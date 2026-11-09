@@ -3880,6 +3880,15 @@ impl PainterApp {
                 ui.radio_value(&mut s.id_source, IdSource::Materials, "Materials");
                 ui.radio_value(&mut s.id_source, IdSource::VertexColors, "Vertex colors");
             });
+            if s.id_source == IdSource::VertexColors {
+                if self.mesh.tri_vertex_color.is_some() {
+                    ui.label(egui::RichText::new("Vertex colors detected. Bake the ID map to use the imported colors in ID masks.")
+                        .small().color(theme::ACCENT));
+                } else {
+                    ui.label(egui::RichText::new("No vertex colors were found on the imported mesh. Paint vertex colors in Blender and reimport the mesh before baking.")
+                        .small().color(Color32::from_rgb(255, 125, 90)));
+                }
+            }
 
             section(ui, "Maps");
             ui.horizontal_wrapped(|ui| {
@@ -4037,6 +4046,9 @@ impl PainterApp {
                 for k in GenKind::ALL {
                     if ui.selectable_label(g.kind == k, k.name()).clicked() && g.kind != k {
                         *g = new_generator(k, custom);
+                        if k == GenKind::IdMask {
+                            bake_settings.id_source = bake::IdSource::VertexColors;
+                        }
                         dirty = true;
                     }
                 }
