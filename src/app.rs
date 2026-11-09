@@ -431,6 +431,8 @@ pub struct PainterApp {
     other_brush: Brush,
     color2: [f32; 3],
     color_sliders: ColorSliders,
+    /// Target mask generator while sampling a vertex ID from the 3D mesh.
+    id_color_pick_target: Option<(usize, Option<usize>)>,
     cam: OrbitCam,
     cam2d: Cam2d,
     layout: Layout,
@@ -1498,6 +1500,7 @@ impl PainterApp {
             other_brush: Brush::default(),
             color2: [0.95, 0.95, 0.95],
             color_sliders: ColorSliders::default(),
+            id_color_pick_target: None,
             cam: OrbitCam::default(),
             cam2d: Cam2d::default(),
             layout: Layout::Split,
@@ -3825,7 +3828,14 @@ impl PainterApp {
 
     /// A smart mask's settings; `salt` keeps several apart on one panel.
     /// `custom` names the custom bake maps the mask can read.
-    fn generator_ui(ui: &mut egui::Ui, g: &mut crate::engine::Generator, salt: usize, custom: &[bake::CustomMap]) -> bool {
+    fn generator_ui(
+        ui: &mut egui::Ui,
+        g: &mut crate::engine::Generator,
+        salt: usize,
+        custom: &[bake::CustomMap],
+        target: (usize, Option<usize>),
+        pick_target: &mut Option<(usize, Option<usize>)>,
+    ) -> bool {
         use crate::engine::gin;
         let mut dirty = false;
         labeled(ui, "Preset", |ui| {
@@ -3854,6 +3864,12 @@ impl PainterApp {
         if g.weights[gin::ID] != 0.0 {
             dirty |= labeled(ui, "ID color", |ui| color_edit(ui, &mut g.id_color));
             dirty |= slider(ui, "ID tolerance", &mut g.id_tolerance, 0.01..=1.0);
+            if ui.button(egui::RichText::new("Pick vertex color from mesh").small()).on_hover_text("Click a colored point on the 3D model to use its original vertex color as this ID").clicked() {
+                *pick_target = Some(target);
+            }
+            if *pick_target == Some(target) {
+                ui.label(egui::RichText::new("Click the model to sample its vertex color…").small().color(theme::ACCENT));
+            }
         }
         dirty | generator_inputs_ui(ui, g, custom)
     }
@@ -4121,7 +4137,7 @@ impl PainterApp {
         }
         let has_paint = mask.paint.is_some();
         if let Some(g) = &mut mask.generator {
-            dirty |= Self::generator_ui(ui, g, 0, &custom);
+            dirty |= Self::generator_ui(ui, g, 0, &custom, (idx, None), &mut self.id_color_pick_target);
         }
         ui.horizontal(|ui| {
             if !has_paint && ui.button("Add paint to mask").clicked() {
@@ -4185,7 +4201,7 @@ impl PainterApp {
                     });
                     dirty |= slider(ui, "Opacity", &mut ml.opacity, 0.0..=1.0);
                     match &mut ml.source {
-                        MaskSource::Generator(g) => dirty |= Self::generator_ui(ui, g, 100 + i, &custom),
+                        MaskSource::Generator(g) => dirty |= Self::generator_ui(ui, g, 100 + i, &custom, (idx, Some(i)), &mut self.id_color_pick_target),
                         MaskSource::Fill(v) => dirty |= slider(ui, "Value", v, 0.0..=1.0),
                     }
                 });
@@ -5243,6 +5259,53 @@ impl PainterApp {
         }
     }
 
+    /// Samples the imported per-corner vertex color and assigns it to the active ID mask.
+    fn pick_vertex_id_color(&mut self, kind: ViewKind, at: Vec2) {
+        if kind != ViewKind::V3d {
+            self.status = "Vertex ID sampling is available in the 3D view.".into();
+            return;
+        }
+        let size = Vec2::new(self.views.view3d.size[0] as f32, self.views.view3d.size[1] as f32);
+        let (origin, direction) = self.cam.ray(at, size);
+        let Some(hit) = self.bvh.raycast(origin, direction) else {
+            self.status = "Click a colored area on the mesh.".into();
+            return;
+        };
+        let Some(colors) = self.mesh.tri_vertex_color.as_ref().and_then(|all| all.get(hit.tri as usize)) else {
+            self.status = "This mesh has no imported vertex colors. Assign colors in Blender and reimport the FBX/OBJ.".into();
+            self.id_color_pick_target = None;
+            return;
+        };
+        let weights = [1.0 - hit.bary.x - hit.bary.y, hit.bary.x, hit.bary.y];
+        let mut color = [0.0f32; 3];
+        for k in 0..3 {
+            for ch in 0..3 { color[ch] += colors[k][ch] as f32 / 255.0 * weights[k]; }
+        }
+        let Some((layer_idx, mask_layer)) = self.id_color_pick_target.take() else { return; };
+        let Some(mask) = self.engine.layers.get_mut(layer_idx).and_then(|layer| layer.mask.as_mut()) else {
+            self.status = "The target ID mask no longer exists.".into();
+            return;
+        };
+        let generator = match mask_layer {
+            None => mask.generator.as_mut(),
+            Some(i) => mask.layers.get_mut(i).and_then(|layer| match &mut layer.source {
+                crate::engine::MaskSource::Generator(g) => Some(g),
+                crate::engine::MaskSource::Fill(_) => None,
+            }),
+        };
+        let Some(generator) = generator else {
+            self.status = "The selected mask generator no longer exists.".into();
+            return;
+        };
+        generator.id_color = color;
+        generator.id_tolerance = generator.id_tolerance.max(0.015);
+        self.bake_settings.id_source = bake::IdSource::VertexColors;
+        self.engine.mark_dirty();
+        self.show_bake = true;
+        let rgb = color.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+        self.status = format!("Vertex ID #{:02X}{:02X}{:02X} selected. Bake mesh maps to refresh the ID map.", rgb[0], rgb[1], rgb[2]);
+    }
+
     /// Eyedropper: copies the final color, roughness and metallic under the
     /// cursor into the brush, then goes back to painting.
     fn pick_material(&mut self, kind: ViewKind, at: Vec2) {
@@ -5573,7 +5636,9 @@ impl PainterApp {
         // Painting.
         if let Some(p) = hover {
             let in_view = rect.contains(p);
-            if pressed && in_view && !mods.alt && self.stroke.is_none() && resp.hovered() && self.tool == Tool::Picker {
+            if pressed && in_view && !mods.alt && self.stroke.is_none() && resp.hovered() && self.id_color_pick_target.is_some() {
+                self.pick_vertex_id_color(kind, local(p));
+            } else if pressed && in_view && !mods.alt && self.stroke.is_none() && resp.hovered() && self.tool == Tool::Picker {
                 self.pick_material(kind, local(p));
             } else if pressed && in_view && !mods.alt && self.stroke.is_none() && resp.hovered() {
                 // Shift+click: a straight line from where the last stroke ended.
