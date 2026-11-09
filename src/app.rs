@@ -2523,18 +2523,39 @@ impl PainterApp {
         if (self.tool == Tool::Eraser) != (tool == Tool::Eraser) { swap_brushes(&mut self.brush,&mut self.other_brush); }
         self.tool=tool;
     }
-    fn swap_colors(&mut self) { std::mem::swap(&mut self.brush.mat.color,&mut self.color2); }
+    fn active_color(&self) -> [f32; 3] {
+        if self.target == StrokeTarget::Content {
+            if let Some(layer) = self.engine.layers.get(self.selected) {
+                if let Content::Fill(fill) = &layer.content { return fill.mat.color; }
+            }
+        }
+        self.brush.mat.color
+    }
+    fn set_active_color(&mut self, color: [f32; 3]) {
+        if self.target == StrokeTarget::Content {
+            if let Some(layer) = self.engine.layers.get_mut(self.selected) {
+                if let Content::Fill(fill) = &mut layer.content {
+                    fill.mat.color = color;
+                    self.engine.mark_dirty();
+                    return;
+                }
+            }
+        }
+        self.brush.mat.color = color;
+    }
+    fn swap_colors(&mut self) { let current=self.active_color(); self.set_active_color(self.color2); self.color2=current; }
     fn color_slots(&mut self,ui:&mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x=3.0;
-            color_button(ui,&mut self.brush.mat.color,Some("Brush color"));
-            if swap_button(ui).on_hover_text("Swap the two colors (S)").clicked(){self.swap_colors();}
+            let mut active=self.active_color();
+            if color_button(ui,&mut active,Some("Active layer / brush color")){self.set_active_color(active);}
+            if swap_button(ui).on_hover_text("Swap the active color and the second color (S)").clicked(){self.swap_colors();}
             color_button(ui,&mut self.color2,Some("Second color"));
         });
     }
     fn color_hud(&mut self,ui:&mut egui::Ui) {
         ui.set_min_width(280.0); self.color_slots(ui); ui.add_space(4.0);
-        let mut state=std::mem::take(&mut self.color_sliders); let mut color=self.brush.mat.color;
+        let mut state=std::mem::take(&mut self.color_sliders); let mut color=self.active_color();
         if state.out!=color { state.hsv=hsv_keeping(state.hsv,color); state.temp=0.0; state.shifting=false; }
         ui.horizontal(|ui| {
             ui.selectable_value(&mut state.hsv_mode,false,"RGB");
@@ -2568,7 +2589,7 @@ impl PainterApp {
             state.hsv=hsv_keeping(state.hsv,color);
         }
         if temp.drag_stopped()||temp.lost_focus() { state.temp=0.0; state.shifting=false; }
-        self.brush.mat.color=color; state.out=color; self.color_sliders=state;
+        self.set_active_color(color); state.out=color; self.color_sliders=state;
         ui.separator();
         let material=&mut self.brush.mat;
         channel_toggles(ui,&mut material.enabled);
@@ -2579,7 +2600,7 @@ impl PainterApp {
         ui.separator(); self.swatch_tray(ui);
     }
     fn swatch_tray(&mut self,ui:&mut egui::Ui) {
-        let current=self.brush.mat.color.map(|v|(v.clamp(0.0,1.0)*255.0).round() as u8);
+        let current=self.active_color().map(|v|(v.clamp(0.0,1.0)*255.0).round() as u8);
         let shift=ui.input(|i|i.modifiers.shift); let (mut pick,mut remove,mut add)=(None,None,false);
         ui.horizontal_wrapped(|ui|{
             ui.spacing_mut().item_spacing=vec2(3.0,3.0);
@@ -2600,7 +2621,7 @@ impl PainterApp {
         if self.prefs.swatches.is_empty(){ui.label(egui::RichText::new("Press + to keep the brush color here.").small().color(theme::TEXT_DIM));}
         if let Some((index,second))=pick {
             let c=self.prefs.swatches[index].map(|v|v as f32/255.0);
-            if second{self.color2=c;}else{self.brush.mat.color=c;}
+            if second{self.color2=c;}else{self.set_active_color(c);}
         }
         if let Some(index)=remove{self.prefs.swatches.remove(index);}
         if add{self.prefs.swatches.push(current);}
@@ -4379,11 +4400,7 @@ impl PainterApp {
     }
 
     fn brush_properties(&mut self, ui: &mut egui::Ui, content: bool) {
-        if content && matches!(self.tool, Tool::Paint | Tool::Picker) {
-            section(ui, "Color");
-            self.color_slots(ui);
-            self.swatch_tray(ui);
-        }
+        let _ = content;
         section(ui, if self.tool == Tool::Eraser { "Eraser" } else { "Brush" });
         slider(ui, "Size", &mut self.brush.size, 2.0..=800.0);
         slider(ui, "Hardness", &mut self.brush.hardness, 0.0..=0.99);
