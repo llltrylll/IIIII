@@ -2562,8 +2562,6 @@ impl PainterApp {
             ui.selectable_value(&mut state.hsv_mode,false,"RGB");
             ui.selectable_value(&mut state.hsv_mode,true,"HSV");
             ui.separator();
-            ui.label(egui::RichText::new("FLOAT").small().color(theme::TEXT_DIM));
-            ui.label(egui::RichText::new("LINEAR").small().color(theme::TEXT_DIM));
         });
         let (hs_changed,value_changed)=color_field(ui,&mut state.hsv);
         let mut numeric_changed=false;
@@ -2593,8 +2591,28 @@ impl PainterApp {
         if color != self.active_color() { self.set_active_color(color); }
         state.out=color; self.color_sliders=state;
         ui.separator();
-        let material=&mut self.brush.mat;
-        channel_toggles(ui,&mut material.enabled);
+        let material=if self.target==StrokeTarget::Content {
+            self.engine.layers.get_mut(self.selected).and_then(|layer|match &mut layer.content {
+                Content::Fill(fill)=>Some(&mut fill.mat),
+                _=>None,
+            })
+        } else { None };
+        if let Some(material)=material {
+            slider(ui,"Opacity",&mut material.opacity,0.0..=1.0);
+            channel_toggles(ui,&mut material.enabled);
+            if material.enabled[3] { slider(ui,"Height",&mut material.height,-1.0..=1.0); }
+            if material.enabled[1] { slider(ui,"Roughness",&mut material.rough,0.0..=1.0); }
+            if material.enabled[2] { slider(ui,"Metallic",&mut material.metal,0.0..=1.0); }
+            if material.enabled[4] { slider(ui,"Opacity channel",&mut material.opacity,0.0..=1.0); }
+        } else {
+            let material=&mut self.brush.mat;
+            slider(ui,"Opacity",&mut material.opacity,0.0..=1.0);
+            channel_toggles(ui,&mut material.enabled);
+            if material.enabled[3] { slider(ui,"Height",&mut material.height,-1.0..=1.0); }
+            if material.enabled[1] { slider(ui,"Roughness",&mut material.rough,0.0..=1.0); }
+            if material.enabled[2] { slider(ui,"Metallic",&mut material.metal,0.0..=1.0); }
+            if material.enabled[4] { slider(ui,"Opacity channel",&mut material.opacity,0.0..=1.0); }
+        }
         if material.enabled[3] { slider(ui,"Height",&mut material.height,-1.0..=1.0); }
         if material.enabled[1] { slider(ui,"Roughness",&mut material.rough,0.0..=1.0); }
         if material.enabled[2] { slider(ui,"Metallic",&mut material.metal,0.0..=1.0); }
