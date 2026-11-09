@@ -1471,7 +1471,6 @@ pub struct BakeRun {
     nodes: wgpu::Buffer,
     tri_pos: wgpu::Buffer,
     tri_nrm: wgpu::Buffer,
-    tri_vcolor: wgpu::Buffer,
     seg_nodes: wgpu::Buffer,
     segs: wgpu::Buffer,
     /// Ray-traced tiles: x, y and the pass (0 occlusion, 1 custom maps).
@@ -2033,7 +2032,6 @@ impl GpuBaker {
             nodes,
             tri_pos,
             tri_nrm,
-            tri_vcolor,
             seg_nodes,
             segs,
             tiles,
