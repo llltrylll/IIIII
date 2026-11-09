@@ -2613,10 +2613,6 @@ impl PainterApp {
             if material.enabled[2] { slider(ui,"Metallic",&mut material.metal,0.0..=1.0); }
         }
         if fill_target && material_changed { self.engine.mark_dirty(); }
-        if material.enabled[3] { slider(ui,"Height",&mut material.height,-1.0..=1.0); }
-        if material.enabled[1] { slider(ui,"Roughness",&mut material.rough,0.0..=1.0); }
-        if material.enabled[2] { slider(ui,"Metallic",&mut material.metal,0.0..=1.0); }
-        if material.enabled[4] { slider(ui,"Opacity",&mut material.opacity,0.0..=1.0); }
         ui.separator(); self.swatch_tray(ui);
     }
     fn swatch_tray(&mut self,ui:&mut egui::Ui) {
