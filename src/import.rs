@@ -25,8 +25,10 @@ pub struct RawMesh {
     /// Object (mesh node) index per triangle, into `objects`.
     pub tri_object: Vec<u32>,
     pub objects: Vec<String>,
-    /// Average vertex color per triangle (sRGB), when every object has them.
+    /// Average vertex color per triangle (legacy ID report).
     pub tri_color: Option<Vec<[u8; 3]>>,
+    /// Original sRGB vertex colors for each triangle corner, in import order.
+    pub tri_vertex_color: Option<Vec<[[u8; 3]; 3]>>,
     /// Objects without UVs, for error messages.
     pub missing_uvs: Vec<String>,
 }
@@ -171,6 +173,8 @@ struct Builder {
     tri_object: Vec<u32>,
     all_colors: bool,
     tri_color: Vec<[u8; 3]>,
+    tri_vertex_color: Vec<[[u8; 3]; 3]>,
+    color_corners: [[u8; 3]; 3],
     /// Color sum of the triangle being built.
     color_acc: Vec3,
 }
@@ -191,12 +195,17 @@ impl Builder {
         self.all_normals &= c.normal.is_some();
         self.all_uvs &= c.uv.is_some();
         self.all_colors &= c.color.is_some();
-        self.color_acc += c.color.unwrap_or(Vec3::ZERO);
+        let corner = (self.corners - 1) % 3;
+        let color = c.color.unwrap_or(Vec3::ZERO);
+        self.color_acc += color;
+        self.color_corners[corner] = color.to_array().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
         if self.corners % 3 == 0 {
-            // Exporters write vertex colors sRGB-encoded by default; ID
-            // masks compare sRGB too, so they're kept as they are.
+            // Keep the average for older ID-region summaries, but preserve
+            // each corner so the GPU can interpolate the real vertex color.
             let avg = self.color_acc / 3.0;
             self.tri_color.push(avg.to_array().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
+            self.tri_vertex_color.push(self.color_corners);
+            self.color_corners = [[0; 3]; 3];
             self.color_acc = Vec3::ZERO;
         }
         let n = c.normal.unwrap_or(Vec3::ZERO);
@@ -236,6 +245,7 @@ impl Builder {
             tri_object: self.tri_object,
             objects: self.objects,
             tri_color: (self.all_colors && self.corners > 0).then_some(self.tri_color),
+            tri_vertex_color: (self.all_colors && self.corners > 0).then_some(self.tri_vertex_color),
         }
     }
 }
