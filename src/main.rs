@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod color_picker;
 mod bake;
 mod bake_cache;
 mod brushes;
