@@ -2536,9 +2536,9 @@ impl PainterApp {
         self.defer_preview_update();
         ctx.request_repaint_after(MATERIAL_PREVIEW_DELAY);
     }
-    /// Called before viewport compositing. While a pointer is held, keep waiting:
-    /// a slow drag must not trigger a preview rebuild halfway through.
-    fn update_preview_debounce(&mut self, ctx: &egui::Context) {
+    /// Service the material preview timer once per app frame, even when the
+    /// paint viewport is hidden. A held pointer postpones the rebuild until release.
+    fn service_preview_debounce(&mut self, ctx: &egui::Context) {
         let Some(deadline) = self.preview_update_at else { return; };
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -2548,6 +2548,7 @@ impl PainterApp {
             }
             self.preview_update_at = None;
             self.engine.mark_dirty();
+            ctx.request_repaint();
         } else {
             ctx.request_repaint_after(remaining);
         }
@@ -5773,7 +5774,6 @@ impl PainterApp {
         self.update_poly_highlight();
 
         // GPU: apply a settled material edit once, then render this view.
-        self.update_preview_debounce(ui.ctx());
         if self.engine.dirty {
             self.engine.composite();
         }
@@ -6089,6 +6089,7 @@ impl eframe::App for PainterApp {
         self.library_window(&ctx);
         // Settings changed in the bake window show on the next frame.
         self.update_cage_preview(&ctx);
+        self.service_preview_debounce(&ctx);
 
         // Property edits become one undo step once the interaction ends: no
         // button held (slider drags) and no text field focused (typing).
