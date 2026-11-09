@@ -6,7 +6,7 @@ use crate::bake_cache;
 use crate::bvh::Bvh;
 use crate::cage::{CageProbe, CageStats, ProbeKey};
 use crate::environment::{self, EnvBaker, EnvImage, EnvSource, Environment};
-use crate::engine::{Drop, Folder, Projection};
+use crate::engine::{Drop, Folder, Layer, Projection};
 use crate::engine::{
     Blend, BrushPaint, Content, Engine, FillParams, GEN_INPUTS, GenKind, Levels, MAPS, MapKind, MatValues, Stamp,
     StampUniform,
@@ -368,6 +368,8 @@ enum Action {
     AddGenerator(GenKind),
     RemoveMask,
     Duplicate,
+    CopyLayer,
+    PasteLayer,
     Delete,
     Clear,
     MoveTo { from: usize, drop: Drop },
@@ -464,6 +466,8 @@ pub struct PainterApp {
     /// A 3D view drew this frame (else its depth is rendered offscreen).
     drew_3d: bool,
     pending: Vec<Action>,
+    /// A deep copy of a layer block; survives texture-set switches.
+    layer_clipboard: Option<Vec<Layer>>,
     status: String,
     show_help: bool,
     show_about: bool,
@@ -1421,6 +1425,7 @@ impl PainterApp {
             docks: dock::Docks::load(),
             drew_3d: false,
             pending: Vec::new(),
+            layer_clipboard: None,
             status: "Ready. Paint with LMB, orbit with Alt+LMB or RMB, pan with MMB.".into(),
             show_help: false,
             show_about: false,
@@ -1767,6 +1772,36 @@ impl PainterApp {
                         self.selected = i;
                     }
                 }
+                Action::CopyLayer => {
+                    if self.selected < self.engine.layers.len() {
+                        let name = self.engine.layers[self.selected].name.clone();
+                        self.layer_clipboard = self.engine.copy_layer_block(self.selected);
+                        self.status = format!("Copied '{name}'. Switch texture sets and press Ctrl+V to paste.");
+                    } else {
+                        self.layer_clipboard = None;
+                        self.status = "Select a layer to copy.".into();
+                    }
+                }
+                Action::PasteLayer => {
+                    if let Some(layers) = self.layer_clipboard.take() {
+                        if layers.is_empty() {
+                            self.status = "The layer clipboard is empty.".into();
+                        } else {
+                            let ids = self.engine.insert_layers_resampled(
+                                at, parent, layers, "Paste layers".into(), &mut self.undo,
+                            );
+                            if let Some(id) = ids.last().copied() {
+                                self.selected = self.engine.index_of(id).unwrap_or(self.selected);
+                                // Keep the clipboard reusable after a paste, at the destination resolution.
+                                self.layer_clipboard = self.engine.copy_layer_block(self.selected);
+                                self.target = StrokeTarget::Content;
+                                self.status = "Pasted layer block.".into();
+                            }
+                        }
+                    } else {
+                        self.status = "Nothing to paste. Select a layer and press Ctrl+C first.".into();
+                    }
+                }
                 Action::Delete => {
                     self.engine.delete_layer(self.selected, &mut self.undo);
                     self.selected = self.selected.min(self.engine.layers.len().saturating_sub(1));
@@ -2057,6 +2092,8 @@ impl PainterApp {
             if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::O)) {
                 self.pending.push(Action::OpenProject(None));
             }
+            // These shortcuts belong to the layer stack, not text fields; the
+            // keyboard-focus guard below keeps normal text copy/paste intact.
             // Over the graph editor, undo and redo act on the graph.
             let graph = self.graphs.editor.hovered;
             if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z))
@@ -2090,7 +2127,18 @@ impl PainterApp {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
-        ctx.input(|i| {
+        ctx.input_mut(|i| {
+            if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::C)) {
+                self.pending.push(Action::CopyLayer);
+            }
+            if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::V)) {
+                self.pending.push(Action::PasteLayer);
+            }
+            if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::NONE, Key::Delete)) {
+                if self.selected < self.engine.layers.len() {
+                    self.pending.push(Action::Delete);
+                }
+            }
             if i.modifiers.any() {
                 return;
             }
@@ -2117,9 +2165,6 @@ impl PainterApp {
             }
             if i.key_pressed(Key::W) {
                 self.view.show_wire_3d = !self.view.show_wire_3d;
-            }
-            if i.key_pressed(Key::X) {
-                self.brush.symmetry = if self.brush.symmetry == 1 { 0 } else { 1 };
             }
             if i.key_pressed(Key::F) {
                 self.cam = OrbitCam { yaw: self.cam.yaw, pitch: self.cam.pitch, fov_y: self.cam.fov_y, ..OrbitCam::default() };
@@ -2355,6 +2400,8 @@ impl PainterApp {
         ui.separator();
         item(ui, has, "Save as smart material", || Action::SaveSmart);
         item(ui, has, "Duplicate layer", || Action::Duplicate);
+        item(ui, has, "Copy layer (Ctrl+C)", || Action::CopyLayer);
+        item(ui, self.layer_clipboard.as_ref().is_some_and(|layers| !layers.is_empty()), "Paste layer (Ctrl+V)", || Action::PasteLayer);
         item(ui, is_paint, "Clear layer", || Action::Clear);
         item(ui, has, "Delete layer", || Action::Delete);
     }
@@ -2432,6 +2479,13 @@ impl PainterApp {
                     })
                     .response
                     .on_hover_text("What the views show (M: material, C: next channel)");
+                if self.tool != Tool::Eraser && self.target != StrokeTarget::Mask {
+                    ui.label(egui::RichText::new("Color").color(theme::TEXT_DIM));
+                    if color_edit(ui, &mut self.brush.mat.color) {
+                        self.brush.mat.enabled[0] = true;
+                    }
+                    ui.add_space(4.0);
+                }
                 ui.label(egui::RichText::new("Display").color(theme::TEXT_DIM));
                 ui.separator();
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -2532,10 +2586,23 @@ impl PainterApp {
                         ui.add_space(6.0);
                         resp
                     };
+                    if self.tool == Tool::Paint && self.target == StrokeTarget::Content {
+                        ui.label(egui::RichText::new("Color").color(theme::TEXT_DIM));
+                        let mut rgb = self.brush.mat.color.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+                        if ui.color_edit_button_srgb(&mut rgb)
+                            .on_hover_text("Choose a color from the square picker, or enter channel values")
+                            .changed()
+                        {
+                            self.brush.mat.color = rgb.map(|v| v as f32 / 255.0);
+                            self.brush.mat.enabled[0] = true;
+                        }
+                        ui.add_space(6.0);
+                    }
                     s(ui, "Size", &mut self.brush.size, 2.0..=800.0, false)
-                        .on_hover_text("Brush size ([ and ] to shrink / grow, Ctrl+right-drag in the view)");
+                        .on_hover_text("Brush size ([ and ] to shrink / grow, X + right-drag in the view)");
                     s(ui, "Flow", &mut self.brush.flow, 0.01..=1.0, true);
-                    s(ui, "Stroke opacity", &mut self.brush.opacity, 0.01..=1.0, true);
+                    s(ui, "Stroke opacity", &mut self.brush.opacity, 0.01..=1.0, true)
+                        .on_hover_text("Hold Z and right-drag horizontally in a view to adjust stroke opacity");
                     s(ui, "Hardness", &mut self.brush.hardness, 0.0..=0.99, true);
                     s(ui, "Spacing", &mut self.brush.spacing, 0.02..=3.0, true);
                     ui.label(egui::RichText::new("Symmetry").color(theme::TEXT_DIM));
@@ -2548,7 +2615,7 @@ impl PainterApp {
                             }
                         })
                         .response
-                        .on_hover_text("Mirror strokes across the mesh's center (X toggles)");
+                        .on_hover_text("Mirror strokes across the mesh's center");
                     ui.add_space(6.0);
                     ui.label(egui::RichText::new("Projection").color(theme::TEXT_DIM));
                     projection_combo(ui, "projection_bar", &mut self.brush.projection);
@@ -2668,7 +2735,9 @@ impl PainterApp {
             btn(ui, icons::FOLDER_PLUS, "Add folder (inside the selected folder)", Some(Action::AddFolder));
             btn(ui, icons::MASK, "Add black mask", no_mask.then_some(Action::AddMask { white: false }));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                btn(ui, icons::TRASH, "Delete layer", has.then_some(Action::Delete));
+                btn(ui, icons::TRASH, "Delete layer (Delete)", has.then_some(Action::Delete));
+                btn(ui, icons::FILE_PLUS, "Paste copied layer (Ctrl+V)", self.layer_clipboard.as_ref().is_some_and(|layers| !layers.is_empty()).then_some(Action::PasteLayer));
+                btn(ui, icons::COPY, "Copy layer (Ctrl+C)", has.then_some(Action::CopyLayer));
                 btn(ui, icons::COPY, "Duplicate layer", has.then_some(Action::Duplicate));
             });
         });
@@ -5133,7 +5202,7 @@ impl PainterApp {
     }
 
     fn view_input(&mut self, ui: &egui::Ui, kind: ViewKind, rect: Rect, resp: &egui::Response) {
-        let (hover, pressed, down, mods, delta, scroll) = ui.input(|i| {
+        let (hover, pressed, down, mods, delta, scroll, x_down, z_down) = ui.input(|i| {
             (
                 i.pointer.hover_pos(),
                 i.pointer.primary_pressed(),
@@ -5141,11 +5210,24 @@ impl PainterApp {
                 i.modifiers,
                 i.pointer.delta(),
                 i.smooth_scroll_delta.y,
+                i.key_down(egui::Key::X),
+                i.key_down(egui::Key::Z),
             )
         });
         let ppp = self.ppp;
         let local = |p: egui::Pos2| Vec2::new((p.x - rect.min.x) * ppp, (p.y - rect.min.y) * ppp);
         use egui::PointerButton as B;
+
+        // Separate the two brush gestures: X + RMB changes only size;
+        // Z + RMB changes only stroke opacity. Ctrl + RMB is no longer overloaded.
+        let adjust_brush = resp.dragged_by(B::Secondary) && !mods.any() && (x_down || z_down);
+        if adjust_brush {
+            if x_down {
+                self.brush.size = (self.brush.size + delta.x).clamp(2.0, 800.0);
+            } else {
+                self.brush.opacity = (self.brush.opacity + delta.x * 0.0025).clamp(0.01, 1.0);
+            }
+        }
 
         // Pen pressure arrives with touch events; mice never send them.
         let touch = ui.input(|i| {
@@ -5163,8 +5245,9 @@ impl PainterApp {
         // Navigation.
         match kind {
             ViewKind::V3d => {
-                let orbit = (resp.dragged_by(B::Primary) && mods.alt)
-                    || (resp.dragged_by(B::Secondary) && !mods.alt && !mods.shift && !mods.ctrl);
+                let orbit = !adjust_brush
+                    && ((resp.dragged_by(B::Primary) && mods.alt)
+                        || (resp.dragged_by(B::Secondary) && !mods.alt && !mods.shift && !mods.ctrl));
                 if orbit {
                     let k = 0.008 * self.prefs.orbit_speed;
                     self.cam.yaw -= delta.x * k;
@@ -5175,15 +5258,11 @@ impl PainterApp {
                     let k = self.cam.dist * 0.0016;
                     self.cam.target += (-right * delta.x + up * delta.y) * k;
                 }
-                if resp.dragged_by(B::Secondary) && mods.alt {
+                if resp.dragged_by(B::Secondary) && mods.alt && !adjust_brush {
                     self.cam.dist = (self.cam.dist * (delta.y * 0.01).exp()).clamp(0.3, 40.0);
                 }
-                if resp.dragged_by(B::Secondary) && mods.shift {
+                if resp.dragged_by(B::Secondary) && mods.shift && !adjust_brush {
                     self.view.env_rotation += delta.x * 0.01;
-                }
-                if resp.dragged_by(B::Secondary) && mods.ctrl {
-                    self.brush.size = (self.brush.size + delta.x).clamp(2.0, 800.0);
-                    self.brush.hardness = (self.brush.hardness - delta.y * 0.005).clamp(0.0, 0.99);
                 }
                 if resp.hovered() && scroll != 0.0 {
                     self.cam.dist = (self.cam.dist * (-scroll * self.zoom_rate()).exp()).clamp(0.3, 40.0);
@@ -5199,7 +5278,7 @@ impl PainterApp {
                 }
             }
             ViewKind::V2d => {
-                if resp.dragged_by(B::Middle) || resp.dragged_by(B::Secondary) || (resp.dragged_by(B::Primary) && mods.alt) {
+                if resp.dragged_by(B::Middle) || (resp.dragged_by(B::Secondary) && !adjust_brush) || (resp.dragged_by(B::Primary) && mods.alt) {
                     self.cam2d.pan += Vec2::new(delta.x, delta.y) * ppp;
                 }
                 if resp.hovered() && scroll != 0.0 {
