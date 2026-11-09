@@ -375,7 +375,7 @@ impl PainterApp {
 
     /// Picks the polygon fill tool in `mode` (offscreen tests).
     pub(crate) fn test_poly_tool(&mut self, mode: crate::polyfill::FillMode, lasso: bool) {
-        self.tool = super::Tool::PolyFill;
+        self.set_tool(super::Tool::PolyFill);
         self.poly.mode = mode;
         self.poly.lasso = lasso;
     }
