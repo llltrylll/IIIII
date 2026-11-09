@@ -2134,7 +2134,7 @@ impl PainterApp {
             if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::V)) {
                 self.pending.push(Action::PasteLayer);
             }
-            if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::NONE, Key::Delete)) {
+            if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::default(), Key::Delete)) {
                 if self.selected < self.engine.layers.len() {
                     self.pending.push(Action::Delete);
                 }
@@ -2479,7 +2479,7 @@ impl PainterApp {
                     })
                     .response
                     .on_hover_text("What the views show (M: material, C: next channel)");
-                if self.tool != Tool::Eraser && self.target != StrokeTarget::Mask {
+                if self.target == StrokeTarget::Content && self.tool != Tool::Eraser && self.tool != Tool::Picker {
                     ui.label(egui::RichText::new("Color").color(theme::TEXT_DIM));
                     if color_edit(ui, &mut self.brush.mat.color) {
                         self.brush.mat.enabled[0] = true;
