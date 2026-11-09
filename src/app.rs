@@ -3893,6 +3893,9 @@ impl PainterApp {
         custom: &[bake::CustomMap],
         target: (usize, Option<usize>),
         pick_target: &mut Option<(usize, Option<usize>)>,
+        bake_settings: &mut BakeSettings,
+        view: &mut ViewSettings,
+        show_bake: &mut bool,
     ) -> bool {
         use crate::engine::gin;
         let mut dirty = false;
@@ -3924,9 +3927,12 @@ impl PainterApp {
             dirty |= slider(ui, "ID tolerance", &mut g.id_tolerance, 0.01..=1.0);
             if ui.button(egui::RichText::new("Pick vertex color from mesh").small()).on_hover_text("Click a colored point on the 3D model to use its original vertex color as this ID").clicked() {
                 *pick_target = Some(target);
+                bake_settings.id_source = bake::IdSource::VertexColors;
+                view.mode = ViewMode::Map(4);
+                *show_bake = true;
             }
             if *pick_target == Some(target) {
-                ui.label(egui::RichText::new("Click the model to sample its vertex color…").small().color(theme::ACCENT));
+                ui.label(egui::RichText::new("Bake the ID map, then click a colored point on the model.").small().color(theme::ACCENT));
             }
         }
         dirty | generator_inputs_ui(ui, g, custom)
@@ -4195,7 +4201,7 @@ impl PainterApp {
         }
         let has_paint = mask.paint.is_some();
         if let Some(g) = &mut mask.generator {
-            dirty |= Self::generator_ui(ui, g, 0, &custom, (idx, None), &mut self.id_color_pick_target);
+            dirty |= Self::generator_ui(ui, g, 0, &custom, (idx, None), &mut self.id_color_pick_target, &mut self.bake_settings, &mut self.view, &mut self.show_bake);
         }
         ui.horizontal(|ui| {
             if !has_paint && ui.button("Add paint to mask").clicked() {
@@ -4259,7 +4265,7 @@ impl PainterApp {
                     });
                     dirty |= slider(ui, "Opacity", &mut ml.opacity, 0.0..=1.0);
                     match &mut ml.source {
-                        MaskSource::Generator(g) => dirty |= Self::generator_ui(ui, g, 100 + i, &custom, (idx, Some(i)), &mut self.id_color_pick_target),
+                        MaskSource::Generator(g) => dirty |= Self::generator_ui(ui, g, 100 + i, &custom, (idx, Some(i)), &mut self.id_color_pick_target, &mut self.bake_settings, &mut self.view, &mut self.show_bake),
                         MaskSource::Fill(v) => dirty |= slider(ui, "Value", v, 0.0..=1.0),
                     }
                 });
