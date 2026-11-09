@@ -1005,7 +1005,7 @@ fn swap_button(ui: &mut egui::Ui) -> egui::Response {
     response
 }
 #[derive(Default)]
-struct ColorSliders { hsv: [f32; 3], out: [f32; 3], temp: f32, base: [f32; 3], shifting: bool }
+struct ColorSliders { hsv: [f32; 3], out: [f32; 3], temp: f32, base: [f32; 3], shifting: bool, hsv_mode: bool }
 fn rgb_to_hsv(c: [f32; 3]) -> [f32; 3] {
     let max = c[0].max(c[1]).max(c[2]);
     let delta = max - c[0].min(c[1]).min(c[2]);
@@ -1030,52 +1030,59 @@ fn shift_temperature(color: [f32; 3], amount: f32) -> [f32; 3] {
 }
 
 fn color_field(ui: &mut egui::Ui, hsv: &mut [f32; 3]) -> (bool, bool) {
-    let mut sv_changed=false; let mut hue_changed=false;
-    let hue_color=hsv_to_rgb([hsv[0],1.0,1.0]);
-    let (rect,response)=ui.allocate_exact_size(vec2(ui.available_width(),118.0),egui::Sense::click_and_drag());
-    let painter=ui.painter();
-    painter.rect_filled(rect,2.0,Color32::from_rgb((hue_color[0]*255.0) as u8,(hue_color[1]*255.0) as u8,(hue_color[2]*255.0) as u8));
-    let mut white=egui::epaint::Mesh::default(); let base=white.vertices.len() as u32;
-    white.colored_vertex(rect.left_top(),Color32::WHITE);
-    white.colored_vertex(rect.right_top(),Color32::from_rgba_unmultiplied(255,255,255,0));
-    white.colored_vertex(rect.right_bottom(),Color32::from_rgba_unmultiplied(255,255,255,0));
-    white.colored_vertex(rect.left_bottom(),Color32::WHITE);
-    white.add_triangle(base,base+1,base+2); white.add_triangle(base,base+2,base+3);
-    painter.add(egui::Shape::mesh(white));
-    let mut black=egui::epaint::Mesh::default(); let base=black.vertices.len() as u32;
-    black.colored_vertex(rect.left_top(),Color32::from_black_alpha(0));
-    black.colored_vertex(rect.right_top(),Color32::from_black_alpha(0));
-    black.colored_vertex(rect.right_bottom(),Color32::from_black_alpha(245));
-    black.colored_vertex(rect.left_bottom(),Color32::from_black_alpha(245));
-    black.add_triangle(base,base+1,base+2); black.add_triangle(base,base+2,base+3);
-    painter.add(egui::Shape::mesh(black));
-    painter.rect_stroke(rect,2.0,egui::Stroke::new(1.0,theme::OUTLINE),egui::StrokeKind::Inside);
-    let marker=egui::pos2(rect.left()+hsv[1]*rect.width(),rect.bottom()-hsv[2]*rect.height());
-    painter.circle_stroke(marker,6.0,egui::Stroke::new(2.0,Color32::BLACK));
-    painter.circle_stroke(marker,4.5,egui::Stroke::new(1.5,Color32::WHITE));
-    if (response.clicked()||response.dragged()) && let Some(pos)=response.interact_pointer_pos() {
-        hsv[1]=((pos.x-rect.left())/rect.width()).clamp(0.0,1.0);
-        hsv[2]=(1.0-(pos.y-rect.top())/rect.height()).clamp(0.0,1.0); sv_changed=true;
-    }
-    let (hue_rect,hue_response)=ui.allocate_exact_size(vec2(ui.available_width(),13.0),egui::Sense::click_and_drag());
-    let mut mesh=egui::epaint::Mesh::default(); const STEPS:usize=48;
-    for i in 0..STEPS {
-        let h0=i as f32/STEPS as f32; let h1=(i+1) as f32/STEPS as f32;
-        let cv=|h:f32|{let c=hsv_to_rgb([h,1.0,1.0]);Color32::from_rgb((c[0]*255.0) as u8,(c[1]*255.0) as u8,(c[2]*255.0) as u8)};
-        let c0=cv(h0); let c1=cv(h1); let b=mesh.vertices.len() as u32;
-        mesh.colored_vertex(egui::pos2(hue_rect.left()+hue_rect.width()*h0,hue_rect.top()),c0);
-        mesh.colored_vertex(egui::pos2(hue_rect.left()+hue_rect.width()*h1,hue_rect.top()),c1);
-        mesh.colored_vertex(egui::pos2(hue_rect.left()+hue_rect.width()*h1,hue_rect.bottom()),c1);
-        mesh.colored_vertex(egui::pos2(hue_rect.left()+hue_rect.width()*h0,hue_rect.bottom()),c0);
-        mesh.add_triangle(b,b+1,b+2); mesh.add_triangle(b,b+2,b+3);
-    }
-    ui.painter().add(egui::Shape::mesh(mesh));
-    let hx=hue_rect.left()+hsv[0]*hue_rect.width();
-    ui.painter().line_segment([egui::pos2(hx,hue_rect.top()-2.0),egui::pos2(hx,hue_rect.bottom()+2.0)],egui::Stroke::new(2.0,Color32::WHITE));
-    if (hue_response.clicked()||hue_response.dragged()) && let Some(pos)=hue_response.interact_pointer_pos() {
-        hsv[0]=((pos.x-hue_rect.left())/hue_rect.width()).clamp(0.0,1.0); hue_changed=true;
-    }
-    (sv_changed,hue_changed)
+    let mut hs_changed = false;
+    let mut value_changed = false;
+    ui.horizontal(|ui| {
+        let square_size = vec2((ui.available_width() - 24.0).max(150.0), 190.0);
+        let (rect, response) = ui.allocate_exact_size(square_size, egui::Sense::click_and_drag());
+        let mut mesh = egui::epaint::Mesh::default();
+        const X_STEPS: usize = 48;
+        const Y_STEPS: usize = 16;
+        for y in 0..Y_STEPS {
+            for x in 0..X_STEPS {
+                let h0=x as f32/X_STEPS as f32; let h1=(x+1) as f32/X_STEPS as f32;
+                let s0=1.0-y as f32/Y_STEPS as f32; let s1=1.0-(y+1) as f32/Y_STEPS as f32;
+                let p0=egui::pos2(rect.left()+rect.width()*h0,rect.top()+rect.height()*(1.0-s0));
+                let p1=egui::pos2(rect.left()+rect.width()*h1,rect.top()+rect.height()*(1.0-s0));
+                let p2=egui::pos2(rect.left()+rect.width()*h1,rect.top()+rect.height()*(1.0-s1));
+                let p3=egui::pos2(rect.left()+rect.width()*h0,rect.top()+rect.height()*(1.0-s1));
+                let cv=|h:f32,s:f32|{let v=hsv_to_rgb([h,s,1.0]);Color32::from_rgb((v[0]*255.0) as u8,(v[1]*255.0) as u8,(v[2]*255.0) as u8)};
+                let b=mesh.vertices.len() as u32;
+                mesh.colored_vertex(p0,cv(h0,s0)); mesh.colored_vertex(p1,cv(h1,s0));
+                mesh.colored_vertex(p2,cv(h1,s1)); mesh.colored_vertex(p3,cv(h0,s1));
+                mesh.add_triangle(b,b+1,b+2); mesh.add_triangle(b,b+2,b+3);
+            }
+        }
+        ui.painter().add(egui::Shape::mesh(mesh));
+        ui.painter().rect_stroke(rect,2.0,egui::Stroke::new(1.0,theme::OUTLINE),egui::StrokeKind::Inside);
+        let marker=egui::pos2(rect.left()+hsv[0]*rect.width(),rect.bottom()-hsv[1]*rect.height());
+        ui.painter().circle_stroke(marker,6.0,egui::Stroke::new(2.0,Color32::BLACK));
+        ui.painter().circle_stroke(marker,4.5,egui::Stroke::new(1.5,Color32::WHITE));
+        if (response.clicked()||response.dragged()) && let Some(pos)=response.interact_pointer_pos() {
+            hsv[0]=((pos.x-rect.left())/rect.width()).clamp(0.0,1.0);
+            hsv[1]=(1.0-(pos.y-rect.top())/rect.height()).clamp(0.0,1.0);
+            hs_changed=true;
+        }
+        let (value_rect,value_response)=ui.allocate_exact_size(vec2(18.0,rect.height()),egui::Sense::click_and_drag());
+        let mut value_mesh=egui::epaint::Mesh::default();
+        let top=hsv_to_rgb([hsv[0],hsv[1],1.0]);
+        let top=Color32::from_rgb((top[0]*255.0) as u8,(top[1]*255.0) as u8,(top[2]*255.0) as u8);
+        let b=value_mesh.vertices.len() as u32;
+        value_mesh.colored_vertex(value_rect.left_top(),top);
+        value_mesh.colored_vertex(value_rect.right_top(),top);
+        value_mesh.colored_vertex(value_rect.right_bottom(),Color32::BLACK);
+        value_mesh.colored_vertex(value_rect.left_bottom(),Color32::BLACK);
+        value_mesh.add_triangle(b,b+1,b+2); value_mesh.add_triangle(b,b+2,b+3);
+        ui.painter().add(egui::Shape::mesh(value_mesh));
+        ui.painter().rect_stroke(value_rect,1.0,egui::Stroke::new(1.0,theme::OUTLINE),egui::StrokeKind::Inside);
+        let vy=value_rect.bottom()-(hsv[2]*value_rect.height());
+        ui.painter().line_segment([egui::pos2(value_rect.left()-2.0,vy),egui::pos2(value_rect.right()+2.0,vy)],egui::Stroke::new(2.0,Color32::WHITE));
+        if (value_response.clicked()||value_response.dragged()) && let Some(pos)=value_response.interact_pointer_pos() {
+            hsv[2]=(1.0-(pos.y-value_rect.top())/value_rect.height()).clamp(0.0,1.0);
+            value_changed=true;
+        }
+    });
+    (hs_changed,value_changed)
 }
 
 /// Channel toggles in Substance order: color, height, rough, metal, opacity.
@@ -2529,17 +2536,31 @@ impl PainterApp {
         ui.set_min_width(280.0); self.color_slots(ui); ui.add_space(4.0);
         let mut state=std::mem::take(&mut self.color_sliders); let mut color=self.brush.mat.color;
         if state.out!=color { state.hsv=hsv_keeping(state.hsv,color); state.temp=0.0; state.shifting=false; }
-        ui.label(egui::RichText::new("COLOR FIELD").small().color(theme::TEXT_DIM));
-        let (sv_changed,hue_changed)=color_field(ui,&mut state.hsv);
-        let (mut h,mut s,mut v)=(state.hsv[0]*360.0,state.hsv[1]*100.0,state.hsv[2]*100.0);
-        let hsv_slider=|ui:&mut egui::Ui,label:&str,value:&mut f32,max:f32,unit:&str|{
-            labeled(ui,label,|ui|ui.add(egui::Slider::new(value,0.0..=max).max_decimals(0).suffix(unit)).changed())
-        };
-        let mut slider_changed=hsv_slider(ui,"Hue",&mut h,360.0,"°");
-        slider_changed|=hsv_slider(ui,"Saturation",&mut s,100.0,"%");
-        slider_changed|=hsv_slider(ui,"Brightness",&mut v,100.0,"%");
-        if slider_changed { state.hsv=[h/360.0,s/100.0,v/100.0]; }
-        if sv_changed||hue_changed||slider_changed { color=hsv_to_rgb(state.hsv); }
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut state.hsv_mode,false,"RGB");
+            ui.selectable_value(&mut state.hsv_mode,true,"HSV");
+            ui.separator();
+            ui.label(egui::RichText::new("FLOAT").small().color(theme::TEXT_DIM));
+            ui.label(egui::RichText::new("LINEAR").small().color(theme::TEXT_DIM));
+        });
+        let (hs_changed,value_changed)=color_field(ui,&mut state.hsv);
+        let mut numeric_changed=false;
+        if state.hsv_mode {
+            let (mut h,mut s,mut v)=(state.hsv[0]*360.0,state.hsv[1]*100.0,state.hsv[2]*100.0);
+            numeric_changed |= labeled(ui,"H",|ui|ui.add(egui::Slider::new(&mut h,0.0..=360.0).max_decimals(2)).changed());
+            numeric_changed |= labeled(ui,"S",|ui|ui.add(egui::Slider::new(&mut s,0.0..=100.0).max_decimals(2)).changed());
+            numeric_changed |= labeled(ui,"V",|ui|ui.add(egui::Slider::new(&mut v,0.0..=100.0).max_decimals(2)).changed());
+            if numeric_changed { state.hsv=[h/360.0,s/100.0,v/100.0]; }
+        } else {
+            let mut rgb=color.map(|v|v*255.0);
+            for (name,value) in [("R",&mut rgb[0]),("G",&mut rgb[1]),("B",&mut rgb[2])] {
+                numeric_changed |= labeled(ui,name,|ui|ui.add(egui::Slider::new(value,0.0..=255.0).max_decimals(0)).changed());
+            }
+            if numeric_changed { color=rgb.map(|v|v/255.0); state.hsv=hsv_keeping(state.hsv,color); }
+        }
+        if hs_changed||value_changed||numeric_changed { color=hsv_to_rgb(state.hsv); }
+        let hex=color.map(|v|(v.clamp(0.0,1.0)*255.0).round() as u8);
+        ui.label(egui::RichText::new(format!("#{:02X}{:02X}{:02X}",hex[0],hex[1],hex[2])).monospace().small());
         let temp=labeled(ui,"Temperature",|ui|ui.add(egui::Slider::new(&mut state.temp,-100.0..=100.0).max_decimals(0)));
         if temp.changed() {
             if !state.shifting { state.base=color; state.shifting=true; }
