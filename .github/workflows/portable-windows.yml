@@ -1,0 +1,88 @@
+name: Portable Windows RAR
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/portable-windows.yml"
+      - "src/**"
+      - "assets/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
+      - "scripts/package.ps1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable-windows:
+    name: Build portable Windows RAR
+    runs-on: windows-latest
+    steps:
+      - name: Check out master
+        uses: actions/checkout@v5
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run unit tests
+        run: cargo test --locked
+
+      - name: Build optimized Windows executable
+        run: cargo build --release --locked
+
+      - name: Stage portable application
+        id: package
+        shell: pwsh
+        run: ./scripts/package.ps1 -NoBuild
+
+      - name: Install WinRAR command-line utility
+        shell: pwsh
+        run: |
+          choco install winrar --no-progress -y
+          if ($LASTEXITCODE -ne 0) { throw "WinRAR installation failed" }
+
+      - name: Create and verify RAR archive
+        id: rar
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $stage = Join-Path $PWD "dist/Material Painter"
+          $rar = Join-Path $PWD "dist/MaterialPainter-$version-windows-x64.rar"
+
+          $rarExe = Join-Path $env:ProgramFiles "WinRAR/Rar.exe"
+          if (-not (Test-Path $rarExe)) {
+            $command = Get-Command Rar.exe -ErrorAction SilentlyContinue
+            if ($command) { $rarExe = $command.Source }
+          }
+          if (-not (Test-Path $rarExe)) { throw "Rar.exe was not found after installing WinRAR" }
+
+          if (Test-Path $rar) { Remove-Item -Force $rar }
+          Push-Location $stage
+          try {
+            & $rarExe a -r -ep1 -m5 -idq $rar "*"
+            if ($LASTEXITCODE -ne 0) { throw "RAR compression failed" }
+          }
+          finally {
+            Pop-Location
+          }
+
+          & $rarExe t -idq $rar
+          if ($LASTEXITCODE -ne 0) { throw "RAR integrity test failed" }
+
+          "archive=$rar" | Out-File -Append -Encoding utf8 -FilePath $env:GITHUB_OUTPUT
+          Get-Item $rar | Select-Object Name, Length
+
+      - name: Upload the RAR file (without wrapping it in ZIP)
+        uses: actions/upload-artifact@v7
+        with:
+          name: MaterialPainter-Windows-RAR
+          path: ${{ steps.rar.outputs.archive }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
