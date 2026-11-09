@@ -533,7 +533,7 @@ pub(crate) const REPO_URL: &str = "https://github.com/alla2001/material-painter"
 /// `selected` when no layer is selected.
 const NO_LAYER: usize = usize::MAX;
 /// Wait until material controls have been idle before rebuilding the preview.
-const MATERIAL_PREVIEW_DELAY: Duration = Duration::from_secs(2);
+const MATERIAL_PREVIEW_DELAY: Duration = Duration::from_millis(1000);
 
 fn srgb_u8(c: [f32; 3]) -> Color32 {
     Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8)
@@ -981,11 +981,34 @@ fn slider(ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::RangeInc
 
 fn color_edit(ui: &mut egui::Ui, c: &mut [f32; 3]) -> bool { color_button(ui, c, None) }
 fn color_button(ui: &mut egui::Ui, c: &mut [f32; 3], tip: Option<&str>) -> bool {
-    let mut rgb = c.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
-    let response = ui.color_edit_button_srgb(&mut rgb);
-    let changed = response.changed();
-    if let Some(tip) = tip { response.on_hover_text(tip); }
-    if changed { *c = rgb.map(|v| v as f32 / 255.0); }
+    let rgb = c.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+    let response = ui.add(egui::Button::new(egui::RichText::new("   ").background_color(Color32::from_rgb(rgb[0], rgb[1], rgb[2])))
+        .fill(Color32::from_rgb(rgb[0], rgb[1], rgb[2])).min_size(vec2(28.0, 18.0)));
+    let response = if let Some(tip) = tip { response.on_hover_text(tip) } else { response };
+    let mut changed = false;
+    egui::Popup::from_toggle_button_response(&response)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_width(344.0);
+            egui::ScrollArea::vertical().max_height(470.0).show(ui, |ui| {
+                let mut hsv = rgb_to_hsv(*c);
+                let (hs, val) = color_field(ui, &mut hsv);
+                if hs || val { *c = hsv_to_rgb(hsv); changed = true; }
+                ui.separator();
+                let mut channels = c.map(|v| v * 255.0);
+                for (label, index) in [("R", 0usize), ("G", 1usize), ("B", 2usize)] {
+                    changed |= labeled(ui, label, |ui| ui.add(egui::Slider::new(&mut channels[index], 0.0..=255.0).max_decimals(0)).changed());
+                }
+                if changed { *c = channels.map(|v| (v / 255.0).clamp(0.0, 1.0)); }
+                let mut hex = format!("#{:02X}{:02X}{:02X}", (c[0]*255.0).round() as u8, (c[1]*255.0).round() as u8, (c[2]*255.0).round() as u8);
+                ui.horizontal(|ui| {
+                    ui.label("HEX");
+                    if ui.add(egui::TextEdit::singleline(&mut hex).desired_width(90.0)).changed() {
+                        if let Some(parsed) = parse_color_hex(&hex) { *c = parsed; changed = true; }
+                    }
+                });
+            });
+        });
     changed
 }
 fn swap_brushes(active: &mut Brush, other: &mut Brush) {
@@ -2658,7 +2681,9 @@ impl PainterApp {
     fn color_hud(&mut self,ui:&mut egui::Ui) {
         let fill_target=self.target==StrokeTarget::Content && self.engine.layers.get(self.selected).is_some_and(|layer|matches!(&layer.content,Content::Fill(_)));
         let initial_active_color=self.active_color();
-        ui.set_min_width(280.0); self.color_slots(ui); ui.add_space(4.0);
+        ui.set_width(360.0);
+        egui::ScrollArea::vertical().max_height(540.0).show(ui, |ui| {
+        self.color_slots(ui); ui.add_space(4.0);
         let mut state=std::mem::take(&mut self.color_sliders); let mut color=self.active_color();
         if state.out!=color { state.hsv=hsv_keeping(state.hsv,color); state.temp=0.0; state.shifting=false; }
         ui.horizontal(|ui| {
@@ -2738,6 +2763,7 @@ impl PainterApp {
         if fill_target && (material_changed || self.active_color()!=initial_active_color) {
             self.schedule_preview_update(ui.ctx());
         }
+        });
     }
     fn swatch_tray(&mut self,ui:&mut egui::Ui) {
         let current=self.active_color().map(|v|(v.clamp(0.0,1.0)*255.0).round() as u8);
@@ -2938,8 +2964,11 @@ impl PainterApp {
                         ui.add_space(6.0);
                         resp
                     };
-                    // The Color popup at the far right owns color selection.
-                    // Keep this brush strip focused on size, flow, opacity and projection.
+                    // Keep the two brush colors and their swap control beside Paint.
+                    if matches!(self.tool, Tool::Paint | Tool::Picker) && self.target == StrokeTarget::Content {
+                        self.color_slots(ui);
+                        ui.separator();
+                    }
                     s(ui, "Size", &mut self.brush.size, 2.0..=800.0, false)
                         .on_hover_text("Brush size ([ and ] to shrink / grow, X + right-drag in the view)");
                     s(ui, "Flow", &mut self.brush.flow, 0.01..=1.0, true);
