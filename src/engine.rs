@@ -288,7 +288,7 @@ impl GenKind {
             GenKind::PartRandom => "Random Parts",
             GenKind::Clouds => "Clouds",
             GenKind::PositionGradient => "World Gradient",
-            GenKind::IdMask => "ID Mask",
+            GenKind::IdMask => "Vertex Color ID Mask",
             GenKind::CustomMap => "Custom Bake Map",
         }
     }
