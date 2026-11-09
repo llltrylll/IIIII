@@ -2836,13 +2836,8 @@ impl PainterApp {
                     })
                     .response
                     .on_hover_text("What the views show (M: material, C: next channel)");
-                if self.target == StrokeTarget::Content && self.tool != Tool::Eraser && self.tool != Tool::Picker {
-                    ui.label(egui::RichText::new("Color").color(theme::TEXT_DIM));
-                    if color_edit(ui, &mut self.brush.mat.color) {
-                        self.brush.mat.enabled[0] = true;
-                    }
-                    ui.add_space(4.0);
-                }
+                // Color selection is consolidated in the Color popup at the right end
+                // of this toolbar; do not show a second, competing color chip here.
                 ui.label(egui::RichText::new("Display").color(theme::TEXT_DIM));
                 ui.separator();
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
