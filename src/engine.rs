@@ -2305,6 +2305,62 @@ impl Engine {
         Some(at - 1)
     }
 
+    /// Deep-copies the selected layer and its folder contents for the app clipboard.
+    /// Parent links inside the copied block are remapped, while an external parent
+    /// is left for the destination stack to replace during insertion.
+    pub fn copy_layer_block(&mut self, idx: usize) -> Option<Vec<Layer>> {
+        if idx >= self.layers.len() {
+            return None;
+        }
+        let indices: Vec<usize> = self.block(idx).collect();
+        let mut copies: Vec<Layer> = indices.iter().map(|&i| self.copy_layer(i)).collect();
+        let ids: HashMap<u64, u64> = indices
+            .iter()
+            .zip(&copies)
+            .map(|(&i, copy)| (self.layers[i].id, copy.id))
+            .collect();
+        for (copy, &i) in copies.iter_mut().zip(&indices) {
+            copy.parent = self.layers[i].parent.map(|p| ids.get(&p).copied().unwrap_or(p));
+        }
+        Some(copies)
+    }
+
+    /// Inserts clipboard layers into this texture set. Painted channels and masks
+    /// are resampled to this set's resolution; fill images remain shared bitmaps.
+    pub fn insert_layers_resampled(
+        &mut self,
+        at: usize,
+        parent: Option<u64>,
+        mut layers: Vec<Layer>,
+        label: String,
+        undo: &mut UndoStack,
+    ) -> Vec<u64> {
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        let mut resampled = false;
+        for layer in &mut layers {
+            if let Content::Paint(channels) = &mut layer.content {
+                for tex in channels.iter_mut().flatten() {
+                    if tex.width != self.res || tex.height != self.res {
+                        *tex = self.resample(&mut encoder, tex, self.res);
+                        resampled = true;
+                    }
+                }
+            }
+            if let Some(mask) = &mut layer.mask {
+                if let Some(tex) = &mut mask.paint {
+                    if tex.width != self.res || tex.height != self.res {
+                        *tex = self.resample(&mut encoder, tex, self.res);
+                        resampled = true;
+                    }
+                }
+            }
+        }
+        if resampled {
+            self.queue.submit([encoder.finish()]);
+        }
+        self.insert_layers(at, parent, layers, label, undo)
+    }
+
     /// Inserts layers (bottom first, a folder after its contents, as in the
     /// stack) at `at` as one undo step. They get new ids; parents among them
     /// are remapped, and the rest go into `parent`. Returns the new ids.
