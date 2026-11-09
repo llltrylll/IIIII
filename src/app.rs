@@ -3999,7 +3999,6 @@ impl PainterApp {
         target: (usize, Option<usize>),
         pick_target: &mut Option<(usize, Option<usize>)>,
         bake_settings: &mut BakeSettings,
-        view: &mut ViewSettings,
         show_bake: &mut bool,
     ) -> bool {
         use crate::engine::gin;
@@ -4305,7 +4304,7 @@ impl PainterApp {
         }
         let has_paint = mask.paint.is_some();
         if let Some(g) = &mut mask.generator {
-            dirty |= Self::generator_ui(ui, g, 0, &custom, (idx, None), &mut self.id_color_pick_target, &mut self.bake_settings, &mut self.view, &mut self.show_bake);
+            dirty |= Self::generator_ui(ui, g, 0, &custom, (idx, None), &mut self.id_color_pick_target, &mut self.bake_settings, &mut self.show_bake);
         }
         ui.horizontal(|ui| {
             if !has_paint && ui.button("Add paint to mask").clicked() {
@@ -4369,7 +4368,7 @@ impl PainterApp {
                     });
                     dirty |= slider(ui, "Opacity", &mut ml.opacity, 0.0..=1.0);
                     match &mut ml.source {
-                        MaskSource::Generator(g) => dirty |= Self::generator_ui(ui, g, 100 + i, &custom, (idx, Some(i)), &mut self.id_color_pick_target, &mut self.bake_settings, &mut self.view, &mut self.show_bake),
+                        MaskSource::Generator(g) => dirty |= Self::generator_ui(ui, g, 100 + i, &custom, (idx, Some(i)), &mut self.id_color_pick_target, &mut self.bake_settings, &mut self.show_bake),
                         MaskSource::Fill(v) => dirty |= slider(ui, "Value", v, 0.0..=1.0),
                     }
                 });
