@@ -20,7 +20,7 @@ use crate::presets::{self, PreviewLayer};
 use crate::raytrace::{RayTracer, RtSettings};
 use crate::theme;
 use crate::undo::{StrokeTarget, UndoStack};
-use crate::viewport::{Background, Cam2d, FAR, NEAR, OrbitCam, OverlaySlot, Overlays, ViewMode, ViewRenderer, ViewSettings};
+use crate::viewport::{Background, Cam2d, FAR, NEAR, OrbitCam, OverlaySlot, OverlayVertex, Overlays, ViewMode, ViewRenderer, ViewSettings};
 use eframe::{egui, egui_wgpu, wgpu};
 use egui::{Color32, Rect, Sense, Stroke, pos2, vec2};
 use glam::{Vec2, Vec3};
@@ -433,6 +433,8 @@ pub struct PainterApp {
     color_sliders: ColorSliders,
     /// Target mask generator while sampling a vertex ID from the 3D mesh.
     id_color_pick_target: Option<(usize, Option<usize>)>,
+    /// Whether imported per-vertex colors are currently shown over the 3D mesh.
+    vertex_color_preview_active: bool,
     /// Latest material edit; the expensive preview rebuild waits until this settles.
     preview_update_at: Option<Instant>,
     cam: OrbitCam,
@@ -533,7 +535,7 @@ pub(crate) const REPO_URL: &str = "https://github.com/alla2001/material-painter"
 /// `selected` when no layer is selected.
 const NO_LAYER: usize = usize::MAX;
 /// Wait until material controls have been idle before rebuilding the preview.
-const MATERIAL_PREVIEW_DELAY: Duration = Duration::from_millis(1000);
+const MATERIAL_PREVIEW_DELAY: Duration = Duration::from_millis(500);
 
 fn srgb_u8(c: [f32; 3]) -> Color32 {
     Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8)
@@ -989,11 +991,19 @@ fn color_button(ui: &mut egui::Ui, c: &mut [f32; 3], tip: Option<&str>) -> bool 
     egui::Popup::from_toggle_button_response(&response)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
-            ui.set_width(344.0);
-            egui::ScrollArea::vertical().max_height(470.0).show(ui, |ui| {
+            ui.set_width(410.0);
+            egui::ScrollArea::vertical().max_height(600.0).show(ui, |ui| {
                 let mut hsv = rgb_to_hsv(*c);
                 let (hs, val) = color_field(ui, &mut hsv);
                 if hs || val { *c = hsv_to_rgb(hsv); changed = true; }
+                let mut hsv_values = [hsv[0] * 360.0, hsv[1] * 100.0, hsv[2] * 100.0];
+                for (label, index, range) in [("H", 0usize, 0.0..=360.0), ("S", 1usize, 0.0..=100.0), ("V", 2usize, 0.0..=100.0)] {
+                    changed |= labeled(ui, label, |ui| ui.add(egui::Slider::new(&mut hsv_values[index], range).max_decimals(2)).changed());
+                }
+                if changed && !(hs || val) {
+                    hsv = [hsv_values[0] / 360.0, hsv_values[1] / 100.0, hsv_values[2] / 100.0];
+                    *c = hsv_to_rgb(hsv);
+                }
                 ui.separator();
                 let mut channels = c.map(|v| v * 255.0);
                 for (label, index) in [("R", 0usize), ("G", 1usize), ("B", 2usize)] {
@@ -1080,7 +1090,7 @@ fn color_field(ui: &mut egui::Ui, hsv: &mut [f32; 3]) -> (bool, bool) {
     let mut value_changed = false;
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
-            let square_size = vec2((ui.available_width() - 24.0).max(150.0), 190.0);
+            let square_size = vec2((ui.available_width() - 24.0).max(180.0), 230.0);
             let (rect, response) = ui.allocate_exact_size(square_size, egui::Sense::click_and_drag());
             let mut mesh = egui::epaint::Mesh::default();
             const X_STEPS: usize = 48;
@@ -1119,7 +1129,7 @@ fn color_field(ui: &mut egui::Ui, hsv: &mut [f32; 3]) -> (bool, bool) {
                 hs_changed = true;
             }
 
-            let (value_rect, value_response) = ui.allocate_exact_size(vec2(18.0, rect.height()), egui::Sense::click_and_drag());
+            let (value_rect, value_response) = ui.allocate_exact_size(vec2(20.0, rect.height()), egui::Sense::click_and_drag());
             let mut value_mesh = egui::epaint::Mesh::default();
             let top = hsv_to_rgb([hsv[0], hsv[1], 1.0]);
             let top = Color32::from_rgb((top[0] * 255.0) as u8, (top[1] * 255.0) as u8, (top[2] * 255.0) as u8);
@@ -1142,7 +1152,7 @@ fn color_field(ui: &mut egui::Ui, hsv: &mut [f32; 3]) -> (bool, bool) {
 
         // A dedicated rainbow hue rail makes the hue independently selectable,
         // like a conventional color picker, without sacrificing the large SV/HS field.
-        let (hue_rect, hue_response) = ui.allocate_exact_size(vec2(ui.available_width(), 14.0), egui::Sense::click_and_drag());
+        let (hue_rect, hue_response) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), egui::Sense::click_and_drag());
         let mut hue_mesh = egui::epaint::Mesh::default();
         const HUE_STEPS: usize = 72;
         for x in 0..HUE_STEPS {
@@ -1594,6 +1604,7 @@ impl PainterApp {
             color2: [0.95, 0.95, 0.95],
             color_sliders: ColorSliders::default(),
             id_color_pick_target: None,
+            vertex_color_preview_active: false,
             preview_update_at: None,
             cam: OrbitCam::default(),
             cam2d: Cam2d::default(),
@@ -1858,6 +1869,8 @@ impl PainterApp {
         self.poly.topo = None;
         self.poly.shown = None;
         self.overlays.clear(OverlaySlot::Selection);
+        self.overlays.clear(OverlaySlot::VertexColors);
+        self.vertex_color_preview_active = false;
         // A painted cage belongs to the mesh it was painted on.
         if self.bake_settings.cage_paint.as_deref().is_some_and(|p| !p.fits(self.mesh.vertices.len())) {
             self.bake_settings.cage_paint = None;
@@ -2681,8 +2694,8 @@ impl PainterApp {
     fn color_hud(&mut self,ui:&mut egui::Ui) {
         let fill_target=self.target==StrokeTarget::Content && self.engine.layers.get(self.selected).is_some_and(|layer|matches!(&layer.content,Content::Fill(_)));
         let initial_active_color=self.active_color();
-        ui.set_width(360.0);
-        egui::ScrollArea::vertical().max_height(540.0).show(ui, |ui| {
+        ui.set_width(420.0);
+        egui::ScrollArea::vertical().max_height(620.0).show(ui, |ui| {
         self.color_slots(ui); ui.add_space(4.0);
         let mut state=std::mem::take(&mut self.color_sliders); let mut color=self.active_color();
         if state.out!=color { state.hsv=hsv_keeping(state.hsv,color); state.temp=0.0; state.shifting=false; }
@@ -3884,8 +3897,10 @@ impl PainterApp {
                 if self.mesh.tri_vertex_color.is_some() {
                     ui.label(egui::RichText::new("Vertex colors detected. Bake the ID map to use the imported colors in ID masks.")
                         .small().color(theme::ACCENT));
+                    ui.label(egui::RichText::new("The 3D viewport displays the imported vertex colors while this source is selected.")
+                        .small().color(theme::TEXT_DIM));
                 } else {
-                    ui.label(egui::RichText::new("No vertex colors were found on the imported mesh. Paint vertex colors in Blender and reimport the mesh before baking.")
+                    ui.label(egui::RichText::new("No vertex colors were found on the imported mesh. Assign a vertex color attribute in Blender, export FBX/OBJ with colors, then reimport.")
                         .small().color(Color32::from_rgb(255, 125, 90)));
                 }
             }
@@ -4070,7 +4085,7 @@ impl PainterApp {
         if g.weights[gin::ID] != 0.0 {
             dirty |= labeled(ui, "ID color", |ui| color_edit(ui, &mut g.id_color));
             dirty |= slider(ui, "ID tolerance", &mut g.id_tolerance, 0.01..=1.0);
-            if ui.button(egui::RichText::new("Sample vertex ID color").small()).on_hover_text("Click a colored point in the 3D viewport. The original imported vertex color becomes this generator's ID color.").clicked() {
+            if ui.button(theme::with_icon(icons::EYEDROPPER, "Sample from mesh")).on_hover_text("Click a colored point on the 3D model. Its imported vertex color becomes this ID mask color.").clicked() {
                 *pick_target = Some(target);
                 bake_settings.id_source = bake::IdSource::VertexColors;
                 *show_bake = false;
@@ -5256,6 +5271,39 @@ impl PainterApp {
         }
     }
 
+    /// Shows the imported vertex colors directly on the 3D mesh when they are the active ID source.
+    /// This is a viewport-only preview; the baked ID texture still uses the same per-corner colors.
+    fn sync_vertex_color_preview(&mut self, ctx: &egui::Context) {
+        let has_colors = self.mesh.tri_vertex_color.as_ref().is_some_and(|colors| {
+            colors.len() == self.mesh.indices.len() / 3
+        });
+        let show = self.bake_settings.id_source == bake::IdSource::VertexColors && has_colors;
+        if show == self.vertex_color_preview_active {
+            return;
+        }
+        if show {
+            let mut triangles = Vec::with_capacity(self.mesh.indices.len());
+            if let Some(colors) = &self.mesh.tri_vertex_color {
+                for (tri_index, tri) in self.mesh.indices.chunks_exact(3).enumerate() {
+                    let tri_colors = colors[tri_index];
+                    for corner in 0..3 {
+                        let Some(vertex) = self.mesh.vertices.get(tri[corner] as usize) else { continue; };
+                        let rgb = tri_colors[corner];
+                        triangles.push(OverlayVertex {
+                            pos: vertex.pos,
+                            color: [rgb[0], rgb[1], rgb[2], 255],
+                        });
+                    }
+                }
+            }
+            self.overlays.set(&self.rs.device, OverlaySlot::VertexColors, &triangles, &[]);
+        } else {
+            self.overlays.clear(OverlaySlot::VertexColors);
+        }
+        self.vertex_color_preview_active = show;
+        ctx.request_repaint();
+    }
+
     // ------------------------------------------------------------------ polygon fill
 
     fn poly_topology(&mut self) -> Arc<Topology> {
@@ -6170,6 +6218,7 @@ impl eframe::App for PainterApp {
         self.update_graphs();
         self.update_preview_shader();
         self.update_cage_preview(&ctx);
+        self.sync_vertex_color_preview(&ctx);
         match self.workspace {
             Workspace::Paint => {
                 egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::same(4))).show(ui, |ui| {
@@ -6201,6 +6250,7 @@ impl eframe::App for PainterApp {
         self.library_window(&ctx);
         // Settings changed in the bake window show on the next frame.
         self.update_cage_preview(&ctx);
+        self.sync_vertex_color_preview(&ctx);
         self.service_preview_debounce(&ctx);
 
         // Property edits become one undo step once the interaction ends: no

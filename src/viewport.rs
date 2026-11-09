@@ -294,8 +294,10 @@ pub struct OverlayVertex {
 pub enum OverlaySlot {
     /// Bake cage preview.
     Cage = 0,
-    /// Polygon fill: the faces under the cursor.
-    Selection = 1,
+    /// Imported per-corner vertex colors for the ID-map preview.
+    VertexColors = 1,
+    /// Polygon fill: the faces under the cursor (drawn over the ID preview).
+    Selection = 2,
 }
 
 /// Triangles and lines of one overlay slot.
@@ -309,7 +311,7 @@ struct OverlayBuffers {
 /// (viewport, MCP renders) shows the same.
 #[derive(Default)]
 pub struct Overlays {
-    slots: [OverlayBuffers; 2],
+    slots: [OverlayBuffers; 3],
 }
 
 impl Overlays {
