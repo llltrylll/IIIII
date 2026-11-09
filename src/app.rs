@@ -428,6 +428,9 @@ pub struct PainterApp {
     target: StrokeTarget,
     tool: Tool,
     brush: Brush,
+    other_brush: Brush,
+    color2: [f32; 3],
+    color_sliders: ColorSliders,
     cam: OrbitCam,
     cam2d: Cam2d,
     layout: Layout,
@@ -970,13 +973,107 @@ fn slider(ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::RangeInc
     labeled(ui, label, |ui| ui.add(egui::Slider::new(v, range).max_decimals(2)).changed())
 }
 
-fn color_edit(ui: &mut egui::Ui, c: &mut [f32; 3]) -> bool {
+fn color_edit(ui: &mut egui::Ui, c: &mut [f32; 3]) -> bool { color_button(ui, c, None) }
+fn color_button(ui: &mut egui::Ui, c: &mut [f32; 3], tip: Option<&str>) -> bool {
     let mut rgb = c.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
-    let changed = ui.color_edit_button_srgb(&mut rgb).changed();
-    if changed {
-        *c = rgb.map(|v| v as f32 / 255.0);
-    }
+    let response = ui.color_edit_button_srgb(&mut rgb);
+    let changed = response.changed();
+    if let Some(tip) = tip { response.on_hover_text(tip); }
+    if changed { *c = rgb.map(|v| v as f32 / 255.0); }
     changed
+}
+fn swap_brushes(active: &mut Brush, other: &mut Brush) {
+    std::mem::swap(active, other);
+    let left = &*other;
+    active.mat = MatValues { enabled: active.mat.enabled, ..left.mat };
+    active.mask_value = left.mask_value;
+    active.fix_value = left.fix_value;
+    active.symmetry = left.symmetry;
+    active.projection = left.projection;
+    active.paint_through = left.paint_through;
+    active.angle_limit = left.angle_limit;
+    active.stabilize = left.stabilize;
+}
+fn swap_button(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(20.0, 20.0), egui::Sense::click());
+    let stroke = egui::Stroke::new(1.5, if response.hovered() { Color32::WHITE } else { theme::TEXT });
+    let center = rect.center();
+    ui.painter().arrow(center + vec2(5.0, -3.5), vec2(-10.0, 0.0), stroke);
+    ui.painter().arrow(center + vec2(-5.0, 3.5), vec2(10.0, 0.0), stroke);
+    response
+}
+#[derive(Default)]
+struct ColorSliders { hsv: [f32; 3], out: [f32; 3], temp: f32, base: [f32; 3], shifting: bool }
+fn rgb_to_hsv(c: [f32; 3]) -> [f32; 3] {
+    let max = c[0].max(c[1]).max(c[2]);
+    let delta = max - c[0].min(c[1]).min(c[2]);
+    let h = if delta <= 0.0 { 0.0 }
+    else if max == c[0] { ((c[1] - c[2]) / delta).rem_euclid(6.0) }
+    else if max == c[1] { (c[2] - c[0]) / delta + 2.0 }
+    else { (c[0] - c[1]) / delta + 4.0 };
+    [h / 6.0, if max > 0.0 { delta / max } else { 0.0 }, max]
+}
+fn hsv_to_rgb([h, s, v]: [f32; 3]) -> [f32; 3] {
+    let channel = |n: f32| { let k = (n + h * 6.0) % 6.0; v - v * s * k.min(4.0 - k).clamp(0.0, 1.0) };
+    [channel(5.0), channel(3.0), channel(1.0)]
+}
+fn hsv_keeping(prev: [f32; 3], color: [f32; 3]) -> [f32; 3] {
+    let next = rgb_to_hsv(color);
+    [if next[1] > 0.0 && next[2] > 0.0 { next[0] } else { prev[0] },
+     if next[2] > 0.0 { next[1] } else { prev[1] }, next[2]]
+}
+fn shift_temperature(color: [f32; 3], amount: f32) -> [f32; 3] {
+    let gain = [1.0 + 0.30 * amount, 1.0 + 0.05 * amount, 1.0 - 0.30 * amount];
+    std::array::from_fn(|i| (color[i] * gain[i]).clamp(0.0, 1.0))
+}
+
+fn color_field(ui: &mut egui::Ui, hsv: &mut [f32; 3]) -> (bool, bool) {
+    let mut sv_changed=false; let mut hue_changed=false;
+    let hue_color=hsv_to_rgb([hsv[0],1.0,1.0]);
+    let (rect,response)=ui.allocate_exact_size(vec2(ui.available_width(),118.0),egui::Sense::click_and_drag());
+    let painter=ui.painter();
+    painter.rect_filled(rect,2.0,Color32::from_rgb((hue_color[0]*255.0) as u8,(hue_color[1]*255.0) as u8,(hue_color[2]*255.0) as u8));
+    let mut white=egui::epaint::Mesh::default(); let base=white.vertices.len() as u32;
+    white.colored_vertex(rect.left_top(),Color32::WHITE);
+    white.colored_vertex(rect.right_top(),Color32::from_rgba_unmultiplied(255,255,255,0));
+    white.colored_vertex(rect.right_bottom(),Color32::from_rgba_unmultiplied(255,255,255,0));
+    white.colored_vertex(rect.left_bottom(),Color32::WHITE);
+    white.add_triangle(base,base+1,base+2); white.add_triangle(base,base+2,base+3);
+    painter.add(egui::Shape::mesh(white));
+    let mut black=egui::epaint::Mesh::default(); let base=black.vertices.len() as u32;
+    black.colored_vertex(rect.left_top(),Color32::from_black_alpha(0));
+    black.colored_vertex(rect.right_top(),Color32::from_black_alpha(0));
+    black.colored_vertex(rect.right_bottom(),Color32::from_black_alpha(245));
+    black.colored_vertex(rect.left_bottom(),Color32::from_black_alpha(245));
+    black.add_triangle(base,base+1,base+2); black.add_triangle(base,base+2,base+3);
+    painter.add(egui::Shape::mesh(black));
+    painter.rect_stroke(rect,2.0,egui::Stroke::new(1.0,theme::OUTLINE),egui::StrokeKind::Inside);
+    let marker=egui::pos2(rect.left()+hsv[1]*rect.width(),rect.bottom()-hsv[2]*rect.height());
+    painter.circle_stroke(marker,6.0,egui::Stroke::new(2.0,Color32::BLACK));
+    painter.circle_stroke(marker,4.5,egui::Stroke::new(1.5,Color32::WHITE));
+    if (response.clicked()||response.dragged()) && let Some(pos)=response.interact_pointer_pos() {
+        hsv[1]=((pos.x-rect.left())/rect.width()).clamp(0.0,1.0);
+        hsv[2]=(1.0-(pos.y-rect.top())/rect.height()).clamp(0.0,1.0); sv_changed=true;
+    }
+    let (hue_rect,hue_response)=ui.allocate_exact_size(vec2(ui.available_width(),13.0),egui::Sense::click_and_drag());
+    let mut mesh=egui::epaint::Mesh::default(); const STEPS:usize=48;
+    for i in 0..STEPS {
+        let h0=i as f32/STEPS as f32; let h1=(i+1) as f32/STEPS as f32;
+        let cv=|h:f32|{let c=hsv_to_rgb([h,1.0,1.0]);Color32::from_rgb((c[0]*255.0) as u8,(c[1]*255.0) as u8,(c[2]*255.0) as u8)};
+        let c0=cv(h0); let c1=cv(h1); let b=mesh.vertices.len() as u32;
+        mesh.colored_vertex(egui::pos2(hue_rect.left()+hue_rect.width()*h0,hue_rect.top()),c0);
+        mesh.colored_vertex(egui::pos2(hue_rect.left()+hue_rect.width()*h1,hue_rect.top()),c1);
+        mesh.colored_vertex(egui::pos2(hue_rect.left()+hue_rect.width()*h1,hue_rect.bottom()),c1);
+        mesh.colored_vertex(egui::pos2(hue_rect.left()+hue_rect.width()*h0,hue_rect.bottom()),c0);
+        mesh.add_triangle(b,b+1,b+2); mesh.add_triangle(b,b+2,b+3);
+    }
+    ui.painter().add(egui::Shape::mesh(mesh));
+    let hx=hue_rect.left()+hsv[0]*hue_rect.width();
+    ui.painter().line_segment([egui::pos2(hx,hue_rect.top()-2.0),egui::pos2(hx,hue_rect.bottom()+2.0)],egui::Stroke::new(2.0,Color32::WHITE));
+    if (hue_response.clicked()||hue_response.dragged()) && let Some(pos)=hue_response.interact_pointer_pos() {
+        hsv[0]=((pos.x-hue_rect.left())/hue_rect.width()).clamp(0.0,1.0); hue_changed=true;
+    }
+    (sv_changed,hue_changed)
 }
 
 /// Channel toggles in Substance order: color, height, rough, metal, opacity.
@@ -1273,7 +1370,7 @@ impl PainterApp {
         let at = self.engine.layers.len();
         self.selected = self.engine.add_paint_layer(at, None, Some("Stitches".into()), &mut self.undo);
         self.target = StrokeTarget::Content;
-        self.tool = Tool::Path;
+        self.set_tool(Tool::Path);
         self.brush.tip = crate::brushes::BRUSH_ALPHAS.iter().position(|b| b.name == "Stitch");
         self.brush.size = 34.0;
         self.brush.spacing = 1.25;
@@ -1398,6 +1495,9 @@ impl PainterApp {
             target: StrokeTarget::Content,
             tool: Tool::Paint,
             brush: Brush::default(),
+            other_brush: Brush::default(),
+            color2: [0.95, 0.95, 0.95],
+            color_sliders: ColorSliders::default(),
             cam: OrbitCam::default(),
             cam2d: Cam2d::default(),
             layout: Layout::Split,
@@ -1862,7 +1962,7 @@ impl PainterApp {
                 Action::SetBrushTip(tip) => {
                     self.brush.tip = tip;
                     if !matches!(self.tool, Tool::Paint | Tool::Eraser) {
-                        self.tool = Tool::Paint;
+                        self.set_tool(Tool::Paint);
                     }
                     let name = tip.map_or("Round", |i| crate::brushes::BRUSH_ALPHAS[i].name);
                     self.status = format!("Brush tip: {name}.");
@@ -2143,10 +2243,10 @@ impl PainterApp {
                 return;
             }
             if i.key_pressed(Key::Num1) {
-                self.tool = Tool::Paint;
+                self.set_tool(Tool::Paint);
             }
             if i.key_pressed(Key::Num2) {
-                self.tool = Tool::Eraser;
+                self.set_tool(Tool::Eraser);
             }
             if i.key_pressed(Key::OpenBracket) {
                 self.brush.size = (self.brush.size / 1.15).max(2.0);
@@ -2155,13 +2255,16 @@ impl PainterApp {
                 self.brush.size = (self.brush.size * 1.15).min(800.0);
             }
             if i.key_pressed(Key::I) {
-                self.tool = Tool::Picker;
+                self.set_tool(Tool::Picker);
             }
             if i.key_pressed(Key::Num3) || i.key_pressed(Key::P) {
-                self.tool = Tool::PolyFill;
+                self.set_tool(Tool::PolyFill);
             }
             if i.key_pressed(Key::Num4) || i.key_pressed(Key::L) {
-                self.tool = Tool::Path;
+                self.set_tool(Tool::Path);
+            }
+            if i.key_pressed(Key::S) {
+                self.swap_colors();
             }
             if i.key_pressed(Key::W) {
                 self.view.show_wire_3d = !self.view.show_wire_3d;
@@ -2406,23 +2509,92 @@ impl PainterApp {
         item(ui, has, "Delete layer", || Action::Delete);
     }
 
+    fn set_tool(&mut self, tool: Tool) {
+        if (self.tool == Tool::Eraser) != (tool == Tool::Eraser) { swap_brushes(&mut self.brush,&mut self.other_brush); }
+        self.tool=tool;
+    }
+    fn swap_colors(&mut self) { std::mem::swap(&mut self.brush.mat.color,&mut self.color2); }
+    fn color_slots(&mut self,ui:&mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x=3.0;
+            color_button(ui,&mut self.brush.mat.color,Some("Brush color"));
+            if swap_button(ui).on_hover_text("Swap the two colors (S)").clicked(){self.swap_colors();}
+            color_button(ui,&mut self.color2,Some("Second color"));
+        });
+    }
+    fn color_hud(&mut self,ui:&mut egui::Ui) {
+        ui.set_min_width(280.0); self.color_slots(ui); ui.add_space(4.0);
+        let mut state=std::mem::take(&mut self.color_sliders); let mut color=self.brush.mat.color;
+        if state.out!=color { state.hsv=hsv_keeping(state.hsv,color); state.temp=0.0; state.shifting=false; }
+        ui.label(egui::RichText::new("COLOR FIELD").small().color(theme::TEXT_DIM));
+        let (sv_changed,hue_changed)=color_field(ui,&mut state.hsv);
+        let (mut h,mut s,mut v)=(state.hsv[0]*360.0,state.hsv[1]*100.0,state.hsv[2]*100.0);
+        let hsv_slider=|ui:&mut egui::Ui,label:&str,value:&mut f32,max:f32,unit:&str|{
+            labeled(ui,label,|ui|ui.add(egui::Slider::new(value,0.0..=max).max_decimals(0).suffix(unit)).changed())
+        };
+        let mut slider_changed=hsv_slider(ui,"Hue",&mut h,360.0,"°");
+        slider_changed|=hsv_slider(ui,"Saturation",&mut s,100.0,"%");
+        slider_changed|=hsv_slider(ui,"Brightness",&mut v,100.0,"%");
+        if slider_changed { state.hsv=[h/360.0,s/100.0,v/100.0]; }
+        if sv_changed||hue_changed||slider_changed { color=hsv_to_rgb(state.hsv); }
+        let temp=labeled(ui,"Temperature",|ui|ui.add(egui::Slider::new(&mut state.temp,-100.0..=100.0).max_decimals(0)));
+        if temp.changed() {
+            if !state.shifting { state.base=color; state.shifting=true; }
+            color=shift_temperature(state.base,state.temp/100.0);
+            state.hsv=hsv_keeping(state.hsv,color);
+        }
+        if temp.drag_stopped()||temp.lost_focus() { state.temp=0.0; state.shifting=false; }
+        self.brush.mat.color=color; state.out=color; self.color_sliders=state;
+        ui.separator();
+        let material=&mut self.brush.mat;
+        channel_toggles(ui,&mut material.enabled);
+        if material.enabled[3] { slider(ui,"Height",&mut material.height,-1.0..=1.0); }
+        if material.enabled[1] { slider(ui,"Roughness",&mut material.rough,0.0..=1.0); }
+        if material.enabled[2] { slider(ui,"Metallic",&mut material.metal,0.0..=1.0); }
+        if material.enabled[4] { slider(ui,"Opacity",&mut material.opacity,0.0..=1.0); }
+        ui.separator(); self.swatch_tray(ui);
+    }
+    fn swatch_tray(&mut self,ui:&mut egui::Ui) {
+        let current=self.brush.mat.color.map(|v|(v.clamp(0.0,1.0)*255.0).round() as u8);
+        let shift=ui.input(|i|i.modifiers.shift); let (mut pick,mut remove,mut add)=(None,None,false);
+        ui.horizontal_wrapped(|ui|{
+            ui.spacing_mut().item_spacing=vec2(3.0,3.0);
+            for (index,color) in self.prefs.swatches.iter().enumerate() {
+                let (rect,response)=ui.allocate_exact_size(vec2(18.0,18.0),egui::Sense::click());
+                let selected=*color==current;
+                ui.painter().rect_filled(rect,2.0,Color32::from_rgb(color[0],color[1],color[2]));
+                ui.painter().rect_stroke(rect,2.0,egui::Stroke::new(if selected{2.0}else{1.0},if selected{Color32::WHITE}else{Color32::from_gray(80)}),egui::StrokeKind::Inside);
+                let hint=format!("#{:02x}{:02x}{:02x}\nClick: brush color\nShift+click: second color\nRight-click: remove",color[0],color[1],color[2]);
+                let response=response.on_hover_text(hint);
+                if response.clicked(){pick=Some((index,shift));}
+                if response.secondary_clicked(){remove=Some(index);}
+            }
+            let can_add=self.prefs.swatches.len()<prefs::MAX_SWATCHES&&!self.prefs.swatches.contains(&current);
+            let plus=egui::Button::new(icons::PLUS).min_size(vec2(18.0,18.0));
+            if ui.add_enabled(can_add,plus).on_hover_text("Save the brush color in the tray").clicked(){add=true;}
+        });
+        if self.prefs.swatches.is_empty(){ui.label(egui::RichText::new("Press + to keep the brush color here.").small().color(theme::TEXT_DIM));}
+        if let Some((index,second))=pick {
+            let c=self.prefs.swatches[index].map(|v|v as f32/255.0);
+            if second{self.color2=c;}else{self.brush.mat.color=c;}
+        }
+        if let Some(index)=remove{self.prefs.swatches.remove(index);}
+        if add{self.prefs.swatches.push(current);}
+    }
+
     fn context_toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_centered(|ui| {
             // The right-hand controls go first; the tool controls get what's
             // left and clip instead of running under them on narrow windows.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let rt_btn = ui
-                    .add(theme::selectable(self.rt.enabled, theme::with_icon(icons::SUN, "Ray trace")))
-                    .on_hover_text("Path-traced preview of the 3D view (F10). Right-click for settings.");
-                if rt_btn.clicked() {
-                    self.rt.enabled = !self.rt.enabled;
+                // Ray trace remains in View and on F10; this toolbar slot opens the Color HUD.
+                if matches!(self.tool, Tool::Paint | Tool::Picker) && self.target == StrokeTarget::Content {
+                    let color_btn=ui.add(theme::selectable(false,theme::with_icon(icons::DROP,"Color")))
+                        .on_hover_text("Two colors, HSV, temperature, channel values and saved swatches");
+                    egui::Popup::from_toggle_button_response(&color_btn)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .show(|ui|self.color_hud(ui));
                 }
-                rt_btn.context_menu(|ui| {
-                    ui.set_min_width(220.0);
-                    labeled(ui, "Max samples", |ui| ui.add(egui::Slider::new(&mut self.rt.max_samples, 16..=4096).logarithmic(true)));
-                    labeled(ui, "Bounces", |ui| ui.add(egui::Slider::new(&mut self.rt.bounces, 1..=12)));
-                    ui.checkbox(&mut self.rt.ground, "Ground plane with shadows");
-                });
                 if ui
                     .add(theme::selectable(self.view.show_wire, theme::with_icon(icons::GRID_FOUR, "UV wire")))
                     .on_hover_text("Show the UV wireframe in the 2D view")
@@ -2598,6 +2770,10 @@ impl PainterApp {
                         }
                         ui.add_space(6.0);
                     }
+                    if matches!(self.tool, Tool::Paint | Tool::Picker) && self.target == StrokeTarget::Content {
+                        self.color_slots(ui);
+                        ui.separator();
+                    }
                     s(ui, "Size", &mut self.brush.size, 2.0..=800.0, false)
                         .on_hover_text("Brush size ([ and ] to shrink / grow, X + right-drag in the view)");
                     s(ui, "Flow", &mut self.brush.flow, 0.01..=1.0, true);
@@ -2636,7 +2812,7 @@ impl PainterApp {
             (Tool::Picker, icons::EYEDROPPER, "Pick material from the surface (I)"),
         ] {
             if theme::icon_button(ui, icon, self.tool == tool, 34.0).on_hover_text(tip).clicked() {
-                self.tool = tool;
+                self.set_tool(tool);
             }
         }
         ui.add_space(4.0);
@@ -3331,7 +3507,7 @@ impl PainterApp {
                                     } else {
                                         self.target = StrokeTarget::BakeFix(i);
                                         self.view.mode = ViewMode::Map(i);
-                                        self.tool = Tool::Paint;
+                                        self.set_tool(Tool::Paint);
                                     }
                                 }
                                 if has_fix && ui.small_button("✖").on_hover_text("Clear painted fixes").clicked() {
@@ -4166,6 +4342,11 @@ impl PainterApp {
     }
 
     fn brush_properties(&mut self, ui: &mut egui::Ui, content: bool) {
+        if content && matches!(self.tool, Tool::Paint | Tool::Picker) {
+            section(ui, "Color");
+            self.color_slots(ui);
+            self.swatch_tray(ui);
+        }
         section(ui, if self.tool == Tool::Eraser { "Eraser" } else { "Brush" });
         slider(ui, "Size", &mut self.brush.size, 2.0..=800.0);
         slider(ui, "Hardness", &mut self.brush.hardness, 0.0..=0.99);
@@ -4522,7 +4703,7 @@ impl PainterApp {
                                                 emission: self.brush.mat.emission,
                                                 ..f.mat
                                             };
-                                            self.tool = Tool::Paint;
+                                            self.set_tool(Tool::Paint);
                                             ui.close();
                                         }
                                     });
@@ -5093,7 +5274,7 @@ impl PainterApp {
         self.brush.mat.color = color;
         self.brush.mat.rough = rough;
         self.brush.mat.metal = metal;
-        self.tool = Tool::Paint;
+        self.set_tool(Tool::Paint);
         let hex = color.map(|c| (c * 255.0).round() as u8);
         self.status = format!(
             "Picked #{:02X}{:02X}{:02X}, roughness {:.2}, metallic {:.2}.",
@@ -5766,4 +5947,13 @@ impl eframe::App for PainterApp {
         let ms = start.elapsed().as_secs_f32() * 1000.0;
         self.frame_ms = self.frame_ms * 0.9 + ms * 0.1;
     }
+}
+
+#[cfg(test)]
+mod color_hud_tests{
+use super::*;
+fn close(a:[f32;3],b:[f32;3])->bool{a.iter().zip(b).all(|(x,y)|(x-y).abs()<1e-4)}
+#[test]fn hsv_round_trips(){for c in [[0.8,0.2,0.1],[0.0,0.0,0.0],[1.0,1.0,1.0],[0.2,0.9,0.4],[0.1,0.3,0.95],[0.5,0.5,0.5],[1.0,0.0,0.0]]{assert!(close(hsv_to_rgb(rgb_to_hsv(c)),c),"{c:?}");}}
+#[test]fn gray_keeps_previous_hue(){let p=[0.6,0.7,0.8];assert!(close(hsv_keeping(p,[0.4,0.4,0.4]),[0.6,0.0,0.4]));assert!(close(hsv_keeping(p,[0.0,0.0,0.0]),[0.6,0.7,0.0]));}
+#[test]fn temperature_warms_and_cools(){let c=[0.5,0.5,0.5];assert_eq!(shift_temperature(c,0.0),c);let w=shift_temperature(c,1.0);let k=shift_temperature(c,-1.0);assert!(w[0]>c[0]&&w[2]<c[2]);assert!(k[0]<c[0]&&k[2]>c[2]);}
 }
