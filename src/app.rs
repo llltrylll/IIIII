@@ -2591,7 +2591,7 @@ impl PainterApp {
         if color != self.active_color() { self.set_active_color(color); }
         state.out=color; self.color_sliders=state;
         ui.separator();
-        let fill_target=self.target==StrokeTarget::Content && self.engine.layers.get(self.selected).is_some_and(|layer|matches!(layer.content,Content::Fill(_)));
+        let fill_target=self.target==StrokeTarget::Content && self.engine.layers.get(self.selected).is_some_and(|layer|matches!(&layer.content,Content::Fill(_)));
         let mut material_changed=false;
         if fill_target {
             if let Some(layer)=self.engine.layers.get_mut(self.selected) {
