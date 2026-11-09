@@ -2481,7 +2481,7 @@ impl PainterApp {
                     .on_hover_text("What the views show (M: material, C: next channel)");
                 if self.target == StrokeTarget::Content && self.tool != Tool::Eraser && self.tool != Tool::Picker {
                     ui.label(egui::RichText::new("Color").color(theme::TEXT_DIM));
-                    if color_edit(ui, &mut self.brush.mat.color) {
+                    if crate::color_picker::button(ui, &mut self.brush.mat.color) {
                         self.brush.mat.enabled[0] = true;
                     }
                     ui.add_space(4.0);
@@ -2588,12 +2588,7 @@ impl PainterApp {
                     };
                     if self.tool == Tool::Paint && self.target == StrokeTarget::Content {
                         ui.label(egui::RichText::new("Color").color(theme::TEXT_DIM));
-                        let mut rgb = self.brush.mat.color.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
-                        if ui.color_edit_button_srgb(&mut rgb)
-                            .on_hover_text("Choose a color from the square picker, or enter channel values")
-                            .changed()
-                        {
-                            self.brush.mat.color = rgb.map(|v| v as f32 / 255.0);
+                        if crate::color_picker::button(ui, &mut self.brush.mat.color) {
                             self.brush.mat.enabled[0] = true;
                         }
                         ui.add_space(6.0);
