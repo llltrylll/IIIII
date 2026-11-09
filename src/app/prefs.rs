@@ -66,6 +66,7 @@ pub struct Preferences {
     pub brush_size: f32,
     pub brush_hardness: f32,
     pub brush_spacing: f32,
+    pub swatches: Vec<[u8; 3]>,
     /// Texels of padding polygon fill adds past UV island borders.
     pub poly_padding: f32,
     // Baking
@@ -110,6 +111,7 @@ impl Default for Preferences {
             brush_size: 70.0,
             brush_hardness: 0.55,
             brush_spacing: 0.08,
+            swatches: Vec::new(),
             poly_padding: 2.0,
             bake_quality: Quality::Standard,
             bake_match_by_name: true,
@@ -131,6 +133,11 @@ impl Default for Preferences {
 
 const FILE: &str = "preferences.json";
 pub const RESOLUTIONS: [u32; 6] = [256, 512, 1024, 2048, 4096, 8192];
+pub const MAX_SWATCHES:usize=32;
+fn swatches_from_json(v:&Value)->Vec<[u8;3]>{
+let byte=|x:Option<&Value>|x.and_then(Value::as_u64).map(|n|n.min(255) as u8);
+v.as_array().map_or_else(Vec::new,|list|list.iter().filter_map(|c|Some([byte(c.get(0))?,byte(c.get(1))?,byte(c.get(2))?])).take(MAX_SWATCHES).collect())
+}
 
 impl Preferences {
     pub fn load() -> Preferences {
@@ -167,6 +174,7 @@ impl Preferences {
             "brush_size": self.brush_size,
             "brush_hardness": self.brush_hardness,
             "brush_spacing": self.brush_spacing,
+            "swatches": self.swatches,
             "poly_padding": self.poly_padding,
             "bake_quality": self.bake_quality.name(),
             "bake_match_by_name": self.bake_match_by_name,
@@ -213,6 +221,7 @@ impl Preferences {
             brush_size: f("brush_size", d.brush_size, 1.0, 1000.0),
             brush_hardness: f("brush_hardness", d.brush_hardness, 0.0, 1.0),
             brush_spacing: f("brush_spacing", d.brush_spacing, 0.01, 2.0),
+            swatches: swatches_from_json(&v["swatches"]),
             poly_padding: f("poly_padding", d.poly_padding, 0.0, 16.0),
             bake_quality: v["bake_quality"].as_str().and_then(|n| Quality::ALL.into_iter().find(|q| q.name() == n)).unwrap_or(d.bake_quality),
             bake_match_by_name: b("bake_match_by_name", d.bake_match_by_name),
@@ -514,7 +523,9 @@ impl PainterApp {
         (self.rt.max_samples, self.rt.bounces) = (p.rt_max_samples, p.rt_bounces);
         self.undo.max_entries = p.undo_steps;
         self.recent.truncate(p.recent_count);
-        (self.brush.size, self.brush.hardness, self.brush.spacing) = (p.brush_size, p.brush_hardness, p.brush_spacing);
+        for brush in [&mut self.brush, &mut self.other_brush] {
+            (brush.size, brush.hardness, brush.spacing) = (p.brush_size, p.brush_hardness, p.brush_spacing);
+        }
         self.apply_project_defaults();
         self.prefs_applied = p;
     }
@@ -526,4 +537,11 @@ impl PainterApp {
         self.bake_settings.apply_quality(p.bake_quality);
         self.bake_settings.match_by_name = p.bake_match_by_name;
     }
+}
+
+#[cfg(test)]
+mod swatch_tests{
+use super::*;
+#[test]fn swatches_round_trip(){let p=Preferences{swatches:vec![[255,0,0],[10,20,30]],..Preferences::default()};assert_eq!(Preferences::from_json(&p.to_json()).swatches,p.swatches);}
+#[test]fn malformed_swatches_skip(){let v=json!({"swatches":[[1,2,3],[1,2],"red",[300,0,0],null]});assert_eq!(Preferences::from_json(&v).swatches,vec![[1,2,3],[255,0,0]]);}
 }
