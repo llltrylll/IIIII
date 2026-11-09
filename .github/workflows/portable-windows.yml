@@ -2,7 +2,6 @@ name: Portable Windows RAR
 
 on:
   push:
-    branches: [master]
     paths:
       - ".github/workflows/portable-windows.yml"
       - "src/**"
@@ -21,7 +20,7 @@ jobs:
     name: Build portable Windows RAR
     runs-on: windows-latest
     steps:
-      - name: Check out master
+      - name: Check out this fork branch
         uses: actions/checkout@v5
 
       - name: Install stable Rust
