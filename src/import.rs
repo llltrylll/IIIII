@@ -171,7 +171,7 @@ struct Builder {
     material_names: Vec<String>,
     objects: Vec<String>,
     tri_object: Vec<u32>,
-    all_colors: bool,
+    any_colors: bool,
     tri_color: Vec<[u8; 3]>,
     tri_vertex_color: Vec<[[u8; 3]; 3]>,
     color_corners: [[u8; 3]; 3],
@@ -189,14 +189,15 @@ impl Builder {
         if self.corners == 0 {
             self.all_normals = true;
             self.all_uvs = true;
-            self.all_colors = true;
         }
         self.corners += 1;
         self.all_normals &= c.normal.is_some();
         self.all_uvs &= c.uv.is_some();
-        self.all_colors &= c.color.is_some();
+        // Keep vertex colors even when only some objects carry a color layer.
+        // Unpainted objects receive white so they remain a selectable ID region.
+        self.any_colors |= c.color.is_some();
         let corner = (self.corners - 1) % 3;
-        let color = c.color.unwrap_or(Vec3::ZERO);
+        let color = c.color.unwrap_or(Vec3::ONE);
         self.color_acc += color;
         self.color_corners[corner] = color.to_array().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
         if self.corners % 3 == 0 {
@@ -244,8 +245,8 @@ impl Builder {
             missing_uvs: self.missing_uvs,
             tri_object: self.tri_object,
             objects: self.objects,
-            tri_color: (self.all_colors && self.corners > 0).then_some(self.tri_color),
-            tri_vertex_color: (self.all_colors && self.corners > 0).then_some(self.tri_vertex_color),
+            tri_color: (self.any_colors && self.corners > 0).then_some(self.tri_color),
+            tri_vertex_color: (self.any_colors && self.corners > 0).then_some(self.tri_vertex_color),
         }
     }
 }
