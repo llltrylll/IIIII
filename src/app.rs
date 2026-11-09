@@ -2540,12 +2540,16 @@ impl PainterApp {
     /// paint viewport is hidden. A held pointer postpones the rebuild until release.
     fn service_preview_debounce(&mut self, ctx: &egui::Context) {
         let Some(deadline) = self.preview_update_at else { return; };
+        // Keep extending the debounce while a pointer interaction is active.
+        // This guarantees the full delay starts after the slider is released,
+        // even when someone holds the knob without moving it.
+        if ctx.input(|i| i.pointer.any_down()) {
+            self.defer_preview_update();
+            ctx.request_repaint_after(MATERIAL_PREVIEW_DELAY);
+            return;
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            if ctx.input(|i| i.pointer.any_down()) {
-                ctx.request_repaint_after(Duration::from_millis(120));
-                return;
-            }
             self.preview_update_at = None;
             self.engine.mark_dirty();
             ctx.request_repaint();
