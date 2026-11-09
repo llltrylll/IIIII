@@ -80,6 +80,8 @@ struct BakeU {
 // The custom maps, one per channel.
 @group(0) @binding(36) var cust_w: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(37) var cust_t: texture_2d<f32>;
+// Original per-corner vertex colors (or flat ID colors) for interpolation.
+@group(0) @binding(39) var<storage, read> tri_vcolor: array<vec4<f32>>;
 
 // Match-by-name group of the texel being projected (0 = hit anything). Only
 // projection rays set it; occlusion rays see the whole mesh.
@@ -767,7 +769,10 @@ fn cs_surface(@builtin(global_invocation_id) gid: vec3<u32>) {
         let part = parts[pi];
         prand = part.x;
         pgrad = clamp((center_pos.y - part.y) / max(part.z, 1e-5), 0.0, 1.0);
-        idc = ids[bitcast<u32>(tri_pos[center_tri * 3u + 1u].w)].xyz;
+        let bary = vec3<f32>(1.0 - center_bary.x - center_bary.y, center_bary.x, center_bary.y);
+        idc = tri_vcolor[center_tri * 3u].xyz * bary.x
+            + tri_vcolor[center_tri * 3u + 1u].xyz * bary.y
+            + tri_vcolor[center_tri * 3u + 2u].xyz * bary.z;
         geo = vec4<f32>(hit_geo_normal(center_tri, center_n), f32(pi));
     }
     // Heights span [-range, range] around mid-gray. With a cage, rays start
