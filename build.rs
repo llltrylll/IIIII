@@ -38,12 +38,23 @@ fn main() {
 }
 
 fn png_ico(png: &[u8]) -> Vec<u8> {
-    // Windows supports PNG-compressed ICO entries (Vista and later).
+    // Embed the original PNG as an ICO image. The ICO size byte is zero for
+    // dimensions >= 256 px, as required by the Windows icon directory format.
+    assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "application icon is not a PNG");
+    assert!(png.len() >= 24, "application icon PNG header is truncated");
+    assert_eq!(&png[12..16], b"IHDR", "application icon has no IHDR header");
+    let width = u32::from_be_bytes(png[16..20].try_into().expect("PNG width"));
+    let height = u32::from_be_bytes(png[20..24].try_into().expect("PNG height"));
+    assert!(width > 0 && height > 0, "application icon has invalid dimensions");
+    assert!(width <= 256 && height <= 256, "Windows ICO PNG entries cannot exceed 256 px");
+    let icon_width = if width == 256 { 0 } else { width as u8 };
+    let icon_height = if height == 256 { 0 } else { height as u8 };
+
     let mut ico = Vec::with_capacity(22 + png.len());
     ico.extend_from_slice(&0u16.to_le_bytes()); // reserved
     ico.extend_from_slice(&1u16.to_le_bytes()); // icon type
     ico.extend_from_slice(&1u16.to_le_bytes()); // image count
-    ico.extend_from_slice(&[128, 128, 0, 0]); // 128x128, no palette
+    ico.extend_from_slice(&[icon_width, icon_height, 0, 0]);
     ico.extend_from_slice(&1u16.to_le_bytes()); // color planes
     ico.extend_from_slice(&32u16.to_le_bytes()); // bits per pixel
     ico.extend_from_slice(&(png.len() as u32).to_le_bytes());
