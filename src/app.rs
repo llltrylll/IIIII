@@ -2573,9 +2573,9 @@ impl PainterApp {
             if numeric_changed { state.hsv=[h/360.0,s/100.0,v/100.0]; }
         } else {
             let mut rgb=color.map(|v|v*255.0);
-            for (name,value) in [("R",&mut rgb[0]),("G",&mut rgb[1]),("B",&mut rgb[2])] {
-                numeric_changed |= labeled(ui,name,|ui|ui.add(egui::Slider::new(value,0.0..=255.0).max_decimals(0)).changed());
-            }
+            numeric_changed |= labeled(ui,"R",|ui|ui.add(egui::Slider::new(&mut rgb[0],0.0..=255.0).max_decimals(0)).changed());
+            numeric_changed |= labeled(ui,"G",|ui|ui.add(egui::Slider::new(&mut rgb[1],0.0..=255.0).max_decimals(0)).changed());
+            numeric_changed |= labeled(ui,"B",|ui|ui.add(egui::Slider::new(&mut rgb[2],0.0..=255.0).max_decimals(0)).changed());
             if numeric_changed { color=rgb.map(|v|v/255.0); state.hsv=hsv_keeping(state.hsv,color); }
         }
         if hs_changed||value_changed||numeric_changed { color=hsv_to_rgb(state.hsv); }
