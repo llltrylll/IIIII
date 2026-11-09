@@ -5330,7 +5330,7 @@ impl PainterApp {
             self.id_color_pick_target = None;
             return;
         };
-        let weights = [1.0 - hit.bary.x - hit.bary.y, hit.bary.x, hit.bary.y];
+        let weights = [hit.bary.x, hit.bary.y, hit.bary.z];
         let mut color = [0.0f32; 3];
         for k in 0..3 {
             for ch in 0..3 { color[ch] += colors[k][ch] as f32 / 255.0 * weights[k]; }
