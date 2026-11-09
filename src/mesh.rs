@@ -60,6 +60,8 @@ pub struct Mesh {
     pub objects: Vec<String>,
     /// Vertex colors per triangle (sRGB), for color ID maps.
     pub tri_color: Option<Vec<[u8; 3]>>,
+    /// Original vertex colors for each triangle corner, in triangle order.
+    pub tri_vertex_color: Option<Vec<[[u8; 3]; 3]>>,
     /// Texture sets, one per material, in triangle order; never empty.
     pub sets: Vec<MeshSet>,
 }
@@ -76,6 +78,7 @@ pub struct HighPoly {
     pub tri_object: Vec<u32>,
     pub objects: Vec<String>,
     pub tri_color: Option<Vec<[u8; 3]>>,
+    pub tri_vertex_color: Option<Vec<[[u8; 3]; 3]>>,
 }
 
 impl HighPoly {
@@ -95,6 +98,7 @@ impl HighPoly {
             tri_object: raw.tri_object,
             objects: raw.objects,
             tri_color: raw.tri_color,
+            tri_vertex_color: raw.tri_vertex_color,
         })
     }
 }
@@ -197,6 +201,7 @@ impl Mesh {
             tri_object: Vec::new(),
             objects: Vec::new(),
             tri_color: None,
+            tri_vertex_color: None,
             sets: Vec::new(),
         };
         mesh.set_ranges(Vec::new());
@@ -223,6 +228,7 @@ impl Mesh {
             tri_object: Vec::new(),
             objects: Vec::new(),
             tri_color: None,
+            tri_vertex_color: None,
             sets: Vec::new(),
         };
         mesh.set_ranges(Vec::new());
@@ -250,6 +256,9 @@ impl Mesh {
         }
         if let Some(c) = &self.tri_color {
             self.tri_color = Some(order.iter().map(|&t| c[t]).collect());
+        }
+        if let Some(c) = &self.tri_vertex_color {
+            self.tri_vertex_color = Some(order.iter().map(|&t| c[t]).collect());
         }
         let mut ranges: Vec<(String, Range<u32>)> = Vec::new();
         for (k, &t) in order.iter().enumerate() {
@@ -316,6 +325,7 @@ impl Mesh {
         mesh.tri_object = raw.tri_object;
         mesh.objects = raw.objects;
         mesh.tri_color = raw.tri_color;
+        mesh.tri_vertex_color = raw.tri_vertex_color;
         mesh.split_by_material(&raw.tri_material, &raw.material_names);
         Ok(mesh)
     }
