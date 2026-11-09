@@ -2938,22 +2938,8 @@ impl PainterApp {
                         ui.add_space(6.0);
                         resp
                     };
-                    if self.tool == Tool::Paint && self.target == StrokeTarget::Content {
-                        ui.label(egui::RichText::new("Color").color(theme::TEXT_DIM));
-                        let mut rgb = self.brush.mat.color.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
-                        if ui.color_edit_button_srgb(&mut rgb)
-                            .on_hover_text("Choose a color from the square picker, or enter channel values")
-                            .changed()
-                        {
-                            self.brush.mat.color = rgb.map(|v| v as f32 / 255.0);
-                            self.brush.mat.enabled[0] = true;
-                        }
-                        ui.add_space(6.0);
-                    }
-                    if matches!(self.tool, Tool::Paint | Tool::Picker) && self.target == StrokeTarget::Content {
-                        self.color_slots(ui);
-                        ui.separator();
-                    }
+                    // The Color popup at the far right owns color selection.
+                    // Keep this brush strip focused on size, flow, opacity and projection.
                     s(ui, "Size", &mut self.brush.size, 2.0..=800.0, false)
                         .on_hover_text("Brush size ([ and ] to shrink / grow, X + right-drag in the view)");
                     s(ui, "Flow", &mut self.brush.flow, 0.01..=1.0, true);
