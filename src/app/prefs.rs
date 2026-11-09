@@ -497,12 +497,8 @@ impl PainterApp {
         if new.fov_deg != old.fov_deg {
             self.cam.fov_y = new.fov_deg.to_radians();
         }
-        if new.rt_max_samples != old.rt_max_samples {
-            self.rt.max_samples = new.rt_max_samples;
-        }
-        if new.rt_bounces != old.rt_bounces {
-            self.rt.bounces = new.rt_bounces;
-        }
+        // Ray-traced sample count and bounce depth are startup-only:
+        // changes are saved here and take effect the next time the app opens.
         self.undo.max_entries = new.undo_steps;
         if new.recent_count != old.recent_count {
             self.recent.truncate(new.recent_count);
