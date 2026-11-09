@@ -2549,6 +2549,7 @@ impl PainterApp {
             ui.spacing_mut().item_spacing.x=3.0;
             let mut active=self.active_color();
             if color_button(ui,&mut active,Some("Active layer / brush color")){self.set_active_color(active);}
+            if theme::icon_button(ui,icons::EYEDROPPER,false,20.0).on_hover_text("Pick material color from the mesh (I)").clicked(){self.set_tool(Tool::Picker);}
             if swap_button(ui).on_hover_text("Swap the active color and the second color (S)").clicked(){self.swap_colors();}
             color_button(ui,&mut self.color2,Some("Second color"));
         });
@@ -2589,7 +2590,8 @@ impl PainterApp {
             state.hsv=hsv_keeping(state.hsv,color);
         }
         if temp.drag_stopped()||temp.lost_focus() { state.temp=0.0; state.shifting=false; }
-        self.set_active_color(color); state.out=color; self.color_sliders=state;
+        if color != self.active_color() { self.set_active_color(color); }
+        state.out=color; self.color_sliders=state;
         ui.separator();
         let material=&mut self.brush.mat;
         channel_toggles(ui,&mut material.enabled);
