@@ -15,7 +15,7 @@ const SWATCHES: [(&str, [u8; 3]); 10] = [
     ("Gunmetal", [75, 83, 91]),
     ("Steel", [151, 160, 168]),
     ("Ivory", [231, 226, 207]),
-    ("Rust", [137,  sixty_four(), 45]),
+    ("Rust", [137,  64, 45]),
     ("Copper", [184, 112, 67]),
     ("Brass", [184, 151, 72]),
     ("Olive", [91, 103, 57]),
@@ -39,6 +39,7 @@ pub(crate) fn button(ui: &mut egui::Ui, color: &mut [f32; 3]) -> bool {
 
     egui::Popup::menu(&response)
         .width(PICKER_WIDTH)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
             ui.set_min_width(PICKER_WIDTH);
             ui.spacing_mut().item_spacing = vec2(5.0, 6.0);
