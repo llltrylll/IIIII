@@ -40,3 +40,6 @@ codegen-units = 1
 
 [dev-dependencies]
 egui_kittest = { version = "0.37", features = ["wgpu", "eframe", "snapshot"] }
+
+[build-dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png"] }
