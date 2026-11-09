@@ -25,7 +25,7 @@ use eframe::{egui, egui_wgpu, wgpu};
 use egui::{Color32, Rect, Sense, Stroke, pos2, vec2};
 use glam::{Vec2, Vec3};
 use std::sync::{Arc, mpsc};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 mod export_ui;
 mod dock;
@@ -433,6 +433,8 @@ pub struct PainterApp {
     color_sliders: ColorSliders,
     /// Target mask generator while sampling a vertex ID from the 3D mesh.
     id_color_pick_target: Option<(usize, Option<usize>)>,
+    /// Latest material edit; the expensive preview rebuild waits until this settles.
+    preview_update_at: Option<Instant>,
     cam: OrbitCam,
     cam2d: Cam2d,
     layout: Layout,
@@ -530,6 +532,8 @@ const RESOLUTIONS: [u32; 4] = [512, 1024, 2048, 4096];
 pub(crate) const REPO_URL: &str = "https://github.com/alla2001/material-painter";
 /// `selected` when no layer is selected.
 const NO_LAYER: usize = usize::MAX;
+/// Wait until material controls have been idle before rebuilding the preview.
+const MATERIAL_PREVIEW_DELAY: Duration = Duration::from_secs(7);
 
 fn srgb_u8(c: [f32; 3]) -> Color32 {
     Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8)
@@ -1508,6 +1512,7 @@ impl PainterApp {
             color2: [0.95, 0.95, 0.95],
             color_sliders: ColorSliders::default(),
             id_color_pick_target: None,
+            preview_update_at: None,
             cam: OrbitCam::default(),
             cam2d: Cam2d::default(),
             layout: Layout::Split,
@@ -2523,6 +2528,30 @@ impl PainterApp {
         if (self.tool == Tool::Eraser) != (tool == Tool::Eraser) { swap_brushes(&mut self.brush,&mut self.other_brush); }
         self.tool=tool;
     }
+    /// Debounce expensive material preview recomposites without blocking UI controls.
+    fn defer_preview_update(&mut self) {
+        self.preview_update_at = Some(Instant::now() + MATERIAL_PREVIEW_DELAY);
+    }
+    fn schedule_preview_update(&mut self, ctx: &egui::Context) {
+        self.defer_preview_update();
+        ctx.request_repaint_after(MATERIAL_PREVIEW_DELAY);
+    }
+    /// Called before viewport compositing. While a pointer is held, keep waiting:
+    /// a slow drag must not trigger a preview rebuild halfway through.
+    fn update_preview_debounce(&mut self, ctx: &egui::Context) {
+        let Some(deadline) = self.preview_update_at else { return; };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            if ctx.input(|i| i.pointer.any_down()) {
+                ctx.request_repaint_after(Duration::from_millis(120));
+                return;
+            }
+            self.preview_update_at = None;
+            self.engine.mark_dirty();
+        } else {
+            ctx.request_repaint_after(remaining);
+        }
+    }
     fn active_color(&self) -> [f32; 3] {
         if self.target == StrokeTarget::Content {
             if let Some(layer) = self.engine.layers.get(self.selected) {
@@ -2536,7 +2565,7 @@ impl PainterApp {
             if let Some(layer) = self.engine.layers.get_mut(self.selected) {
                 if let Content::Fill(fill) = &mut layer.content {
                     fill.mat.color = color;
-                    self.engine.mark_dirty();
+                    self.defer_preview_update();
                     return;
                 }
             }
@@ -2555,6 +2584,8 @@ impl PainterApp {
         });
     }
     fn color_hud(&mut self,ui:&mut egui::Ui) {
+        let fill_target=self.target==StrokeTarget::Content && self.engine.layers.get(self.selected).is_some_and(|layer|matches!(&layer.content,Content::Fill(_)));
+        let initial_active_color=self.active_color();
         ui.set_min_width(280.0); self.color_slots(ui); ui.add_space(4.0);
         let mut state=std::mem::take(&mut self.color_sliders); let mut color=self.active_color();
         if state.out!=color { state.hsv=hsv_keeping(state.hsv,color); state.temp=0.0; state.shifting=false; }
@@ -2591,7 +2622,6 @@ impl PainterApp {
         if color != self.active_color() { self.set_active_color(color); }
         state.out=color; self.color_sliders=state;
         ui.separator();
-        let fill_target=self.target==StrokeTarget::Content && self.engine.layers.get(self.selected).is_some_and(|layer|matches!(&layer.content,Content::Fill(_)));
         let mut material_changed=false;
         if fill_target {
             if let Some(layer)=self.engine.layers.get_mut(self.selected) {
@@ -2612,8 +2642,10 @@ impl PainterApp {
             if material.enabled[1] { slider(ui,"Roughness",&mut material.rough,0.0..=1.0); }
             if material.enabled[2] { slider(ui,"Metallic",&mut material.metal,0.0..=1.0); }
         }
-        if fill_target && material_changed { self.engine.mark_dirty(); }
         ui.separator(); self.swatch_tray(ui);
+        if fill_target && (material_changed || self.active_color()!=initial_active_color) {
+            self.schedule_preview_update(ui.ctx());
+        }
     }
     fn swatch_tray(&mut self,ui:&mut egui::Ui) {
         let current=self.active_color().map(|v|(v.clamp(0.0,1.0)*255.0).round() as u8);
@@ -4114,7 +4146,7 @@ impl PainterApp {
                 }
             }
             if dirty {
-                self.engine.mark_dirty();
+                self.schedule_preview_update(ui.ctx());
             }
         });
     }
@@ -4298,9 +4330,6 @@ impl PainterApp {
         if count == 0 {
             ui.label(egui::RichText::new("Stack more smart masks on this one: each blends over the mask below it (Multiply keeps only where both are, Add joins them, Subtract cuts one out).").small().color(theme::TEXT_DIM));
         }
-        if dirty {
-            self.engine.mark_dirty();
-        }
         dirty
     }
 
@@ -4366,9 +4395,6 @@ impl PainterApp {
         });
         if mask.filters.is_empty() {
             ui.label(egui::RichText::new("Filters run in order on the finished mask: levels, blur, warp, noise breakup and more.").small().color(theme::TEXT_DIM));
-        }
-        if dirty {
-            self.engine.mark_dirty();
         }
         dirty
     }
@@ -5746,7 +5772,8 @@ impl PainterApp {
         }
         self.update_poly_highlight();
 
-        // GPU: composite, then render this view at its pixel size.
+        // GPU: apply a settled material edit once, then render this view.
+        self.update_preview_debounce(ui.ctx());
         if self.engine.dirty {
             self.engine.composite();
         }
@@ -5761,7 +5788,7 @@ impl PainterApp {
                 self.drew_3d = true;
                 // Path tracing replaces the 3D view while it's idle. Painting and
                 // the map display modes use the raster view, which reacts instantly.
-                if self.rt.enabled && self.stroke.is_none() && self.view.mode == ViewMode::Material {
+                if self.rt.enabled && self.stroke.is_none() && self.view.mode == ViewMode::Material && self.preview_update_at.is_none() {
                     let engines = texture_sets::engines(&self.engine, &self.sets, self.mesh.sets.len());
                     if self.raytracer.render(&self.rs, size, &engines, &self.env, &self.cam, &self.view, &self.rt) {
                         ui.ctx().request_repaint();
