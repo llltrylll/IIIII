@@ -620,7 +620,7 @@ fn hash01(x: u32) -> f32 {
 }
 
 /// Evenly spread, saturated ID colors (golden-ratio hue walk).
-fn id_color(i: u32) -> [f32; 4] {
+pub(crate) fn id_color(i: u32) -> [f32; 4] {
     let h = (i as f32 * 0.618_034).fract() * 6.0;
     let s = 0.75;
     let v = 0.95 - 0.25 * ((i / 7) % 2) as f32;

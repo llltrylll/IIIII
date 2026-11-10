@@ -116,21 +116,35 @@ pub(crate) fn picker(ui: &mut egui::Ui, hsv: &mut Rgb) -> bool {
         let (square, square_response) = ui.allocate_exact_size(SQUARE, Sense::click_and_drag());
         let (rail, rail_response) = ui.allocate_exact_size(vec2(RAIL_W, SQUARE.y), Sense::click_and_drag());
 
-        // Handle initial clicks and every frame of a primary-button drag.
-        let primary_interacting = |r: &egui::Response| {
-            r.is_pointer_button_down_on()
-                || r.dragged_by(egui::PointerButton::Primary)
-                || r.clicked()
-        };
-        if primary_interacting(&square_response) {
-            if let Some(pos) = square_response.interact_pointer_pos() {
+        let (pointer, pressed, down) = ui.input(|i| {
+            (i.pointer.interact_pos(), i.pointer.button_pressed(egui::PointerButton::Primary),
+             i.pointer.button_down(egui::PointerButton::Primary))
+        });
+
+        // Persist which control owns the drag. The raw pointer position is
+        // clamped to its bounds, so the marker follows smoothly to the edge.
+        let square_drag_id = square_response.id.with("sv_square_drag");
+        let square_was_dragging = ui.data(|d| d.get_temp::<bool>(square_drag_id).unwrap_or(false));
+        let square_started = square_response.hovered() && pressed;
+        let square_active = square_started || (square_was_dragging && down) || square_response.clicked();
+        ui.data_mut(|d| d.insert_temp(square_drag_id, square_active && down));
+        if square_active {
+            if let Some(pos) = pointer {
+                let pos = pos2(pos.x.clamp(square.left(), square.right()), pos.y.clamp(square.top(), square.bottom()));
                 let (s, v) = sv_at(square, pos);
                 (hsv[1], hsv[2]) = (s, v);
                 changed = true;
             }
         }
-        if primary_interacting(&rail_response) {
-            if let Some(pos) = rail_response.interact_pointer_pos() {
+
+        let rail_drag_id = rail_response.id.with("hue_rail_drag");
+        let rail_was_dragging = ui.data(|d| d.get_temp::<bool>(rail_drag_id).unwrap_or(false));
+        let rail_started = rail_response.hovered() && pressed;
+        let rail_active = rail_started || (rail_was_dragging && down) || rail_response.clicked();
+        ui.data_mut(|d| d.insert_temp(rail_drag_id, rail_active && down));
+        if rail_active {
+            if let Some(pos) = pointer {
+                let pos = pos2(pos.x.clamp(rail.left(), rail.right()), pos.y.clamp(rail.top(), rail.bottom()));
                 hsv[0] = hue_at(rail, pos);
                 changed = true;
             }

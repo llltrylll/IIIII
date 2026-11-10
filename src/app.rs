@@ -3986,6 +3986,8 @@ impl PainterApp {
         pick_target: &mut Option<(usize, Option<usize>)>,
         bake_settings: &mut BakeSettings,
         show_bake: &mut bool,
+        has_vertex_colors: bool,
+        can_sample_mesh_ids: bool,
     ) -> bool {
         use crate::engine::gin;
         let mut dirty = false;
@@ -3995,7 +3997,11 @@ impl PainterApp {
                     if ui.selectable_label(g.kind == k, k.name()).clicked() && g.kind != k {
                         *g = new_generator(k, custom);
                         if k == GenKind::IdMask {
-                            bake_settings.id_source = bake::IdSource::VertexColors;
+                            bake_settings.id_source = if has_vertex_colors {
+                                IdSource::VertexColors
+                            } else {
+                                IdSource::MeshParts
+                            };
                         }
                         dirty = true;
                     }
@@ -4016,15 +4022,47 @@ impl PainterApp {
             dirty |= slider(ui, "Edge width", &mut g.edge_width, 0.002..=0.5);
         }
         if g.weights[gin::ID] != 0.0 {
+            // Old projects may have selected Vertex Colors before an attribute
+            // existed. Fall back to generated part IDs instead of a blank mask.
+            if !has_vertex_colors && bake_settings.id_source == IdSource::VertexColors {
+                bake_settings.id_source = IdSource::MeshParts;
+                dirty = true;
+            }
+            labeled(ui, "ID source", |ui| {
+                dirty |= ui.radio_value(&mut bake_settings.id_source, IdSource::MeshParts, "Mesh parts").changed();
+                dirty |= ui.radio_value(&mut bake_settings.id_source, IdSource::Materials, "Materials").changed();
+                ui.add_enabled_ui(has_vertex_colors, |ui| {
+                    dirty |= ui.radio_value(&mut bake_settings.id_source, IdSource::VertexColors, "Vertex colors").changed();
+                });
+            });
             dirty |= labeled(ui, "ID color", |ui| color_edit(ui, &mut g.id_color));
             dirty |= slider(ui, "ID tolerance", &mut g.id_tolerance, 0.01..=1.0);
-            if ui.button(theme::with_icon(icons::EYEDROPPER, "Sample from mesh")).on_hover_text("Click a colored point on the 3D model. Its imported vertex color becomes this ID mask color.").clicked() {
+
+            let can_sample = match bake_settings.id_source {
+                IdSource::VertexColors => has_vertex_colors,
+                IdSource::MeshParts | IdSource::Materials => can_sample_mesh_ids,
+            };
+            let sample_tip = match bake_settings.id_source {
+                IdSource::VertexColors => "Click the mesh to sample its imported vertex color.",
+                IdSource::MeshParts => "Click a disconnected mesh part to sample its generated ID color.",
+                IdSource::Materials => "Click a material/texture set on the mesh to sample its generated ID color.",
+            };
+            if ui.add_enabled(can_sample, egui::Button::new(theme::with_icon(icons::EYEDROPPER, "Sample from mesh")))
+                .on_hover_text(sample_tip).clicked()
+            {
                 *pick_target = Some(target);
-                bake_settings.id_source = bake::IdSource::VertexColors;
                 *show_bake = false;
             }
+            if !has_vertex_colors && bake_settings.id_source == IdSource::MeshParts {
+                ui.label(egui::RichText::new("No vertex colors imported. Using automatic IDs for disconnected mesh parts.").small().color(theme::ACCENT));
+            } else if !has_vertex_colors && bake_settings.id_source == IdSource::Materials {
+                ui.label(egui::RichText::new("Using automatic IDs from material / texture-set assignments.").small().color(theme::ACCENT));
+            }
+            if !can_sample_mesh_ids && bake_settings.id_source != IdSource::VertexColors {
+                ui.label(egui::RichText::new("Sampling generated part/material IDs is available when baking the low-poly mesh directly, without a separate high-poly source.").small().color(theme::TEXT_DIM));
+            }
             if *pick_target == Some(target) {
-                ui.label(egui::RichText::new("Click a colored area in the 3D viewport. Then bake the ID map to refresh the mask preview.").small().color(theme::ACCENT));
+                ui.label(egui::RichText::new("Click a region in the 3D viewport. Then bake the ID map to refresh the mask preview.").small().color(theme::ACCENT));
             }
         }
         dirty | generator_inputs_ui(ui, g, custom)
@@ -4272,6 +4310,10 @@ impl PainterApp {
     fn mask_properties(&mut self, ui: &mut egui::Ui, idx: usize) -> bool {
         let mut dirty = false;
         let custom = self.bake_settings.custom.clone();
+        let has_vertex_colors = self.mesh.tri_vertex_color.as_ref().is_some_and(|colors| {
+            colors.len() == self.mesh.indices.len() / 3
+        });
+        let can_sample_mesh_ids = self.bake_settings.high_poly.is_none();
         section(ui, "Mask");
         self.missing_maps_note(ui, idx);
         let Some(mask) = self.engine.layers[idx].mask.as_mut() else {
@@ -4293,7 +4335,7 @@ impl PainterApp {
         }
         let has_paint = mask.paint.is_some();
         if let Some(g) = &mut mask.generator {
-            dirty |= Self::generator_ui(ui, g, 0, &custom, (idx, None), &mut self.id_color_pick_target, &mut self.bake_settings, &mut self.show_bake);
+            dirty |= Self::generator_ui(ui, g, 0, &custom, (idx, None), &mut self.id_color_pick_target, &mut self.bake_settings, &mut self.show_bake, has_vertex_colors, can_sample_mesh_ids);
         }
         ui.horizontal(|ui| {
             if !has_paint && ui.button("Add paint to mask").clicked() {
@@ -4318,6 +4360,10 @@ impl PainterApp {
         if self.engine.layers[idx].is_folder() {
             return false;
         }
+        let has_vertex_colors = self.mesh.tri_vertex_color.as_ref().is_some_and(|colors| {
+            colors.len() == self.mesh.indices.len() / 3
+        });
+        let can_sample_mesh_ids = self.bake_settings.high_poly.is_none();
         let Some(mask) = self.engine.layers[idx].mask.as_mut() else { return false };
         section(ui, "Mask layers");
         let mut dirty = false;
@@ -4357,7 +4403,7 @@ impl PainterApp {
                     });
                     dirty |= slider(ui, "Opacity", &mut ml.opacity, 0.0..=1.0);
                     match &mut ml.source {
-                        MaskSource::Generator(g) => dirty |= Self::generator_ui(ui, g, 100 + i, &custom, (idx, Some(i)), &mut self.id_color_pick_target, &mut self.bake_settings, &mut self.show_bake),
+                        MaskSource::Generator(g) => dirty |= Self::generator_ui(ui, g, 100 + i, &custom, (idx, Some(i)), &mut self.id_color_pick_target, &mut self.bake_settings, &mut self.show_bake, has_vertex_colors, can_sample_mesh_ids),
                         MaskSource::Fill(v) => dirty |= slider(ui, "Value", v, 0.0..=1.0),
                     }
                 });
@@ -5438,28 +5484,64 @@ impl PainterApp {
         }
     }
 
-    /// Samples the imported per-corner vertex color and assigns it to the active ID mask.
-    fn pick_vertex_id_color(&mut self, kind: ViewKind, at: Vec2) {
+    /// Samples the active ID source (imported vertex colors, mesh parts or materials)
+    /// and assigns that region's color to the selected ID mask.
+    fn pick_id_color(&mut self, kind: ViewKind, at: Vec2) {
         if kind != ViewKind::V3d {
-            self.status = "Vertex ID sampling is available in the 3D view.".into();
+            self.status = "ID sampling is available in the 3D view.".into();
             return;
         }
         let size = Vec2::new(self.views.view3d.size[0] as f32, self.views.view3d.size[1] as f32);
         let (origin, direction) = self.cam.ray(at, size);
         let Some(hit) = self.bvh.raycast(origin, direction) else {
-            self.status = "Click a colored area on the mesh.".into();
+            self.status = "Click a visible area of the mesh.".into();
             return;
         };
-        let Some(colors) = self.mesh.tri_vertex_color.as_ref().and_then(|all| all.get(hit.tri as usize)) else {
-            self.status = "This mesh has no imported vertex colors. Assign colors in Blender and reimport the FBX/OBJ.".into();
-            self.id_color_pick_target = None;
-            return;
+
+        let source = self.bake_settings.id_source;
+        let color = match source {
+            IdSource::VertexColors => {
+                let Some(colors) = self.mesh.tri_vertex_color.as_ref().and_then(|all| all.get(hit.tri as usize)) else {
+                    self.status = "This mesh has no imported vertex colors. Choose Mesh parts or Materials, or import vertex colors from Blender.".into();
+                    self.id_color_pick_target = None;
+                    return;
+                };
+                let weights = [hit.bary.x, hit.bary.y, hit.bary.z];
+                let mut color = [0.0f32; 3];
+                for k in 0..3 {
+                    for ch in 0..3 {
+                        color[ch] += colors[k][ch] as f32 / 255.0 * weights[k];
+                    }
+                }
+                color
+            }
+            IdSource::MeshParts => {
+                if self.bake_settings.high_poly.is_some() {
+                    self.status = "Mesh-part sampling is disabled while a separate high-poly source is active. Bake the low-poly mesh directly or use imported vertex colors.".into();
+                    self.id_color_pick_target = None;
+                    return;
+                }
+                let positions: Vec<Vec3> = self.mesh.vertices.iter().map(|v| Vec3::from_array(v.pos)).collect();
+                let (parts, _) = bake::components(&positions, &self.mesh.indices);
+                let Some(&part) = parts.get(hit.tri as usize) else {
+                    self.status = "Could not resolve the clicked mesh part.".into();
+                    self.id_color_pick_target = None;
+                    return;
+                };
+                let rgba = bake::id_color(part);
+                [rgba[0], rgba[1], rgba[2]]
+            }
+            IdSource::Materials => {
+                if self.bake_settings.high_poly.is_some() {
+                    self.status = "Material sampling is disabled while a separate high-poly source is active. Bake the low-poly mesh directly or use imported vertex colors.".into();
+                    self.id_color_pick_target = None;
+                    return;
+                }
+                let rgba = bake::id_color(self.mesh.set_of(hit.tri) as u32);
+                [rgba[0], rgba[1], rgba[2]]
+            }
         };
-        let weights = [hit.bary.x, hit.bary.y, hit.bary.z];
-        let mut color = [0.0f32; 3];
-        for k in 0..3 {
-            for ch in 0..3 { color[ch] += colors[k][ch] as f32 / 255.0 * weights[k]; }
-        }
+
         let Some((layer_idx, mask_layer)) = self.id_color_pick_target.take() else { return; };
         let Some(mask) = self.engine.layers.get_mut(layer_idx).and_then(|layer| layer.mask.as_mut()) else {
             self.status = "The target ID mask no longer exists.".into();
@@ -5478,12 +5560,16 @@ impl PainterApp {
         };
         generator.id_color = color;
         generator.id_tolerance = generator.id_tolerance.max(0.015);
-        self.bake_settings.id_source = bake::IdSource::VertexColors;
         self.view.mode = ViewMode::Map(crate::engine::ID_MAP_INDEX);
         self.engine.mark_dirty();
         self.show_bake = true;
         let rgb = color.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
-        self.status = format!("Vertex ID #{:02X}{:02X}{:02X} sampled. Bake mesh maps to update the ID preview.", rgb[0], rgb[1], rgb[2]);
+        let source_name = match source {
+            IdSource::VertexColors => "vertex color",
+            IdSource::MeshParts => "mesh part",
+            IdSource::Materials => "material",
+        };
+        self.status = format!("ID #{:02X}{:02X}{:02X} sampled from {source_name}. Bake mesh maps to update the mask preview.", rgb[0], rgb[1], rgb[2]);
     }
 
     /// Eyedropper: copies the final color, roughness and metallic under the
@@ -5824,7 +5910,7 @@ impl PainterApp {
         if let Some(p) = hover {
             let in_view = rect.contains(p);
             if pressed && in_view && !mods.alt && self.stroke.is_none() && resp.hovered() && self.id_color_pick_target.is_some() {
-                self.pick_vertex_id_color(kind, local(p));
+                self.pick_id_color(kind, local(p));
             } else if pressed && in_view && !mods.alt && self.stroke.is_none() && resp.hovered() && self.tool == Tool::Picker {
                 self.pick_material(kind, local(p));
             } else if pressed && in_view && !mods.alt && self.stroke.is_none() && resp.hovered() {
