@@ -238,6 +238,16 @@ pub(super) fn fill_from(v: &Value) -> FillParams {
     }
 }
 
+/// Per-corner vertex colors from their saved bytes (nine a triangle); `None`
+/// when they don't cover exactly `tris` triangles.
+fn corner_colors_from_bytes(bytes: &[u8], tris: usize) -> Option<Vec<[[u8; 3]; 3]>> {
+    let colors: Vec<[[u8; 3]; 3]> = bytes
+        .chunks_exact(9)
+        .map(|c| [[c[0], c[1], c[2]], [c[3], c[4], c[5]], [c[6], c[7], c[8]]])
+        .collect();
+    (colors.len() == tris && bytes.len() == tris * 9).then_some(colors)
+}
+
 pub(super) fn generator_json(g: &Generator) -> Value {
     json!({
         "kind": g.kind.name(),
@@ -251,6 +261,7 @@ pub(super) fn generator_json(g: &Generator) -> Value {
         "edge_width": g.edge_width,
         "id_color": g.id_color,
         "id_tolerance": g.id_tolerance,
+        "id_colors": g.id_colors(),
         "custom": g.custom.iter().filter(|c| c.id != 0).map(|c| json!({"id": c.id, "weight": c.weight})).collect::<Vec<_>>(),
     })
 }
@@ -339,7 +350,7 @@ pub(super) fn generator_from(v: &Value) -> Result<Generator, String> {
     for (slot, c) in custom.iter_mut().zip(v["custom"].as_array().into_iter().flatten()) {
         *slot = crate::engine::CustomInput { id: c["id"].as_u64().unwrap_or(0) as u32, weight: c["weight"].as_f64().unwrap_or(0.0) as f32 };
     }
-    Ok(Generator {
+    let mut g = Generator {
         kind,
         weights,
         level: f(v, "level", d.level),
@@ -351,8 +362,19 @@ pub(super) fn generator_from(v: &Value) -> Result<Generator, String> {
         edge_width: f(v, "edge_width", d.edge_width),
         id_color: arr(v, "id_color", d.id_color),
         id_tolerance: f(v, "id_tolerance", d.id_tolerance),
+        id_more: d.id_more,
+        id_count: 1,
         custom,
-    })
+    };
+    // Older projects have just `id_color`.
+    let colors: Vec<[f32; 3]> = v["id_colors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|c| std::array::from_fn(|k| c[k].as_f64().unwrap_or(0.0) as f32))
+        .collect();
+    g.set_id_colors(&colors);
+    Ok(g)
 }
 
 impl PainterApp {
@@ -471,6 +493,8 @@ impl PainterApp {
             "objects": mesh.objects,
             "tri_object": w.blob(bytemuck::cast_slice(&mesh.tri_object)),
             "tri_color": mesh.tri_color.as_ref().map(|c| w.blob(bytemuck::cast_slice(c))),
+            // Per-corner vertex colors: the ID mask palette and the mesh eyedropper read them.
+            "tri_vertex_color": mesh.tri_vertex_color.as_ref().map(|c| w.blob(bytemuck::cast_slice(c))),
         });
         // Every texture set: its layers, size and mesh-map corrections.
         let engines = super::texture_sets::engines(&self.engine, &self.sets, self.mesh.sets.len());
@@ -623,6 +647,10 @@ impl PainterApp {
                 mesh.tri_color = Some(colors);
             }
         }
+        // Projects saved before this key existed only have the per-triangle average.
+        if !m["tri_vertex_color"].is_null() {
+            mesh.tri_vertex_color = corner_colors_from_bytes(&r.blob(&m["tri_vertex_color"])?, tris);
+        }
         let bv = &manifest["bake"];
         let mut bs = crate::bake::BakeSettings::default();
         if let Some(q) = s(bv, "quality") {
@@ -667,6 +695,8 @@ impl PainterApp {
             Some("VertexColors") => IdSource::VertexColors,
             _ => IdSource::MeshParts,
         };
+        // The maps stored in the project were baked with these settings.
+        self.baked_id_source = bs.id_source;
 
         // Texture sets: projects before version 3 have one, at the top level.
         let set_values: Vec<&Value> = match manifest["texture_sets"].as_array() {
@@ -907,5 +937,16 @@ mod tests {
         // And the new format round-trips.
         let back = generator_from(&generator_json(&g)).unwrap();
         assert_eq!(back, g);
+    }
+
+    #[test]
+    fn corner_colors_survive_a_save() {
+        let colors: Vec<[[u8; 3]; 3]> = vec![[[255, 0, 0], [0, 255, 0], [0, 0, 255]], [[1, 2, 3], [4, 5, 6], [7, 8, 9]]];
+        let bytes: Vec<u8> = bytemuck::cast_slice::<[[u8; 3]; 3], u8>(&colors).to_vec();
+        assert_eq!(bytes.len(), 18);
+        assert_eq!(corner_colors_from_bytes(&bytes, 2), Some(colors));
+        // A color list that doesn't match the mesh is dropped, not misaligned.
+        assert_eq!(corner_colors_from_bytes(&bytes, 3), None);
+        assert_eq!(corner_colors_from_bytes(&bytes[..17], 2), None);
     }
 }

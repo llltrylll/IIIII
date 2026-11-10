@@ -20,7 +20,7 @@ use crate::presets::{self, PreviewLayer};
 use crate::raytrace::{RayTracer, RtSettings};
 use crate::theme;
 use crate::undo::{StrokeTarget, UndoStack};
-use crate::viewport::{Background, Cam2d, FAR, NEAR, OrbitCam, OverlaySlot, OverlayVertex, Overlays, ViewMode, ViewRenderer, ViewSettings};
+use crate::viewport::{Background, Cam2d, FAR, NEAR, OrbitCam, OverlaySlot, Overlays, ViewMode, ViewRenderer, ViewSettings};
 use eframe::{egui, egui_wgpu, wgpu};
 use egui::{Color32, Rect, Sense, Stroke, pos2, vec2};
 use glam::{Vec2, Vec3};
@@ -47,6 +47,7 @@ mod shelf_previews;
 mod texture_sets;
 mod cage_paint;
 mod color_picker;
+mod vertex_id;
 
 use export_ui::{ExportDialog, open_in_file_browser};
 use graph_ui::GraphStore;
@@ -435,7 +436,9 @@ pub struct PainterApp {
     /// Target mask generator while sampling a vertex ID from the 3D mesh.
     id_color_pick_target: Option<(usize, Option<usize>)>,
     /// Whether imported per-vertex colors are currently shown over the 3D mesh.
-    vertex_color_preview_active: bool,
+    vertex_id: vertex_id::VertexIdState,
+    /// ID source of the maps that were baked last.
+    baked_id_source: IdSource,
     /// Latest material edit; the expensive preview rebuild waits until this settles.
     preview_update_at: Option<Instant>,
     cam: OrbitCam,
@@ -1517,7 +1520,8 @@ impl PainterApp {
             color2: [0.95, 0.95, 0.95],
             color_sliders: ColorSliders::default(),
             id_color_pick_target: None,
-            vertex_color_preview_active: false,
+            vertex_id: Default::default(),
+            baked_id_source: IdSource::MeshParts,
             preview_update_at: None,
             cam: OrbitCam::default(),
             cam2d: Cam2d::default(),
@@ -1630,6 +1634,7 @@ impl PainterApp {
         self.sets.baking = set;
         let mesh = self.mesh.clone();
         let settings = self.bake_settings.clone();
+        self.baked_id_source = settings.id_source;
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
@@ -1783,7 +1788,7 @@ impl PainterApp {
         self.poly.shown = None;
         self.overlays.clear(OverlaySlot::Selection);
         self.overlays.clear(OverlaySlot::VertexColors);
-        self.vertex_color_preview_active = false;
+        self.vertex_id.shown = None;
         // A painted cage belongs to the mesh it was painted on.
         if self.bake_settings.cage_paint.as_deref().is_some_and(|p| !p.fits(self.mesh.vertices.len())) {
             self.bake_settings.cage_paint = None;
@@ -3974,8 +3979,8 @@ impl PainterApp {
         custom: &[bake::CustomMap],
         target: (usize, Option<usize>),
         pick_target: &mut Option<(usize, Option<usize>)>,
-        bake_settings: &mut BakeSettings,
-        show_bake: &mut bool,
+        vertex_id: &mut vertex_id::VertexIdState,
+        info: vertex_id::Info,
     ) -> bool {
         use crate::engine::gin;
         let mut dirty = false;
@@ -3984,9 +3989,6 @@ impl PainterApp {
                 for k in GenKind::ALL {
                     if ui.selectable_label(g.kind == k, k.name()).clicked() && g.kind != k {
                         *g = new_generator(k, custom);
-                        if k == GenKind::IdMask {
-                            bake_settings.id_source = bake::IdSource::VertexColors;
-                        }
                         dirty = true;
                     }
                 }
@@ -4006,16 +4008,7 @@ impl PainterApp {
             dirty |= slider(ui, "Edge width", &mut g.edge_width, 0.002..=0.5);
         }
         if g.weights[gin::ID] != 0.0 {
-            dirty |= labeled(ui, "ID color", |ui| color_edit(ui, &mut g.id_color));
-            dirty |= slider(ui, "ID tolerance", &mut g.id_tolerance, 0.01..=1.0);
-            if ui.button(theme::with_icon(icons::EYEDROPPER, "Sample from mesh")).on_hover_text("Click a colored point on the 3D model. Its imported vertex color becomes this ID mask color.").clicked() {
-                *pick_target = Some(target);
-                bake_settings.id_source = bake::IdSource::VertexColors;
-                *show_bake = false;
-            }
-            if *pick_target == Some(target) {
-                ui.label(egui::RichText::new("Click a colored area in the 3D viewport. Then bake the ID map to refresh the mask preview.").small().color(theme::ACCENT));
-            }
+            dirty |= vertex_id::panel(ui, g, vertex_id, info, pick_target, target);
         }
         dirty | generator_inputs_ui(ui, g, custom)
     }
@@ -4262,6 +4255,8 @@ impl PainterApp {
     fn mask_properties(&mut self, ui: &mut egui::Ui, idx: usize) -> bool {
         let mut dirty = false;
         let custom = self.bake_settings.custom.clone();
+        let palette = self.vertex_id.palette_for(&self.mesh).clone();
+        let id_info = vertex_id::Info { palette: &palette, has_colors: vertex_id::has_colors(&self.mesh), baked_source: self.baked_id_source };
         section(ui, "Mask");
         self.missing_maps_note(ui, idx);
         let Some(mask) = self.engine.layers[idx].mask.as_mut() else {
@@ -4283,7 +4278,7 @@ impl PainterApp {
         }
         let has_paint = mask.paint.is_some();
         if let Some(g) = &mut mask.generator {
-            dirty |= Self::generator_ui(ui, g, 0, &custom, (idx, None), &mut self.id_color_pick_target, &mut self.bake_settings, &mut self.show_bake);
+            dirty |= Self::generator_ui(ui, g, 0, &custom, (idx, None), &mut self.id_color_pick_target, &mut self.vertex_id, id_info);
         }
         ui.horizontal(|ui| {
             if !has_paint && ui.button("Add paint to mask").clicked() {
@@ -4312,6 +4307,8 @@ impl PainterApp {
         section(ui, "Mask layers");
         let mut dirty = false;
         let custom = self.bake_settings.custom.clone();
+        let palette = self.vertex_id.palette_for(&self.mesh).clone();
+        let id_info = vertex_id::Info { palette: &palette, has_colors: vertex_id::has_colors(&self.mesh), baked_source: self.baked_id_source };
         let (mut remove, mut swap) = (None, None);
         let count = mask.layers.len();
         // Top of the stack first, like the layer list.
@@ -4347,7 +4344,7 @@ impl PainterApp {
                     });
                     dirty |= slider(ui, "Opacity", &mut ml.opacity, 0.0..=1.0);
                     match &mut ml.source {
-                        MaskSource::Generator(g) => dirty |= Self::generator_ui(ui, g, 100 + i, &custom, (idx, Some(i)), &mut self.id_color_pick_target, &mut self.bake_settings, &mut self.show_bake),
+                        MaskSource::Generator(g) => dirty |= Self::generator_ui(ui, g, 100 + i, &custom, (idx, Some(i)), &mut self.id_color_pick_target, &mut self.vertex_id, id_info),
                         MaskSource::Fill(v) => dirty |= slider(ui, "Value", v, 0.0..=1.0),
                     }
                 });
@@ -5194,37 +5191,59 @@ impl PainterApp {
         }
     }
 
-    /// Shows the imported vertex colors directly on the 3D mesh when they are the active ID source.
-    /// This is a viewport-only preview; the baked ID texture still uses the same per-corner colors.
+    /// What the 3D model shows of the vertex colors: the colors themselves while
+    /// sampling (or in the baker with the Vertex colors source), the ID mask's
+    /// selection while its panel is open. A viewport-only preview.
     fn sync_vertex_color_preview(&mut self, ctx: &egui::Context) {
-        let has_colors = self.mesh.tri_vertex_color.as_ref().is_some_and(|colors| {
-            colors.len() == self.mesh.indices.len() / 3
-        });
-        let show = self.bake_settings.id_source == bake::IdSource::VertexColors && has_colors;
-        if show == self.vertex_color_preview_active {
+        self.service_vertex_id_requests(ctx);
+        let want = if !vertex_id::has_colors(&self.mesh) {
+            None
+        } else if self.id_color_pick_target.is_some() || (self.show_bake && self.bake_settings.id_source == IdSource::VertexColors) {
+            Some(vertex_id::Shown::Colors)
+        } else if self.vertex_id.preview_off {
+            None
+        } else {
+            self.vertex_id.panel.as_ref().map(|(ids, tol)| vertex_id::Shown::Mask(ids.iter().map(|c| c.map(f32::to_bits)).collect(), tol.to_bits()))
+        };
+        if want == self.vertex_id.shown {
             return;
         }
-        if show {
-            let mut triangles = Vec::with_capacity(self.mesh.indices.len());
-            if let Some(colors) = &self.mesh.tri_vertex_color {
-                for (tri_index, tri) in self.mesh.indices.chunks_exact(3).enumerate() {
-                    let tri_colors = colors[tri_index];
-                    for corner in 0..3 {
-                        let Some(vertex) = self.mesh.vertices.get(tri[corner] as usize) else { continue; };
-                        let rgb = tri_colors[corner];
-                        triangles.push(OverlayVertex {
-                            pos: vertex.pos,
-                            color: [rgb[0], rgb[1], rgb[2], 255],
-                        });
-                    }
-                }
+        match &want {
+            Some(shown) => {
+                let triangles = vertex_id::overlay(&self.mesh, shown);
+                self.overlays.set(&self.rs.device, OverlaySlot::VertexColors, &triangles, &[]);
             }
-            self.overlays.set(&self.rs.device, OverlaySlot::VertexColors, &triangles, &[]);
-        } else {
-            self.overlays.clear(OverlaySlot::VertexColors);
+            None => self.overlays.clear(OverlaySlot::VertexColors),
         }
-        self.vertex_color_preview_active = show;
+        self.vertex_id.shown = want;
         ctx.request_repaint();
+    }
+
+    /// Things the ID mask panel asked for: baking from vertex colors, and
+    /// reading the colors from the mesh file for projects saved without them.
+    fn service_vertex_id_requests(&mut self, ctx: &egui::Context) {
+        if std::mem::take(&mut self.vertex_id.want_rebake) {
+            self.bake_settings.id_source = IdSource::VertexColors;
+            self.start_bake_all(ctx);
+            self.status = "Baking the mesh maps from the vertex colors.".into();
+        }
+        if std::mem::take(&mut self.vertex_id.want_import) {
+            let Some(path) = rfd::FileDialog::new().add_filter("Mesh (FBX, OBJ)", &crate::import::EXTENSIONS).set_title("The mesh file this project was made from").pick_file() else {
+                return;
+            };
+            match vertex_id::colors_from_file(&self.mesh, &path) {
+                Ok(colors) => {
+                    let found = vertex_id::palette(&colors).distinct;
+                    let mut mesh = (*self.mesh).clone();
+                    mesh.tri_vertex_color = Some(colors);
+                    self.mesh = Arc::new(mesh);
+                    self.vertex_id.shown = None;
+                    self.status = format!("Read {found} vertex colors from the file. Pick the ID colors in the mask's Properties.");
+                }
+                Err(e) => self.status = e,
+            }
+            ctx.request_repaint();
+        }
     }
 
     // ------------------------------------------------------------------ polygon fill
@@ -5441,7 +5460,7 @@ impl PainterApp {
             return;
         };
         let Some(colors) = self.mesh.tri_vertex_color.as_ref().and_then(|all| all.get(hit.tri as usize)) else {
-            self.status = "This mesh has no imported vertex colors. Assign colors in Blender and reimport the FBX/OBJ.".into();
+            self.status = "This mesh has no vertex colors. Open the ID mask in Properties and use \"Import vertex colors from file\".".into();
             self.id_color_pick_target = None;
             return;
         };
@@ -5466,14 +5485,19 @@ impl PainterApp {
             self.status = "The selected mask generator no longer exists.".into();
             return;
         };
-        generator.id_color = color;
-        generator.id_tolerance = generator.id_tolerance.max(0.015);
-        self.bake_settings.id_source = bake::IdSource::VertexColors;
-        self.view.mode = ViewMode::Map(4);
-        self.engine.mark_dirty();
-        self.show_bake = true;
+        let mut ids = generator.id_colors();
         let rgb = color.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
-        self.status = format!("Vertex ID #{:02X}{:02X}{:02X} sampled. Bake mesh maps to update the ID preview.", rgb[0], rgb[1], rgb[2]);
+        if vertex_id::selected_index(&ids, rgb).is_none() {
+            if ids.len() < crate::engine::MAX_ID_COLORS {
+                ids.push(color);
+            } else {
+                *ids.last_mut().expect("at least one") = color;
+            }
+            generator.set_id_colors(&ids);
+        }
+        generator.id_tolerance = generator.id_tolerance.max(0.015);
+        self.engine.mark_dirty();
+        self.status = format!("Vertex ID #{:02X}{:02X}{:02X} is selected.", rgb[0], rgb[1], rgb[2]);
     }
 
     /// Eyedropper: copies the final color, roughness and metallic under the
@@ -6149,6 +6173,8 @@ impl eframe::App for PainterApp {
         self.update_preview_shader();
         self.update_cage_preview(&ctx);
         self.sync_vertex_color_preview(&ctx);
+        // The ID mask panel says again, below, whether it is open.
+        self.vertex_id.panel = None;
         match self.workspace {
             Workspace::Paint => {
                 egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::same(4))).show(ui, |ui| {

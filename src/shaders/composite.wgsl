@@ -22,6 +22,7 @@ struct LayerU {
     img: vec4<f32>,         // image tiling, rotation (degrees), offset x, offset y
     emis: vec4<f32>,        // fill emission (sRGB rgb), emission channel enable
     ns: vec4<f32>,          // normal image strength, normal channel enable, fill specular, specular channel enable
+    gids: array<vec4<f32>, 7>, // more ID mask colors (rgb), 1 in w when in use
 };
 
 @group(0) @binding(0) var<uniform> u: LayerU;
@@ -191,6 +192,10 @@ fn generator(p: vec3<f32>, n: vec3<f32>, uv: vec2<f32>, texel_world: f32) -> f32
     s.width = u.gp1.w;
     s.id_color = u.gid.rgb;
     s.id_tolerance = u.gid.w;
+    var gids = u.gids;
+    for (var k = 0; k < 7; k++) {
+        s.id_more[k] = gids[k];
+    }
 
     var v = 0.0;
     for (var i = 0; i < 20; i++) {

@@ -38,6 +38,7 @@ pub struct Vertex {
     pub tangent: [f32; 4],
 }
 
+#[derive(Clone)]
 pub struct Mesh {
     pub name: String,
     pub vertices: Vec<Vertex>,

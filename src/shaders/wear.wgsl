@@ -124,6 +124,8 @@ struct MaskSurface {
     width: f32,
     id_color: vec3<f32>,
     id_tolerance: f32,
+    // More ID colors (rgb), 1 in w when in use.
+    id_more: array<vec4<f32>, 7>,
 };
 
 // Smart mask input `i` (`engine::GEN_INPUTS` order).
@@ -155,7 +157,14 @@ fn mask_input(i: i32, s: MaskSurface) -> f32 {
         case 13: { return fbm(q); }
         case 14: {
             let tol = max(s.id_tolerance, 1e-3);
-            return 1.0 - smoothstep(tol * 0.5, tol, distance(s.e.rgb, s.id_color));
+            var m = 1.0 - smoothstep(tol * 0.5, tol, distance(s.e.rgb, s.id_color));
+            var more = s.id_more;
+            for (var k = 0; k < 7; k++) {
+                if (more[k].w > 0.5) {
+                    m = max(m, 1.0 - smoothstep(tol * 0.5, tol, distance(s.e.rgb, more[k].xyz)));
+                }
+            }
+            return m;
         }
         case 15: { return max(-s.n.y, 0.0); }
         case 16: { return wood_grain(s.p, s.n, s.scale, s.bsize, s.seed); }

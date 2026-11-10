@@ -191,6 +191,8 @@ pub const GEN_INPUT_COUNT: usize = 20;
 
 /// Custom bake maps one smart mask can mix (any of the project's, by id).
 pub const MAX_CUSTOM_INPUTS: usize = 4;
+/// Vertex colors one ID mask can select at once (`Generator::id_color` plus `id_more`).
+pub const MAX_ID_COLORS: usize = 8;
 
 /// A smart mask input reading a custom bake map.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
@@ -373,6 +375,8 @@ impl GenKind {
             edge_width: 0.04,
             id_color: [1.0, 0.0, 0.0],
             id_tolerance: 0.15,
+            id_more: [[0.0; 3]; MAX_ID_COLORS - 1],
+            id_count: 1,
             custom: [CustomInput::default(); MAX_CUSTOM_INPUTS],
         }
     }
@@ -392,13 +396,36 @@ pub struct Generator {
     pub seed: f32,
     /// World-space width for the Edges and Creases inputs.
     pub edge_width: f32,
+    /// The first ID color (the one old projects and tools know).
     pub id_color: [f32; 3],
     pub id_tolerance: f32,
+    /// More ID colors; the first `id_count - 1` are in use.
+    pub id_more: [[f32; 3]; MAX_ID_COLORS - 1],
+    /// How many ID colors the mask selects (1 to `MAX_ID_COLORS`).
+    pub id_count: u32,
     /// Custom bake maps mixed in, by id.
     pub custom: [CustomInput; MAX_CUSTOM_INPUTS],
 }
 
 impl Generator {
+    /// The ID colors the mask selects.
+    pub fn id_colors(&self) -> Vec<[f32; 3]> {
+        let n = (self.id_count as usize).clamp(1, MAX_ID_COLORS);
+        std::iter::once(self.id_color).chain(self.id_more.iter().copied()).take(n).collect()
+    }
+
+    /// Replaces the selected ID colors (at most `MAX_ID_COLORS`, at least one).
+    pub fn set_id_colors(&mut self, colors: &[[f32; 3]]) {
+        let colors = &colors[..colors.len().min(MAX_ID_COLORS)];
+        let Some(first) = colors.first() else { return };
+        self.id_color = *first;
+        self.id_more = [[0.0; 3]; MAX_ID_COLORS - 1];
+        for (slot, c) in self.id_more.iter_mut().zip(&colors[1..]) {
+            *slot = *c;
+        }
+        self.id_count = colors.len() as u32;
+    }
+
     /// The custom bake maps this generator reads (by id).
     pub fn custom_ids(&self) -> impl Iterator<Item = u32> + '_ {
         self.custom.iter().filter(|c| c.id != 0 && c.weight.abs() > 1e-4).map(|c| c.id)
@@ -873,6 +900,17 @@ impl Layer {
     }
 }
 
+/// The ID mask's colors as shader uniforms: the first color with the
+/// tolerance, then the others.
+fn id_uniform(g: &Generator) -> ([f32; 4], [[f32; 4]; MAX_ID_COLORS - 1]) {
+    let colors = g.id_colors();
+    let mut more = [[0.0; 4]; MAX_ID_COLORS - 1];
+    for (slot, c) in more.iter_mut().zip(&colors[1..]) {
+        *slot = [c[0], c[1], c[2], 1.0];
+    }
+    ([g.id_color[0], g.id_color[1], g.id_color[2], g.id_tolerance], more)
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct LayerUniform {
@@ -898,6 +936,8 @@ struct LayerUniform {
     /// Normal image strength, normal channel flag, fill specular level,
     /// specular channel flag.
     ns: [f32; 4],
+    /// The ID mask's further colors (rgb) with a 1 in w when in use.
+    gids: [[f32; 4]; MAX_ID_COLORS - 1],
 }
 
 #[repr(C)]
@@ -3291,7 +3331,7 @@ impl Engine {
                 (u.gc, u.gcw) = self.custom_refs(g);
                 u.gp0 = [g.level, g.contrast, g.scale, g.noise];
                 u.gp1 = [if g.invert { 1.0 } else { 0.0 }, g.seed, 1.0, g.edge_width];
-                u.gid = [g.id_color[0], g.id_color[1], g.id_color[2], g.id_tolerance];
+                (u.gid, u.gids) = id_uniform(g);
             }
         }
         u.p0 = [layer.opacity, layer.blend as u32 as f32, kind, has_paint_mask];
@@ -3417,7 +3457,7 @@ impl Engine {
                             (iu.gc, iu.gcw) = self.custom_refs(&g);
                             iu.gp0 = [g.level, g.contrast, g.scale, g.noise];
                             iu.gp1 = [if g.invert { 1.0 } else { 0.0 }, g.seed, 1.0, g.edge_width];
-                            iu.gid = [g.id_color[0], g.id_color[1], g.id_color[2], g.id_tolerance];
+                            (iu.gid, iu.gids) = id_uniform(&g);
                         }
                         MaskSource::Fill(_) => iu.gp1[2] = 0.0,
                     }

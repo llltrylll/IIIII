@@ -421,3 +421,31 @@ pub fn f16_to_f32(h: u16) -> f32 {
         _ => sign * (1.0 + man / 1024.0) * 2f32.powi(exp - 15),
     }
 }
+
+/// Shaders are checked here without a GPU: a WGSL mistake would otherwise only
+/// show when the app starts.
+#[cfg(test)]
+mod shader_tests {
+    use super::wgpu;
+
+    fn validate(label: &str, src: &str) {
+        let full = format!("{}\n{}", include_str!("shaders/common.wgsl"), src);
+        let module = wgpu::naga::front::wgsl::parse_str(&full).unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(&full)));
+        wgpu::naga::valid::Validator::new(wgpu::naga::valid::ValidationFlags::all(), wgpu::naga::valid::Capabilities::all())
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{label}: {e:?}"));
+    }
+
+    #[test]
+    fn composite_shader_is_valid() {
+        validate("composite", concat!(include_str!("shaders/wear.wgsl"), include_str!("shaders/composite.wgsl")));
+    }
+
+    #[test]
+    fn engine_shaders_are_valid() {
+        validate("thumbs", include_str!("shaders/thumbs.wgsl"));
+        validate("mask filter", include_str!("shaders/mask_filter.wgsl"));
+        validate("apply", include_str!("shaders/apply.wgsl"));
+        validate("maps resolve", include_str!("shaders/maps_resolve.wgsl"));
+    }
+}
