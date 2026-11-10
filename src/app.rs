@@ -1058,8 +1058,6 @@ struct ColorSliders {
     hsv_mode: bool,
     hex_edit: String,
     hex_dirty: bool,
-    /// Color when the panel was opened, for the old | new swatch.
-    opened: [f32; 3],
 }
 fn parse_color_hex(value: &str) -> Option<[f32; 3]> {
     let raw = value.trim().strip_prefix('#').unwrap_or(value.trim());
@@ -2641,7 +2639,6 @@ impl PainterApp {
             state.hex_edit = color_picker::hex_string(color);
         }
         ui.horizontal(|ui| {
-            if color_picker::compare_swatch(ui,state.opened,color) { color=state.opened; state.hsv=hsv_keeping(state.hsv,color); }
             ui.label(egui::RichText::new("HEX").small().color(theme::TEXT_DIM));
             let response = ui.add(egui::TextEdit::singleline(&mut state.hex_edit).desired_width(94.0).font(egui::TextStyle::Monospace));
             if response.changed() {
@@ -2737,7 +2734,6 @@ impl PainterApp {
                 if matches!(self.tool, Tool::Paint | Tool::Picker) && self.target == StrokeTarget::Content {
                     let color_btn=ui.add(theme::selectable(false,theme::with_icon(icons::DROP,"Color")))
                         .on_hover_text("Two colors, HSV, temperature, channel values and saved swatches");
-                    if color_btn.clicked() { self.color_sliders.opened=self.active_color(); }
                     egui::Popup::from_toggle_button_response(&color_btn)
                         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                         .show(|ui|self.color_hud(ui));
@@ -5469,7 +5465,7 @@ impl PainterApp {
         generator.id_color = color;
         generator.id_tolerance = generator.id_tolerance.max(0.015);
         self.bake_settings.id_source = bake::IdSource::VertexColors;
-        self.view.mode = ViewMode::Map(4);
+        self.view.mode = ViewMode::Map(crate::engine::ID_MAP_INDEX);
         self.engine.mark_dirty();
         self.show_bake = true;
         let rgb = color.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);

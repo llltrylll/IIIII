@@ -1042,6 +1042,15 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
         }
     };
 
+    if settings.id_source == IdSource::VertexColors
+        && tri_color.as_ref().is_none_or(|colors| colors.len() != indices.len() / 3)
+    {
+        return Err(
+            "Vertex Colors is selected for the ID map, but the active bake source has no valid imported vertex colors. Add a vertex-color attribute to the mesh being baked (the high-poly source too, when one is enabled), reimport it, or choose Mesh parts / Materials."
+                .into(),
+        );
+    }
+
     // Name groups: 1-based per distinct low-poly base name; 0 = unmatched
     // (an unmatched low part sees everything, an unmatched high part is seen
     // by everyone).

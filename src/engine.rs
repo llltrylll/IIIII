@@ -407,7 +407,7 @@ impl Generator {
     /// The baked maps this generator reads (a bit per `MAPS` index).
     pub fn needs_maps(&self) -> u32 {
         // Generator input -> the map it comes from.
-        const FROM: [(usize, usize); 10] = [
+        const FROM: [(usize, usize); 11] = [
             (gin::EDGE, 5),
             (gin::CONVEX, 1),
             (gin::CONCAVE, 1),
@@ -418,6 +418,7 @@ impl Generator {
             (gin::CREASE, 6),
             (gin::PART_GRADIENT, 8),
             (gin::PART_RANDOM, 7),
+            (gin::ID, ID_MAP_INDEX),
         ];
         FROM.iter().filter(|(i, _)| self.weights[*i].abs() > 1e-4).fold(0, |acc, (_, m)| acc | (1 << m))
     }
@@ -454,6 +455,8 @@ const fn map(name: &'static str, tex: usize, comp: usize, kind: MapKind, desc: &
 
 /// How many built-in baked maps there are (see [`MAPS`]).
 pub const MAP_COUNT: usize = 13;
+/// Built-in ID color map (`MAPS` index), used by Vertex Color ID masks.
+pub const ID_MAP_INDEX: usize = 12;
 
 /// Every built-in baked map, packed into five textures
 /// (`bake::MAP_TEXTURES`). View mode `6 + index` displays map `index`.
@@ -471,7 +474,7 @@ pub const MAPS: [MapInfo; MAP_COUNT] = [
     map("Bent Normal", 2, 0, MapKind::Info, "Average unoccluded direction (world space)."),
     map("Normal", 3, 0, MapKind::Normal, "Tangent-space normal from the high poly."),
     map("Height", 3, 2, MapKind::Scalar, "High-poly displacement relative to the low poly."),
-    map("ID", 4, 0, MapKind::Info, "Color per material or mesh part, for ID masks."),
+    map("ID", 4, 0, MapKind::Info, "Imported vertex colors or generated material/mesh-part colors, used by ID masks."),
 ];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -3906,5 +3909,18 @@ impl Engine {
             ("paint layers", mb(self.layers.iter().map(|l| l.vram_bytes()).sum())),
             ("fill images", mb(unique_images)),
         ]
+    }
+}
+
+
+#[cfg(test)]
+mod id_map_dependency_tests {
+    use super::*;
+
+    #[test]
+    fn vertex_color_id_mask_requires_the_id_map() {
+        let generator = GenKind::IdMask.default_generator();
+        assert_eq!(generator.needs_maps(), 1 << ID_MAP_INDEX);
+        assert_eq!(MAPS[ID_MAP_INDEX].name, "ID");
     }
 }

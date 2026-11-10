@@ -22,7 +22,6 @@ const RAIL_W: f32 = 22.0;
 const GAP: f32 = 8.0;
 /// Width of the picker; the strips below it use the same width.
 pub(crate) const WIDTH: f32 = SQUARE.x + GAP + RAIL_W;
-const MIX_STEPS: usize = 11;
 /// Harmony offsets in degrees: two triadic, two analogous and the complement.
 const HARMONY: [f32; 5] = [-120.0, -30.0, 30.0, 120.0, 180.0];
 /// Red, yellow, green, cyan, blue, magenta, red: the hue rail's stops. Each
@@ -116,50 +115,48 @@ pub(crate) fn picker(ui: &mut egui::Ui, hsv: &mut Rgb) -> bool {
         ui.spacing_mut().item_spacing.x = GAP;
         let (square, square_response) = ui.allocate_exact_size(SQUARE, Sense::click_and_drag());
         let (rail, rail_response) = ui.allocate_exact_size(vec2(RAIL_W, SQUARE.y), Sense::click_and_drag());
-        let held = |r: &egui::Response| r.is_pointer_button_down_on() && r.ctx.input(|i| i.pointer.primary_down());
-        if held(&square_response) && let Some(pos) = square_response.interact_pointer_pos() {
-            let (s, v) = sv_at(square, pos);
-            (hsv[1], hsv[2]) = (s, v);
-            changed = true;
+
+        // Handle initial clicks and every frame of a primary-button drag.
+        let primary_interacting = |r: &egui::Response| {
+            r.is_pointer_button_down_on()
+                || r.dragged_by(egui::PointerButton::Primary)
+                || r.clicked()
+        };
+        if primary_interacting(&square_response) {
+            if let Some(pos) = square_response.interact_pointer_pos() {
+                let (s, v) = sv_at(square, pos);
+                (hsv[1], hsv[2]) = (s, v);
+                changed = true;
+            }
         }
-        if held(&rail_response) && let Some(pos) = rail_response.interact_pointer_pos() {
-            hsv[0] = hue_at(rail, pos);
-            changed = true;
+        if primary_interacting(&rail_response) {
+            if let Some(pos) = rail_response.interact_pointer_pos() {
+                hsv[0] = hue_at(rail, pos);
+                changed = true;
+            }
         }
+
         let painter = ui.painter();
         draw_square(painter, square, hsv[0]);
         draw_rail(painter, rail);
-        // Round marker filled with the colour it selects, white ring, dark outer ring.
+
         let marker = sv_pos(square, hsv[1], hsv[2]);
         painter.circle_filled(marker, 6.5, to_color32(hsv_to_rgb(*hsv)));
         painter.circle_stroke(marker, 6.5, Stroke::new(2.0, Color32::WHITE));
         painter.circle_stroke(marker, 8.0, Stroke::new(1.0, Color32::from_black_alpha(170)));
-        // Handle across the rail, filled with the pure hue.
+
         let y = rail.top() + hsv[0] * rail.height();
         let handle = Rect::from_center_size(pos2(rail.center().x, y), vec2(RAIL_W + 6.0, 7.0));
         painter.rect_filled(handle, 2.0, to_color32(hsv_to_rgb([hsv[0], 1.0, 1.0])));
         painter.rect_stroke(handle, 2.0, Stroke::new(2.0, Color32::WHITE), StrokeKind::Outside);
         painter.rect_stroke(handle.expand(2.0), 3.0, Stroke::new(1.0, Color32::from_black_alpha(170)), StrokeKind::Outside);
-        square_response.on_hover_cursor(CursorIcon::Crosshair);
-        rail_response.on_hover_cursor(CursorIcon::ResizeVertical);
+
+        square_response.on_hover_cursor(CursorIcon::Crosshair)
+            .on_hover_text("Click or drag to set saturation and value");
+        rail_response.on_hover_cursor(CursorIcon::ResizeVertical)
+            .on_hover_text("Click or drag to set hue");
     });
     changed
-}
-
-/// Old | new colour. True when the old half is clicked, to go back to it.
-pub(crate) fn compare_swatch(ui: &mut egui::Ui, old: Rgb, new: Rgb) -> bool {
-    let (rect, response) = ui.allocate_exact_size(vec2(64.0, 22.0), Sense::click());
-    let middle = rect.center().x;
-    let painter = ui.painter();
-    painter.rect_filled(Rect::from_min_max(rect.min, pos2(middle, rect.max.y)), 0.0, to_color32(old));
-    painter.rect_filled(Rect::from_min_max(pos2(middle, rect.min.y), rect.max), 0.0, to_color32(new));
-    painter.rect_stroke(rect, 2.0, Stroke::new(1.0, theme::OUTLINE), StrokeKind::Inside);
-    let on_old = response.hovered() && response.ctx.pointer_hover_pos().is_some_and(|p| p.x < middle);
-    if on_old {
-        painter.rect_stroke(Rect::from_min_max(rect.min, pos2(middle, rect.max.y)), 0.0, Stroke::new(1.5, Color32::WHITE), StrokeKind::Inside);
-    }
-    response.clone().on_hover_text("Left: the color when this panel opened (click to go back to it). Right: the color now.");
-    response.clicked() && response.interact_pointer_pos().is_some_and(|p| p.x < middle)
 }
 
 /// A row of swatches. Click picks the color, Shift+click makes it the second color.
@@ -188,11 +185,39 @@ fn caption(ui: &mut egui::Ui, text: &str) {
     ui.label(egui::RichText::new(text).small().color(theme::TEXT_DIM));
 }
 
-/// Steps from `a` to `b`, both ends included.
+/// Continuous blend between the two active colors. Clicking or dragging
+/// samples any point along the gradient; Shift targets the secondary color.
 pub(crate) fn mix_strip(ui: &mut egui::Ui, a: Rgb, b: Rgb) -> Option<(Rgb, bool)> {
-    caption(ui, "Mix of the two colors");
-    let colors: Vec<Rgb> = (0..MIX_STEPS).map(|i| mix(a, b, i as f32 / (MIX_STEPS - 1) as f32)).collect();
-    swatch_strip(ui, &colors, 18.0)
+    caption(ui, "Mix the two active colors");
+    let (rect, response) = ui.allocate_exact_size(vec2(WIDTH, 22.0), Sense::click_and_drag());
+    let mut mesh = Mesh::default();
+    quad(&mut mesh, rect, to_color32(a), to_color32(b), to_color32(b), to_color32(a));
+    ui.painter().add(egui::Shape::mesh(mesh));
+    ui.painter().rect_stroke(rect, 2.0, Stroke::new(1.0, theme::OUTLINE), StrokeKind::Inside);
+
+    let interacting = response.is_pointer_button_down_on()
+        || response.dragged_by(egui::PointerButton::Primary)
+        || response.clicked();
+    let pointer = response.interact_pointer_pos();
+    if response.hovered() || interacting {
+        if let Some(pos) = pointer {
+            let t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+            let x = rect.left() + t * rect.width();
+            ui.painter().line_segment(
+                [pos2(x, rect.top()), pos2(x, rect.bottom())],
+                Stroke::new(2.0, Color32::WHITE),
+            );
+        }
+    }
+    response.clone().on_hover_text("Click or drag to mix the two colors. Hold Shift to assign the result to the second color.");
+    if interacting {
+        if let Some(pos) = pointer {
+            let t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+            let second = ui.input(|i| i.modifiers.shift);
+            return Some((mix(a, b, t), second));
+        }
+    }
+    None
 }
 
 /// Colors related to `base` by hue: analogous, triadic and the complement.
@@ -308,7 +333,7 @@ mod tests {
         const H: usize = 330;
         let ctx = egui::Context::default();
         let mut hsv = rgb_to_hsv([0.78, 0.45, 0.16]);
-        let (old, second) = ([0.2, 0.5, 1.0], [0.1, 0.55, 0.5]);
+        let second = [0.1, 0.55, 0.5];
         let input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(W as f32, H as f32))),
             ..Default::default()
@@ -316,9 +341,6 @@ mod tests {
         let mut output = ctx.run_ui(input, |ui| {
             ui.set_width(WIDTH);
             picker(ui, &mut hsv);
-            ui.horizontal(|ui| {
-                compare_swatch(ui, old, hsv_to_rgb(hsv));
-            });
             mix_strip(ui, hsv_to_rgb(hsv), second);
             harmony_row(ui, hsv_to_rgb(hsv));
         });
