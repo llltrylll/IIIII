@@ -1145,7 +1145,9 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
     let parts: Vec<[f32; 4]> = (0..part_count as usize)
         .map(|p| [hash01(p as u32 + 1), part_lo[p], (part_hi[p] - part_lo[p]).max(1e-5), 0.0])
         .collect();
-    let use_materials = settings.id_source == IdSource::Materials && material_count > 1;
+    // A single-material mesh still has one valid material ID region. Keeping
+    // the source active avoids silently substituting connected mesh parts.
+    let use_materials = settings.id_source == IdSource::Materials;
     // Vertex colors: one ID per distinct color, shown as that color.
     let color_ids: Option<(Vec<u32>, Vec<[f32; 4]>)> = match (&tri_color, settings.id_source) {
         (Some(colors), IdSource::VertexColors) if colors.len() == indices.len() / 3 => {

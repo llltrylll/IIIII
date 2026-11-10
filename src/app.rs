@@ -4039,7 +4039,10 @@ impl PainterApp {
             dirty |= slider(ui, "ID tolerance", &mut g.id_tolerance, 0.01..=1.0);
 
             let can_sample = match bake_settings.id_source {
-                IdSource::VertexColors => has_vertex_colors,
+                // The viewport sampler intersects the low-poly mesh. With a
+                // separate high-poly bake source, its IDs can differ, so don't
+                // assign a low-poly sample to a high-poly ID texture.
+                IdSource::VertexColors => has_vertex_colors && can_sample_mesh_ids,
                 IdSource::MeshParts | IdSource::Materials => can_sample_mesh_ids,
             };
             let sample_tip = match bake_settings.id_source {
@@ -4058,8 +4061,8 @@ impl PainterApp {
             } else if !has_vertex_colors && bake_settings.id_source == IdSource::Materials {
                 ui.label(egui::RichText::new("Using automatic IDs from material / texture-set assignments.").small().color(theme::ACCENT));
             }
-            if !can_sample_mesh_ids && bake_settings.id_source != IdSource::VertexColors {
-                ui.label(egui::RichText::new("Sampling generated part/material IDs is available when baking the low-poly mesh directly, without a separate high-poly source.").small().color(theme::TEXT_DIM));
+            if !can_sample_mesh_ids {
+                ui.label(egui::RichText::new("Sampling is disabled with a separate high-poly source because the viewport click hits the low-poly mesh, while the ID map is generated from the high-poly mesh. Set the ID color manually or bake the low-poly mesh directly.").small().color(theme::TEXT_DIM));
             }
             if *pick_target == Some(target) {
                 ui.label(egui::RichText::new("Click a region in the 3D viewport. Then bake the ID map to refresh the mask preview.").small().color(theme::ACCENT));
