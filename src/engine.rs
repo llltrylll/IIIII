@@ -371,7 +371,8 @@ impl GenKind {
             invert: false,
             seed: 0.0,
             edge_width: 0.04,
-            id_color: [1.0, 0.0, 0.0],
+            // Match the first generated ID color (`bake::id_color(0)`).
+            id_color: [0.95, 0.2375, 0.2375],
             id_tolerance: 0.15,
             custom: [CustomInput::default(); MAX_CUSTOM_INPUTS],
         }
