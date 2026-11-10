@@ -195,10 +195,32 @@ pub(crate) fn mix_strip(ui: &mut egui::Ui, a: Rgb, b: Rgb) -> Option<(Rgb, bool)
     ui.painter().add(egui::Shape::mesh(mesh));
     ui.painter().rect_stroke(rect, 2.0, Stroke::new(1.0, theme::OUTLINE), StrokeKind::Inside);
 
+    let memory = response.id.with("mix_source_colors");
+    let shift = ui.input(|i| i.modifiers.shift);
+    let started = response.hovered()
+        && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
+    if started {
+        // Freeze both endpoints for the whole click/drag. Otherwise changing
+        // either active color would move the gradient under the pointer.
+        ui.data_mut(|d| d.insert_temp(memory, (a, b, shift)));
+    }
+
     let interacting = response.is_pointer_button_down_on()
         || response.dragged_by(egui::PointerButton::Primary)
         || response.clicked();
     let pointer = response.interact_pointer_pos();
+    let (from, to, assign_second) = if interacting {
+        ui.data(|d| d.get_temp::<(Rgb, Rgb, bool)>(memory)).unwrap_or((a, b, shift))
+    } else {
+        (a, b, shift)
+    };
+
+    // Draw the frozen source gradient while dragging, even as the destination
+    // color changes on each frame.
+    let mut mesh = Mesh::default();
+    quad(&mut mesh, rect, to_color32(from), to_color32(to), to_color32(to), to_color32(from));
+    ui.painter().add(egui::Shape::mesh(mesh));
+    ui.painter().rect_stroke(rect, 2.0, Stroke::new(1.0, theme::OUTLINE), StrokeKind::Inside);
     if response.hovered() || interacting {
         if let Some(pos) = pointer {
             let t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
@@ -213,8 +235,7 @@ pub(crate) fn mix_strip(ui: &mut egui::Ui, a: Rgb, b: Rgb) -> Option<(Rgb, bool)
     if interacting {
         if let Some(pos) = pointer {
             let t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-            let second = ui.input(|i| i.modifiers.shift);
-            return Some((mix(a, b, t), second));
+            return Some((mix(from, to, t), assign_second));
         }
     }
     None
