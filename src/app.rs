@@ -46,6 +46,7 @@ mod project_io;
 mod shelf_previews;
 mod texture_sets;
 mod cage_paint;
+mod color_picker;
 
 use export_ui::{ExportDialog, open_in_file_browser};
 use graph_ui::GraphStore;
@@ -535,7 +536,7 @@ pub(crate) const REPO_URL: &str = "https://github.com/alla2001/material-painter"
 /// `selected` when no layer is selected.
 const NO_LAYER: usize = usize::MAX;
 /// Wait until material controls have been idle before rebuilding the preview.
-const MATERIAL_PREVIEW_DELAY: Duration = Duration::from_millis(500);
+const MATERIAL_PREVIEW_DELAY: Duration = Duration::from_millis(1200);
 
 fn srgb_u8(c: [f32; 3]) -> Color32 {
     Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8)
@@ -991,16 +992,21 @@ fn color_button(ui: &mut egui::Ui, c: &mut [f32; 3], tip: Option<&str>) -> bool 
     egui::Popup::from_toggle_button_response(&response)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
-            ui.set_width(410.0);
+            ui.set_width(color_picker::WIDTH + 28.0);
             egui::ScrollArea::vertical().max_height(600.0).show(ui, |ui| {
-                let mut hsv = rgb_to_hsv(*c);
-                let (hs, val) = color_field(ui, &mut hsv);
-                if hs || val { *c = hsv_to_rgb(hsv); changed = true; }
+                // The hue is remembered between frames so it survives passing through gray or black.
+                let memory = response.id.with("picker_hsv");
+                let mut hsv = match ui.data(|d| d.get_temp::<[f32; 3]>(memory)) {
+                    Some(previous) => hsv_keeping(previous, *c),
+                    None => rgb_to_hsv(*c),
+                };
+                let picked = color_picker::picker(ui, &mut hsv);
+                if picked { *c = hsv_to_rgb(hsv); changed = true; }
                 let mut hsv_values = [hsv[0] * 360.0, hsv[1] * 100.0, hsv[2] * 100.0];
                 for (label, index, range) in [("H", 0usize, 0.0..=360.0), ("S", 1usize, 0.0..=100.0), ("V", 2usize, 0.0..=100.0)] {
                     changed |= labeled(ui, label, |ui| ui.add(egui::Slider::new(&mut hsv_values[index], range).max_decimals(2)).changed());
                 }
-                if changed && !(hs || val) {
+                if changed && !picked {
                     hsv = [hsv_values[0] / 360.0, hsv_values[1] / 100.0, hsv_values[2] / 100.0];
                     *c = hsv_to_rgb(hsv);
                 }
@@ -1010,13 +1016,14 @@ fn color_button(ui: &mut egui::Ui, c: &mut [f32; 3], tip: Option<&str>) -> bool 
                     changed |= labeled(ui, label, |ui| ui.add(egui::Slider::new(&mut channels[index], 0.0..=255.0).max_decimals(0)).changed());
                 }
                 if changed { *c = channels.map(|v| (v / 255.0).clamp(0.0, 1.0)); }
-                let mut hex = format!("#{:02X}{:02X}{:02X}", (c[0]*255.0).round() as u8, (c[1]*255.0).round() as u8, (c[2]*255.0).round() as u8);
+                let mut hex = color_picker::hex_string(*c);
                 ui.horizontal(|ui| {
                     ui.label("HEX");
                     if ui.add(egui::TextEdit::singleline(&mut hex).desired_width(90.0)).changed() {
                         if let Some(parsed) = parse_color_hex(&hex) { *c = parsed; changed = true; }
                     }
                 });
+                ui.data_mut(|d| d.insert_temp(memory, if changed { hsv_keeping(hsv, *c) } else { hsv }));
             });
         });
     changed
@@ -1051,6 +1058,8 @@ struct ColorSliders {
     hsv_mode: bool,
     hex_edit: String,
     hex_dirty: bool,
+    /// Color when the panel was opened, for the old | new swatch.
+    opened: [f32; 3],
 }
 fn parse_color_hex(value: &str) -> Option<[f32; 3]> {
     let raw = value.trim().strip_prefix('#').unwrap_or(value.trim());
@@ -1083,102 +1092,6 @@ fn hsv_keeping(prev: [f32; 3], color: [f32; 3]) -> [f32; 3] {
 fn shift_temperature(color: [f32; 3], amount: f32) -> [f32; 3] {
     let gain = [1.0 + 0.30 * amount, 1.0 + 0.05 * amount, 1.0 - 0.30 * amount];
     std::array::from_fn(|i| (color[i] * gain[i]).clamp(0.0, 1.0))
-}
-
-fn color_field(ui: &mut egui::Ui, hsv: &mut [f32; 3]) -> (bool, bool) {
-    let mut hs_changed = false;
-    let mut value_changed = false;
-    ui.vertical(|ui| {
-        ui.horizontal(|ui| {
-            let square_size = vec2((ui.available_width() - 24.0).max(180.0), 230.0);
-            let (rect, response) = ui.allocate_exact_size(square_size, egui::Sense::click_and_drag());
-            let mut mesh = egui::epaint::Mesh::default();
-            const X_STEPS: usize = 48;
-            const Y_STEPS: usize = 16;
-            for y in 0..Y_STEPS {
-                for x in 0..X_STEPS {
-                    let h0 = x as f32 / X_STEPS as f32;
-                    let h1 = (x + 1) as f32 / X_STEPS as f32;
-                    let s0 = 1.0 - y as f32 / Y_STEPS as f32;
-                    let s1 = 1.0 - (y + 1) as f32 / Y_STEPS as f32;
-                    let p0 = egui::pos2(rect.left() + rect.width() * h0, rect.top() + rect.height() * (1.0 - s0));
-                    let p1 = egui::pos2(rect.left() + rect.width() * h1, rect.top() + rect.height() * (1.0 - s0));
-                    let p2 = egui::pos2(rect.left() + rect.width() * h1, rect.top() + rect.height() * (1.0 - s1));
-                    let p3 = egui::pos2(rect.left() + rect.width() * h0, rect.top() + rect.height() * (1.0 - s1));
-                    let cv = |h: f32, s: f32| {
-                        let v = hsv_to_rgb([h, s, 1.0]);
-                        Color32::from_rgb((v[0] * 255.0) as u8, (v[1] * 255.0) as u8, (v[2] * 255.0) as u8)
-                    };
-                    let b = mesh.vertices.len() as u32;
-                    mesh.colored_vertex(p0, cv(h0, s0));
-                    mesh.colored_vertex(p1, cv(h1, s0));
-                    mesh.colored_vertex(p2, cv(h1, s1));
-                    mesh.colored_vertex(p3, cv(h0, s1));
-                    mesh.add_triangle(b, b + 1, b + 2);
-                    mesh.add_triangle(b, b + 2, b + 3);
-                }
-            }
-            ui.painter().add(egui::Shape::mesh(mesh));
-            ui.painter().rect_stroke(rect, 2.0, egui::Stroke::new(1.0, theme::OUTLINE), egui::StrokeKind::Inside);
-            let marker = egui::pos2(rect.left() + hsv[0] * rect.width(), rect.bottom() - hsv[1] * rect.height());
-            ui.painter().circle_stroke(marker, 6.0, egui::Stroke::new(2.0, Color32::BLACK));
-            ui.painter().circle_stroke(marker, 4.5, egui::Stroke::new(1.5, Color32::WHITE));
-            if (response.clicked() || response.dragged()) && let Some(pos) = response.interact_pointer_pos() {
-                hsv[0] = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-                hsv[1] = (1.0 - (pos.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
-                hs_changed = true;
-            }
-
-            let (value_rect, value_response) = ui.allocate_exact_size(vec2(20.0, rect.height()), egui::Sense::click_and_drag());
-            let mut value_mesh = egui::epaint::Mesh::default();
-            let top = hsv_to_rgb([hsv[0], hsv[1], 1.0]);
-            let top = Color32::from_rgb((top[0] * 255.0) as u8, (top[1] * 255.0) as u8, (top[2] * 255.0) as u8);
-            let b = value_mesh.vertices.len() as u32;
-            value_mesh.colored_vertex(value_rect.left_top(), top);
-            value_mesh.colored_vertex(value_rect.right_top(), top);
-            value_mesh.colored_vertex(value_rect.right_bottom(), Color32::BLACK);
-            value_mesh.colored_vertex(value_rect.left_bottom(), Color32::BLACK);
-            value_mesh.add_triangle(b, b + 1, b + 2);
-            value_mesh.add_triangle(b, b + 2, b + 3);
-            ui.painter().add(egui::Shape::mesh(value_mesh));
-            ui.painter().rect_stroke(value_rect, 1.0, egui::Stroke::new(1.0, theme::OUTLINE), egui::StrokeKind::Inside);
-            let vy = value_rect.bottom() - hsv[2] * value_rect.height();
-            ui.painter().line_segment([egui::pos2(value_rect.left() - 2.0, vy), egui::pos2(value_rect.right() + 2.0, vy)], egui::Stroke::new(2.0, Color32::WHITE));
-            if (value_response.clicked() || value_response.dragged()) && let Some(pos) = value_response.interact_pointer_pos() {
-                hsv[2] = (1.0 - (pos.y - value_rect.top()) / value_rect.height()).clamp(0.0, 1.0);
-                value_changed = true;
-            }
-        });
-
-        // A dedicated rainbow hue rail makes the hue independently selectable,
-        // like a conventional color picker, without sacrificing the large SV/HS field.
-        let (hue_rect, hue_response) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), egui::Sense::click_and_drag());
-        let mut hue_mesh = egui::epaint::Mesh::default();
-        const HUE_STEPS: usize = 72;
-        for x in 0..HUE_STEPS {
-            let h0 = x as f32 / HUE_STEPS as f32;
-            let h1 = (x + 1) as f32 / HUE_STEPS as f32;
-            let c0 = hsv_to_rgb([h0, 1.0, 1.0]);
-            let c1 = hsv_to_rgb([h1, 1.0, 1.0]);
-            let color = |c: [f32; 3]| Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8);
-            let b = hue_mesh.vertices.len() as u32;
-            hue_mesh.colored_vertex(egui::pos2(hue_rect.left() + hue_rect.width() * h0, hue_rect.top()), color(c0));
-            hue_mesh.colored_vertex(egui::pos2(hue_rect.left() + hue_rect.width() * h1, hue_rect.top()), color(c1));
-            hue_mesh.colored_vertex(egui::pos2(hue_rect.left() + hue_rect.width() * h1, hue_rect.bottom()), color(c1));
-            hue_mesh.colored_vertex(egui::pos2(hue_rect.left() + hue_rect.width() * h0, hue_rect.bottom()), color(c0));
-            hue_mesh.add_triangle(b, b + 1, b + 2);
-            hue_mesh.add_triangle(b, b + 2, b + 3);
-        }
-        ui.painter().add(egui::Shape::mesh(hue_mesh));
-        ui.painter().rect_stroke(hue_rect, 2.0, egui::Stroke::new(1.0, theme::OUTLINE), egui::StrokeKind::Inside);
-        let hx = hue_rect.left() + hsv[0] * hue_rect.width();
-        ui.painter().line_segment([egui::pos2(hx, hue_rect.top() - 2.0), egui::pos2(hx, hue_rect.bottom() + 2.0)], egui::Stroke::new(2.0, Color32::WHITE));
-        if (hue_response.clicked() || hue_response.dragged()) && let Some(pos) = hue_response.interact_pointer_pos() {
-            hsv[0] = ((pos.x - hue_rect.left()) / hue_rect.width()).clamp(0.0, 1.0);
-            hs_changed = true;
-        }
-    });
-    (hs_changed, value_changed)
 }
 
 /// Channel toggles in Substance order: color, height, rough, metal, opacity.
@@ -2337,14 +2250,18 @@ impl PainterApp {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
+        // Layer shortcuts only in the paint workspace, and not over the graph
+        // editor: there Delete removes nodes and Ctrl+C / Ctrl+V copy them, and
+        // consuming the key here would hide it from the editor.
+        let layer_keys = self.workspace == Workspace::Paint && !self.graphs.editor.hovered;
         ctx.input_mut(|i| {
-            if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::C)) {
+            if layer_keys && i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::C)) {
                 self.pending.push(Action::CopyLayer);
             }
-            if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::V)) {
+            if layer_keys && i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::V)) {
                 self.pending.push(Action::PasteLayer);
             }
-            if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::default(), Key::Delete)) {
+            if layer_keys && i.consume_shortcut(&KeyboardShortcut::new(Modifiers::default(), Key::Delete)) {
                 if self.selected < self.engine.layers.len() {
                     self.pending.push(Action::Delete);
                 }
@@ -2704,7 +2621,7 @@ impl PainterApp {
             ui.selectable_value(&mut state.hsv_mode,true,"HSV");
             ui.separator();
         });
-        let (hs_changed,value_changed)=color_field(ui,&mut state.hsv);
+        let picked=color_picker::picker(ui,&mut state.hsv);
         let mut numeric_changed=false;
         if state.hsv_mode {
             let (mut h,mut s,mut v)=(state.hsv[0]*360.0,state.hsv[1]*100.0,state.hsv[2]*100.0);
@@ -2719,12 +2636,12 @@ impl PainterApp {
             numeric_changed |= labeled(ui,"B",|ui|ui.add(egui::Slider::new(&mut rgb[2],0.0..=255.0).max_decimals(0)).changed());
             if numeric_changed { color=rgb.map(|v|v/255.0); state.hsv=hsv_keeping(state.hsv,color); }
         }
-        if hs_changed||value_changed||numeric_changed { color=hsv_to_rgb(state.hsv); }
-        let hex=color.map(|v|(v.clamp(0.0,1.0)*255.0).round() as u8);
+        if picked||numeric_changed { color=hsv_to_rgb(state.hsv); }
         if !state.hex_dirty {
-            state.hex_edit = format!("#{:02X}{:02X}{:02X}", hex[0], hex[1], hex[2]);
+            state.hex_edit = color_picker::hex_string(color);
         }
         ui.horizontal(|ui| {
+            if color_picker::compare_swatch(ui,state.opened,color) { color=state.opened; state.hsv=hsv_keeping(state.hsv,color); }
             ui.label(egui::RichText::new("HEX").small().color(theme::TEXT_DIM));
             let response = ui.add(egui::TextEdit::singleline(&mut state.hex_edit).desired_width(94.0).font(egui::TextStyle::Monospace));
             if response.changed() {
@@ -2736,11 +2653,9 @@ impl PainterApp {
             }
             if response.lost_focus() {
                 state.hex_dirty = false;
-                state.hex_edit = format!("#{:02X}{:02X}{:02X}",
-                    (color[0].clamp(0.0,1.0)*255.0).round() as u8,
-                    (color[1].clamp(0.0,1.0)*255.0).round() as u8,
-                    (color[2].clamp(0.0,1.0)*255.0).round() as u8);
+                state.hex_edit = color_picker::hex_string(color);
             }
+            if ui.button("Copy").on_hover_text("Copy the hex code").clicked() { ui.ctx().copy_text(color_picker::hex_string(color)); }
         });
         let temp=labeled(ui,"Temperature",|ui|ui.add(egui::Slider::new(&mut state.temp,-100.0..=100.0).max_decimals(0)));
         if temp.changed() {
@@ -2749,6 +2664,13 @@ impl PainterApp {
             state.hsv=hsv_keeping(state.hsv,color);
         }
         if temp.drag_stopped()||temp.lost_focus() { state.temp=0.0; state.shifting=false; }
+        ui.add_space(2.0);
+        let second=self.color2;
+        let from_mix=color_picker::mix_strip(ui,color,second);
+        let from_harmony=color_picker::harmony_row(ui,color);
+        if let Some((picked,as_second))=from_mix.or(from_harmony) {
+            if as_second { self.color2=picked; } else { color=picked; state.hsv=hsv_keeping(state.hsv,color); }
+        }
         if color != self.active_color() { self.set_active_color(color); }
         state.out=color; self.color_sliders=state;
         ui.separator();
@@ -2815,6 +2737,7 @@ impl PainterApp {
                 if matches!(self.tool, Tool::Paint | Tool::Picker) && self.target == StrokeTarget::Content {
                     let color_btn=ui.add(theme::selectable(false,theme::with_icon(icons::DROP,"Color")))
                         .on_hover_text("Two colors, HSV, temperature, channel values and saved swatches");
+                    if color_btn.clicked() { self.color_sliders.opened=self.active_color(); }
                     egui::Popup::from_toggle_button_response(&color_btn)
                         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                         .show(|ui|self.color_hud(ui));
@@ -5709,15 +5632,22 @@ impl PainterApp {
         let local = |p: egui::Pos2| Vec2::new((p.x - rect.min.x) * ppp, (p.y - rect.min.y) * ppp);
         use egui::PointerButton as B;
 
-        // Separate the two brush gestures: X + RMB changes only size;
-        // Z + RMB changes only stroke opacity. Ctrl + RMB is no longer overloaded.
-        let adjust_brush = resp.dragged_by(B::Secondary) && !mods.any() && (x_down || z_down);
-        if adjust_brush {
-            if x_down {
-                self.brush.size = (self.brush.size + delta.x).clamp(2.0, 800.0);
-            } else {
-                self.brush.opacity = (self.brush.opacity + delta.x * 0.0025).clamp(0.01, 1.0);
-            }
+        // One brush value per gesture, all with the right mouse button and a
+        // horizontal drag (right: more): X changes only the size, Z only the
+        // stroke opacity, Ctrl only the hardness.
+        let rmb = resp.dragged_by(B::Secondary);
+        let adjust_xz = rmb && !mods.any() && (x_down || z_down);
+        let adjust_hardness = rmb && mods.ctrl && !mods.alt && !mods.shift && !x_down && !z_down;
+        let adjust_brush = adjust_xz || adjust_hardness;
+        if adjust_xz && x_down {
+            self.brush.size = (self.brush.size + delta.x).clamp(2.0, 800.0);
+            self.status = format!("Brush size {:.0}", self.brush.size);
+        } else if adjust_xz {
+            self.brush.opacity = (self.brush.opacity + delta.x * 0.0025).clamp(0.01, 1.0);
+            self.status = format!("Stroke opacity {:.0}%", self.brush.opacity * 100.0);
+        } else if adjust_hardness {
+            self.brush.hardness = (self.brush.hardness + delta.x * 0.004).clamp(0.0, 1.0);
+            self.status = format!("Brush hardness {:.0}%", self.brush.hardness * 100.0);
         }
 
         // Pen pressure arrives with touch events; mice never send them.

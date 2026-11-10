@@ -15,13 +15,20 @@ fn main() {
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("build output directory"));
     let png = fs::read(root.join("assets/ui/icon.png")).expect("read application icon");
     let source = image::load_from_memory(&png).expect("decode application icon PNG");
-    let icon_image = source.resize_exact(256, 256, image::imageops::FilterType::Lanczos3);
-    let mut encoded = Cursor::new(Vec::new());
-    icon_image
-        .write_to(&mut encoded, image::ImageFormat::Png)
-        .expect("encode 256px Windows icon");
+    // One PNG per size so Explorer, the taskbar and Alt+Tab each get a sharp icon.
+    let pngs: Vec<Vec<u8>> = ICON_SIZES
+        .iter()
+        .map(|&size| {
+            let mut encoded = Cursor::new(Vec::new());
+            source
+                .resize_exact(size, size, image::imageops::FilterType::Lanczos3)
+                .write_to(&mut encoded, image::ImageFormat::Png)
+                .expect("encode Windows icon size");
+            encoded.into_inner()
+        })
+        .collect();
     let ico = out.join("material-painter.ico");
-    fs::write(&ico, png_ico(&encoded.into_inner())).expect("write Windows icon");
+    fs::write(&ico, ico_from_pngs(&pngs)).expect("write Windows icon");
 
     let rc = out.join("material-painter.rc");
     let res = out.join("material-painter.res");
@@ -43,23 +50,35 @@ fn main() {
     println!("cargo:rustc-link-arg-bins={}", res.display());
 }
 
-fn png_ico(png: &[u8]) -> Vec<u8> {
-    assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "application icon is not a PNG");
-    assert!(png.len() >= 24, "application icon PNG header is truncated");
-    assert_eq!(&png[12..16], b"IHDR", "application icon has no IHDR header");
-    let width = u32::from_be_bytes(png[16..20].try_into().expect("PNG width"));
-    let height = u32::from_be_bytes(png[20..24].try_into().expect("PNG height"));
-    assert_eq!((width, height), (256, 256), "Windows icon must be 256x256");
-    let mut ico = Vec::with_capacity(22 + png.len());
-    ico.extend_from_slice(&0u16.to_le_bytes());
-    ico.extend_from_slice(&1u16.to_le_bytes());
-    ico.extend_from_slice(&1u16.to_le_bytes());
-    ico.extend_from_slice(&[0, 0, 0, 0]);
-    ico.extend_from_slice(&1u16.to_le_bytes());
-    ico.extend_from_slice(&32u16.to_le_bytes());
-    ico.extend_from_slice(&(png.len() as u32).to_le_bytes());
-    ico.extend_from_slice(&22u32.to_le_bytes());
-    ico.extend_from_slice(png);
+/// Sizes embedded in the .exe's icon, smallest first.
+pub const ICON_SIZES: [u32; 7] = [16, 24, 32, 48, 64, 128, 256];
+
+/// An .ico file holding each square PNG as is (PNG-in-ICO, Windows Vista and later).
+pub fn ico_from_pngs(pngs: &[Vec<u8>]) -> Vec<u8> {
+    let header = 6 + 16 * pngs.len();
+    let mut ico = Vec::with_capacity(header + pngs.iter().map(Vec::len).sum::<usize>());
+    ico.extend_from_slice(&0u16.to_le_bytes()); // reserved
+    ico.extend_from_slice(&1u16.to_le_bytes()); // type: icon
+    ico.extend_from_slice(&(pngs.len() as u16).to_le_bytes());
+    let mut offset = header as u32;
+    for png in pngs {
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "icon entry is not a PNG");
+        assert_eq!(&png[12..16], b"IHDR", "icon entry has no IHDR header");
+        let width = u32::from_be_bytes(png[16..20].try_into().expect("PNG width"));
+        let height = u32::from_be_bytes(png[20..24].try_into().expect("PNG height"));
+        assert!(width == height && (1..=256).contains(&width), "icon sizes are square, up to 256");
+        // A size of 256 is stored as 0 in the directory.
+        let dim = if width == 256 { 0 } else { width as u8 };
+        ico.extend_from_slice(&[dim, dim, 0, 0]); // width, height, palette size, reserved
+        ico.extend_from_slice(&1u16.to_le_bytes()); // color planes
+        ico.extend_from_slice(&32u16.to_le_bytes()); // bits per pixel
+        ico.extend_from_slice(&(png.len() as u32).to_le_bytes());
+        ico.extend_from_slice(&offset.to_le_bytes());
+        offset += png.len() as u32;
+    }
+    for png in pngs {
+        ico.extend_from_slice(png);
+    }
     ico
 }
 

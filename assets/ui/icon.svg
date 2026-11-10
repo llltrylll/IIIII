@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#262b3a"/>
+      <stop offset="1" stop-color="#0b0d13"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5a6788" stop-opacity=".9"/>
+      <stop offset="1" stop-color="#20263a" stop-opacity=".6"/>
+    </linearGradient>
+    <radialGradient id="ball" cx=".36" cy=".30" r=".85">
+      <stop offset="0" stop-color="#d8ecff"/>
+      <stop offset=".18" stop-color="#7cb8ff"/>
+      <stop offset=".45" stop-color="#2f78e8"/>
+      <stop offset=".78" stop-color="#112e6e"/>
+      <stop offset="1" stop-color="#050b1f"/>
+    </radialGradient>
+    <radialGradient id="bounce" cx=".72" cy=".95" r=".55">
+      <stop offset="0" stop-color="#ff9a3c" stop-opacity=".6"/>
+      <stop offset="1" stop-color="#ff9a3c" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="paint" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#ff6a13"/>
+      <stop offset=".55" stop-color="#ff9a2e"/>
+      <stop offset="1" stop-color="#ffd27a"/>
+    </linearGradient>
+    <clipPath id="sphere"><circle cx="256" cy="246" r="158"/></clipPath>
+    <filter id="blur14" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="14"/></filter>
+    <filter id="blur6" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="6"/></filter>
+    <filter id="blur3" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="3"/></filter>
+  </defs>
+
+  <!-- plate -->
+  <rect x="14" y="14" width="484" height="484" rx="112" fill="url(#plate)"/>
+  <rect x="16" y="16" width="480" height="480" rx="110" fill="none" stroke="url(#rim)" stroke-width="4"/>
+
+  <g transform="translate(256 252) scale(1.12) translate(-256 -246)">
+  <!-- contact shadow -->
+  <ellipse cx="262" cy="428" rx="132" ry="20" fill="#000" opacity=".55" filter="url(#blur14)"/>
+
+  <!-- sphere -->
+  <circle cx="256" cy="246" r="158" fill="url(#ball)"/>
+  <g clip-path="url(#sphere)">
+    <rect x="90" y="88" width="340" height="320" fill="url(#bounce)"/>
+    <!-- brush stroke painted on the sphere, with a soft shadow under it -->
+    <path d="M 96 352 C 170 262, 262 296, 334 206 S 420 150, 440 128" fill="none" stroke="#000" stroke-opacity=".45" stroke-width="64" stroke-linecap="round" filter="url(#blur6)" transform="translate(5 9)"/>
+    <path d="M 96 352 C 170 262, 262 296, 334 206 S 420 150, 440 128" fill="none" stroke="url(#paint)" stroke-width="58" stroke-linecap="round"/>
+    <!-- bristle streaks -->
+    <g fill="none" stroke-linecap="round" opacity=".55">
+      <path d="M 100 340 C 172 252, 262 286, 334 196 S 418 142, 436 120" stroke="#fff2c8" stroke-width="5"/>
+      <path d="M 102 366 C 176 276, 266 310, 338 220 S 424 166, 444 144" stroke="#c4410a" stroke-width="6"/>
+      <path d="M 98 354 C 174 266, 264 298, 336 208 S 422 154, 442 132" stroke="#ffb44d" stroke-width="3"/>
+    </g>
+  </g>
+
+  <!-- specular -->
+  <ellipse cx="196" cy="172" rx="62" ry="34" transform="rotate(-32 196 172)" fill="#fff" opacity=".55" filter="url(#blur6)"/>
+  <ellipse cx="184" cy="160" rx="20" ry="10" transform="rotate(-32 184 160)" fill="#fff" opacity=".95" filter="url(#blur3)"/>
+  <circle cx="256" cy="246" r="157" fill="none" stroke="#9fc8ff" stroke-opacity=".28" stroke-width="2"/>
+  </g>
+</svg>
