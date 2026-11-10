@@ -993,7 +993,14 @@ fn color_button(ui: &mut egui::Ui, c: &mut [f32; 3], tip: Option<&str>) -> bool 
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
             ui.set_width(color_picker::WIDTH + 28.0);
-            egui::ScrollArea::vertical().max_height(600.0).show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(600.0)
+                .scroll_source(egui::containers::scroll_area::ScrollSource {
+                    scroll_bar: true,
+                    drag: egui::containers::scroll_area::DragScroll::Never,
+                    mouse_wheel: true,
+                })
+                .show(ui, |ui| {
                 // The hue is remembered between frames so it survives passing through gray or black.
                 let memory = response.id.with("picker_hsv");
                 let mut hsv = match ui.data(|d| d.get_temp::<[f32; 3]>(memory)) {
@@ -2610,7 +2617,14 @@ impl PainterApp {
         let fill_target=self.target==StrokeTarget::Content && self.engine.layers.get(self.selected).is_some_and(|layer|matches!(&layer.content,Content::Fill(_)));
         let initial_active_color=self.active_color();
         ui.set_width(420.0);
-        egui::ScrollArea::vertical().max_height(620.0).show(ui, |ui| {
+        egui::ScrollArea::vertical()
+            .max_height(620.0)
+            .scroll_source(egui::containers::scroll_area::ScrollSource {
+                scroll_bar: true,
+                drag: egui::containers::scroll_area::DragScroll::Never,
+                mouse_wheel: true,
+            })
+            .show(ui, |ui| {
         self.color_slots(ui); ui.add_space(4.0);
         let mut state=std::mem::take(&mut self.color_sliders); let mut color=self.active_color();
         if state.out!=color { state.hsv=hsv_keeping(state.hsv,color); state.temp=0.0; state.shifting=false; }
