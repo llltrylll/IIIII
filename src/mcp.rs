@@ -84,7 +84,8 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> std::io::Result<Option<Req
     let mut parts = line.split_whitespace();
     let method = parts.next().unwrap_or_default().to_string();
     let path = parts.next().unwrap_or_default().to_string();
-    let (mut length, mut origin) = (0usize, None);
+    const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+    let (mut length, mut origin, mut saw_length) = (0usize, None, false);
     loop {
         let mut h = String::new();
         if reader.read_line(&mut h)? == 0 || h.trim().is_empty() {
@@ -92,13 +93,27 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> std::io::Result<Option<Req
         }
         if let Some((k, v)) = h.split_once(':') {
             match k.trim().to_ascii_lowercase().as_str() {
-                "content-length" => length = v.trim().parse().unwrap_or(0),
+                "content-length" => {
+                    if saw_length {
+                        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "duplicate Content-Length"));
+                    }
+                    saw_length = true;
+                    length = v.trim().parse().map_err(|_| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid Content-Length")
+                    })?;
+                }
+                "transfer-encoding" => {
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "transfer encoding is not supported"));
+                }
                 "origin" => origin = Some(v.trim().to_string()),
                 _ => {}
             }
         }
     }
-    let mut body = vec![0; length.min(16 << 20)];
+    if length > MAX_REQUEST_BYTES {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "request body exceeds 16 MiB"));
+    }
+    let mut body = vec![0; length];
     reader.read_exact(&mut body)?;
     Ok(Some(Request { method, path, origin, body }))
 }
