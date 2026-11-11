@@ -22,7 +22,7 @@ pub fn decompress(src: &[u8], size: usize) -> Result<Vec<u8>, Lz4Error> {
             loop {
                 let b = *src.get(i).ok_or(Lz4Error)?;
                 i += 1;
-                literals += b as usize;
+                literals = literals.checked_add(b as usize).ok_or(Lz4Error)?;
                 if b != 255 {
                     break;
                 }
@@ -47,13 +47,13 @@ pub fn decompress(src: &[u8], size: usize) -> Result<Vec<u8>, Lz4Error> {
             loop {
                 let b = *src.get(i).ok_or(Lz4Error)?;
                 i += 1;
-                len += b as usize;
+                len = len.checked_add(b as usize).ok_or(Lz4Error)?;
                 if b != 255 {
                     break;
                 }
             }
         }
-        len += 4;
+        len = len.checked_add(4).ok_or(Lz4Error)?;
         let output_len = out.len().checked_add(len).ok_or(Lz4Error)?;
         if offset == 0 || offset > out.len() || output_len > size {
             return Err(Lz4Error);
