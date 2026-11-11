@@ -87,34 +87,62 @@ fn find_codestream(data: &[u8]) -> Result<usize> {
     if data.starts_with(&[0xff, 0x4f]) {
         return Ok(0);
     }
-    let mut p = 0;
-    while p + 8 <= data.len() {
+
+    let mut p = 0usize;
+    while let Some(header_end) = p.checked_add(8).filter(|&end| end <= data.len()) {
         let mut len = be32(data, p)?;
-        let kind = &data[p + 4..p + 8];
-        let mut header = 8;
+        let kind = data.get(p + 4..header_end).ok_or(Jp2Error::Corrupt("box header"))?;
+        let mut header = 8usize;
         if len == 1 {
-            len = data.get(p + 8..p + 16).map(|s| u64::from_be_bytes(s.try_into().unwrap()) as usize).ok_or(Jp2Error::Corrupt("box"))?;
+            let ext_end = p.checked_add(16).ok_or(Jp2Error::Corrupt("box length"))?;
+            let ext = data.get(header_end..ext_end).ok_or(Jp2Error::Corrupt("box"))?;
+            let raw = u64::from_be_bytes([ext[0], ext[1], ext[2], ext[3], ext[4], ext[5], ext[6], ext[7]]);
+            len = usize::try_from(raw).map_err(|_| Jp2Error::Corrupt("box length"))?;
             header = 16;
         } else if len == 0 {
             len = data.len() - p;
         }
-        if kind == b"jp2c" {
-            return Ok(p + header);
-        }
+
         if len < header {
             return corrupt("box length");
         }
-        p += len;
+        let end = p.checked_add(len).ok_or(Jp2Error::Corrupt("box length"))?;
+        if end > data.len() {
+            return corrupt("box past end");
+        }
+        if kind == b"jp2c" {
+            return p.checked_add(header).filter(|&start| start <= end).ok_or(Jp2Error::Corrupt("codestream box"));
+        }
+        p = end;
     }
     corrupt("no codestream")
 }
+
+/// Reads a length-prefixed JPEG 2000 marker segment without trusting its
+/// declared length. The returned slice excludes the marker and length field.
+fn marker_segment(cs: &[u8], marker: usize) -> Result<(&[u8], usize)> {
+    let length_at = marker.checked_add(2).ok_or(Jp2Error::Corrupt("marker length"))?;
+    let length = be16(cs, length_at)?;
+    if length < 2 {
+        return corrupt("marker segment length");
+    }
+    let payload_at = marker.checked_add(4).ok_or(Jp2Error::Corrupt("marker length"))?;
+    let end = marker
+        .checked_add(2)
+        .and_then(|start| start.checked_add(length))
+        .ok_or(Jp2Error::Corrupt("marker length"))?;
+    let payload = cs.get(payload_at..end).ok_or(Jp2Error::Corrupt("marker segment past end"))?;
+    Ok((payload, end))
+}
+
+const MAX_DECODED_PIXELS: usize = 4 * 1024 * 1024;
 
 fn decode_codestream(cs: &[u8], reduce: usize) -> Result<Decoded> {
     if !cs.starts_with(&[0xff, 0x4f]) {
         return corrupt("missing SOC");
     }
     let mut prm = Params::default();
-    let mut p = 2;
+    let mut p = 2usize;
     let mut tile_data: Vec<u8> = Vec::new();
     let mut seen_cod = false;
     let mut seen_qcd = false;
@@ -122,8 +150,10 @@ fn decode_codestream(cs: &[u8], reduce: usize) -> Result<Decoded> {
         let marker = be16(cs, p)?;
         match marker {
             0xff51 => {
-                let l = be16(cs, p + 2)?;
-                let b = &cs[p + 4..p + 2 + l];
+                let (b, next) = marker_segment(cs, p)?;
+                if b.len() < 36 {
+                    return corrupt("short image size segment");
+                }
                 if be16(b, 0)? != 0 {
                     return unsupported("capabilities (Rsiz)");
                 }
@@ -132,23 +162,34 @@ fn decode_codestream(cs: &[u8], reduce: usize) -> Result<Decoded> {
                 if xo != 0 || yo != 0 || xto != 0 || yto != 0 {
                     return unsupported("image or tile offsets");
                 }
+                let components = be16(b, 34)?;
+                let component_bytes = components.checked_mul(3).ok_or(Jp2Error::Corrupt("component count"))?;
+                let required = 36usize.checked_add(component_bytes).ok_or(Jp2Error::Corrupt("component count"))?;
+                if b.len() < required {
+                    return corrupt("short component descriptors");
+                }
                 prm.width = xs;
                 prm.height = ys;
                 prm.tile_w = xt;
                 prm.tile_h = yt;
-                prm.components = be16(b, 34)?;
+                prm.components = components;
                 if xt < xs || yt < ys {
                     return unsupported("several tiles");
                 }
                 if prm.components == 0 || prm.components > 4 || prm.width == 0 || prm.height == 0 {
                     return corrupt("image size");
                 }
+                let pixels = prm.width.checked_mul(prm.height).ok_or(Jp2Error::Corrupt("image dimensions"))?;
+                if pixels > MAX_DECODED_PIXELS {
+                    return unsupported("image exceeds the decoder's safe pixel limit");
+                }
                 for c in 0..prm.components {
-                    let ssiz = b[36 + c * 3] as u32;
+                    let at = 36 + c * 3;
+                    let ssiz = b[at] as u32;
                     if ssiz & 0x80 != 0 {
                         return unsupported("signed components");
                     }
-                    if b[37 + c * 3] != 1 || b[38 + c * 3] != 1 {
+                    if b[at + 1] != 1 || b[at + 2] != 1 {
                         return unsupported("subsampled components");
                     }
                     let prec = (ssiz & 0x7f) + 1;
@@ -161,10 +202,13 @@ fn decode_codestream(cs: &[u8], reduce: usize) -> Result<Decoded> {
                 if prm.precision > 16 {
                     return unsupported("more than 16 bits per component");
                 }
+                p = next;
             }
             0xff52 => {
-                let l = be16(cs, p + 2)?;
-                let b = &cs[p + 4..p + 2 + l];
+                let (b, next) = marker_segment(cs, p)?;
+                if b.len() < 10 {
+                    return corrupt("short coding style segment");
+                }
                 let scod = b[0];
                 if scod & 1 != 0 {
                     return unsupported("user-defined precincts");
@@ -187,43 +231,72 @@ fn decode_codestream(cs: &[u8], reduce: usize) -> Result<Decoded> {
                     return corrupt("coding style");
                 }
                 seen_cod = true;
+                p = next;
             }
             0xff5c => {
-                let l = be16(cs, p + 2)?;
-                let b = &cs[p + 4..p + 2 + l];
-                if b[0] & 31 != 0 {
+                let (b, next) = marker_segment(cs, p)?;
+                let Some((&style, exponents)) = b.split_first() else {
+                    return corrupt("short quantisation segment");
+                };
+                if style & 31 != 0 {
                     return unsupported("quantisation (lossy)");
                 }
-                prm.guard = (b[0] >> 5) as u32;
-                prm.exponents = b[1..].iter().map(|v| (*v >> 3) as u32).collect();
+                prm.guard = (style >> 5) as u32;
+                prm.exponents = exponents.iter().map(|v| (*v >> 3) as u32).collect();
                 seen_qcd = true;
+                p = next;
             }
             0xff53 | 0xff5d => return unsupported("per-component coding or quantisation overrides"),
             0xff90 => {
-                // Start of tile-part.
                 if !seen_cod || !seen_qcd {
                     return corrupt("missing COD or QCD");
                 }
-                let psot = be32(cs, p + 6)?;
-                let tile_index = be16(cs, p + 4)?;
+                let (sot, next) = marker_segment(cs, p)?;
+                if sot.len() != 8 {
+                    return corrupt("short tile-part header");
+                }
+                let psot = be32(sot, 2)?;
+                let tile_index = be16(sot, 0)?;
                 if tile_index != 0 {
                     return unsupported("several tiles");
                 }
-                let end = if psot == 0 { cs.len() } else { (p + psot).min(cs.len()) };
-                let mut q = p + 12;
-                loop {
-                    let m = be16(cs, q)?;
-                    if m == 0xff93 {
-                        q += 2;
+                let end = if psot == 0 {
+                    cs.len()
+                } else {
+                    let end = p.checked_add(psot).ok_or(Jp2Error::Corrupt("tile-part length"))?;
+                    if end > cs.len() {
+                        return corrupt("tile-part past end");
+                    }
+                    end
+                };
+                if next > end {
+                    return corrupt("short tile-part");
+                }
+
+                let mut q = next;
+                let mut found_sod = false;
+                while q < end {
+                    if be16(cs, q)? == 0xff93 {
+                        q = q.checked_add(2).ok_or(Jp2Error::Corrupt("tile data offset"))?;
+                        found_sod = true;
                         break;
                     }
-                    q += 2 + be16(cs, q + 2)?;
+                    let (_, after_segment) = marker_segment(cs, q)?;
+                    if after_segment > end || after_segment <= q {
+                        return corrupt("tile header segment length");
+                    }
+                    q = after_segment;
                 }
+                if !found_sod {
+                    return corrupt("missing SOD");
+                }
+
                 let mut stop = end;
-                if psot == 0 && cs[..stop].ends_with(&[0xff, 0xd9]) {
+                if psot == 0 && cs.get(..stop).is_some_and(|bytes| bytes.ends_with(&[0xff, 0xd9])) {
                     stop -= 2;
                 }
-                tile_data.extend_from_slice(&cs[q.min(stop)..stop]);
+                let tile_bytes = cs.get(q..stop).ok_or(Jp2Error::Corrupt("tile data range"))?;
+                tile_data.extend_from_slice(tile_bytes);
                 p = end;
                 if be16(cs, p).map(|m| m == 0xff90).unwrap_or(false) {
                     continue;
@@ -231,9 +304,14 @@ fn decode_codestream(cs: &[u8], reduce: usize) -> Result<Decoded> {
                 break;
             }
             0xffd9 => break,
-            _ => {}
+            _ => {
+                let (_, next) = marker_segment(cs, p)?;
+                if next <= p {
+                    return corrupt("marker did not advance");
+                }
+                p = next;
+            }
         }
-        p += 2 + be16(cs, p + 2)?;
     }
     if tile_data.is_empty() {
         return corrupt("no tile data");
@@ -904,4 +982,42 @@ fn decode_tile(prm: &Params, data: &[u8], reduce: usize) -> Result<Decoded> {
         }
     }
     Ok(Decoded { width: w, height: h, components: ncomp, precision: prm.precision, reduced: reduce, samples })
+}
+
+
+#[cfg(test)]
+mod parser_tests {
+    use super::*;
+
+    #[test]
+    fn marker_segment_checks_declared_length() {
+        let bytes = [0xff, 0x52, 0x00, 0x06, 0x01, 0x02];
+        assert!(matches!(marker_segment(&bytes, 0), Err(Jp2Error::Corrupt(_))));
+    }
+
+    #[test]
+    fn marker_segment_returns_payload_and_next_offset() {
+        let bytes = [0xff, 0x52, 0x00, 0x04, 0xaa, 0xbb, 0xff, 0xd9];
+        let (payload, next) = marker_segment(&bytes, 0).unwrap();
+        assert_eq!(payload, &[0xaa, 0xbb]);
+        assert_eq!(next, 6);
+    }
+
+    #[test]
+    fn extended_jp2_box_length_must_be_present() {
+        let bytes = [0, 0, 0, 1, b'j', b'p', b'2', b'c'];
+        assert!(matches!(find_codestream(&bytes), Err(Jp2Error::Corrupt(_))));
+    }
+
+    #[test]
+    fn truncated_codestream_segments_return_errors_instead_of_panicking() {
+        let short_siz = [0xff, 0x4f, 0xff, 0x51, 0x00, 0x06, 0, 0];
+        assert!(matches!(decode_codestream(&short_siz, 0), Err(Jp2Error::Corrupt(_))));
+
+        let short_cod = [0xff, 0x4f, 0xff, 0x52, 0x00, 0x03, 0];
+        assert!(matches!(decode_codestream(&short_cod, 0), Err(Jp2Error::Corrupt(_))));
+
+        let short_qcd = [0xff, 0x4f, 0xff, 0x5c, 0x00, 0x02];
+        assert!(matches!(decode_codestream(&short_qcd, 0), Err(Jp2Error::Corrupt(_))));
+    }
 }
