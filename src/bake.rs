@@ -1377,38 +1377,103 @@ impl BakeReport {
 
     /// A finished report restored from [`Self::cache_json`].
     pub fn from_cache_json(v: &serde_json::Value) -> Option<Self> {
-        let u = |k: &str| v[k].as_u64();
-        let f = |k: &str| v[k].as_f64().map(|x| x as f32);
-        let f3 = |r: &serde_json::Value, k: &str| -> Option<[f32; 3]> {
-            let a = r[k].as_array()?;
-            Some([a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32, a.get(2)?.as_f64()? as f32])
+        let u = |key: &str| v[key].as_u64();
+        let u32_value = |key: &str| u(key).and_then(|value| u32::try_from(value).ok());
+        let usize_value = |key: &str| u(key).and_then(|value| usize::try_from(value).ok());
+        let f = |key: &str| {
+            let value = v[key].as_f64()? as f32;
+            value.is_finite().then_some(value)
         };
+        let f3 = |value: &serde_json::Value, key: &str| -> Option<[f32; 3]> {
+            let values = value[key].as_array()?;
+            let result = [
+                values.first()?.as_f64()? as f32,
+                values.get(1)?.as_f64()? as f32,
+                values.get(2)?.as_f64()? as f32,
+            ];
+            result.iter().all(|component| component.is_finite()).then_some(result)
+        };
+
+        let triangles = usize_value("triangles")?;
+        let resolution = u32_value("resolution")?;
+        let rays_per_texel = u32_value("rays_per_texel")?;
+        let prep_seconds = f("prep_seconds")?;
+        let edge_max_distance = f("edge_max_distance")?;
+        let gpu_seconds = f("gpu_seconds")?;
+        if triangles == 0
+            || resolution == 0
+            || resolution > MAX_BAKE_RES
+            || rays_per_texel == 0
+            || prep_seconds < 0.0
+            || edge_max_distance < 0.0
+            || gpu_seconds < 0.0
+        {
+            return None;
+        }
+
         let id_regions = v["id_regions"]
             .as_array()?
             .iter()
-            .map(|r| Some(IdRegion { color: f3(r, "color")?, triangles: r["triangles"].as_u64()? as usize, min: f3(r, "min")?, max: f3(r, "max")? }))
+            .map(|region| {
+                let region_triangles = usize::try_from(region["triangles"].as_u64()?).ok()?;
+                if region_triangles > triangles {
+                    return None;
+                }
+                Some(IdRegion {
+                    color: f3(region, "color")?,
+                    triangles: region_triangles,
+                    min: f3(region, "min")?,
+                    max: f3(region, "max")?,
+                })
+            })
             .collect::<Option<Vec<_>>>()?;
+
+        let custom = match v["custom"].as_array() {
+            Some(values) => values.iter()
+                .map(|value| u32::try_from(value.as_u64()?).ok())
+                .collect::<Option<Vec<_>>>()?,
+            None => Vec::new(),
+        };
+        if custom.len() > MAX_CUSTOM_MAPS {
+            return None;
+        }
+        let mut custom_ids = std::collections::HashSet::with_capacity(custom.len());
+        if custom.iter().any(|&id| id == 0 || !custom_ids.insert(id)) {
+            return None;
+        }
+
+        let baked = u32_value("baked").unwrap_or(ALL_MAPS);
+        if baked & !ALL_MAPS != 0 {
+            return None;
+        }
+        let valid_texels = u32_value("valid_texels")?;
+        let missed_texels = u32_value("missed_texels")?;
+        let filled_texels = u32_value("filled_texels").unwrap_or(0);
+        if missed_texels > valid_texels || filled_texels > missed_texels {
+            return None;
+        }
+
         Some(BakeReport {
             source: v["source"].as_str()?.to_string(),
-            triangles: u("triangles")? as usize,
-            parts: u("parts")? as usize,
-            hard_edges: u("hard_edges")? as usize,
-            resolution: u("resolution")? as u32,
-            rays_per_texel: u("rays_per_texel")? as u32,
-            prep_seconds: f("prep_seconds")?,
-            edge_max_distance: f("edge_max_distance")?,
+            triangles,
+            parts: usize_value("parts")?,
+            hard_edges: usize_value("hard_edges")?,
+            resolution,
+            rays_per_texel,
+            prep_seconds,
+            edge_max_distance,
             id_regions,
-            matched_names: u("matched_names")? as usize,
+            matched_names: usize_value("matched_names")?,
             used_cage: v["used_cage"].as_bool()?,
-            baked: v["baked"].as_u64().map_or(ALL_MAPS, |b| b as u32),
-            custom: v["custom"].as_array().map_or(Vec::new(), |a| a.iter().filter_map(|x| x.as_u64()).map(|x| x as u32).collect()),
+            baked,
+            custom,
             from_cache: true,
             started: Instant::now(),
-            gpu_seconds: AtomicU32::new(f("gpu_seconds")?.to_bits()),
+            gpu_seconds: AtomicU32::new(gpu_seconds.to_bits()),
             finished: AtomicBool::new(true),
-            valid_texels: AtomicU32::new(u("valid_texels")? as u32),
-            missed_texels: AtomicU32::new(u("missed_texels")? as u32),
-            filled_texels: AtomicU32::new(u("filled_texels").unwrap_or(0) as u32),
+            valid_texels: AtomicU32::new(valid_texels),
+            missed_texels: AtomicU32::new(missed_texels),
+            filled_texels: AtomicU32::new(filled_texels),
         })
     }
 }
