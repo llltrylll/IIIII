@@ -38,17 +38,30 @@ fn corrupt<T>(what: &str) -> Result<T> {
 }
 
 fn u16_at(b: &[u8], o: usize) -> Result<u16> {
-    b.get(o..o + 2).map(|s| u16::from_le_bytes([s[0], s[1]])).ok_or_else(|| Hdf5Error::Corrupt("short read".into()))
+    let end = o.checked_add(2).ok_or_else(|| Hdf5Error::Corrupt("short read".into()))?;
+    b.get(o..end).map(|s| u16::from_le_bytes([s[0], s[1]])).ok_or_else(|| Hdf5Error::Corrupt("short read".into()))
 }
 
 fn u32_at(b: &[u8], o: usize) -> Result<u32> {
-    b.get(o..o + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]])).ok_or_else(|| Hdf5Error::Corrupt("short read".into()))
+    let end = o.checked_add(4).ok_or_else(|| Hdf5Error::Corrupt("short read".into()))?;
+    b.get(o..end).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]])).ok_or_else(|| Hdf5Error::Corrupt("short read".into()))
 }
 
 fn u64_at(b: &[u8], o: usize) -> Result<u64> {
-    b.get(o..o + 8)
+    let end = o.checked_add(8).ok_or_else(|| Hdf5Error::Corrupt("short read".into()))?;
+    b.get(o..end)
         .map(|s| u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]))
         .ok_or_else(|| Hdf5Error::Corrupt("short read".into()))
+}
+
+fn dataset_byte_len(dims: &[u64], element_size: u64) -> Result<u64> {
+    if element_size == 0 {
+        return corrupt("zero-sized datatype");
+    }
+    let elements = dims.iter().try_fold(1u64, |total, &dim| {
+        total.checked_mul(dim).ok_or_else(|| Hdf5Error::Corrupt("dataset dimensions overflow".into()))
+    })?;
+    elements.checked_mul(element_size).ok_or_else(|| Hdf5Error::Corrupt("dataset byte size overflow".into()))
 }
 
 /// One dataset's location, found from its object header.
@@ -165,8 +178,14 @@ impl<R: Read + Seek> Hdf5File<R> {
         }
         let level = head[5];
         let used = u16_at(&head, 6)? as usize;
+        if rank != 1 {
+            return Err(Hdf5Error::Unsupported("chunked datasets must be one-dimensional byte arrays".into()));
+        }
         let key_size = 8 + 8 * rank;
-        let body = read_at(&mut self.r, node + 24, used * (key_size + 8) + key_size)?;
+        let body_len = used.checked_mul(key_size + 8).and_then(|n| n.checked_add(key_size))
+            .ok_or_else(|| Hdf5Error::Corrupt("chunk B-tree size overflow".into()))?;
+        let body_at = node.checked_add(24).ok_or_else(|| Hdf5Error::Corrupt("chunk B-tree address overflow".into()))?;
+        let body = read_at(&mut self.r, body_at, body_len)?;
         for i in 0..used {
             let key = i * (key_size + 8);
             let size = u32_at(&body, key)? as usize;
@@ -211,7 +230,10 @@ impl<R: Read + Seek> Hdf5File<R> {
             return corrupt("local heap");
         }
         let heap_data = u64_at(&h, 24)?;
-        let heap_size = u64_at(&h, 8)? as usize;
+        let heap_size = usize::try_from(u64_at(&h, 8)?).map_err(|_| Hdf5Error::Corrupt("local heap size".into()))?;
+        if heap_size as u64 > MAX_HDF5_METADATA_BYTES {
+            return Err(Hdf5Error::Unsupported("local heap exceeds the metadata size limit".into()));
+        }
         let heap_bytes = read_at(&mut self.r, heap_data, heap_size)?;
         self.walk_btree(btree, &heap_bytes, f).map(|_| ())
     }
@@ -223,7 +245,10 @@ impl<R: Read + Seek> Hdf5File<R> {
         }
         let level = head[5];
         let used = u16_at(&head, 6)? as usize;
-        let body = read_at(&mut self.r, node + 24, used * 16 + 8)?;
+        let body_len = used.checked_mul(16).and_then(|n| n.checked_add(8))
+            .ok_or_else(|| Hdf5Error::Corrupt("group B-tree size overflow".into()))?;
+        let body_at = node.checked_add(24).ok_or_else(|| Hdf5Error::Corrupt("group B-tree address overflow".into()))?;
+        let body = read_at(&mut self.r, body_at, body_len)?;
         for i in 0..used {
             let child = u64_at(&body, 8 + i * 16)?;
             if level > 0 {
@@ -237,7 +262,9 @@ impl<R: Read + Seek> Hdf5File<R> {
                 return corrupt("symbol table node");
             }
             let count = u16_at(&snod, 6)? as usize;
-            let entries = read_at(&mut self.r, child + 8, count * 40)?;
+            let entries_len = count.checked_mul(40).ok_or_else(|| Hdf5Error::Corrupt("symbol table size overflow".into()))?;
+            let entries_at = child.checked_add(8).ok_or_else(|| Hdf5Error::Corrupt("symbol table address overflow".into()))?;
+            let entries = read_at(&mut self.r, entries_at, entries_len)?;
             for e in 0..count {
                 let name_off = u64_at(&entries, e * 40)? as usize;
                 let addr = u64_at(&entries, e * 40 + 8)?;
@@ -258,10 +285,19 @@ impl<R: Read + Seek> Hdf5File<R> {
             return Err(Hdf5Error::Unsupported(format!("object header version {}", head[0])));
         }
         let mut remaining = u16_at(&head, 2)? as usize;
-        let mut blocks = vec![(addr + 16, u32_at(&head, 8)? as u64)];
+        let first_block = addr.checked_add(16).ok_or_else(|| Hdf5Error::Corrupt("object header address overflow".into()))?;
+        let first_len = u32_at(&head, 8)? as u64;
+        if first_len > MAX_HDF5_METADATA_BYTES {
+            return Err(Hdf5Error::Unsupported("object header exceeds the metadata size limit".into()));
+        }
+        let mut blocks = vec![(first_block, first_len)];
         let mut out = Vec::new();
         while let Some((start, len)) = blocks.pop() {
-            let data = read_at(&mut self.r, start, len as usize)?;
+            if len > MAX_HDF5_METADATA_BYTES {
+                return Err(Hdf5Error::Unsupported("object header continuation exceeds the metadata size limit".into()));
+            }
+            let len = usize::try_from(len).map_err(|_| Hdf5Error::Corrupt("object header size".into()))?;
+            let data = read_at(&mut self.r, start, len)?;
             let mut p = 0;
             while p + 8 <= data.len() && remaining > 0 {
                 let kind = u16_at(&data, p)?;
@@ -270,7 +306,12 @@ impl<R: Read + Seek> Hdf5File<R> {
                 p += 8 + size;
                 remaining -= 1;
                 if kind == 0x10 {
-                    blocks.push((u64_at(&body, 0)?, u64_at(&body, 8)?));
+                    let next_addr = u64_at(&body, 0)?;
+                    let next_len = u64_at(&body, 8)?;
+                    if next_len > MAX_HDF5_METADATA_BYTES {
+                        return Err(Hdf5Error::Unsupported("object header continuation exceeds the metadata size limit".into()));
+                    }
+                    blocks.push((next_addr, next_len));
                 } else {
                     out.push((kind, body));
                 }
@@ -289,39 +330,65 @@ impl<R: Read + Seek> Hdf5File<R> {
         let dims = dataspace_dims(space)?;
         let ty = find(0x03).ok_or_else(|| Hdf5Error::Corrupt("dataset without datatype".into()))?;
         let element = u32_at(ty, 4)? as u64;
-        let len = dims.iter().product::<u64>() * element;
+        let len = dataset_byte_len(&dims, element)?;
         let lay = find(0x08).ok_or_else(|| Hdf5Error::Corrupt("dataset without layout".into()))?;
-        if lay[0] != 3 {
-            return Err(Hdf5Error::Unsupported(format!("data layout version {}", lay[0])));
+        let layout_version = *lay.first().ok_or_else(|| Hdf5Error::Corrupt("empty layout message".into()))?;
+        if layout_version != 3 {
+            return Err(Hdf5Error::Unsupported(format!("data layout version {layout_version}")));
         }
-        let layout = match lay[1] {
+        let layout_class = *lay.get(1).ok_or_else(|| Hdf5Error::Corrupt("short layout message".into()))?;
+        let layout = match layout_class {
             0 => {
                 let size = u16_at(lay, 2)? as usize;
-                Layout::Compact(lay.get(4..4 + size).ok_or_else(|| Hdf5Error::Corrupt("compact data".into()))?.to_vec())
+                let end = 4usize.checked_add(size).ok_or_else(|| Hdf5Error::Corrupt("compact dataset size overflow".into()))?;
+                Layout::Compact(lay.get(4..end).ok_or_else(|| Hdf5Error::Corrupt("compact data".into()))?.to_vec())
             }
             1 => Layout::Contiguous { address: u64_at(lay, 2)? },
             2 => {
-                let rank = lay[2] as usize;
+                let rank = *lay.get(2).ok_or_else(|| Hdf5Error::Corrupt("short chunked layout message".into()))? as usize;
+                if rank != 1 {
+                    return Err(Hdf5Error::Unsupported("chunked datasets must be one-dimensional byte arrays".into()));
+                }
                 let btree = u64_at(lay, 3)?;
-                let mut d = Vec::new();
+                let dimensions_end = 11usize.checked_add(rank.checked_mul(4).ok_or_else(|| Hdf5Error::Corrupt("chunk dimensions overflow".into()))?)
+                    .ok_or_else(|| Hdf5Error::Corrupt("chunk layout size overflow".into()))?;
+                if dimensions_end > lay.len() {
+                    return corrupt("short chunked layout dimensions");
+                }
+                let mut d = Vec::with_capacity(rank);
                 for i in 0..rank {
-                    d.push(u32_at(lay, 11 + 4 * i)?);
+                    let offset = 11usize.checked_add(i.checked_mul(4).ok_or_else(|| Hdf5Error::Corrupt("chunk dimension offset overflow".into()))?)
+                        .ok_or_else(|| Hdf5Error::Corrupt("chunk dimension offset overflow".into()))?;
+                    d.push(u32_at(lay, offset)?);
                 }
                 Layout::Chunked { btree, dims: d }
             }
-            c => return Err(Hdf5Error::Unsupported(format!("layout class {c}"))),
+            class => return Err(Hdf5Error::Unsupported(format!("layout class {class}"))),
         };
         Ok(DatasetInfo { len, layout })
     }
 }
 
 fn dataspace_dims(m: &[u8]) -> Result<Vec<u64>> {
-    let (rank, start) = match m[0] {
-        1 => (m[1] as usize, 8),
-        2 => (m[1] as usize, 4),
+    let version = *m.first().ok_or_else(|| Hdf5Error::Corrupt("empty dataspace message".into()))?;
+    let rank = *m.get(1).ok_or_else(|| Hdf5Error::Corrupt("short dataspace message".into()))? as usize;
+    let start = match version {
+        1 => 8usize,
+        2 => 4usize,
         v => return Err(Hdf5Error::Unsupported(format!("dataspace version {v}"))),
     };
-    (0..rank).map(|i| u64_at(m, start + 8 * i)).collect()
+    if rank > 8 {
+        return Err(Hdf5Error::Unsupported("dataspace rank exceeds the supported limit".into()));
+    }
+    let end = start.checked_add(rank.checked_mul(8).ok_or_else(|| Hdf5Error::Corrupt("dataspace dimensions overflow".into()))?)
+        .ok_or_else(|| Hdf5Error::Corrupt("dataspace dimensions overflow".into()))?;
+    if end > m.len() {
+        return corrupt("short dataspace dimensions");
+    }
+    (0..rank).map(|i| {
+        let offset = start + i * 8;
+        u64_at(m, offset)
+    }).collect()
 }
 
 fn read_at<R: Read + Seek>(r: &mut R, offset: u64, len: usize) -> Result<Vec<u8>> {
@@ -329,4 +396,39 @@ fn read_at<R: Read + Seek>(r: &mut R, offset: u64, len: usize) -> Result<Vec<u8>
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
     Ok(buf)
+}
+
+
+#[cfg(test)]
+mod parser_tests {
+    use super::*;
+
+    #[test]
+    fn dataset_length_rejects_dimension_and_element_overflow() {
+        assert!(matches!(dataset_byte_len(&[u64::MAX, 2], 1), Err(Hdf5Error::Corrupt(_))));
+        assert!(matches!(dataset_byte_len(&[u64::MAX], 2), Err(Hdf5Error::Corrupt(_))));
+        assert!(matches!(dataset_byte_len(&[1], 0), Err(Hdf5Error::Corrupt(_))));
+    }
+
+    #[test]
+    fn dataspace_parser_rejects_empty_and_truncated_messages() {
+        assert!(matches!(dataspace_dims(&[]), Err(Hdf5Error::Corrupt(_))));
+        assert!(matches!(dataspace_dims(&[1]), Err(Hdf5Error::Corrupt(_))));
+        assert!(matches!(dataspace_dims(&[1, 1, 0, 0]), Err(Hdf5Error::Corrupt(_))));
+    }
+
+    #[test]
+    fn dataspace_parser_rejects_unreasonable_rank() {
+        assert!(matches!(dataspace_dims(&[1, 9]), Err(Hdf5Error::Unsupported(_))));
+    }
+
+    #[test]
+    fn dataspace_parser_reads_one_dimensional_byte_extent() {
+        let mut message = vec![0u8; 16];
+        message[0] = 1;
+        message[1] = 1;
+        message[8..16].copy_from_slice(&512u64.to_le_bytes());
+        assert_eq!(dataspace_dims(&message).unwrap(), vec![512]);
+        assert_eq!(dataset_byte_len(&[512], 1).unwrap(), 512);
+    }
 }
