@@ -125,12 +125,12 @@ pub fn has_colors(mesh: &Mesh) -> bool {
 /// The vertex colors of `file` for `mesh`, when it is the same mesh.
 pub fn colors_from_file(mesh: &Mesh, file: &std::path::Path) -> Result<Vec<[[u8; 3]; 3]>, String> {
     let other = Mesh::load_file(file)?;
-    let same = other.indices.len() == mesh.indices.len()
-        && other.vertices.len() == mesh.vertices.len()
-        && (0..mesh.vertices.len()).step_by((mesh.vertices.len() / 64).max(1)).all(|i| {
-            let (a, b) = (mesh.vertices[i].pos, other.vertices[i].pos);
-            (0..3).all(|k| (a[k] - b[k]).abs() < 1e-4)
+    let same_topology = other.indices == mesh.indices;
+    let same_positions = other.vertices.len() == mesh.vertices.len()
+        && mesh.vertices.iter().zip(&other.vertices).all(|(a, b)| {
+            (0..3).all(|k| (a.pos[k] - b.pos[k]).abs() < 1e-4)
         });
+    let same = same_topology && same_positions;
     if !same {
         return Err(format!(
             "'{}' is not the mesh that is loaded ({} triangles there, {} here). Pick the file this project was made from.",
@@ -148,8 +148,10 @@ pub fn colors_from_file(mesh: &Mesh, file: &std::path::Path) -> Result<Vec<[[u8;
 /// What the ID mask panel keeps between frames.
 #[derive(Default)]
 pub struct VertexIdState {
-    /// The loaded mesh's palette and which mesh (pointer) it was made for.
-    pub palette: Option<(usize, Palette)>,
+    /// The loaded mesh's palette and a weak identity for the mesh it belongs to.
+    /// Keeping the weak control block prevents allocator pointer reuse from
+    /// making a new mesh look like the previous one.
+    pub palette: Option<(std::sync::Weak<Mesh>, Palette)>,
     /// The mask preview on the model is switched off.
     pub preview_off: bool,
     /// The panel was drawn this frame, with these ID colors and tolerance.
@@ -166,10 +168,10 @@ pub struct VertexIdState {
 impl VertexIdState {
     /// The palette of `mesh`, made once per loaded mesh.
     pub fn palette_for(&mut self, mesh: &std::sync::Arc<Mesh>) -> &Palette {
-        let key = std::sync::Arc::as_ptr(mesh) as usize;
-        if self.palette.as_ref().is_none_or(|(k, _)| *k != key) {
+        let identity = std::sync::Arc::downgrade(mesh);
+        if self.palette.as_ref().is_none_or(|(cached, _)| !std::sync::Weak::ptr_eq(cached, &identity)) {
             let p = mesh.tri_vertex_color.as_deref().map(palette).unwrap_or_default();
-            self.palette = Some((key, p));
+            self.palette = Some((identity, p));
             self.auto_baked = false;
         }
         &self.palette.as_ref().expect("just made").1

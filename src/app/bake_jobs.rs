@@ -4,6 +4,7 @@ use super::*;
 impl PainterApp {
     /// Bakes the texture set being edited.
     pub(super) fn start_bake(&mut self, ctx: &egui::Context) {
+        self.bake_id_only = false;
         self.sets.bake_queue.clear();
         self.start_bake_set(self.sets.active, ctx);
     }
@@ -16,6 +17,10 @@ impl PainterApp {
         if self.bake_id_only {
             settings.maps = 0;
             settings.custom.clear();
+            settings.high_poly = None;
+            settings.cage = None;
+            settings.cage_paint = None;
+            settings.match_by_name = false;
         }
         settings
     }
@@ -43,7 +48,6 @@ impl PainterApp {
         self.sets.baking = set;
         let mesh = self.mesh.clone();
         let settings = self.job_bake_settings();
-        self.baked_id_source = settings.id_source;
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
@@ -85,6 +89,7 @@ impl PainterApp {
                             if let Some(e) = self.set_engine_mut(self.sets.baking) {
                                 if id_only { e.replace_id_map(maps, Arc::new(report)) } else { e.set_maps(maps, Arc::new(report)) }
                             }
+                            self.baked_id_source = if id_only { IdSource::VertexColors } else { self.bake_settings.id_source };
                         }
                         Err(e) => {
                             self.fail_mcp_bake(&e);
@@ -157,6 +162,7 @@ impl PainterApp {
                     if let Some(e) = self.set_engine_mut(self.sets.baking) {
                         if id_only { e.replace_id_map(maps, report) } else { e.set_maps(maps, report) }
                     }
+                    self.baked_id_source = if id_only { IdSource::VertexColors } else { self.bake_settings.id_source };
                     if id_only {
                         self.status = "Baked the ID map from the vertex colors.".into();
                     }
