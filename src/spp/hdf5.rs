@@ -13,6 +13,9 @@ use std::io::{Read, Seek, SeekFrom};
 
 const SIGNATURE: [u8; 8] = [0x89, b'H', b'D', b'F', 0x0d, 0x0a, 0x1a, 0x0a];
 const UNDEFINED: u64 = u64::MAX;
+/// The import only needs ordinary texture tiles and model data; reject
+/// unreasonable metadata sizes before allocating from an untrusted HDF5 file.
+const MAX_DATASET_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Hdf5Error {
@@ -127,16 +130,25 @@ impl<R: Read + Seek> Hdf5File<R> {
 
     /// Read the whole dataset.
     pub fn read(&mut self, info: &DatasetInfo) -> Result<Vec<u8>> {
+        if info.len > MAX_DATASET_BYTES {
+            return Err(Hdf5Error::Unsupported("dataset exceeds the safe import size limit".into()));
+        }
+        let len = usize::try_from(info.len).map_err(|_| Hdf5Error::Corrupt("dataset size"))?;
         match &info.layout {
-            Layout::Compact(data) => Ok(data.clone()),
+            Layout::Compact(data) => {
+                if data.len() != len {
+                    return corrupt("compact dataset size");
+                }
+                Ok(data.clone())
+            }
             Layout::Contiguous { address } => {
                 if *address == UNDEFINED {
-                    return Ok(vec![0; info.len as usize]);
+                    return Ok(vec![0; len]);
                 }
-                read_at(&mut self.r, *address, info.len as usize)
+                read_at(&mut self.r, *address, len)
             }
             Layout::Chunked { btree, dims } => {
-                let mut out = vec![0u8; info.len as usize];
+                let mut out = vec![0u8; len];
                 if *btree != UNDEFINED {
                     let rank = dims.len();
                     self.read_chunks(*btree, rank, &mut out)?;
