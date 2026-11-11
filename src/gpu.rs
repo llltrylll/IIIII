@@ -13,6 +13,8 @@ pub struct Tex {
     pub width: u32,
     pub height: u32,
     pub samples: u32,
+    /// Number of allocated mip levels (1 for ordinary render targets).
+    pub mip_levels: u32,
 }
 
 pub const LAYER_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_ATTACHMENT
@@ -63,11 +65,20 @@ impl Tex {
                 ..Default::default()
             })
         });
-        Tex { texture, view, srgb_view, format, width, height, samples }
+        Tex { texture, view, srgb_view, format, width, height, samples, mip_levels: 1 }
     }
 
     pub fn bytes(&self) -> u64 {
-        self.width as u64 * self.height as u64 * bytes_per_texel(self.format) as u64 * self.samples as u64
+        let bpp = bytes_per_texel(self.format) as u64;
+        let mut width = self.width as u64;
+        let mut height = self.height as u64;
+        let mut total = 0u64;
+        for _ in 0..self.mip_levels {
+            total = total.saturating_add(width.saturating_mul(height).saturating_mul(bpp));
+            width = (width / 2).max(1);
+            height = (height / 2).max(1);
+        }
+        total.saturating_mul(self.samples as u64)
     }
 
     pub fn copy_info(&self) -> wgpu::TexelCopyTextureInfo<'_> {
@@ -220,7 +231,7 @@ pub fn upload_mips<P: image::Pixel<Subpixel = u8> + 'static>(
         }
     }
     let view = texture.create_view(&Default::default());
-    Tex { texture, view, srgb_view: None, format, width: w, height: h, samples: 1 }
+    Tex { texture, view, srgb_view: None, format, width: w, height: h, samples: 1, mip_levels: mips }
 }
 
 pub fn layout(device: &wgpu::Device, bgl: &wgpu::BindGroupLayout) -> wgpu::PipelineLayout {
