@@ -886,7 +886,9 @@ pub fn export(s: &Snapshot, template: &Template, settings: &Settings) -> Result<
     }
     std::fs::create_dir_all(&settings.folder).map_err(|e| format!("Cannot create folder: {e}"))?;
     let res = s.res;
-    let n = (res * res) as usize;
+    let side = usize::try_from(res).map_err(|_| "Export resolution is too large.".to_string())?;
+    let n = side.checked_mul(side).ok_or_else(|| "Export pixel count overflow.".to_string())?;
+    let components = n.checked_mul(4).ok_or_else(|| "Export buffer size overflow.".to_string())?;
     let padding = match settings.padding {
         Padding::None => None,
         Padding::Dilate(px) => Some(px),
@@ -910,39 +912,54 @@ pub fn export(s: &Snapshot, template: &Template, settings: &Settings) -> Result<
     let out_size = settings.size.unwrap_or(res);
     let opaque = s.opaque;
 
-    maps.par_iter()
+    // Keep the source maps resident, but build one output map at a time.
+    // Exporting several 4K/8K maps concurrently multiplied large temporary
+    // RGBA buffers and could exhaust system RAM even when each map fit alone.
+    maps.iter()
         .map(|&map| {
             // A color whose alpha is only opacity stays RGB on an opaque texture set.
             let rgb = (map.alpha_is_opacity() && opaque).then(|| OutputMap { layout: Layout::Rgb, ..map.clone() });
             let map = rgb.as_ref().unwrap_or(map);
             let chans = map.layout.channels();
-            let mut px = vec![[0.0f32, 0.0, 0.0, 1.0]; n];
+
+            // This is the exact flat storage ImageBuffer consumes below. Keeping
+            // it flat avoids allocating Vec<[f32; 4]> and then flattening into
+            // a second equally large Vec<f32>.
+            let mut px = vec![0.0f32; components];
+            px.par_chunks_exact_mut(4).for_each(|p| p[3] = 1.0);
             for (k, c) in map.chans[..chans].iter().enumerate() {
                 let plane = &cache[&c.src];
                 let comp = (c.comp as usize).min(2);
-                for (i, p) in px.iter_mut().enumerate() {
+                px.par_chunks_exact_mut(4).enumerate().for_each(|(i, p)| {
                     let v = plane[i][comp];
                     p[k] = if c.invert { 1.0 - v } else { v };
-                }
+                });
             }
             if map.layout == Layout::Gray {
-                for p in &mut px {
-                    *p = [p[0], p[0], p[0], 1.0];
-                }
+                px.par_chunks_exact_mut(4).for_each(|p| {
+                    p[1] = p[0];
+                    p[2] = p[0];
+                    p[3] = 1.0;
+                });
             }
             if let Some(near) = &nearest {
                 let cover = cover.as_ref().expect("with nearest");
-                let src = px.clone();
                 for i in 0..n {
+                    let dst = i * 4;
                     if near[i] != NO_SOURCE {
-                        px[i] = src[near[i] as usize];
+                        let src = near[i] as usize * 4;
+                        // nearest_covered always points at an original covered
+                        // texel; those source texels are never overwritten.
+                        let pixel = [px[src], px[src + 1], px[src + 2], px[src + 3]];
+                        px[dst..dst + 4].copy_from_slice(&pixel);
                     }
                     if settings.padding == Padding::Transparent && map.layout == Layout::Rgba && !cover[i] {
-                        px[i][3] = 0.0;
+                        px[dst + 3] = 0.0;
                     }
                 }
             }
-            let mut img: ImageBuffer<Rgba<f32>, Vec<f32>> = ImageBuffer::from_vec(res, res, px.into_iter().flatten().collect()).expect("sized");
+            let mut img: ImageBuffer<Rgba<f32>, Vec<f32>> =
+                ImageBuffer::from_vec(res, res, px).expect("sized");
             if out_size != res {
                 let filter = if out_size < res { image::imageops::FilterType::Triangle } else { image::imageops::FilterType::CatmullRom };
                 img = image::imageops::resize(&img, out_size, out_size, filter);
