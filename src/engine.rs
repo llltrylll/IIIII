@@ -3355,6 +3355,11 @@ impl Engine {
 
     /// Re-composites the whole stack. Cheap enough to run every painting frame:
     /// one fullscreen pass per visible layer, plus one per faded or masked folder.
+    /// Waits until the GPU has finished everything submitted so far.
+    pub fn wait_idle(&self) {
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+
     pub fn composite(&mut self) {
         if self.maps_dirty {
             self.resolve_maps();

@@ -445,6 +445,8 @@ pub struct PainterApp {
     preview_pointer_down: bool,
     /// How long the last preview rebuild took.
     last_composite: Duration,
+    /// The next rebuild reports how long it took (F5).
+    time_composite: bool,
     cam: OrbitCam,
     cam2d: Cam2d,
     layout: Layout,
@@ -1532,6 +1534,7 @@ impl PainterApp {
             preview_update_at: None,
             preview_pointer_down: false,
             last_composite: Duration::ZERO,
+            time_composite: false,
             cam: OrbitCam::default(),
             cam2d: Cam2d::default(),
             layout: Layout::Split,
@@ -2337,6 +2340,7 @@ impl PainterApp {
             if i.key_pressed(Key::F5) {
                 self.preview_update_at = None;
                 self.engine.mark_dirty();
+                self.time_composite = true;
                 self.status = "Preview recomposition forced (F5).".into();
             }
         });
@@ -5910,6 +5914,21 @@ impl PainterApp {
             let started = Instant::now();
             self.engine.composite();
             self.last_composite = started.elapsed();
+            if std::mem::take(&mut self.time_composite) {
+                // F5 measures the whole rebuild, GPU included.
+                let cpu = started.elapsed();
+                self.engine.wait_idle();
+                let total = started.elapsed();
+                self.status = format!(
+                    "Recomposition (F5): {:.0} ms total ({:.0} ms preparing, {:.0} ms on the GPU), {} layers, {}².",
+                    total.as_secs_f64() * 1000.0,
+                    cpu.as_secs_f64() * 1000.0,
+                    (total - cpu).as_secs_f64() * 1000.0,
+                    self.engine.layers.len(),
+                    self.engine.res
+                );
+                self.last_composite = total;
+            }
         }
         self.composite_parked();
         let size = [(rect.width() * self.ppp).round() as u32, (rect.height() * self.ppp).round() as u32];
