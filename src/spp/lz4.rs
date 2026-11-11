@@ -11,7 +11,8 @@ pub struct Lz4Error;
 
 /// Decompress `src` into exactly `size` bytes.
 pub fn decompress(src: &[u8], size: usize) -> Result<Vec<u8>, Lz4Error> {
-    let mut out: Vec<u8> = Vec::with_capacity(size);
+    let mut out: Vec<u8> = Vec::new();
+    out.try_reserve_exact(size).map_err(|_| Lz4Error)?;
     let mut i = 0;
     while i < src.len() {
         let token = src[i];
@@ -27,13 +28,20 @@ pub fn decompress(src: &[u8], size: usize) -> Result<Vec<u8>, Lz4Error> {
                 }
             }
         }
-        out.extend_from_slice(src.get(i..i + literals).ok_or(Lz4Error)?);
-        i += literals;
+        let literal_end = i.checked_add(literals).ok_or(Lz4Error)?;
+        let output_len = out.len().checked_add(literals).ok_or(Lz4Error)?;
+        if output_len > size {
+            return Err(Lz4Error);
+        }
+        out.extend_from_slice(src.get(i..literal_end).ok_or(Lz4Error)?);
+        i = literal_end;
         if i >= src.len() {
             break;
         }
-        let offset = *src.get(i).ok_or(Lz4Error)? as usize | (*src.get(i + 1).ok_or(Lz4Error)? as usize) << 8;
-        i += 2;
+        let offset_end = i.checked_add(2).ok_or(Lz4Error)?;
+        let offset_bytes = src.get(i..offset_end).ok_or(Lz4Error)?;
+        let offset = offset_bytes[0] as usize | (offset_bytes[1] as usize) << 8;
+        i = offset_end;
         let mut len = (token & 15) as usize;
         if len == 15 {
             loop {
@@ -46,12 +54,14 @@ pub fn decompress(src: &[u8], size: usize) -> Result<Vec<u8>, Lz4Error> {
             }
         }
         len += 4;
-        if offset == 0 || offset > out.len() || out.len() + len > size {
+        let output_len = out.len().checked_add(len).ok_or(Lz4Error)?;
+        if offset == 0 || offset > out.len() || output_len > size {
             return Err(Lz4Error);
         }
         let start = out.len() - offset;
         for k in 0..len {
-            let b = out[start + k];
+            let index = start.checked_add(k).ok_or(Lz4Error)?;
+            let b = *out.get(index).ok_or(Lz4Error)?;
             out.push(b);
         }
     }
