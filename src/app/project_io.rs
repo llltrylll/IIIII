@@ -595,9 +595,9 @@ impl PainterApp {
             write(&blob_len.to_le_bytes())?;
             write(blob)?;
         }
+        drop(write);
         file.flush().map_err(|e| format!("can't finish {}: {e}", tmp.display()))?;
         file.sync_all().map_err(|e| format!("can't sync {}: {e}", tmp.display()))?;
-        drop(write);
         drop(file);
         std::fs::rename(&tmp, path).map_err(|e| format!("can't replace {}: {e}", path.display()))?;
         Ok(bytes)
