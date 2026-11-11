@@ -69,16 +69,13 @@ impl Tex {
     }
 
     pub fn bytes(&self) -> u64 {
-        let bpp = bytes_per_texel(self.format) as u64;
-        let mut width = self.width as u64;
-        let mut height = self.height as u64;
-        let mut total = 0u64;
-        for _ in 0..self.mip_levels {
-            total = total.saturating_add(width.saturating_mul(height).saturating_mul(bpp));
-            width = (width / 2).max(1);
-            height = (height / 2).max(1);
-        }
-        total.saturating_mul(self.samples as u64)
+        texture_allocation_bytes(
+            self.width,
+            self.height,
+            bytes_per_texel(self.format),
+            self.mip_levels,
+            self.samples,
+        )
     }
 
     pub fn copy_info(&self) -> wgpu::TexelCopyTextureInfo<'_> {
@@ -109,6 +106,19 @@ pub fn bytes_per_texel(format: wgpu::TextureFormat) -> u32 {
         F::Rgba32Float => 16,
         _ => 4,
     }
+}
+
+fn texture_allocation_bytes(width: u32, height: u32, bytes_per_pixel: u32, mip_levels: u32, samples: u32) -> u64 {
+    let mut width = width as u64;
+    let mut height = height as u64;
+    let bpp = bytes_per_pixel as u64;
+    let mut total = 0u64;
+    for _ in 0..mip_levels {
+        total = total.saturating_add(width.saturating_mul(height).saturating_mul(bpp));
+        width = (width / 2).max(1);
+        height = (height / 2).max(1);
+    }
+    total.saturating_mul(samples as u64)
 }
 
 pub fn clear_texture(encoder: &mut wgpu::CommandEncoder, tex: &Tex, color: wgpu::Color) {
@@ -435,6 +445,23 @@ pub fn f16_to_f32(h: u16) -> f32 {
 
 /// Shaders are checked here without a GPU: a WGSL mistake would otherwise only
 /// show when the app starts.
+#[cfg(test)]
+mod texture_memory_tests {
+    use super::texture_allocation_bytes;
+
+    #[test]
+    fn counts_every_mip_level() {
+        // 4x2 RGBA8: 32 + 8 + 4 bytes across 3 levels.
+        assert_eq!(texture_allocation_bytes(4, 2, 4, 3, 1), 44);
+        assert_eq!(texture_allocation_bytes(4, 2, 4, 3, 4), 176);
+    }
+
+    #[test]
+    fn single_level_render_targets_keep_their_original_size() {
+        assert_eq!(texture_allocation_bytes(2048, 1024, 8, 1, 1), 16 * 1024 * 1024);
+    }
+}
+
 #[cfg(test)]
 mod shader_tests {
     use super::wgpu;
