@@ -425,6 +425,71 @@ enum Action {
     TextureToChannel { texture: usize, ch: usize },
 }
 
+/// Running average and peak of one measured time, in milliseconds.
+#[derive(Default, Clone, Copy)]
+struct Stat {
+    sum: f64,
+    peak: f64,
+    n: u32,
+}
+
+impl Stat {
+    fn add(&mut self, v: f64) {
+        self.sum += v;
+        self.peak = self.peak.max(v);
+        self.n += 1;
+    }
+
+    fn text(&self) -> String {
+        if self.n == 0 { "-".into() } else { format!("{:.1}/{:.0}", self.sum / f64::from(self.n), self.peak) }
+    }
+}
+
+/// F6: where the main thread's time goes while painting. Everything here is
+/// CPU time (recording and submitting work); it never waits for the GPU, so
+/// it does not disturb what it measures. A frame that is slow while these
+/// are small is waiting on the GPU.
+#[derive(Default)]
+struct StrokeMeter {
+    on: bool,
+    /// `stroke_step` calls since the last recomposition.
+    steps_now: u32,
+    steps_per_frame: Stat,
+    step_cpu: Stat,
+    begin_cpu: Stat,
+    composite_cpu: Stat,
+    end_cpu: Stat,
+    /// The recomposition right after letting go is still due.
+    after_pending: bool,
+    after_release_cpu: Stat,
+}
+
+impl StrokeMeter {
+    /// The recomposition ran: counts the frame's steps while painting, or
+    /// times the first one after releasing.
+    fn composited(&mut self, painting: bool, cpu_ms: f64) {
+        if painting {
+            self.composite_cpu.add(cpu_ms);
+            self.steps_per_frame.add(f64::from(std::mem::take(&mut self.steps_now)));
+        } else if std::mem::take(&mut self.after_pending) {
+            self.after_release_cpu.add(cpu_ms);
+        }
+    }
+
+    /// Status-bar text: average/peak in ms (steps: calls per frame).
+    fn text(&self) -> String {
+        format!(
+            "F6 CPU avg/peak ms: steps/frame {}, stamp {}, begin {}, recomp {}, end {}, recomp after release {}",
+            self.steps_per_frame.text(),
+            self.step_cpu.text(),
+            self.begin_cpu.text(),
+            self.composite_cpu.text(),
+            self.end_cpu.text(),
+            self.after_release_cpu.text()
+        )
+    }
+}
+
 pub struct PainterApp {
     rs: egui_wgpu::RenderState,
     mesh: Arc<Mesh>,
@@ -454,6 +519,8 @@ pub struct PainterApp {
     preview_update_at: Option<Instant>,
     /// The next rebuild reports how long it took (F5).
     time_composite: bool,
+    /// F6: CPU time of the paint path.
+    meter: StrokeMeter,
     /// The running bake only makes the ID map (from vertex colors).
     bake_id_only: bool,
     cam: OrbitCam,
@@ -1442,6 +1509,7 @@ impl PainterApp {
             baked_id_source: IdSource::MeshParts,
             preview_update_at: None,
             time_composite: false,
+            meter: StrokeMeter::default(),
             bake_id_only: false,
             cam: OrbitCam::default(),
             cam2d: Cam2d::default(),
@@ -2114,6 +2182,14 @@ impl PainterApp {
             if i.key_pressed(Key::F3) {
                 self.layout = Layout::View2d;
             }
+            if i.key_pressed(Key::F6) {
+                self.meter = StrokeMeter { on: !self.meter.on, ..Default::default() };
+                self.status = if self.meter.on {
+                    "F6 meter on (CPU times, bottom right). Paint, then press F6 again to stop.".into()
+                } else {
+                    "F6 meter off.".into()
+                };
+            }
             if i.key_pressed(Key::F5) {
                 self.preview_update_at = None;
                 self.engine.mark_dirty();
@@ -2608,7 +2684,8 @@ impl PainterApp {
                 let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
                 ui.label(
                     egui::RichText::new(format!(
-                        "{:.1} ms (peak {:.0})  │  VRAM {:.0} MB  │  Undo {:.1} MB RAM ({} steps)  │  {}²  │  {} tris",
+                        "{}{:.1} ms (peak {:.0})  │  VRAM {:.0} MB  │  Undo {:.1} MB RAM ({} steps)  │  {}²  │  {} tris",
+                        if self.meter.on { format!("{}  │  ", self.meter.text()) } else { String::new() },
                         self.frame_ms,
                         self.frame_peak_ms,
                         mb(self.engine.vram_bytes()),
@@ -3650,7 +3727,13 @@ impl PainterApp {
 
     fn try_begin_stroke(&mut self, kind: ViewKind, at: Vec2) {
         let erase = self.tool == Tool::Eraser;
-        if self.begin_stroke_on_target(kind, at, erase) {
+        let began = Instant::now();
+        let begun = self.begin_stroke_on_target(kind, at, erase);
+        if self.meter.on && begun {
+            self.meter.begin_cpu.add(began.elapsed().as_secs_f64() * 1000.0);
+            self.meter.after_pending = false;
+        }
+        if begun {
             let stamp = self.make_stamp(at, None, self.pressure);
             self.paint_stamps(kind, &[stamp]);
         }
@@ -3771,7 +3854,12 @@ impl PainterApp {
                 })
             }
         };
+        let stamp_started = Instant::now();
         self.engine.stroke_step(&stamps, su, self.views.view3d.depth_view(), &paint, region);
+        if self.meter.on {
+            self.meter.steps_now += 1;
+            self.meter.step_cpu.add(stamp_started.elapsed().as_secs_f64() * 1000.0);
+        }
     }
 
     fn continue_stroke(&mut self, at: Vec2) {
@@ -3818,8 +3906,13 @@ impl PainterApp {
             if matches!(self.tool, Tool::Paint | Tool::Eraser) {
                 self.line_anchor = Some(LineAnchor { view: s.view, at: s.last, key: self.view_key(s.view) });
             }
+            let ending = Instant::now();
             if let Some(entry) = self.engine.end_stroke() {
                 self.undo.push("Paint stroke", crate::undo::Edit::Stroke(entry));
+            }
+            if self.meter.on {
+                self.meter.end_cpu.add(ending.elapsed().as_secs_f64() * 1000.0);
+                self.meter.after_pending = true;
             }
         }
     }

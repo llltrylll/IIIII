@@ -251,6 +251,9 @@ impl PainterApp {
         if self.engine.dirty {
             let started = Instant::now();
             self.engine.composite();
+            if self.meter.on {
+                self.meter.composited(self.stroke.is_some(), started.elapsed().as_secs_f64() * 1000.0);
+            }
             if std::mem::take(&mut self.time_composite) {
                 // F5 measures the whole rebuild, GPU included.
                 let cpu = started.elapsed();
