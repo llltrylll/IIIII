@@ -323,13 +323,37 @@ impl UndoStack {
         self.undo.last().map_or(0, |e| e.serial)
     }
 
+    /// Discards history and any group that has not yet been committed.
     pub fn clear(&mut self) {
         self.undo.clear();
         self.redo.clear();
         self.group = None;
+        self.group_depth = 0;
     }
 
     pub fn ram_bytes(&self) -> usize {
         self.undo.iter().chain(self.redo.iter()).map(|e| e.edit.bytes()).sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Edit, UndoStack};
+
+    #[test]
+    fn clearing_history_also_resets_open_groups() {
+        let mut history = UndoStack::default();
+        history.begin_group("discarded group");
+        history.push("discarded edit", Edit::Order(Vec::new()));
+
+        history.clear();
+
+        history.begin_group("kept group");
+        history.push("kept edit", Edit::Order(Vec::new()));
+        history.end_group();
+
+        assert_eq!(history.undo.len(), 1);
+        assert_eq!(history.undo[0].label, "kept group");
+        assert!(matches!(&history.undo[0].edit, Edit::Group(edits) if edits.len() == 1));
     }
 }
