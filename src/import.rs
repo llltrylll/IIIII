@@ -42,11 +42,40 @@ pub fn load(path: &Path) -> Result<RawMesh, String> {
         "fbx" => load_fbx(path)?,
         _ => return Err(format!("Unsupported mesh format '.{ext}'. Use OBJ or FBX.")),
     };
-    if mesh.indices.is_empty() {
-        return Err("The file contains no triangles.".into());
-    }
+    validate_raw_mesh(&mesh)?;
     mesh.name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     Ok(mesh)
+}
+
+/// Reject inconsistent importer output before mesh construction can index or
+/// normalize it. This also catches non-finite FBX transforms and broken
+/// per-triangle attributes while keeping valid files unchanged.
+fn validate_raw_mesh(mesh: &RawMesh) -> Result<(), String> {
+    let bad = "The mesh file contains inconsistent or invalid geometry.";
+    if mesh.indices.is_empty() || !mesh.indices.len().is_multiple_of(3) || mesh.positions.is_empty() {
+        return Err("The file contains no complete triangles.".into());
+    }
+
+    let triangles = mesh.indices.len() / 3;
+    if mesh.indices.iter().any(|&index| index as usize >= mesh.positions.len())
+        || mesh.positions.iter().any(|p| !p.is_finite())
+        || mesh.normals.as_ref().is_some_and(|values| {
+            values.len() != mesh.positions.len() || values.iter().any(|n| !n.is_finite())
+        })
+        || mesh.uvs.as_ref().is_some_and(|values| {
+            values.len() != mesh.positions.len() || values.iter().any(|uv| !uv.is_finite())
+        })
+        || mesh.tri_material.len() != triangles
+        || mesh.tri_object.len() != triangles
+        || mesh.tri_material.iter().any(|&material| material >= mesh.material_count)
+        || mesh.tri_object.iter().any(|&object| object as usize >= mesh.objects.len())
+        || mesh.tri_color.as_ref().is_some_and(|colors| colors.len() != triangles)
+        || mesh.tri_vertex_color.as_ref().is_some_and(|colors| colors.len() != triangles)
+    {
+        return Err(bad.into());
+    }
+
+    Ok(())
 }
 
 fn load_obj(path: &Path) -> Result<RawMesh, String> {
@@ -240,7 +269,7 @@ impl Builder {
             uvs: self.all_uvs.then_some(self.uvs),
             indices: self.indices,
             tri_material: self.tri_material,
-            material_count: self.max_material + 1,
+            material_count: self.max_material.saturating_add(1),
             material_names: self.material_names,
             missing_uvs: self.missing_uvs,
             tri_object: self.tri_object,
