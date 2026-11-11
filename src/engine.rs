@@ -1009,9 +1009,11 @@ fn composite_passes(layers: &[Layer]) -> (Vec<Pass>, usize) {
 /// The ID mask's colors as shader uniforms: the first color with the
 /// tolerance, then the others.
 fn id_uniform(g: &Generator) -> ([f32; 4], [[f32; 4]; MAX_ID_COLORS - 1]) {
-    let colors = g.id_colors();
+    // Read the fixed-size selection directly: this runs for every ID mask
+    // during composition, so allocating a temporary Vec here is unnecessary.
+    let count = (g.id_count as usize).clamp(1, MAX_ID_COLORS);
     let mut more = [[0.0; 4]; MAX_ID_COLORS - 1];
-    for (slot, c) in more.iter_mut().zip(&colors[1..]) {
+    for (slot, c) in more.iter_mut().zip(g.id_more.iter().take(count - 1)) {
         *slot = [c[0], c[1], c[2], 1.0];
     }
     ([g.id_color[0], g.id_color[1], g.id_color[2], g.id_tolerance], more)
@@ -4105,5 +4107,19 @@ mod composite_tests {
         let (passes, depth) = composite_passes(&layers);
         assert_eq!(passes, vec![Pass::Layer(0)]);
         assert_eq!(depth, 0);
+    }
+
+    #[test]
+    fn id_uniform_copies_only_the_selected_additional_colors() {
+        let mut generator = GenKind::IdMask.default_generator();
+        generator.id_color = [0.1, 0.2, 0.3];
+        generator.id_more[0] = [0.4, 0.5, 0.6];
+        generator.id_more[1] = [0.7, 0.8, 0.9];
+        generator.id_count = 2;
+
+        let (primary, additional) = id_uniform(&generator);
+        assert_eq!(primary, [0.1, 0.2, 0.3, generator.id_tolerance]);
+        assert_eq!(additional[0], [0.4, 0.5, 0.6, 1.0]);
+        assert_eq!(additional[1], [0.0; 4]);
     }
 }
