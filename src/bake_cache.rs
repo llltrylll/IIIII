@@ -186,6 +186,9 @@ fn decode(mut b: &[u8]) -> Option<Entry> {
     let json_len = u32_(&mut b)? as usize;
     let report: serde_json::Value = serde_json::from_slice(take(&mut b, json_len)?).ok()?;
     let report = BakeReport::from_cache_json(&report)?;
+    if report.resolution == 0 || report.resolution > MAX_BAKE_RES {
+        return None;
+    }
     let texture = |b: &mut &[u8], format: wgpu::TextureFormat| -> Option<(u32, Vec<u8>)> {
         let res = u32_(b)?;
         if res == 0 || res > MAX_BAKE_RES {
@@ -212,8 +215,15 @@ fn decode(mut b: &[u8]) -> Option<Entry> {
     if count > max_custom_textures {
         return None;
     }
+    let expected_custom_textures = report.custom.len().div_ceil(CUSTOM_PER_TEXTURE);
+    if count != expected_custom_textures {
+        return None;
+    }
     let custom = (0..count).map(|_| texture(&mut b, CUSTOM_FORMAT)).collect::<Option<Vec<_>>>()?;
-    if custom.iter().any(|(res, _)| *res != resolution) || !b.is_empty() {
+    if report.resolution != resolution
+        || custom.iter().any(|(res, _)| *res != resolution)
+        || !b.is_empty()
+    {
         return None;
     }
     Some(Entry { report, maps, custom })
@@ -421,6 +431,27 @@ mod tests {
         }
         bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes.extend_from_slice(b"unexpected");
+        assert!(decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn cache_rejects_report_and_texture_resolution_mismatch() {
+        let mut bytes = test_cache_header();
+        for format in MAP_FORMATS {
+            append_test_texture(&mut bytes, 2, format);
+        }
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        assert!(decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn cache_rejects_custom_texture_count_mismatch() {
+        let mut bytes = test_cache_header();
+        for format in MAP_FORMATS {
+            append_test_texture(&mut bytes, 1, format);
+        }
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        append_test_texture(&mut bytes, 1, CUSTOM_FORMAT);
         assert!(decode(&bytes).is_none());
     }
 
