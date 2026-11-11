@@ -16,6 +16,7 @@ const UNDEFINED: u64 = u64::MAX;
 /// The import only needs ordinary texture tiles and model data; reject
 /// unreasonable metadata sizes before allocating from an untrusted HDF5 file.
 const MAX_DATASET_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_HDF5_METADATA_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Hdf5Error {
