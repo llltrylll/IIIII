@@ -136,6 +136,14 @@ impl Reader<'_> {
         }
         lz4_flex::decompress_size_prepended(packed).map_err(|e| format!("blob {i} is damaged: {e}"))
     }
+
+    fn pod_blob<T: bytemuck::Pod>(&self, v: &Value) -> Result<Vec<T>, String> {
+        let bytes = self.blob(v)?;
+        if bytes.len() % std::mem::size_of::<T>() != 0 {
+            return Err("project contains a malformed binary array".into());
+        }
+        Ok(bytemuck::pod_collect_to_vec(&bytes))
+    }
 }
 
 fn f(v: &Value, key: &str, default: f32) -> f32 {
@@ -704,8 +712,8 @@ impl PainterApp {
 
         // Everything is decoded before the open document is touched.
         let m = &manifest["mesh"];
-        let vertices: Vec<Vertex> = bytemuck::pod_collect_to_vec(&r.blob(&m["vertices"])?);
-        let indices: Vec<u32> = bytemuck::pod_collect_to_vec(&r.blob(&m["indices"])?);
+        let vertices: Vec<Vertex> = r.pod_blob(&m["vertices"])?;
+        let indices: Vec<u32> = r.pod_blob(&m["indices"])?;
         if vertices.is_empty()
             || indices.is_empty()
             || !indices.len().is_multiple_of(3)
@@ -724,8 +732,11 @@ impl PainterApp {
         let tris = indices.len() / 3;
         let mut mesh = Mesh::from_saved(s(m, "name").unwrap_or("Mesh").to_string(), vertices, indices, center, scale);
         if let Some(names) = m["objects"].as_array() {
-            let tri_object: Vec<u32> = bytemuck::pod_collect_to_vec(&r.blob(&m["tri_object"])?);
-            if tri_object.len() == tris && tri_object.iter().all(|&o| (o as usize) < names.len()) {
+            if !names.is_empty() {
+                let tri_object: Vec<u32> = r.pod_blob(&m["tri_object"])?;
+                if tri_object.len() != tris || tri_object.iter().any(|&o| o as usize >= names.len()) {
+                    return Err(bad());
+                }
                 mesh.objects = names.iter().map(|n| n.as_str().unwrap_or("").to_string()).collect();
                 mesh.tri_object = tri_object;
             }
