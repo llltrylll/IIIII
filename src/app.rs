@@ -1612,13 +1612,19 @@ impl PainterApp {
                 }
                 Action::Undo => {
                     self.switch_for_history(false);
-                    self.engine.undo(&mut self.undo);
-                    self.after_history_step();
+                    match self.engine.undo(&mut self.undo) {
+                        Ok(true) => self.after_history_step(),
+                        Ok(false) => {}
+                        Err(error) => self.status = format!("Undo failed: {error}"),
+                    }
                 }
                 Action::Redo => {
                     self.switch_for_history(true);
-                    self.engine.redo(&mut self.undo);
-                    self.after_history_step();
+                    match self.engine.redo(&mut self.undo) {
+                        Ok(true) => self.after_history_step(),
+                        Ok(false) => {}
+                        Err(error) => self.status = format!("Redo failed: {error}"),
+                    }
                 }
                 Action::AddPaint => {
                     self.selected = self.engine.add_paint_layer(at, parent, None, &mut self.undo);
