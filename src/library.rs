@@ -248,7 +248,7 @@ fn get_bytes(agent: &ureq::Agent, url: &str, progress: &dyn Fn(u64, u64)) -> Res
         .map_err(|_| format!("{url}: invalid Content-Length"))?;
     let mut out = Vec::new();
     out.try_reserve_exact(initial).map_err(|e| format!("{url}: can't reserve download buffer: {e}"))?;
-    let mut reader = resp.body_mut().with_config().limit(MAX_DOWNLOAD_BYTES).reader();
+    let mut reader = resp.body_mut().with_config().limit(MAX_DOWNLOAD_BYTES + 1).reader();
     let mut buf = vec![0u8; 256 * 1024];
     loop {
         let n = reader.read(&mut buf).map_err(|e| format!("{url}: {e}"))?;
