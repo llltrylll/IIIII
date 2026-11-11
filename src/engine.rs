@@ -4030,17 +4030,45 @@ impl Engine {
     // ------------------------------------------------------------------ stats
 
     pub fn vram_bytes(&self) -> u64 {
+        // Fill images can be shared by several layers. Count each GPU texture
+        // once, while counting the additional array copy used by the shaders.
+        let mut images = HashMap::new();
+        for image in self.layers.iter().flat_map(|layer| layer.images.iter().flatten()) {
+            images.entry(Arc::as_ptr(&image.tex)).or_insert_with(|| image.tex.bytes());
+        }
+        let image_bytes = images.values().copied().sum::<u64>();
+
+        let set_bytes = |sets: &[[Tex; ACCUM]]| sets.iter().flatten().map(|tex| tex.bytes()).sum::<u64>();
+        let custom_array_bytes = {
+            let res = self.custom.first().map_or(1, |tex| tex.width) as u64;
+            res * res * self.custom.len().max(1) as u64 * gpu::bytes_per_texel(CUSTOM_FORMAT) as u64
+        };
+        let filtered_masks = self.mask_out.values().flat_map(|textures| textures.iter()).map(|tex| tex.bytes()).sum::<u64>();
+        let buffers = self.layer_ubuf.size()
+            + self.stamp_ubuf.size()
+            + self.stamp_sbuf.size()
+            + self.apply_ubuf.size()
+            + self.mask_filter_ubuf.size();
         let fixed = self.pos.bytes()
             + self.nrm.bytes()
             + self.tan.bytes()
             + self.stroke.bytes()
+            + self.dummy.bytes()
+            + self.brush_alpha.bytes()
+            + self.brush_grain.bytes()
             + self.maps.iter().map(|t| t.bytes()).sum::<u64>()
+            + self.custom.iter().map(|t| t.bytes()).sum::<u64>()
+            + custom_array_bytes
             + self.resolved.iter().flatten().map(|t| t.bytes()).sum::<u64>()
             + self.map_fix.iter().flatten().map(|t| t.bytes()).sum::<u64>()
             + self.accum.iter().flatten().map(|t| t.bytes()).sum::<u64>()
+            + set_bytes(&self.folder_below)
+            + self.prefix_cache.as_ref().map_or(0, |set| set.iter().map(|t| t.bytes()).sum())
+            + filtered_masks
             + self.snap.iter().flatten().map(|t| t.bytes()).sum::<u64>()
-            + self.snap_mask.as_ref().map_or(0, |t| t.bytes());
-        fixed + self.layers.iter().map(|l| l.vram_bytes()).sum::<u64>()
+            + self.snap_mask.as_ref().map_or(0, |t| t.bytes())
+            + buffers;
+        fixed + image_bytes + self.layers.iter().map(|layer| layer.vram_bytes()).sum::<u64>()
     }
 
     pub fn layer_vram_bytes(&self, idx: usize) -> u64 {
