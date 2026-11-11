@@ -18,6 +18,7 @@ use crate::post::Tonemap;
 use crate::viewport::{Background, OrbitCam};
 use eframe::{egui, wgpu};
 use serde_json::{Value, json};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 8] = b"MPPROJ\x00\x01";
@@ -472,9 +473,9 @@ impl PainterApp {
             return;
         }
         let Some(path) = autosave_path() else { return };
-        self.autosaved_serial = serial;
-        if let Err(e) = self.write_project(&path) {
-            self.status = format!("Autosave failed: {e}");
+        match self.write_project(&path) {
+            Ok(_) => self.autosaved_serial = self.undo.state_serial(),
+            Err(e) => self.status = format!("Autosave failed: {e}"),
         }
     }
 
@@ -572,19 +573,34 @@ impl PainterApp {
             "view": view,
         });
         let text = serde_json::to_vec(&manifest).map_err(|e| e.to_string())?;
-        let mut out = Vec::with_capacity(text.len() + w.blobs.iter().map(|b| b.len() + 8).sum::<usize>() + 32);
-        out.extend_from_slice(MAGIC);
-        out.extend_from_slice(&(text.len() as u64).to_le_bytes());
-        out.extend_from_slice(&text);
-        out.extend_from_slice(&(w.blobs.len() as u64).to_le_bytes());
-        for blob in &w.blobs {
-            out.extend_from_slice(&(blob.len() as u64).to_le_bytes());
-            out.extend_from_slice(blob);
-        }
+        // Stream the container to the temporary file. The compressed blobs
+        // already live in Writer; assembling a second project-sized Vec here
+        // needlessly doubled peak memory for large texture sets.
         let tmp = path.with_extension("mpp.tmp");
-        std::fs::write(&tmp, &out).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
+        let mut file = std::fs::File::create(&tmp).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
+        let mut bytes = 0usize;
+        let mut write = |chunk: &[u8]| -> Result<(), String> {
+            file.write_all(chunk).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
+            bytes = bytes.checked_add(chunk.len()).ok_or_else(|| "project size overflow".to_string())?;
+            Ok(())
+        };
+        let manifest_len = u64::try_from(text.len()).map_err(|_| "manifest is too large".to_string())?;
+        let blob_count = u64::try_from(w.blobs.len()).map_err(|_| "too many project blobs".to_string())?;
+        write(MAGIC)?;
+        write(&manifest_len.to_le_bytes())?;
+        write(&text)?;
+        write(&blob_count.to_le_bytes())?;
+        for blob in &w.blobs {
+            let blob_len = u64::try_from(blob.len()).map_err(|_| "project blob is too large".to_string())?;
+            write(&blob_len.to_le_bytes())?;
+            write(blob)?;
+        }
+        file.flush().map_err(|e| format!("can't finish {}: {e}", tmp.display()))?;
+        file.sync_all().map_err(|e| format!("can't sync {}: {e}", tmp.display()))?;
+        drop(write);
+        drop(file);
         std::fs::rename(&tmp, path).map_err(|e| format!("can't replace {}: {e}", path.display()))?;
-        Ok(out.len())
+        Ok(bytes)
     }
 
     fn remember_recent(&mut self, path: &Path) {
