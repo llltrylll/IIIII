@@ -9,7 +9,7 @@
 use crate::engine::{Blend, Content, FillParams, Generator, Layer, Levels, Mask};
 use crate::gpu::{Tex, bytes_per_texel};
 use eframe::wgpu;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 
@@ -21,9 +21,14 @@ pub struct TexInfo {
 }
 
 enum SnapState {
-    Mapping { buffers: Vec<wgpu::Buffer>, remaining: Arc<AtomicUsize> },
+    Mapping {
+        buffers: Vec<wgpu::Buffer>,
+        remaining: Arc<AtomicUsize>,
+        failure: Arc<Mutex<Option<String>>>,
+    },
     Compressing(mpsc::Receiver<Vec<Vec<u8>>>),
     Ready(Vec<Vec<u8>>),
+    Failed(String),
 }
 
 pub struct Snapshot {
@@ -63,14 +68,22 @@ impl Snapshot {
             buffers.push(buffer);
         }
         let remaining = Arc::new(AtomicUsize::new(buffers.len()));
-        Snapshot { infos, state: SnapState::Mapping { buffers, remaining } }
+        let failure = Arc::new(Mutex::new(None));
+        Snapshot { infos, state: SnapState::Mapping { buffers, remaining, failure } }
     }
 
     pub fn request_map(&self) {
-        if let SnapState::Mapping { buffers, remaining } = &self.state {
+        if let SnapState::Mapping { buffers, remaining, failure } = &self.state {
             for b in buffers {
                 let remaining = remaining.clone();
-                b.slice(..).map_async(wgpu::MapMode::Read, move |_| {
+                let failure = failure.clone();
+                b.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+                    if let Err(error) = result {
+                        let mut slot = failure.lock().unwrap_or_else(|e| e.into_inner());
+                        if slot.is_none() {
+                            *slot = Some(format!("GPU undo snapshot readback failed: {error}"));
+                        }
+                    }
                     remaining.fetch_sub(1, Ordering::AcqRel);
                 });
             }
@@ -80,50 +93,76 @@ impl Snapshot {
     /// Advances the state machine without blocking.
     pub fn update(&mut self) {
         match &mut self.state {
-            SnapState::Mapping { buffers, remaining } => {
+            SnapState::Mapping { buffers, remaining, failure } => {
                 if remaining.load(Ordering::Acquire) != 0 {
                     return;
                 }
-                let raw: Vec<Vec<u8>> = buffers
-                    .iter()
-                    .map(|b| {
-                        let data = b.slice(..).get_mapped_range().expect("staging buffer is mapped").to_vec();
-                        b.unmap();
-                        data
-                    })
-                    .collect();
+
+                let mut failed = failure.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let mut raw = Vec::with_capacity(buffers.len());
+                if failed.is_none() {
+                    for buffer in buffers.iter() {
+                        match buffer.slice(..).get_mapped_range() {
+                            Ok(data) => raw.push(data.to_vec()),
+                            Err(error) => {
+                                failed = Some(format!("GPU undo snapshot could not be read: {error}"));
+                                break;
+                            }
+                        }
+                    }
+                }
+                // Release every mapping, including successful mappings when another failed.
+                for buffer in buffers {
+                    buffer.unmap();
+                }
+                if let Some(error) = failed {
+                    self.state = SnapState::Failed(error);
+                    return;
+                }
+
                 let (tx, rx) = mpsc::channel();
                 rayon::spawn(move || {
-                    let packed = raw.iter().map(|d| lz4_flex::compress_prepend_size(d)).collect();
+                    let packed = raw.iter().map(|data| lz4_flex::compress_prepend_size(data)).collect();
                     let _ = tx.send(packed);
                 });
                 self.state = SnapState::Compressing(rx);
             }
-            SnapState::Compressing(rx) => {
-                if let Ok(data) = rx.try_recv() {
-                    self.state = SnapState::Ready(data);
+            SnapState::Compressing(rx) => match rx.try_recv() {
+                Ok(data) => self.state = SnapState::Ready(data),
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.state = SnapState::Failed("Undo snapshot compression worker stopped unexpectedly.".into());
                 }
-            }
-            SnapState::Ready(_) => {}
+            },
+            SnapState::Ready(_) | SnapState::Failed(_) => {}
         }
     }
 
     /// Blocks until the data is available. Used when the user undoes a stroke
     /// whose readback is still in flight.
-    pub fn wait(&mut self, device: &wgpu::Device) {
+    pub fn wait(&mut self, device: &wgpu::Device) -> Result<(), String> {
         loop {
             match &mut self.state {
                 SnapState::Mapping { remaining, .. } => {
-                    if remaining.load(Ordering::Acquire) != 0 {
-                        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+                    if remaining.load(Ordering::Acquire) != 0
+                        && let Err(error) = device.poll(wgpu::PollType::wait_indefinitely())
+                    {
+                        let message = format!("GPU did not finish the undo snapshot readback: {error:?}");
+                        self.state = SnapState::Failed(message.clone());
+                        return Err(message);
                     }
                     self.update();
                 }
-                SnapState::Compressing(rx) => {
-                    let data = rx.recv().unwrap_or_default();
-                    self.state = SnapState::Ready(data);
-                }
-                SnapState::Ready(_) => return,
+                SnapState::Compressing(rx) => match rx.recv() {
+                    Ok(data) => self.state = SnapState::Ready(data),
+                    Err(_) => {
+                        let message = "Undo snapshot compression worker stopped unexpectedly.".to_string();
+                        self.state = SnapState::Failed(message.clone());
+                        return Err(message);
+                    }
+                },
+                SnapState::Ready(_) => return Ok(()),
+                SnapState::Failed(error) => return Err(error.clone()),
             }
         }
     }
@@ -136,17 +175,34 @@ impl Snapshot {
     }
 
     /// Uploads the snapshot into `textures` (same order and sizes as captured).
-    pub fn restore(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, textures: &[&Tex]) {
-        self.wait(device);
-        let SnapState::Ready(data) = &self.state else { return };
+    pub fn restore(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, textures: &[&Tex]) -> Result<(), String> {
+        self.wait(device)?;
+        let SnapState::Ready(data) = &self.state else {
+            return Err("Undo snapshot is not ready.".into());
+        };
+        if textures.len() != self.infos.len() || data.len() != self.infos.len() {
+            return Err("Undo snapshot texture count no longer matches its target.".into());
+        }
+
+        // Validate the complete snapshot before writing any part of it.
+        let mut decoded = Vec::with_capacity(data.len());
         for ((tex, packed), info) in textures.iter().zip(data).zip(&self.infos) {
             if tex.width != info.width || tex.height != info.height {
-                continue;
+                return Err("Undo snapshot dimensions no longer match its target.".into());
             }
-            let Ok(raw) = lz4_flex::decompress_size_prepended(packed) else { continue };
+            let raw = lz4_flex::decompress_size_prepended(packed)
+                .map_err(|error| format!("Undo snapshot decompression failed: {error}"))?;
+            let expected = info.width as usize * info.height as usize * info.bpp as usize;
+            if raw.len() != expected {
+                return Err("Undo snapshot data has an unexpected size.".into());
+            }
+            decoded.push(raw);
+        }
+
+        for ((tex, raw), info) in textures.iter().zip(&decoded).zip(&self.infos) {
             queue.write_texture(
                 tex.copy_info(),
-                &raw,
+                raw,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(info.width * info.bpp),
@@ -155,6 +211,7 @@ impl Snapshot {
                 tex.extent(),
             );
         }
+        Ok(())
     }
 }
 
