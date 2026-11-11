@@ -55,7 +55,7 @@ mod layers_ui;
 mod shelf_ui;
 mod view_ui;
 mod windows_ui;
-use color_ui::{ColorSliders, color_edit, hsv_to_rgb, parse_color_hex, rgb_to_hsv};
+use color_ui::{ColorSliders, color_edit, hsv_to_rgb, rgb_to_hsv};
 mod vertex_id;
 
 use export_ui::{ExportDialog, open_in_file_browser};

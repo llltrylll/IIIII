@@ -205,7 +205,7 @@ pub(crate) fn harmony_row(ui: &mut egui::Ui, base: Rgb) -> Option<(Rgb, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::parse_color_hex;
+    use crate::app::color_ui::parse_color_hex;
 
     fn close(a: Rgb, b: Rgb) -> bool {
         a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-4)
