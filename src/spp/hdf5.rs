@@ -210,7 +210,8 @@ impl<R: Read + Seek> Hdf5File<R> {
                 return Err(Hdf5Error::Unsupported("filtered chunks".into()));
             }
             // Offsets are per dimension; datasets here are one-dimensional bytes.
-            let offset = u64_at(&body, key + 8)? as usize;
+            let offset = usize::try_from(u64_at(&body, key + 8)?)
+                .map_err(|_| Hdf5Error::Corrupt("chunk offset".into()))?;
             if offset >= out.len() {
                 continue;
             }
