@@ -226,11 +226,10 @@ pub fn read_view(g: &mut Graph, seen: &Graph, specs: &mut [LayerSpec], lib: &Lib
         let (Some(n), Some(before)) = (g.node(t.node), seen.node(t.node)) else { continue };
         match t.role {
             Role::Mask => {
-                if n.params != before.params {
-                    if let Some(mg) = s.generator.as_mut() {
+                if n.params != before.params
+                    && let Some(mg) = s.generator.as_mut() {
                         read_mask(lib, n, Some(before), mg);
                     }
-                }
             }
             Role::Channel(k) => {
                 if n.params != before.params {
@@ -472,11 +471,10 @@ fn read_mask(lib: &Library, n: &Node, before: Option<&Node>, mg: &mut Generator)
     let now = slots(lib, n);
     if let Some(b) = before {
         for (input, _) in slots(lib, b) {
-            if input > 0 && !now.iter().any(|s| s.0 == input) {
-                if let Some(w) = mg.weights.get_mut(input - 1) {
+            if input > 0 && !now.iter().any(|s| s.0 == input)
+                && let Some(w) = mg.weights.get_mut(input - 1) {
                     *w = 0.0;
                 }
-            }
         }
     }
     for (input, weight) in now {

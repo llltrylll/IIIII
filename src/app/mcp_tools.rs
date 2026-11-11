@@ -357,13 +357,10 @@ impl PainterApp {
                         if let Some(v) = f32_arg(args, "part_variation") {
                             f.part_var = v.clamp(0.0, 1.0);
                         }
-                        match str_arg(args, "projection") {
-                            Some(p) => {
-                                f.projection = crate::engine::Projection::from_key(p).ok_or(format!(
-                                    "projection must be uv, triplanar, planar_x, planar_y, planar_z, spherical or cylindrical, not '{p}'"
-                                ))?
-                            }
-                            None => {}
+                        if let Some(p) = str_arg(args, "projection") {
+                            f.projection = crate::engine::Projection::from_key(p).ok_or(format!(
+                                "projection must be uv, triplanar, planar_x, planar_y, planar_z, spherical or cylindrical, not '{p}'"
+                            ))?
                         }
                         if let Some(v) = f32_arg(args, "tiling") {
                             f.tiling = v.max(0.001);

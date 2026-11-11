@@ -313,12 +313,11 @@ impl PainterApp {
                         if ui.button("Restore page defaults").clicked() {
                             self.restore_page_defaults(self.prefs_ui.page);
                         }
-                        if ui.button("Open settings folder").clicked() {
-                            if let Some(dir) = super::project_io::data_dir() {
+                        if ui.button("Open settings folder").clicked()
+                            && let Some(dir) = super::project_io::data_dir() {
                                 let _ = std::fs::create_dir_all(&dir);
                                 super::open_in_file_browser(&dir);
                             }
-                        }
                     });
                     ui.separator();
                     // The scroll area inherits the row's left-to-right layout;
@@ -446,11 +445,10 @@ impl PainterApp {
                 });
                 labeled(ui, "Folder", |ui| {
                     ui.add(egui::TextEdit::singleline(&mut p.export_folder).desired_width(240.0));
-                    if ui.button("Browse…").clicked() {
-                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                    if ui.button("Browse…").clicked()
+                        && let Some(dir) = rfd::FileDialog::new().pick_folder() {
                             p.export_folder = dir.display().to_string();
                         }
-                    }
                 });
                 super::export_ui::format_controls(ui, p);
                 ui.checkbox(&mut p.export_open_folder, "Open the folder after exporting");

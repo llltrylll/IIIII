@@ -421,8 +421,8 @@ impl PainterApp {
     fn share_package(&mut self, ctx: &egui::Context, kind: Kind, path: &std::path::Path, thumb: Option<Vec<u8>>, user_nodes: &[std::path::PathBuf], name: &str) {
         match library::package(kind, path, thumb, user_nodes, name) {
             Ok((dir, zip)) => {
-                open_in_file_browser(&dir.parent().unwrap_or(&dir).to_path_buf());
-                ctx.open_url(egui::OpenUrl::new_tab(library::submit_url(&name)));
+                open_in_file_browser(dir.parent().unwrap_or(&dir));
+                ctx.open_url(egui::OpenUrl::new_tab(library::submit_url(name)));
                 self.status = format!(
                     "Packed '{name}' ({} custom node{}). Attach {} to the submission page that just opened.",
                     user_nodes.len(),

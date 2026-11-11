@@ -428,11 +428,10 @@ impl PainterApp {
                     }
                 }
             });
-            if ui.button("Folder").on_hover_text("Your shaders live here; edits from other editors reload automatically").clicked() {
-                if let Some(dir) = &self.graphs.lib.user_dir {
+            if ui.button("Folder").on_hover_text("Your shaders live here; edits from other editors reload automatically").clicked()
+                && let Some(dir) = &self.graphs.lib.user_dir {
                     super::open_in_file_browser(dir);
                 }
-            }
         });
         let open = self.graphs.shader.id.clone();
         let mut pick = None;

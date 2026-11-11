@@ -28,7 +28,7 @@ pub struct Node {
 }
 
 fn pad8(out: &mut Vec<u8>) {
-    while out.len() % 8 != 0 {
+    while !out.len().is_multiple_of(8) {
         out.push(0);
     }
 }
@@ -77,7 +77,7 @@ fn write_group(out: &mut Vec<u8>, node: &Node) -> (u64, u64, u64) {
         offsets.push(heap_data.len() as u64);
         heap_data.extend(name.as_bytes());
         heap_data.push(0);
-        while heap_data.len() % 8 != 0 {
+        while !heap_data.len().is_multiple_of(8) {
             heap_data.push(0);
         }
     }
@@ -198,7 +198,7 @@ pub fn resource_blob(format: &'static str, width: u32, height: u32, tiles: &[([u
         le(&mut out, data.len() as u32);
         le(&mut out, 0);
         out.extend(*data);
-        out.resize(out.len() + (data.len() + 7) / 8 * 8 - data.len(), 0);
+        out.resize(out.len() + data.len().div_ceil(8) * 8 - data.len(), 0);
     }
     out
 }

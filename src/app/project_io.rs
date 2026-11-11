@@ -208,7 +208,7 @@ pub(super) fn fill_from(v: &Value) -> FillParams {
     // Four channels before opacity existed, five before emission, six before
     // normal and specular (the missing ones stay off).
     let enabled = match v.get("enabled").and_then(Value::as_array) {
-        Some(a) if a.len() >= 4 => std::array::from_fn(|i| a.get(i).map_or(false, |x| x.as_bool().unwrap_or(true))),
+        Some(a) if a.len() >= 4 => std::array::from_fn(|i| a.get(i).is_some_and(|x| x.as_bool().unwrap_or(true))),
         _ => d.mat.enabled,
     };
     FillParams {

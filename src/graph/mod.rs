@@ -377,11 +377,10 @@ impl Graph {
             let mut params = HashMap::new();
             if let (Some(d), Some(map)) = (lib.find(&def), n["params"].as_object()) {
                 for (k, jv) in map {
-                    if let Some(p) = d.params.iter().find(|p| &p.name == k) {
-                        if let Some(val) = json_value(jv, &p.kind) {
+                    if let Some(p) = d.params.iter().find(|p| &p.name == k)
+                        && let Some(val) = json_value(jv, &p.kind) {
                             params.insert(k.clone(), val);
                         }
-                    }
                 }
             }
             let links = n["links"].as_object().map_or_else(HashMap::new, |m| {

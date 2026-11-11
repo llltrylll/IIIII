@@ -259,11 +259,10 @@ fn catalog(agent: &ureq::Agent, source: Source) -> Result<Vec<Entry>, String> {
     let fresh = cache.as_ref().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok()).is_some_and(|t| {
         SystemTime::now().duration_since(t).is_ok_and(|age| age < CATALOG_MAX_AGE)
     });
-    if fresh && let Some(raw) = cache.as_ref().and_then(|p| std::fs::read_to_string(p).ok()) {
-        if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+    if fresh && let Some(raw) = cache.as_ref().and_then(|p| std::fs::read_to_string(p).ok())
+        && let Ok(v) = serde_json::from_str::<Value>(&raw) {
             return Ok(parse_catalog(source, &v));
         }
-    }
     let fetched = fetch_catalog(agent, source);
     match fetched {
         Ok(v) => {
@@ -648,7 +647,7 @@ pub fn local_materials() -> Vec<LocalMaterial> {
             })
         })
         .collect();
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out.sort_by_key(|a| a.name.to_lowercase());
     out
 }
 

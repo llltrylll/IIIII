@@ -2039,11 +2039,10 @@ impl Engine {
     pub fn shared_fill_image(&mut self, path: &std::path::Path) -> Result<FillImage, String> {
         let dir = path.parent().and_then(|d| d.file_name()).map_or(String::new(), |d| format!("{}/", d.to_string_lossy()));
         let name = format!("{dir}{}", path.file_name().map_or("image".into(), |n| n.to_string_lossy()));
-        if let Some((tex, encoded)) = self.image_cache.get(path) {
-            if let Some(tex) = tex.upgrade() {
+        if let Some((tex, encoded)) = self.image_cache.get(path)
+            && let Some(tex) = tex.upgrade() {
                 return Ok(FillImage { tex, name, encoded: encoded.clone() });
             }
-        }
         let encoded = Arc::new(std::fs::read(path).map_err(|e| format!("can't read {}: {e}", path.display()))?);
         let img = self.decode_fill_image(name, encoded.clone())?;
         self.image_cache.retain(|_, (t, _)| t.strong_count() > 0);
@@ -2351,10 +2350,7 @@ impl Engine {
             let copy = self.copy_layer(i);
             new_ids.insert(self.layers[i].id, copy.id);
             let mut copy = copy;
-            copy.parent = match self.layers[i].parent {
-                Some(p) => Some(*new_ids.get(&p).unwrap_or(&p)),
-                None => None,
-            };
+            copy.parent = self.layers[i].parent.map(|p| *new_ids.get(&p).unwrap_or(&p));
             if i == idx {
                 copy.name = format!("{} copy", copy.name);
             }
@@ -2406,14 +2402,12 @@ impl Engine {
                     }
                 }
             }
-            if let Some(mask) = &mut layer.mask {
-                if let Some(tex) = &mut mask.paint {
-                    if tex.width != self.res || tex.height != self.res {
+            if let Some(mask) = &mut layer.mask
+                && let Some(tex) = &mut mask.paint
+                    && (tex.width != self.res || tex.height != self.res) {
                         *tex = self.resample(&mut encoder, tex, self.res);
                         resampled = true;
                     }
-                }
-            }
         }
         if resampled {
             self.queue.submit([encoder.finish()]);
@@ -2618,15 +2612,14 @@ impl Engine {
         if layer.thumb.is_some() {
             return;
         }
-        if let Content::Paint(ch) = &layer.content {
-            if let Some(color) = &ch[0] {
+        if let Content::Paint(ch) = &layer.content
+            && let Some(color) = &ch[0] {
                 layer.thumb = Some(rs.renderer.write().register_native_texture(
                     &rs.device,
                     color.srgb(),
                     wgpu::FilterMode::Linear,
                 ));
             }
-        }
     }
 
     fn layer_props(layer: &Layer) -> LayerProps {
@@ -3434,11 +3427,10 @@ impl Engine {
         // the filtered texture instead (no smart mask on top).
         let mut source_slot: HashMap<usize, usize> = HashMap::new();
         for pass in &passes {
-            if let Pass::Layer(li) | Pass::End(li) = *pass {
-                if self.has_mask_filters(li) {
+            if let Pass::Layer(li) | Pass::End(li) = *pass
+                && self.has_mask_filters(li) {
                     source_slot.insert(li, passes.len() + source_slot.len());
                 }
-            }
         }
         // Each enabled mask layer renders through its own uniform slot too: the
         // layer's uniform with that mask layer's generator (or none, for a fill).
@@ -3721,11 +3713,10 @@ impl Engine {
                 )),
                 _ => None,
             };
-            if let Some(t) = filtered {
-                if let Some(i) = self.mask_out[&layer.id].iter().position(|x| std::ptr::eq(x, t)) {
+            if let Some(t) = filtered
+                && let Some(i) = self.mask_out[&layer.id].iter().position(|x| std::ptr::eq(x, t)) {
                     finals.push((layer.id, i));
                 }
-            }
             let bg = make_bg(filtered.or(mask));
             let out = &self.accum[dst];
             // A patch keeps what is around it.
@@ -3902,8 +3893,8 @@ impl Engine {
             if let (Some(m), Some(t)) = (layer.mask.as_mut(), mask) {
                 m.paint = Some(t);
             }
-            if let (Some(id), Content::Paint(ch)) = (layer.thumb, &layer.content) {
-                if let Some(color) = &ch[0] {
+            if let (Some(id), Content::Paint(ch)) = (layer.thumb, &layer.content)
+                && let Some(color) = &ch[0] {
                     self.rs.renderer.write().update_egui_texture_from_wgpu_texture(
                         &self.device,
                         color.srgb(),
@@ -3911,7 +3902,6 @@ impl Engine {
                         id,
                     );
                 }
-            }
         }
         self.res = res;
         self.uv_version += 1;

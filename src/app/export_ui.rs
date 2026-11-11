@@ -351,11 +351,10 @@ impl PainterApp {
                             // The rest of the row, less the Browse button.
                             let w = (ui.available_width() - 80.0).max(60.0);
                             ui.add(egui::TextEdit::singleline(&mut self.prefs.export_folder).desired_width(w));
-                            if ui.button("Browse…").clicked() {
-                                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                            if ui.button("Browse…").clicked()
+                                && let Some(dir) = rfd::FileDialog::new().pick_folder() {
                                     self.prefs.export_folder = dir.display().to_string();
                                 }
-                            }
                         });
                         labeled(ui, "$mesh", |ui| ui.add(egui::TextEdit::singleline(&mut self.export.mesh_name).desired_width(ui.available_width())));
                         format_controls(ui, &mut self.prefs);
@@ -444,10 +443,9 @@ impl PainterApp {
                 });
             });
         self.export.open = open;
-        if !ctx.input(|i| i.pointer.any_down()) && ctx.memory(|m| m.focused().is_none()) {
-            if let Err(e) = self.export.save_custom_if_changed() {
+        if !ctx.input(|i| i.pointer.any_down()) && ctx.memory(|m| m.focused().is_none())
+            && let Err(e) = self.export.save_custom_if_changed() {
                 self.status = format!("Couldn't save export templates: {e}");
             }
-        }
     }
 }

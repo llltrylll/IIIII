@@ -1029,9 +1029,8 @@ fn color_button(ui: &mut egui::Ui, c: &mut [f32; 3], tip: Option<&str>) -> bool 
                 let mut hex = color_picker::hex_string(*c);
                 ui.horizontal(|ui| {
                     ui.label("HEX");
-                    if ui.add(egui::TextEdit::singleline(&mut hex).desired_width(90.0)).changed() {
-                        if let Some(parsed) = parse_color_hex(&hex) { *c = parsed; changed = true; }
-                    }
+                    if ui.add(egui::TextEdit::singleline(&mut hex).desired_width(90.0)).changed()
+                        && let Some(parsed) = parse_color_hex(&hex) { *c = parsed; changed = true; }
                 });
                 ui.data_mut(|d| d.insert_temp(memory, if changed { hsv_keeping(hsv, *c) } else { hsv }));
             });
@@ -1495,7 +1494,7 @@ impl PainterApp {
         let brushes = crate::brushes::BRUSH_ALPHAS
             .iter()
             .map(|b| {
-                let px: Vec<Color32> = b.render(THUMB).into_iter().map(|a| Color32::from_white_alpha(a)).collect();
+                let px: Vec<Color32> = b.render(THUMB).into_iter().map(Color32::from_white_alpha).collect();
                 load(b.name, egui::ColorImage::new([THUMB as usize; 2], px))
             })
             .collect();
@@ -2316,11 +2315,10 @@ impl PainterApp {
             if layer_keys && i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::V)) {
                 self.pending.push(Action::PasteLayer);
             }
-            if layer_keys && i.consume_shortcut(&KeyboardShortcut::new(Modifiers::default(), Key::Delete)) {
-                if self.selected < self.engine.layers.len() {
+            if layer_keys && i.consume_shortcut(&KeyboardShortcut::new(Modifiers::default(), Key::Delete))
+                && self.selected < self.engine.layers.len() {
                     self.pending.push(Action::Delete);
                 }
-            }
             if i.modifiers.any() {
                 return;
             }
@@ -2631,23 +2629,19 @@ impl PainterApp {
         }
     }
     fn active_color(&self) -> [f32; 3] {
-        if self.target == StrokeTarget::Content {
-            if let Some(layer) = self.engine.layers.get(self.selected) {
-                if let Content::Fill(fill) = &layer.content { return fill.mat.color; }
-            }
-        }
+        if self.target == StrokeTarget::Content
+            && let Some(layer) = self.engine.layers.get(self.selected)
+                && let Content::Fill(fill) = &layer.content { return fill.mat.color; }
         self.brush.mat.color
     }
     fn set_active_color(&mut self, color: [f32; 3]) {
-        if self.target == StrokeTarget::Content {
-            if let Some(layer) = self.engine.layers.get_mut(self.selected) {
-                if let Content::Fill(fill) = &mut layer.content {
+        if self.target == StrokeTarget::Content
+            && let Some(layer) = self.engine.layers.get_mut(self.selected)
+                && let Content::Fill(fill) = &mut layer.content {
                     fill.mat.color = color;
                     self.defer_preview_update();
                     return;
                 }
-            }
-        }
         self.brush.mat.color = color;
     }
     fn swap_colors(&mut self) { let current=self.active_color(); self.set_active_color(self.color2); self.color2=current; }
@@ -2736,8 +2730,8 @@ impl PainterApp {
         ui.separator();
         let mut material_changed=false;
         if fill_target {
-            if let Some(layer)=self.engine.layers.get_mut(self.selected) {
-                if let Content::Fill(fill)=&mut layer.content {
+            if let Some(layer)=self.engine.layers.get_mut(self.selected)
+                && let Content::Fill(fill)=&mut layer.content {
                     let material=&mut fill.mat;
                     material_changed |= slider(ui,"Opacity",&mut material.opacity,0.0..=1.0);
                     material_changed |= channel_toggles(ui,&mut material.enabled);
@@ -2745,7 +2739,6 @@ impl PainterApp {
                     if material.enabled[1] { material_changed |= slider(ui,"Roughness",&mut material.rough,0.0..=1.0); }
                     if material.enabled[2] { material_changed |= slider(ui,"Metallic",&mut material.metal,0.0..=1.0); }
                 }
-            }
         } else {
             let material=&mut self.brush.mat;
             slider(ui,"Opacity",&mut material.opacity,0.0..=1.0);
@@ -3038,12 +3031,11 @@ impl PainterApp {
                     .color(theme::TEXT_DIM)
                     .small(),
                 );
-                if let Some(server) = &self.mcp {
-                    if server.enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Some(server) = &self.mcp
+                    && server.enabled.load(std::sync::atomic::Ordering::Relaxed) {
                         ui.label(egui::RichText::new(format!("MCP :{}", server.port)).color(theme::ACCENT).small())
                             .on_hover_text(format!("AI agents can connect at {}", server.url()));
                     }
-                }
                 if let Some((p, what)) = self.bake_progress() {
                     ui.add(egui::ProgressBar::new(p).desired_width(140.0).text(format!("{what} {:.0}%", p * 100.0)));
                 }
@@ -3088,11 +3080,10 @@ impl PainterApp {
             let mut btn = |ui: &mut egui::Ui, icon: &str, tip: &str, action: Option<Action>| {
                 let enabled = action.is_some();
                 let resp = ui.add_enabled_ui(enabled, |ui| theme::icon_button(ui, icon, false, 28.0)).inner;
-                if resp.on_hover_text(tip).clicked() {
-                    if let Some(a) = action {
+                if resp.on_hover_text(tip).clicked()
+                    && let Some(a) = action {
                         self.pending.push(a);
                     }
-                }
             };
             let has = self.selected < self.engine.layers.len();
             let no_mask = has && self.engine.layers[self.selected].mask.is_none();
@@ -3286,8 +3277,8 @@ impl PainterApp {
                 _ => Drop::Below(id),
             }
         };
-        if let (Some(from), Some(p)) = (resp.dnd_hover_payload::<LayerDrag>(), ui.ctx().pointer_interact_pos()) {
-            if from.0 != idx {
+        if let (Some(from), Some(p)) = (resp.dnd_hover_payload::<LayerDrag>(), ui.ctx().pointer_interact_pos())
+            && from.0 != idx {
                 let accent = Stroke::new(2.0, theme::ACCENT);
                 match drop_at(p.y) {
                     Drop::Above(_) => {
@@ -3301,12 +3292,10 @@ impl PainterApp {
                     }
                 }
             }
-        }
-        if let (Some(from), Some(p)) = (dnd_release::<LayerDrag>(&resp), ui.ctx().pointer_interact_pos()) {
-            if from.0 != idx {
+        if let (Some(from), Some(p)) = (dnd_release::<LayerDrag>(&resp), ui.ctx().pointer_interact_pos())
+            && from.0 != idx {
                 self.pending.push(Action::MoveTo { from: from.0, drop: drop_at(p.y) });
             }
-        }
         // Shelf items land where they're dropped; a generator masks the row's layer.
         if let (Some(item), Some(p)) = (resp.dnd_hover_payload::<ShelfItem>(), ui.ctx().pointer_interact_pos()) {
             let accent = Stroke::new(2.0, theme::ACCENT);
@@ -3791,11 +3780,10 @@ impl PainterApp {
             if let Some(path) = s.high_poly.clone() {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(path.display().to_string()).small().color(theme::TEXT_DIM));
-                    if ui.small_button("Change…").clicked() {
-                        if let Some(p) = rfd::FileDialog::new().add_filter("Mesh (FBX, OBJ)", &crate::import::EXTENSIONS).pick_file() {
+                    if ui.small_button("Change…").clicked()
+                        && let Some(p) = rfd::FileDialog::new().add_filter("Mesh (FBX, OBJ)", &crate::import::EXTENSIONS).pick_file() {
                             s.high_poly = Some(p);
                         }
-                    }
                 });
                 ui.label(
                     egui::RichText::new("The high poly must be in the same space as the low poly (no UVs needed).")
@@ -5182,11 +5170,10 @@ impl PainterApp {
         let scale = (1.0 - b.size_jitter * r1) * if b.pressure_size { pressure } else { 1.0 };
         let offset = Vec2::new(r2 - 0.5, r3 - 0.5) * 2.0 * b.scatter * radius;
         let mut angle = b.angle.to_radians() + (r4 - 0.5) * std::f32::consts::TAU * b.angle_jitter;
-        if b.follow {
-            if let Some(d) = dir {
+        if b.follow
+            && let Some(d) = dir {
                 angle += d.y.atan2(d.x);
             }
-        }
         ([p.x + offset.x, p.y + offset.y, scale, angle], if b.pressure_flow { pressure } else { 1.0 })
     }
 
@@ -5779,22 +5766,21 @@ impl PainterApp {
                 if resp.hovered() && scroll != 0.0 {
                     self.cam.dist = (self.cam.dist * (-scroll * self.zoom_rate()).exp()).clamp(0.3, 40.0);
                 }
-                if resp.double_clicked() && mods.alt {
-                    if let Some(p) = hover {
+                if resp.double_clicked() && mods.alt
+                    && let Some(p) = hover {
                         let size = Vec2::new(self.views.view3d.size[0] as f32, self.views.view3d.size[1] as f32);
                         let (o, d) = self.cam.ray(local(p), size);
                         if let Some(hit) = self.bvh.raycast(o, d) {
                             self.cam.target = hit.pos;
                         }
                     }
-                }
             }
             ViewKind::V2d => {
                 if resp.dragged_by(B::Middle) || (resp.dragged_by(B::Secondary) && !adjust_brush) || (resp.dragged_by(B::Primary) && mods.alt) {
                     self.cam2d.pan += Vec2::new(delta.x, delta.y) * ppp;
                 }
-                if resp.hovered() && scroll != 0.0 {
-                    if let Some(p) = hover {
+                if resp.hovered() && scroll != 0.0
+                    && let Some(p) = hover {
                         // Zoom about the cursor.
                         let size = self.views.view2d.size;
                         let center = Vec2::new(size[0] as f32, size[1] as f32) * 0.5;
@@ -5804,7 +5790,6 @@ impl PainterApp {
                         self.cam2d.zoom *= f;
                         self.cam2d.pan -= anchor * (f - 1.0);
                     }
-                }
             }
         }
 
@@ -5893,11 +5878,10 @@ impl PainterApp {
                         self.poly_fill(&[t], Some(pos));
                     }
                 }
-            } else if down && self.stroke.as_ref().is_some_and(|s| s.view == kind) {
-                if let Some((t, pos)) = tri {
+            } else if down && self.stroke.as_ref().is_some_and(|s| s.view == kind)
+                && let Some((t, pos)) = tri {
                     self.poly_fill(&[t], Some(pos));
                 }
-            }
             return;
         }
 

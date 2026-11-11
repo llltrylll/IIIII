@@ -200,7 +200,7 @@ impl Builder {
         let color = c.color.unwrap_or(Vec3::ONE);
         self.color_acc += color;
         self.color_corners[corner] = color.to_array().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
-        if self.corners % 3 == 0 {
+        if self.corners.is_multiple_of(3) {
             // Keep the average for older ID-region summaries, but preserve
             // each corner so the GPU can interpolate the real vertex color.
             let avg = self.color_acc / 3.0;

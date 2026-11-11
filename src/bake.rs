@@ -582,20 +582,17 @@ fn uv_scale(mesh: &Mesh, tris: std::ops::Range<u32>) -> f32 {
 /// so "Lid_low" pairs with "Lid_high" and "lid_hp.001".
 pub(crate) fn base_name(name: &str) -> String {
     let mut s = name.trim().to_lowercase();
-    if let Some(dot) = s.rfind('.') {
-        if s[dot + 1..].chars().all(|c| c.is_ascii_digit()) && dot + 1 < s.len() {
+    if let Some(dot) = s.rfind('.')
+        && s[dot + 1..].chars().all(|c| c.is_ascii_digit()) && dot + 1 < s.len() {
             s.truncate(dot);
         }
-    }
     for suffix in ["lowpoly", "highpoly", "low", "high", "lp", "hp", "lo", "hi"] {
-        if let Some(rest) = s.strip_suffix(suffix) {
-            if let Some(stem) = rest.strip_suffix(['_', '-', ' ', '.']) {
-                if !stem.is_empty() {
+        if let Some(rest) = s.strip_suffix(suffix)
+            && let Some(stem) = rest.strip_suffix(['_', '-', ' ', '.'])
+                && !stem.is_empty() {
                     s = stem.to_string();
                     break;
                 }
-            }
-        }
     }
     s
 }
@@ -1048,8 +1045,8 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
     let mut src_group = vec![0u32; indices.len() / 3];
     let mut low_draws = None;
     let mut matched_names = 0;
-    if let (true, Some((src_tri_object, src_names))) = (settings.match_by_name, &src_objects) {
-        if !low.objects.is_empty() && low.tri_object.len() == low_tris && src_tri_object.len() == src_group.len() {
+    if let (true, Some((src_tri_object, src_names))) = (settings.match_by_name, &src_objects)
+        && !low.objects.is_empty() && low.tri_object.len() == low_tris && src_tri_object.len() == src_group.len() {
             let mut groups: HashMap<String, u32> = HashMap::new();
             for name in &low.objects {
                 let n = groups.len() as u32 + 1;
@@ -1070,7 +1067,6 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
                 src_group.fill(0);
             }
         }
-    }
 
     let cage = match &settings.cage {
         Some(path) if settings.high_poly.is_some() => {
@@ -1748,7 +1744,7 @@ impl GpuBaker {
         passes: u32,
     ) {
         // An even count ends back in the source texture.
-        debug_assert!(passes % 2 == 0);
+        debug_assert!(passes.is_multiple_of(2));
         for i in 0..passes {
             let mut u = run.uniform;
             u.e[2] = (1u32 << i) as f32;

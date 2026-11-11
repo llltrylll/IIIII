@@ -180,14 +180,13 @@ impl PainterApp {
         self.bake_preview.run = None;
         self.bake_preview.preparing = None;
         self.bake_preview.shown = None;
-        if let Some(saved) = self.bake_preview.saved.take() {
-            if restore {
+        if let Some(saved) = self.bake_preview.saved.take()
+            && restore {
                 match saved {
                     Some((maps, report)) => self.engine.set_maps(maps, report),
                     None => self.engine.clear_maps(),
                 }
             }
-        }
     }
 
     /// Advances the live preview; call every frame.

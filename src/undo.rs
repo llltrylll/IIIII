@@ -40,7 +40,7 @@ impl Snapshot {
         for tex in textures {
             let bpp = bytes_per_texel(tex.format);
             let row = tex.width * bpp;
-            debug_assert!(row % 256 == 0, "texture rows must be 256-byte aligned for readback");
+            debug_assert!(row.is_multiple_of(256), "texture rows must be 256-byte aligned for readback");
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("undo staging"),
                 size: (row * tex.height) as u64,
@@ -302,11 +302,10 @@ impl UndoStack {
         if self.group_depth > 0 {
             return;
         }
-        if let Some(entry) = self.group.take() {
-            if matches!(&entry.edit, Edit::Group(edits) if !edits.is_empty()) {
+        if let Some(entry) = self.group.take()
+            && matches!(&entry.edit, Edit::Group(edits) if !edits.is_empty()) {
                 self.push(entry.label, entry.edit);
             }
-        }
     }
 
     pub fn update(&mut self) {

@@ -149,11 +149,10 @@ impl PainterApp {
         let view = &self.graphs.docs[di].graph;
         let tag = view.tags.iter().position(|t| t.layer == layer && matches!(t.role, Role::Source(_)))?;
         let t = view.tags[tag];
-        if let Role::Source(id) = t.role {
-            if id != 0 && self.graphs.doc(id).is_some() {
+        if let Role::Source(id) = t.role
+            && id != 0 && self.graphs.doc(id).is_some() {
                 return Some(id);
             }
-        }
         let sub = smart::mask_subgraph(view, t.node, &format!("{name} mask"));
         let id = self.graphs.insert(&self.rs, sub, None);
         // During a sync: the graph is seen again once it's done.
@@ -192,13 +191,11 @@ fn image_path(g: &Graph, layer: u64, ch: usize, name: &str) -> Option<PathBuf> {
         let dir = p.parent().and_then(|d| d.file_name()).map_or(String::new(), |d| format!("{}/", d.to_string_lossy()));
         Some(format!("{dir}{}", p.file_name()?.to_string_lossy()))
     };
-    if let Some(node) = g.tagged(layer, Role::Channel(k)).and_then(|n| g.node(n)) {
-        if let Some(Value::Image(Some(p))) = node.params.get("image") {
-            if tail(p).as_deref() == Some(name) {
+    if let Some(node) = g.tagged(layer, Role::Channel(k)).and_then(|n| g.node(n))
+        && let Some(Value::Image(Some(p))) = node.params.get("image")
+            && tail(p).as_deref() == Some(name) {
                 return Some(p.clone());
             }
-        }
-    }
     let rel = PathBuf::from(format!("pbr/{name}"));
     crate::graph::runtime::asset_path(&rel).is_file().then_some(rel)
 }

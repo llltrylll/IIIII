@@ -264,11 +264,10 @@ impl Runtime {
         let (tx, waker, key) = (self.decoded.0.clone(), self.waker.clone(), path.clone());
         std::thread::spawn(move || {
             let img = image::open(&file).map(|i| i.into_rgba8()).map_err(|e| format!("{}: {e}", file.display()));
-            if tx.send((key, img)).is_ok() {
-                if let Some(w) = waker {
+            if tx.send((key, img)).is_ok()
+                && let Some(w) = waker {
                     w();
                 }
-            }
         });
         Ok(None)
     }
@@ -381,14 +380,13 @@ impl Runtime {
                         *n -= 1;
                         *n
                     });
-                    if left == Some(0) && !outputs.contains(f) {
-                        if let Some(t) = self.rendered.get_mut(f).and_then(|r| r.tex.take()) {
+                    if left == Some(0) && !outputs.contains(f)
+                        && let Some(t) = self.rendered.get_mut(f).and_then(|r| r.tex.take()) {
                             // Only this runtime holds it: free to render into.
                             if Arc::strong_count(&t) == 1 {
                                 pool.push(t);
                             }
                         }
-                    }
                 }
             }
             match result {

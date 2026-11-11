@@ -84,16 +84,14 @@ pub fn ico_from_pngs(pngs: &[Vec<u8>]) -> Vec<u8> {
 
 fn find_resource_compiler() -> Option<PathBuf> {
     for name in ["rc.exe", "llvm-rc.exe"] {
-        if let Ok(output) = Command::new("where.exe").arg(name).output() {
-            if output.status.success() {
-                if let Some(path) = String::from_utf8_lossy(&output.stdout).lines().next() {
+        if let Ok(output) = Command::new("where.exe").arg(name).output()
+            && output.status.success()
+                && let Some(path) = String::from_utf8_lossy(&output.stdout).lines().next() {
                     let path = PathBuf::from(path.trim());
                     if path.is_file() {
                         return Some(path);
                     }
                 }
-            }
-        }
     }
 
     let mut roots = Vec::new();

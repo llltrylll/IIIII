@@ -666,7 +666,7 @@ impl ViewRenderer {
             ..Default::default()
         });
 
-        let globals = vec![Self::globals_buffer(&device), Self::globals_buffer(&device)];
+        let globals = vec![Self::globals_buffer(device), Self::globals_buffer(device)];
         let custom_params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("preview shader params"),
             size: (CUSTOM_PARAMS * 16) as u64,
@@ -961,12 +961,11 @@ impl ViewRenderer {
             if self.custom_mesh.is_none() || settings.mode != ViewMode::Material {
                 pass.set_pipeline(&self.mesh_t);
                 for &k in &shown {
-                    if let (Some(bg), Some(e)) = (bgs.get(k), engines.get(k)) {
-                        if e.uses_opacity() {
+                    if let (Some(bg), Some(e)) = (bgs.get(k), engines.get(k))
+                        && e.uses_opacity() {
                             pass.set_bind_group(0, bg, &[]);
                             pass.draw_indexed(mesh.sets[k].index_range(), 0, 0..1);
                         }
-                    }
                 }
             }
             pass.set_bind_group(0, bg, &[]);

@@ -1241,7 +1241,7 @@ fn custom_map_seams() {
 
 /// A project file's mesh and its manifest (for tests that bake a real project).
 fn load_project_mesh(path: &str) -> (Mesh, serde_json::Value) {
-    let data = std::fs::read(&path).expect("project file");
+    let data = std::fs::read(path).expect("project file");
     let u64_at = |at: usize| u64::from_le_bytes(data[at..at + 8].try_into().unwrap()) as usize;
     let len = u64_at(8);
     let manifest: serde_json::Value = serde_json::from_slice(&data[16..16 + len]).unwrap();
@@ -2494,7 +2494,7 @@ fn normal_and_specular_channels() {
         assert!(uv.distance(tilt.normalize()) < 0.03, "a UV normal image comes out as authored ({what}: {uv})");
         assert!(tri.distance(uv) < 0.05, "tri-planar matches UV on a plane laid out along its axes ({what}: {tri} vs {uv})");
     }
-    assert!(engine.uses_channel(NORMAL) == false, "deleted layers leave no normals");
+    assert!(!engine.uses_channel(NORMAL), "deleted layers leave no normals");
 
     // Two layers add their detail.
     let one = layer_with(&mut engine, &mut undo, Vec3::new(0.3, 0.0, 0.95), Projection::Uv);

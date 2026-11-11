@@ -120,12 +120,11 @@ impl GraphStore {
                     ctx.request_repaint();
                 }
             });
-            if let Ok(mut w) = w {
-                if w.watch(dir, notify::RecursiveMode::NonRecursive).is_ok() {
+            if let Ok(mut w) = w
+                && w.watch(dir, notify::RecursiveMode::NonRecursive).is_ok() {
                     watcher = Some(w);
                     changes = Some(rx);
                 }
-            }
         }
         let mut store = GraphStore {
             lib: Library::load(user_dir),
@@ -260,8 +259,8 @@ fn half_to_f32(b: [u8; 2]) -> f32 {
 /// Map parameter can pick.
 pub(super) fn param_widget(ui: &mut egui::Ui, p: &graph::def::Param, v: &mut Value, salt: u64, custom: &[crate::bake::CustomMap]) -> bool {
     // Seeds get a button that rolls a new one.
-    if let (ParamKind::Int { min, max }, Value::Int(i)) = (&p.kind, &mut *v) {
-        if p.name.contains("seed") {
+    if let (ParamKind::Int { min, max }, Value::Int(i)) = (&p.kind, &mut *v)
+        && p.name.contains("seed") {
             let mut ch = ui.add(egui::Slider::new(i, *min..=*max)).changed();
             if ui.small_button("🎲").on_hover_text("New random seed").clicked() {
                 let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
@@ -270,7 +269,6 @@ pub(super) fn param_widget(ui: &mut egui::Ui, p: &graph::def::Param, v: &mut Val
             }
             return ch;
         }
-    }
     match (&p.kind, v) {
                     (ParamKind::Float { min, max }, Value::Float(f)) => ui.add(egui::Slider::new(f, *min..=*max).max_decimals(3)).changed(),
                     (ParamKind::Int { min, max }, Value::Int(i)) => ui.add(egui::Slider::new(i, *min..=*max)).changed(),
@@ -309,12 +307,11 @@ pub(super) fn param_widget(ui: &mut egui::Ui, p: &graph::def::Param, v: &mut Val
                     (ParamKind::Image, Value::Image(path)) => {
                         let name = path.as_ref().and_then(|p| p.file_name()).map_or("None".into(), |n| n.to_string_lossy().into_owned());
                         ui.add(egui::Label::new(name).truncate());
-                        if ui.small_button("Choose…").clicked() {
-                            if let Some(p) = rfd::FileDialog::new().add_filter("Images", &["png", "jpg", "jpeg", "tga", "bmp", "tif", "tiff", "exr", "hdr"]).pick_file() {
+                        if ui.small_button("Choose…").clicked()
+                            && let Some(p) = rfd::FileDialog::new().add_filter("Images", &["png", "jpg", "jpeg", "tga", "bmp", "tif", "tiff", "exr", "hdr"]).pick_file() {
                                 *path = Some(p);
                                 return true;
                             }
-                        }
                         false
                     }
                     _ => false,
@@ -444,15 +441,14 @@ impl PainterApp {
     /// outputs into their layers. Runs once a frame, before compositing.
     pub(super) fn update_graphs(&mut self) {
         self.sync_folder_graphs();
-        if let Some(rx) = &self.graphs.changes {
-            if rx.try_iter().count() > 0 {
+        if let Some(rx) = &self.graphs.changes
+            && rx.try_iter().count() > 0 {
                 self.graphs.lib.reload_user();
                 for d in &mut self.graphs.docs {
                     d.dirty = true;
                 }
                 self.shader_files_changed();
             }
-        }
         self.fill_parked_graphs();
         let maps_version = self.engine.maps_version;
         for i in 0..self.graphs.docs.len() {
@@ -538,11 +534,10 @@ impl PainterApp {
             if fill {
                 self.engine.set_graph_images(li, graph::channel_outputs(&outs), &name);
             }
-            if mask {
-                if let Some(t) = outs[graph::MASK_USAGE].as_ref().or(outs[0].as_ref()) {
+            if mask
+                && let Some(t) = outs[graph::MASK_USAGE].as_ref().or(outs[0].as_ref()) {
                     self.engine.set_graph_mask(li, t);
                 }
-            }
         }
         self.graphs.docs[i].push = false;
     }
@@ -573,12 +568,11 @@ impl PainterApp {
                     let gp = &d.graph.params[i];
                     let changed = labeled(ui, &gp.name, |ui| {
                         let mut ch = param_widget(ui, &p, &mut v, id ^ (i as u64) << 32, &custom);
-                        if let Some(def) = gp.default.as_ref().filter(|def| **def != v) {
-                            if ui.small_button("⟲").on_hover_text("Back to the material's value").clicked() {
+                        if let Some(def) = gp.default.as_ref().filter(|def| **def != v)
+                            && ui.small_button("⟲").on_hover_text("Back to the material's value").clicked() {
                                 v = def.clone();
                                 ch = true;
                             }
-                        }
                         ch
                     });
                     if changed {
@@ -939,11 +933,10 @@ impl PainterApp {
                     }
                 }
             });
-            if let Some(id) = self.graphs.editor.doc {
-                if let Some(d) = self.graphs.doc_mut(id) {
+            if let Some(id) = self.graphs.editor.doc
+                && let Some(d) = self.graphs.doc_mut(id) {
                     ui.add(egui::TextEdit::singleline(&mut d.graph.name).desired_width(140.0));
                 }
-            }
             let shading = self.graphs.editor.doc.and_then(|id| self.graphs.doc(id)).is_some_and(|d| d.shading);
             if shading {
                 ui.separator();
@@ -987,11 +980,10 @@ impl PainterApp {
             if ui.button("New node…").on_hover_text("Write a custom node in WGSL (opens the Shader Maker)").clicked() {
                 self.new_custom_node(None, true);
             }
-            if ui.button("Nodes folder").on_hover_text("Custom nodes live here; edits on disk reload automatically").clicked() {
-                if let Some(dir) = &self.graphs.lib.user_dir {
+            if ui.button("Nodes folder").on_hover_text("Custom nodes live here; edits on disk reload automatically").clicked()
+                && let Some(dir) = &self.graphs.lib.user_dir {
                     super::open_in_file_browser(dir);
                 }
-            }
             if !self.graphs.lib.errors.is_empty() {
                 let text: Vec<String> = self.graphs.lib.errors.iter().map(|(p, e)| format!("{}: {e}", p.display())).collect();
                 ui.label(egui::RichText::new(format!("⚠ {} node file(s) with errors", text.len())).color(Color32::from_rgb(240, 120, 90)))
@@ -1259,12 +1251,11 @@ impl PainterApp {
                     let Some((_, _, pin)) = in_pins.iter().find(|(nid, name, _)| *nid == id && *name == inp.name) else { continue };
                     let ir = Rect::from_center_size(*pin, vec2(16.0, 16.0) * zoom.max(0.7));
                     let ir_resp = ui.interact(ir, ui.scope_id().with(("graph in", doc, id, inp.name.as_str())), Sense::drag());
-                    if ir_resp.drag_started() {
-                        if let Some(from) = d.graph.nodes[ni].links.remove(&inp.name) {
+                    if ir_resp.drag_started()
+                        && let Some(from) = d.graph.nodes[ni].links.remove(&inp.name) {
                             e.link_from = Some(from);
                             changed = true;
                         }
-                    }
                 }
             }
         }
@@ -1332,12 +1323,11 @@ impl PainterApp {
             e.menu = None;
         }
         let key_menu = over && !typing && e.menu.is_none() && ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Tab));
-        if bg.secondary_clicked() || key_menu {
-            if let Some(p) = ui.input(|i| i.pointer.latest_pos()).filter(|p| rect.contains(*p)) {
+        if (bg.secondary_clicked() || key_menu)
+            && let Some(p) = ui.input(|i| i.pointer.latest_pos()).filter(|p| rect.contains(*p)) {
                 e.menu = Some(AddMenu { at: to_world(p), screen: p, link_from: None, focus: true });
                 e.search.clear();
             }
-        }
         if let Some(def) = add_menu(ui, lib, e, d.shading) {
             let menu = e.menu.take().expect("menu was open");
             let id = d.graph.add(&def, [menu.at.x, menu.at.y]);
@@ -1609,8 +1599,8 @@ impl PainterApp {
         };
         match lib.save_user(&stem, &source) {
             Ok(id) => {
-                if let Some(doc) = self.graphs.editor.doc.filter(|_| to_graph) {
-                    if let Some(d) = self.graphs.docs.iter_mut().find(|d| d.id == doc) {
+                if let Some(doc) = self.graphs.editor.doc.filter(|_| to_graph)
+                    && let Some(d) = self.graphs.docs.iter_mut().find(|d| d.id == doc) {
                         // Copying a selected node swaps it for the copy; else add one.
                         let sel = self.graphs.editor.selected.filter(|s| from.is_some() && d.graph.node(*s).is_some_and(|n| Some(n.def.as_str()) == from));
                         match sel {
@@ -1622,7 +1612,6 @@ impl PainterApp {
                         }
                         d.dirty = true;
                     }
-                }
                 self.open_code(&id);
             }
             Err(e) => self.status = format!("Couldn't create the node: {e}"),
