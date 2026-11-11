@@ -8,6 +8,8 @@
 
 use std::collections::BTreeMap;
 
+const MAX_IMAGE_DATA_BYTES: usize = 512 * 1024 * 1024;
+
 use rayon::prelude::*;
 
 use super::{jp2, lz4, qt};
@@ -130,17 +132,29 @@ pub fn decode_resource_image(blob: &[u8], max_size: u32) -> Result<Plane, ImageE
     if width == 0 || height == 0 || width > 16384 || height > 16384 || tiles > 4096 {
         return corrupt("image size");
     }
-    let le = |b: &[u8], o: usize| -> Option<u32> { b.get(o..o + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]])) };
     let mut jobs: Vec<([u32; 4], &[u8])> = Vec::with_capacity(tiles as usize);
     for _ in 0..tiles {
-        let (Some(x0), Some(y0), Some(x1), Some(y1), Some(len)) = (le(blob, pos), le(blob, pos + 4), le(blob, pos + 8), le(blob, pos + 12), le(blob, pos + 16)) else {
+        let header_end = pos.checked_add(24).ok_or(ImageError::Corrupt("tile header offset"))?;
+        let header = blob.get(pos..header_end).ok_or(ImageError::Corrupt("tile table"))?;
+        let word = |at: usize| -> Option<u32> {
+            let end = at.checked_add(4)?;
+            header.get(at..end).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+        };
+        let (Some(x0), Some(y0), Some(x1), Some(y1), Some(raw_len)) =
+            (word(0), word(4), word(8), word(12), word(16))
+        else {
             return corrupt("tile table");
         };
-        pos += 24;
-        let len = len as usize;
-        let data = blob.get(pos..pos + len).ok_or(ImageError::Corrupt("tile data"))?;
+        let len = usize::try_from(raw_len).map_err(|_| ImageError::Corrupt("tile length"))?;
+        let data_end = header_end.checked_add(len).ok_or(ImageError::Corrupt("tile data offset"))?;
+        let padded_len = len.checked_add(7).ok_or(ImageError::Corrupt("tile padding"))? & !7;
+        let next_pos = header_end.checked_add(padded_len).ok_or(ImageError::Corrupt("tile padding offset"))?;
+        let data = blob.get(header_end..data_end).ok_or(ImageError::Corrupt("tile data"))?;
         // Each tile's data is padded to a multiple of 8 bytes.
-        pos += (len + 7) & !7;
+        if next_pos > blob.len() {
+            return corrupt("tile padding past end");
+        }
+        pos = next_pos;
         if x1 <= x0 || y1 <= y0 || x1 > width || y1 > height {
             return corrupt("tile rectangle");
         }
@@ -257,10 +271,26 @@ pub fn decode_image_resource(blob: &[u8], max_size: u32) -> Result<Plane, ImageE
         "L16" | "LUM16" => (1, 2),
         other => return Err(ImageError::Unsupported(format!("image format {other}"))),
     };
-    if width == 0 || height == 0 || width > 16384 || height > 16384 || (pitch as usize) < width as usize * components * bytes || raw_len as usize != pitch as usize * height as usize {
+    if width == 0 || height == 0 || width > 16384 || height > 16384 {
         return corrupt("image size");
     }
-    let raw = lz4::decompress(blob.get(pos..pos + lz4_len as usize).ok_or(ImageError::Corrupt("image data"))?, raw_len as usize)?;
+    let row_bytes = (width as usize)
+        .checked_mul(components)
+        .and_then(|n| n.checked_mul(bytes))
+        .ok_or(ImageError::Corrupt("image row size"))?;
+    let pitch = usize::try_from(pitch).map_err(|_| ImageError::Corrupt("image pitch"))?;
+    let raw_len = usize::try_from(raw_len).map_err(|_| ImageError::Corrupt("image byte size"))?;
+    let expected_raw = pitch.checked_mul(height as usize).ok_or(ImageError::Corrupt("image byte size"))?;
+    if pitch < row_bytes || raw_len != expected_raw || raw_len > MAX_IMAGE_DATA_BYTES {
+        return corrupt("image size");
+    }
+    let lz4_len = usize::try_from(lz4_len).map_err(|_| ImageError::Corrupt("compressed image size"))?;
+    if lz4_len > MAX_IMAGE_DATA_BYTES {
+        return corrupt("compressed image size");
+    }
+    let data_end = pos.checked_add(lz4_len).ok_or(ImageError::Corrupt("image data offset"))?;
+    let compressed = blob.get(pos..data_end).ok_or(ImageError::Corrupt("image data"))?;
+    let raw = lz4::decompress(compressed, raw_len)?;
     let mut red = Reducer::new(width, height, components, max_size);
     let mut px = vec![0.0f32; components];
     for y in 0..height {
@@ -299,13 +329,24 @@ pub fn decode_cache_image(blob: &[u8], max_size: u32) -> Result<CacheImage, Imag
         return corrupt("cache header");
     };
     let format = CacheFormat::from_gl(gl).ok_or_else(|| ImageError::Unsupported(format!("OpenGL format {gl}")))?;
-    if width == 0 || height == 0 || width > 16384 || height > 16384 || buffer as usize != width as usize * height as usize * format.bytes_per_pixel() {
+    if width == 0 || height == 0 || width > 16384 || height > 16384 {
+        return corrupt("cache buffer size");
+    }
+    let pixels = (width as usize).checked_mul(height as usize).ok_or(ImageError::Corrupt("cache pixel count"))?;
+    let expected_buffer = pixels.checked_mul(format.bytes_per_pixel()).ok_or(ImageError::Corrupt("cache buffer size"))?;
+    let buffer = usize::try_from(buffer).map_err(|_| ImageError::Corrupt("cache buffer size"))?;
+    if buffer != expected_buffer || buffer > MAX_IMAGE_DATA_BYTES {
         return corrupt("cache buffer size");
     }
     let mut r = qt::Reader::new(blob, pos);
     let len = r.u32().ok_or(ImageError::Corrupt("cache length"))? as usize;
+    if len > MAX_IMAGE_DATA_BYTES {
+        return corrupt("cache compressed size");
+    }
     let start = r.pos;
-    let raw = lz4::decompress(blob.get(start..start + len).ok_or(ImageError::Corrupt("cache data"))?, buffer as usize)?;
+    let end = start.checked_add(len).ok_or(ImageError::Corrupt("cache data offset"))?;
+    let compressed = blob.get(start..end).ok_or(ImageError::Corrupt("cache data"))?;
+    let raw = lz4::decompress(compressed, buffer)?;
     let c = format.components();
     let mut red = Reducer::new(width, height, c, max_size);
     let bpp = format.bytes_per_pixel();
