@@ -385,6 +385,8 @@ enum Action {
     AddGraphPreset(usize),
     /// A mask on the selected layer driven by a new material graph.
     AddGraphMask,
+    /// A mask layer of this kind; makes the (black) mask first if the layer has none.
+    AddMaskLayer(GenKind),
     /// Opens the selected layer's graph in the Material Graph window.
     EditGraph,
     GraphUndo,
@@ -441,10 +443,6 @@ pub struct PainterApp {
     baked_id_source: IdSource,
     /// Latest material edit; the expensive preview rebuild waits until this settles.
     preview_update_at: Option<Instant>,
-    /// A pointer button was down at the last frame (a slider or the colour square may be held).
-    preview_pointer_down: bool,
-    /// How long the last preview rebuild took.
-    last_composite: Duration,
     /// The next rebuild reports how long it took (F5).
     time_composite: bool,
     /// The running bake only makes the ID map (from vertex colors).
@@ -547,10 +545,8 @@ pub(crate) const REPO_URL: &str = "https://github.com/alla2001/material-painter"
 /// `selected` when no layer is selected.
 const NO_LAYER: usize = usize::MAX;
 /// Wait until material controls have been idle before rebuilding the preview.
-/// Wait after a settings change (or after letting go of a slider) before the preview is rebuilt.
-const MATERIAL_PREVIEW_DELAY: Duration = Duration::from_millis(150);
-/// While a slider or the colour square is held, the preview is rebuilt at most this often.
-const MATERIAL_PREVIEW_LIVE: Duration = Duration::from_millis(250);
+/// Wait after the last settings change (and while a slider is held) before the preview is rebuilt.
+const MATERIAL_PREVIEW_DELAY: Duration = Duration::from_millis(1500);
 
 fn srgb_u8(c: [f32; 3]) -> Color32 {
     Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8)
@@ -1534,8 +1530,6 @@ impl PainterApp {
             vertex_id: Default::default(),
             baked_id_source: IdSource::MeshParts,
             preview_update_at: None,
-            preview_pointer_down: false,
-            last_composite: Duration::ZERO,
             time_composite: false,
             bake_id_only: false,
             cam: OrbitCam::default(),
@@ -1913,6 +1907,21 @@ impl PainterApp {
                 Action::AddMask { white } => {
                     if self.selected < self.engine.layers.len() {
                         self.engine.add_mask(self.selected, white, None, &mut self.undo);
+                        self.target = StrokeTarget::Mask;
+                    }
+                }
+                Action::AddMaskLayer(kind) => {
+                    if self.selected < self.engine.layers.len() {
+                        if self.engine.layers[self.selected].mask.is_none() {
+                            self.engine.add_mask(self.selected, false, None, &mut self.undo);
+                        }
+                        use crate::engine::{MaskBlend, MaskLayer, MaskSource};
+                        let g = new_generator(kind, &self.bake_settings.custom);
+                        if let Some(mask) = self.engine.layers[self.selected].mask.as_mut() {
+                            let blend = if mask.black_base && mask.layers.is_empty() { MaskBlend::Add } else { MaskBlend::Multiply };
+                            mask.layers.push(MaskLayer { source: MaskSource::Generator(g), blend, opacity: 1.0, enabled: true });
+                            self.engine.mark_dirty();
+                        }
                         self.target = StrokeTarget::Mask;
                     }
                 }
@@ -2595,44 +2604,28 @@ impl PainterApp {
         if (self.tool == Tool::Eraser) != (tool == Tool::Eraser) { swap_brushes(&mut self.brush,&mut self.other_brush); }
         self.tool=tool;
     }
-    /// How long to wait before the next preview rebuild: while a control is held the
-    /// preview follows at a steady pace (never less than 3x what a rebuild costs, so a slow
-    /// one can't pile up), and right after letting go it catches up quickly.
-    fn preview_delay(&self) -> Duration {
-        if self.preview_pointer_down {
-            MATERIAL_PREVIEW_LIVE.max(self.last_composite * 3).min(Duration::from_millis(2000))
-        } else {
-            MATERIAL_PREVIEW_DELAY
-        }
-    }
     /// Debounce expensive material preview recomposites without blocking UI controls.
-    /// An earlier pending deadline is kept, so a held slider can't starve the preview.
     fn defer_preview_update(&mut self) {
-        let at = Instant::now() + self.preview_delay();
-        self.preview_update_at = Some(self.preview_update_at.map_or(at, |old| old.min(at)));
+        self.preview_update_at = Some(Instant::now() + MATERIAL_PREVIEW_DELAY);
     }
     fn schedule_preview_update(&mut self, ctx: &egui::Context) {
         self.defer_preview_update();
-        ctx.request_repaint_after(self.preview_delay());
+        ctx.request_repaint_after(MATERIAL_PREVIEW_DELAY);
     }
     /// Service the material preview timer once per app frame, even when the
-    /// paint viewport is hidden. The preview follows a held control live (throttled)
-    /// and is rebuilt shortly after release.
+    /// paint viewport is hidden. While a control is held the rebuild waits.
     fn service_preview_debounce(&mut self, ctx: &egui::Context) {
-        let down = ctx.input(|i| i.pointer.any_down());
-        // Let go: whatever is still waiting for the next live step is brought forward.
-        if self.preview_pointer_down && !down {
-            if let Some(deadline) = self.preview_update_at {
-                self.preview_update_at = Some(deadline.min(Instant::now() + MATERIAL_PREVIEW_DELAY));
-            }
-        }
-        self.preview_pointer_down = down;
         let Some(deadline) = self.preview_update_at else { return; };
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            self.preview_update_at = None;
-            self.engine.mark_dirty();
-            ctx.request_repaint();
+            if ctx.input(|i| i.pointer.any_down()) {
+                self.preview_update_at = Some(Instant::now() + MATERIAL_PREVIEW_DELAY);
+                ctx.request_repaint_after(MATERIAL_PREVIEW_DELAY);
+            } else {
+                self.preview_update_at = None;
+                self.engine.mark_dirty();
+                ctx.request_repaint();
+            }
         } else {
             ctx.request_repaint_after(remaining);
         }
@@ -2675,7 +2668,7 @@ impl PainterApp {
         egui::ScrollArea::vertical().max_height(620.0).show(ui, |ui| {
         self.color_slots(ui); ui.add_space(4.0);
         let mut state=std::mem::take(&mut self.color_sliders); let mut color=self.active_color();
-        if state.out!=color { state.hsv=hsv_keeping(state.hsv,color); state.temp=0.0; state.shifting=false; }
+        if state.out.iter().zip(color).any(|(a,b)|(a-b).abs()>0.002) { state.hsv=hsv_keeping(state.hsv,color); state.temp=0.0; state.shifting=false; }
         ui.horizontal(|ui| {
             ui.selectable_value(&mut state.hsv_mode,false,"RGB");
             ui.selectable_value(&mut state.hsv_mode,true,"HSV");
@@ -2731,7 +2724,14 @@ impl PainterApp {
         if let Some((picked,as_second))=from_mix.or(from_harmony) {
             if as_second { self.color2=picked; } else { color=picked; state.hsv=hsv_keeping(state.hsv,color); }
         }
-        if color != self.active_color() { self.set_active_color(color); }
+        if color != self.active_color() {
+            self.set_active_color(color);
+            // The next frame (sliders, preview) follows right away, not on the next mouse move.
+            ui.ctx().request_repaint();
+            if self.active_color().iter().zip(color).any(|(a,b)|(a-b).abs()>0.002) {
+                self.status="The color could not be applied to this layer.".into();
+            }
+        }
         state.out=color; self.color_sliders=state;
         ui.separator();
         let mut material_changed=false;
@@ -4109,6 +4109,20 @@ impl PainterApp {
                 }
             }
 
+            if self.target == StrokeTarget::Content && self.engine.layers[idx].mask.is_none() {
+                // The mask is made on its own: no separate "Add mask" step to remember.
+                section(ui, "Mask");
+                ui.menu_button(theme::with_icon(icons::STACK, "Add mask layer ▾"), |ui| {
+                    for k in GenKind::ALL {
+                        if ui.button(k.name()).clicked() {
+                            self.pending.push(Action::AddMaskLayer(k));
+                            ui.close();
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("Adds a mask to this layer if it has none, with this mask layer on it (e.g. Vertex Color ID Mask)");
+            }
             if self.target == StrokeTarget::Mask {
                 dirty |= self.mask_properties(ui, idx);
                 self.brush_properties(ui, false);
@@ -5944,7 +5958,6 @@ impl PainterApp {
         if self.engine.dirty {
             let started = Instant::now();
             self.engine.composite();
-            self.last_composite = started.elapsed();
             if std::mem::take(&mut self.time_composite) {
                 // F5 measures the whole rebuild, GPU included.
                 let cpu = started.elapsed();
@@ -5958,7 +5971,6 @@ impl PainterApp {
                     self.engine.layers.len(),
                     self.engine.res
                 );
-                self.last_composite = total;
             }
         }
         self.composite_parked();
