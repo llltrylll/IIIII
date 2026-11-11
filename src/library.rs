@@ -496,9 +496,15 @@ fn download_ambientcg(agent: &ureq::Agent, entry: &Entry, res: Res, progress: &d
     let zip_bytes = get_bytes(agent, &url, progress)?;
     let dir = material_dir(entry)?;
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).map_err(|e| format!("{}: {e}", entry.name))?;
+    const MAX_ENTRY_BYTES: u64 = 256 * 1024 * 1024;
+    const MAX_EXTRACTED_BYTES: u64 = 768 * 1024 * 1024;
+    let mut extracted = 0u64;
     let mut out: HashMap<&'static str, String> = HashMap::new();
     for i in 0..zip.len() {
         let mut f = zip.by_index(i).map_err(|e| e.to_string())?;
+        if f.size() > MAX_ENTRY_BYTES {
+            return Err(format!("{} contains an image larger than the supported download limit", entry.name));
+        }
         let name = f.name().to_string();
         let lower = name.to_lowercase();
         let map = if lower.contains("_color.") {
@@ -516,7 +522,15 @@ fn download_ambientcg(agent: &ureq::Agent, entry: &Entry, res: Res, progress: &d
         };
         let ext = Path::new(&name).extension().and_then(|e| e.to_str()).unwrap_or("jpg").to_lowercase();
         let mut bytes = Vec::new();
-        f.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        f.by_ref().take(MAX_ENTRY_BYTES + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        if bytes.len() as u64 > MAX_ENTRY_BYTES {
+            return Err(format!("{} contains an oversized image entry", entry.name));
+        }
+        extracted = extracted.checked_add(bytes.len() as u64)
+            .ok_or_else(|| "Material archive size overflow.".to_string())?;
+        if extracted > MAX_EXTRACTED_BYTES {
+            return Err(format!("{} exceeds the total extracted-size limit", entry.name));
+        }
         let file = format!("{map}.{ext}");
         write_atomic(&dir.join(&file), &bytes).map_err(|e| e.to_string())?;
         out.insert(map, file);
