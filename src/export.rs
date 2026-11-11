@@ -567,16 +567,16 @@ struct Plane {
     data: Vec<[f32; 4]>,
 }
 
-fn decode_plane(tex: &wgpu::Texture, raw: &[u8]) -> Result<Plane, String> {
-    let expected = (tex.width() as usize)
-        .checked_mul(tex.height() as usize)
-        .and_then(|pixels| pixels.checked_mul(gpu::bytes_per_texel(tex.format()) as usize))
+fn decode_plane(format: wgpu::TextureFormat, width: u32, height: u32, raw: &[u8]) -> Result<Plane, String> {
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(gpu::bytes_per_texel(format) as usize))
         .ok_or_else(|| "Export texture dimensions overflow.".to_string())?;
     if raw.len() != expected {
         return Err("GPU texture readback returned an unexpected byte count.".into());
     }
 
-    let data = match tex.format() {
+    let data = match format {
         wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba8UnormSrgb => {
             raw.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]].map(|v| v as f32 / 255.0)).collect()
         }
@@ -676,12 +676,14 @@ pub struct Snapshot {
     tris: std::ops::Range<u32>,
 }
 
-/// Owned GPU resources for an export. The interface thread can prepare
-/// this lightweight job without waiting for readbacks; the worker performs
-/// the GPU copy, conversion and file writing.
+/// GPU readback for one texture set. The copy commands are submitted when
+/// this is created, so subsequent painting cannot change the requested export.
 pub struct SnapshotSource {
     res: u32,
-    textures: Vec<wgpu::Texture>,
+    readback: gpu::ReadbackBatch,
+    map_widths: [u32; crate::bake::MAP_TEXTURES],
+    normal_width: u32,
+    position_width: u32,
     opaque: bool,
     emissive: bool,
     specular: bool,
@@ -691,25 +693,43 @@ pub struct SnapshotSource {
     tris: std::ops::Range<u32>,
 }
 
-pub fn snapshot_source(engine: &Engine, mesh: Arc<Mesh>) -> SnapshotSource {
-    let mut textures = Vec::with_capacity(crate::bake::MAP_TEXTURES + 9);
-    for index in 0..crate::bake::MAP_TEXTURES {
-        textures.push(engine.map_tex(index).texture.clone());
-    }
-    textures.push(engine.final_tex(0).texture.clone());
-    textures.push(engine.final_tex(crate::engine::FINAL_EMISSION).texture.clone());
-    textures.push(engine.final_tex(crate::engine::FINAL_NORMAL).texture.clone());
-    textures.push(engine.final_tex(crate::engine::FINAL_SPECULAR).texture.clone());
-    textures.push(engine.final_tex(1).texture.clone());
-    textures.push(engine.final_tex(2).texture.clone());
-    textures.push(engine.final_tex(3).texture.clone());
+pub fn snapshot_source(
+    engine: &Engine,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    mesh: Arc<Mesh>,
+) -> Result<SnapshotSource, String> {
+    let map_textures: Vec<&Tex> = (0..crate::bake::MAP_TEXTURES)
+        .map(|index| engine.map_tex(index))
+        .collect();
     let (pos, nrm) = engine.surface_maps();
-    textures.push(nrm.texture.clone());
-    textures.push(pos.texture.clone());
 
-    SnapshotSource {
+    let mut textures = Vec::with_capacity(map_textures.len() + 9);
+    textures.extend(map_textures.iter().map(|texture| &texture.texture));
+    textures.push(&engine.final_tex(0).texture);
+    textures.push(&engine.final_tex(crate::engine::FINAL_EMISSION).texture);
+    textures.push(&engine.final_tex(crate::engine::FINAL_NORMAL).texture);
+    textures.push(&engine.final_tex(crate::engine::FINAL_SPECULAR).texture);
+    textures.push(&engine.final_tex(1).texture);
+    textures.push(&engine.final_tex(2).texture);
+    textures.push(&engine.final_tex(3).texture);
+    textures.push(&nrm.texture);
+    textures.push(&pos.texture);
+    let readback = gpu::prepare_wgpu_textures(device, queue, &textures)?;
+
+    let map_widths: [u32; crate::bake::MAP_TEXTURES] = map_textures
+        .iter()
+        .map(|texture| texture.width)
+        .collect::<Vec<_>>()
+        .try_into()
+        .map_err(|_| "Export snapshot has the wrong number of mesh maps.".to_string())?;
+
+    Ok(SnapshotSource {
         res: engine.res,
-        textures,
+        readback,
+        map_widths,
+        normal_width: nrm.width,
+        position_width: pos.width,
         opaque: !engine.uses_opacity(),
         emissive: engine.uses_emission(),
         specular: engine.uses_channel(crate::engine::SPECULAR),
@@ -717,25 +737,19 @@ pub fn snapshot_source(engine: &Engine, mesh: Arc<Mesh>) -> SnapshotSource {
         has_bake: engine.has_bake,
         uvs: mesh,
         tris: engine.triangles(),
-    }
+    })
 }
 
 impl SnapshotSource {
-    /// Reads all textures in one submission and one GPU poll. Each raw staging
-    /// buffer is converted immediately, so only the expanded planes persist.
-    pub fn read(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Result<Snapshot, String> {
-        let expected_textures = crate::bake::MAP_TEXTURES + 9;
-        if self.textures.len() != expected_textures {
-            return Err("Export snapshot has an incomplete texture list.".into());
-        }
-        let textures: Vec<&wgpu::Texture> = self.textures.iter().collect();
-        let decoded = gpu::read_wgpu_textures_with(device, queue, &textures, decode_plane)?;
+    /// Maps the previously submitted copies and converts them on the worker.
+    pub fn read(self, device: &wgpu::Device) -> Result<Snapshot, String> {
+        let decoded = self.readback.decode(device, decode_plane)?;
         let mut planes = decoded.into_iter();
 
         let mut mesh_planes = Vec::with_capacity(crate::bake::MAP_TEXTURES);
-        for texture in self.textures.iter().take(crate::bake::MAP_TEXTURES) {
+        for width in self.map_widths {
             let plane = planes.next().ok_or_else(|| "Missing baked mesh map in export readback.".to_string())?;
-            mesh_planes.push(resample(plane, texture.width(), self.res));
+            mesh_planes.push(resample(plane, width, self.res));
         }
         let mesh_maps: [Plane; crate::bake::MAP_TEXTURES] = mesh_planes
             .try_into()
@@ -748,18 +762,14 @@ impl SnapshotSource {
         let rough = planes.next().ok_or_else(|| "Missing roughness map in export readback.".to_string())?;
         let metal = planes.next().ok_or_else(|| "Missing metallic map in export readback.".to_string())?;
         let height = planes.next().ok_or_else(|| "Missing height map in export readback.".to_string())?;
-        let nrm = self.textures.get(crate::bake::MAP_TEXTURES + 7)
-            .ok_or_else(|| "Missing world-normal texture in export snapshot.".to_string())?;
-        let pos = self.textures.get(crate::bake::MAP_TEXTURES + 8)
-            .ok_or_else(|| "Missing position texture in export snapshot.".to_string())?;
         let world_normal = resample(
             planes.next().ok_or_else(|| "Missing world normal map in export readback.".to_string())?,
-            nrm.width(),
+            self.normal_width,
             self.res,
         );
         let position = resample(
             planes.next().ok_or_else(|| "Missing position map in export readback.".to_string())?,
-            pos.width(),
+            self.position_width,
             self.res,
         );
         if planes.next().is_some() {
@@ -783,15 +793,15 @@ impl SnapshotSource {
             position,
             bounds: self.bounds,
             has_bake: self.has_bake,
-            uvs: self.uvs.clone(),
-            tris: self.tris.clone(),
+            uvs: self.uvs,
+            tris: self.tris,
         })
     }
 }
 
 /// Synchronous convenience wrapper for callers that need an immediate snapshot.
 pub fn snapshot(engine: &Engine, device: &wgpu::Device, queue: &wgpu::Queue, mesh: Arc<Mesh>) -> Result<Snapshot, String> {
-    snapshot_source(engine, mesh).read(device, queue)
+    snapshot_source(engine, device, queue, mesh)?.read(device)
 }
 
 // ------------------------------------------------------------------ evaluation
