@@ -407,10 +407,20 @@ impl PainterApp {
     fn tex_from(&self, r: &Reader, v: &Value, label: &str) -> Result<Tex, String> {
         let name = s(v, "format").ok_or("texture without a format")?;
         let format = FORMATS.into_iter().find(|x| format!("{x:?}") == name).ok_or(format!("unknown texture format '{name}'"))?;
-        let (w, h) = (v["width"].as_u64().unwrap_or(0) as u32, v["height"].as_u64().unwrap_or(0) as u32);
+        let w = v["width"].as_u64().and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| format!("{label} texture has an invalid width"))?;
+        let h = v["height"].as_u64().and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| format!("{label} texture has an invalid height"))?;
+        let max_dimension = self.rs.device.limits().max_texture_dimension_2d;
+        if w == 0 || h == 0 || w > max_dimension || h > max_dimension {
+            return Err(format!("{label} texture dimensions exceed the GPU limit"));
+        }
+        let bpp = crate::gpu::bytes_per_texel(format) as usize;
+        let expected = (w as usize).checked_mul(h as usize)
+            .and_then(|pixels| pixels.checked_mul(bpp))
+            .ok_or_else(|| format!("{label} texture size overflows"))?;
         let bytes = r.blob(&v["blob"])?;
-        let expected = (w * h * crate::gpu::bytes_per_texel(format)) as usize;
-        if w == 0 || bytes.len() != expected {
+        if bytes.len() != expected {
             return Err(format!("{label} texture has the wrong size"));
         }
         Ok(self.engine.texture_from_bytes(label, format, w, h, &bytes))
