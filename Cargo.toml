@@ -2,9 +2,9 @@
 name = "material_painter"
 version = "0.1.6"
 edition = "2024"
-description = "A PBR texture painter: layers, smart materials, mesh map baking, material graphs and custom node shaders"
+description = "A personal-use fork of the Material Painter PBR texture painter"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/alla2001/material-painter"
+repository = "https://github.com/llltrylll/IIIII"
 readme = "README.md"
 publish = false
 

@@ -1,85 +1,46 @@
-# Contributing to Material Painter
+# Contributing to this fork
 
-Thanks for helping! Bug reports, testing on your hardware, new nodes, smart
-materials and code are all welcome.
+This repository is a personal-use fork of [Material Painter](https://github.com/alla2001/material-painter). Its custom changes are maintained separately from upstream. Keep the upstream credits, license, third-party notices and SubCraft attribution intact.
 
-- **Questions and chat:** [Discord](https://discord.gg/TqKD5xKp7Y)
-- **Bugs and feature requests:** [GitHub issues](https://github.com/alla2001/material-painter/issues/new/choose)
-- **Where it's going:** the `#roadmap` channel on Discord
+## Build and test
 
-## Building
-
-Install [Rust](https://rustup.rs) (stable), then:
+Install stable Rust from [rustup.rs](https://rustup.rs), then clone this fork:
 
 ```sh
-git clone https://github.com/alla2001/material-painter
-cd material-painter
-cargo run --release
+git clone https://github.com/llltrylll/IIIII.git
+cd IIIII
+cargo build --locked
+cargo test --locked
 ```
 
-On Linux, install the windowing dev packages first:
+On Linux, the windowing development packages may be needed:
 
 ```sh
 sudo apt install pkg-config libxkbcommon-dev libwayland-dev libxcb-render0-dev \
     libxcb-shape0-dev libxcb-xfixes0-dev libgtk-3-dev
 ```
 
-## Testing
+GPU tests render offscreen and require a compatible GPU:
 
 ```sh
-cargo test                                   # unit tests (what CI runs)
-cargo test --bin material_painter -- --ignored --test-threads 1   # GPU tests
+cargo test --locked --bin material_painter -- --ignored --test-threads 1
 ```
 
-The GPU tests render offscreen (no window) on your graphics card and write
-images to `target/bake_test/` so you can look at the result. Run them when
-you touch rendering, baking, painting, nodes or export. CI builds every pull
-request with `-D warnings` on Windows, Linux and macOS, so keep the build
-warning-free.
+They write images to `target/bake_test/`. For rendering, baking, painting, node or export changes, inspect those images; a passing test alone does not confirm the visual result. CI builds with warnings denied on Windows, Linux and macOS.
 
-## Pull requests
+## Change guidelines
 
-1. **Open an issue or ask on Discord before anything big**, so we agree on the
-   approach before you spend time on it. Small fixes can go straight to a PR.
-2. **One change per PR.** A focused 100-line PR gets reviewed; a 3,000-line
-   one that also reformats unrelated files does not.
-3. **Run `cargo test`** (and the GPU tests if you touched GPU code), and say
-   what you tested in the PR.
-4. **Match the existing style:** `cargo fmt` is not enforced on purpose (the
-   code uses its own wrapping), so format like the surrounding code. Doc
-   comments explain *why*, not what.
-5. **Screenshots or a short clip** for anything visible.
+- Keep changes small, focused and easy to review. Avoid unrelated formatting or refactors, especially in the large UI and rendering modules.
+- Preserve the fork's personal changes unless the task specifically asks to revise them: brush color controls, layer copy/paste and shortcut behavior.
+- Follow [AGENTS.md](AGENTS.md) for repository architecture, conventions and commands.
+- Every document edit should use the existing undo-aware engine operations.
+- Keep saved projects backward-compatible when changing project data; review `src/app/project_io.rs` and its version handling.
+- Avoid blocking the UI thread on disk, decoding or GPU readback. Follow the worker-thread and frame-pumping patterns already in the code.
+- Do not add dependencies without a concrete reason. Keep builds warning-free.
+- Say what was built and tested. For visible changes, include a screenshot or short clip when sharing the change.
 
-## Using AI tools
-
-Most contributions will be written with AI help, and that's fine. Material
-Painter itself was built with heavy AI assistance. What matters is the result
-and that a human stands behind it:
-
-- **Say so in the PR** (the template asks). No judgment; it helps review.
-- **You must understand and have run what you submit.** Read the diff before
-  you open the PR, build it, try the feature in the app, and run the tests.
-  "The AI said it works" isn't testing.
-- **Keep AI PRs small and focused.** Agents love to "improve" nearby code;
-  revert anything that isn't part of your change.
-- **Point your agent at [AGENTS.md](AGENTS.md).** It explains the
-  architecture, the conventions and the mistakes agents commonly make here.
-- **No generated filler:** no unneeded abstractions, no comments restating the
-  code, no new dependencies without a reason.
-
-PRs that clearly weren't read or run by their author will be closed, kindly.
-
-## Other ways to help
-
-- **Test on your hardware**, especially AMD and Intel GPUs, Linux
-  distributions and Macs, and report how it runs (Help → About shows the
-  version and GPU).
-- **Write nodes:** Material Designer nodes are single WGSL files; see the
-  Shader Maker tab and `src/graph/nodes/` for examples.
-- **Make smart materials** and share them in Discord.
-- **Support development** on [Ko-fi](https://ko-fi.com/allaeddinerakik).
+AI-assisted changes are welcome, but review the diff, run the app and tests, and understand the behavior before relying on a change. The upstream project and its policies live at [alla2001/material-painter](https://github.com/alla2001/material-painter).
 
 ## License
 
-By contributing you agree that your contribution is licensed under the
-project's license, [GPL-3.0-or-later](LICENSE).
+Contributions to this fork remain under [GPL-3.0-or-later](LICENSE), subject to the upstream project's license and notices.
