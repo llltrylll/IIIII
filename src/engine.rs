@@ -3142,7 +3142,7 @@ impl Engine {
     /// The layer's mask has filters that are on.
     fn has_mask_filters(&self, li: usize) -> bool {
         let l = &self.layers[li];
-        !l.is_folder() && l.mask.as_ref().is_some_and(|m| m.filters.iter().any(|f| f.enabled) || m.layers.iter().any(|ml| ml.enabled))
+        l.mask.as_ref().is_some_and(|m| m.filters.iter().any(|f| f.enabled) || m.layers.iter().any(|ml| ml.enabled))
     }
 
     /// Renders a layer's mask (painting times smart mask) and runs its
@@ -3407,7 +3407,7 @@ impl Engine {
         // the filtered texture instead (no smart mask on top).
         let mut source_slot: HashMap<usize, usize> = HashMap::new();
         for pass in &passes {
-            if let Pass::Layer(li) = *pass {
+            if let Pass::Layer(li) | Pass::End(li) = *pass {
                 if self.has_mask_filters(li) {
                     source_slot.insert(li, passes.len() + source_slot.len());
                 }
@@ -3684,7 +3684,7 @@ impl Engine {
             });
             // Mask filters: render the mask, run its filters, then read the result.
             let filtered = match (*pass, source_slot.get(&li)) {
-                (Pass::Layer(_), Some(&slot)) => Some(self.encode_mask_filters(
+                (Pass::Layer(_) | Pass::End(_), Some(&slot)) => Some(self.encode_mask_filters(
                     &mut encoder,
                     layer.id,
                     &make_bg(mask),

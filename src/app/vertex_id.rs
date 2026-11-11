@@ -159,6 +159,8 @@ pub struct VertexIdState {
     /// Asked for in the panel, done by the app.
     pub want_import: bool,
     pub want_rebake: bool,
+    /// The maps were already baked on their own once for this mesh (so it isn't repeated on every frame).
+    pub auto_baked: bool,
 }
 
 impl VertexIdState {
@@ -168,6 +170,7 @@ impl VertexIdState {
         if self.palette.as_ref().is_none_or(|(k, _)| *k != key) {
             let p = mesh.tri_vertex_color.as_deref().map(palette).unwrap_or_default();
             self.palette = Some((key, p));
+            self.auto_baked = false;
         }
         &self.palette.as_ref().expect("just made").1
     }
@@ -306,6 +309,11 @@ pub fn panel(
     });
 
     if info.baked_source != IdSource::VertexColors {
+        // The mask can't see the colors until the maps are baked from them: do it once on its own.
+        if info.has_colors && !vs.auto_baked {
+            vs.auto_baked = true;
+            vs.want_rebake = true;
+        }
         ui.add_space(2.0);
         ui.label(
             egui::RichText::new("The baked ID map was made from mesh parts or materials, so the mask on the texture ignores these colors until it is baked from vertex colors.")

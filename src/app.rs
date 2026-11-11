@@ -4322,9 +4322,6 @@ impl PainterApp {
     /// mask (painting × smart mask), bottom first.
     fn mask_layers_ui(&mut self, ui: &mut egui::Ui, idx: usize) -> bool {
         use crate::engine::{MaskBlend, MaskLayer, MaskSource};
-        if self.engine.layers[idx].is_folder() {
-            return false;
-        }
         let Some(mask) = self.engine.layers[idx].mask.as_mut() else { return false };
         section(ui, "Mask layers");
         let mut dirty = false;
@@ -4406,9 +4403,6 @@ impl PainterApp {
     /// filters that apply after painting, smart mask and graph.
     fn mask_filters_ui(&mut self, ui: &mut egui::Ui, idx: usize) -> bool {
         use crate::engine::{FilterKind, MaskFilter};
-        if self.engine.layers[idx].is_folder() {
-            return false;
-        }
         let Some(mask) = self.engine.layers[idx].mask.as_mut() else { return false };
         section(ui, "Mask filters");
         let mut dirty = false;
@@ -5247,7 +5241,7 @@ impl PainterApp {
         if std::mem::take(&mut self.vertex_id.want_rebake) {
             self.bake_settings.id_source = IdSource::VertexColors;
             self.start_bake_all(ctx);
-            self.status = "Baking the mesh maps from the vertex colors.".into();
+            self.status = "Baking the mesh maps from the vertex colors (the ID mask shows up when it finishes).".into();
         }
         if std::mem::take(&mut self.vertex_id.want_import) {
             let Some(path) = rfd::FileDialog::new().add_filter("Mesh (FBX, OBJ)", &crate::import::EXTENSIONS).set_title("The mesh file this project was made from").pick_file() else {
@@ -5260,7 +5254,9 @@ impl PainterApp {
                     mesh.tri_vertex_color = Some(colors);
                     self.mesh = Arc::new(mesh);
                     self.vertex_id.shown = None;
-                    self.status = format!("Read {found} vertex colors from the file. Pick the ID colors in the mask's Properties.");
+                    // The ID map has to be baked again from the new colors.
+                    self.vertex_id.want_rebake = true;
+                    self.status = format!("Read {found} vertex colors from the file. Baking the maps from them.");
                 }
                 Err(e) => self.status = e,
             }
