@@ -266,29 +266,62 @@ impl PainterApp {
     /// Things the ID mask panel asked for: baking from vertex colors, and
     /// reading the colors from the mesh file for projects saved without them.
     pub(super) fn service_vertex_id_requests(&mut self, ctx: &egui::Context) {
+        if std::mem::take(&mut self.vertex_id.want_import) && self.vertex_id.import_job.is_none() {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Mesh (FBX, OBJ)", &crate::import::EXTENSIONS)
+                .set_title("The mesh file this project was made from")
+                .pick_file()
+            {
+                let source_mesh = self.mesh.clone();
+                let worker_mesh = source_mesh.clone();
+                let (tx, rx) = mpsc::channel();
+                let worker_ctx = ctx.clone();
+                match std::thread::Builder::new().name("vertex color import".into()).spawn(move || {
+                    let result = vertex_id::colors_from_file(&worker_mesh, &path);
+                    let _ = tx.send((source_mesh, result));
+                    worker_ctx.request_repaint();
+                }) {
+                    Ok(_) => {
+                        self.vertex_id.import_job = Some(rx);
+                        self.status = "Reading vertex colors from the mesh file…".into();
+                    }
+                    Err(e) => self.status = format!("Could not start vertex color import: {e}"),
+                }
+            }
+        }
+
+        // A user may change meshes while the file is being read. Only apply
+        // the result to the exact mesh snapshot that the worker validated.
+        let finished = self.vertex_id.import_job.as_ref().and_then(|rx| match rx.try_recv() {
+            Ok(result) => Some(result),
+            Err(mpsc::TryRecvError::Disconnected) => Some((self.mesh.clone(), Err("Vertex color import stopped unexpectedly.".into()))),
+            Err(mpsc::TryRecvError::Empty) => None,
+        });
+        if let Some((source_mesh, result)) = finished {
+            self.vertex_id.import_job = None;
+            if !Arc::ptr_eq(&source_mesh, &self.mesh) {
+                self.status = "The mesh changed while vertex colors were being imported. Import them again for the current mesh.".into();
+            } else {
+                match result {
+                    Ok(colors) => {
+                        let found = vertex_id::palette(&colors).distinct;
+                        let mut mesh = (*self.mesh).clone();
+                        mesh.tri_vertex_color = Some(colors);
+                        self.mesh = Arc::new(mesh);
+                        self.vertex_id.shown = None;
+                        self.vertex_id.want_rebake = true;
+                        self.status = format!("Read {found} vertex colors from the file. Baking the ID map.");
+                    }
+                    Err(e) => self.status = e,
+                }
+            }
+            ctx.request_repaint();
+        }
+
         if std::mem::take(&mut self.vertex_id.want_rebake) {
             self.bake_settings.id_source = IdSource::VertexColors;
             self.start_bake_id_only(ctx);
             self.status = "Baking the ID map from the vertex colors (the other maps stay as they are).".into();
-        }
-        if std::mem::take(&mut self.vertex_id.want_import) {
-            let Some(path) = rfd::FileDialog::new().add_filter("Mesh (FBX, OBJ)", &crate::import::EXTENSIONS).set_title("The mesh file this project was made from").pick_file() else {
-                return;
-            };
-            match vertex_id::colors_from_file(&self.mesh, &path) {
-                Ok(colors) => {
-                    let found = vertex_id::palette(&colors).distinct;
-                    let mut mesh = (*self.mesh).clone();
-                    mesh.tri_vertex_color = Some(colors);
-                    self.mesh = Arc::new(mesh);
-                    self.vertex_id.shown = None;
-                    // The ID map has to be baked again from the new colors.
-                    self.vertex_id.want_rebake = true;
-                    self.status = format!("Read {found} vertex colors from the file. Baking the maps from them.");
-                }
-                Err(e) => self.status = e,
-            }
-            ctx.request_repaint();
         }
     }
 

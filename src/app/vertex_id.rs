@@ -160,6 +160,8 @@ pub struct VertexIdState {
     pub shown: Option<Shown>,
     /// Asked for in the panel, done by the app.
     pub want_import: bool,
+    /// Reading the source mesh file without blocking the UI thread.
+    pub import_job: Option<std::sync::mpsc::Receiver<(std::sync::Arc<Mesh>, Result<Vec<[[u8; 3]; 3]>, String>)>>,
     pub want_rebake: bool,
     /// The maps were already baked on their own once for this mesh (so it isn't repeated on every frame).
     pub auto_baked: bool,
@@ -226,7 +228,8 @@ pub fn panel(
             .small()
             .color(theme::TEXT_DIM),
         );
-        if ui.button(theme::with_icon(icons::FOLDER_OPEN, "Import vertex colors from file…")).clicked() {
+        let import_label = if vs.import_job.is_some() { "Reading vertex colors…" } else { "Import vertex colors from file…" };
+        if ui.add_enabled(vs.import_job.is_none(), egui::Button::new(theme::with_icon(icons::FOLDER_OPEN, import_label))).clicked() {
             vs.want_import = true;
         }
         ui.label(
