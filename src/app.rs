@@ -512,6 +512,8 @@ pub struct PainterApp {
     /// A crash report the last run left, shown once.
     crash_report: Option<std::path::PathBuf>,
     frame_ms: f32,
+    /// The slowest recent frame (decays), to spot stutter that the average hides.
+    frame_peak_ms: f32,
     ppp: f32,
     mcp: Option<crate::mcp::McpServer>,
     /// MCP calls answered when the running bake completes.
@@ -1483,6 +1485,7 @@ impl PainterApp {
             preview: Default::default(),
             crash_report: crate::crash::take_report(),
             frame_ms: 0.0,
+            frame_peak_ms: 0.0,
             ppp: cc.egui_ctx.pixels_per_point(),
             mcp: None,
             mcp_bake_waiters: Vec::new(),
@@ -2605,8 +2608,9 @@ impl PainterApp {
                 let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
                 ui.label(
                     egui::RichText::new(format!(
-                        "{:.1} ms  │  VRAM {:.0} MB  │  Undo {:.1} MB RAM ({} steps)  │  {}²  │  {} tris",
+                        "{:.1} ms (peak {:.0})  │  VRAM {:.0} MB  │  Undo {:.1} MB RAM ({} steps)  │  {}²  │  {} tris",
                         self.frame_ms,
+                        self.frame_peak_ms,
                         mb(self.engine.vram_bytes()),
                         mb(self.undo.ram_bytes() as u64),
                         self.undo.undo.len(),
@@ -3936,6 +3940,7 @@ impl eframe::App for PainterApp {
         }
         let ms = start.elapsed().as_secs_f32() * 1000.0;
         self.frame_ms = self.frame_ms * 0.9 + ms * 0.1;
+        self.frame_peak_ms = ms.max(self.frame_peak_ms * 0.97);
     }
 }
 

@@ -102,41 +102,11 @@ pub(super) fn shift_temperature(color: [f32; 3], amount: f32) -> [f32; 3] {
 }
 
 
-impl PainterApp {
-    pub(super) fn active_color(&self) -> [f32; 3] {
-        if self.target == StrokeTarget::Content
-            && let Some(layer) = self.engine.layers.get(self.selected)
-                && let Content::Fill(fill) = &layer.content { return fill.mat.color; }
-        self.brush.mat.color
-    }
-    pub(super) fn set_active_color(&mut self, color: [f32; 3]) {
-        if self.target == StrokeTarget::Content
-            && let Some(layer) = self.engine.layers.get_mut(self.selected)
-                && let Content::Fill(fill) = &mut layer.content {
-                    fill.mat.color = color;
-                    self.defer_preview_update();
-                    return;
-                }
-        self.brush.mat.color = color;
-    }
-    pub(super) fn swap_colors(&mut self) { let current=self.active_color(); self.set_active_color(self.color2); self.color2=current; }
-    pub(super) fn color_slots(&mut self,ui:&mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x=3.0;
-            let mut active=self.active_color();
-            if color_button(ui,&mut active,Some("Active layer / brush color")){self.set_active_color(active);}
-            if theme::icon_button(ui,icons::EYEDROPPER,false,20.0).on_hover_text("Pick material color from the mesh (I)").clicked(){self.set_tool(Tool::Picker);}
-            if swap_button(ui).on_hover_text("Swap the active color and the second color (S)").clicked(){self.swap_colors();}
-            color_button(ui,&mut self.color2,Some("Second color"));
-        });
-    }
-    pub(super) fn color_hud(&mut self,ui:&mut egui::Ui) {
-        let fill_target=self.target==StrokeTarget::Content && self.engine.layers.get(self.selected).is_some_and(|layer|matches!(&layer.content,Content::Fill(_)));
-        let initial_active_color=self.active_color();
-        ui.set_width(420.0);
-        egui::ScrollArea::vertical().max_height(620.0).show(ui, |ui| {
-        self.color_slots(ui); ui.add_space(4.0);
-        let mut state=std::mem::take(&mut self.color_sliders); let mut color=self.active_color();
+/// The Color HUD below its two swatches: picker, RGB/HSV values, HEX, temperature, mix strip
+/// and harmonies. Takes the active colour and returns the one to apply; `state` remembers the
+/// hue and the half-typed hex between frames.
+pub(super) fn hud_body(ui:&mut egui::Ui,state:&mut ColorSliders,active:[f32;3],second:&mut [f32;3])->[f32;3] {
+    let mut color=active;
         if state.out.iter().zip(color).any(|(a,b)|(a-b).abs()>0.002) { state.hsv=hsv_keeping(state.hsv,color); state.temp=0.0; state.shifting=false; }
         ui.horizontal(|ui| {
             ui.selectable_value(&mut state.hsv_mode,false,"RGB");
@@ -187,12 +157,52 @@ impl PainterApp {
         }
         if temp.drag_stopped()||temp.lost_focus() { state.temp=0.0; state.shifting=false; }
         ui.add_space(2.0);
-        let second=self.color2;
-        let from_mix=color_picker::mix_strip(ui,color,second);
+        let from_mix=color_picker::mix_strip(ui,color,*second);
         let from_harmony=color_picker::harmony_row(ui,color);
         if let Some((picked,as_second))=from_mix.or(from_harmony) {
-            if as_second { self.color2=picked; } else { color=picked; state.hsv=hsv_keeping(state.hsv,color); }
+            if as_second { *second=picked; } else { color=picked; state.hsv=hsv_keeping(state.hsv,color); }
         }
+    color
+}
+
+impl PainterApp {
+    pub(super) fn active_color(&self) -> [f32; 3] {
+        if self.target == StrokeTarget::Content
+            && let Some(layer) = self.engine.layers.get(self.selected)
+                && let Content::Fill(fill) = &layer.content { return fill.mat.color; }
+        self.brush.mat.color
+    }
+    pub(super) fn set_active_color(&mut self, color: [f32; 3]) {
+        if self.target == StrokeTarget::Content
+            && let Some(layer) = self.engine.layers.get_mut(self.selected)
+                && let Content::Fill(fill) = &mut layer.content {
+                    fill.mat.color = color;
+                    self.defer_preview_update();
+                    return;
+                }
+        self.brush.mat.color = color;
+    }
+    pub(super) fn swap_colors(&mut self) { let current=self.active_color(); self.set_active_color(self.color2); self.color2=current; }
+    pub(super) fn color_slots(&mut self,ui:&mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x=3.0;
+            let mut active=self.active_color();
+            if color_button(ui,&mut active,Some("Active layer / brush color")){self.set_active_color(active);}
+            if theme::icon_button(ui,icons::EYEDROPPER,false,20.0).on_hover_text("Pick material color from the mesh (I)").clicked(){self.set_tool(Tool::Picker);}
+            if swap_button(ui).on_hover_text("Swap the active color and the second color (S)").clicked(){self.swap_colors();}
+            color_button(ui,&mut self.color2,Some("Second color"));
+        });
+    }
+    pub(super) fn color_hud(&mut self,ui:&mut egui::Ui) {
+        let fill_target=self.target==StrokeTarget::Content && self.engine.layers.get(self.selected).is_some_and(|layer|matches!(&layer.content,Content::Fill(_)));
+        let initial_active_color=self.active_color();
+        ui.set_width(420.0);
+        egui::ScrollArea::vertical().max_height(620.0).show(ui, |ui| {
+        self.color_slots(ui); ui.add_space(4.0);
+        let mut state=std::mem::take(&mut self.color_sliders);
+        let mut second=self.color2;
+        let color=hud_body(ui,&mut state,self.active_color(),&mut second);
+        self.color2=second;
         if color != self.active_color() {
             self.set_active_color(color);
             // The next frame (sliders, preview) follows right away, not on the next mouse move.
@@ -265,5 +275,57 @@ fn close(a:[f32;3],b:[f32;3])->bool{a.iter().zip(b).all(|(x,y)|(x-y).abs()<1e-4)
 #[test]fn hsv_round_trips(){for c in [[0.8,0.2,0.1],[0.0,0.0,0.0],[1.0,1.0,1.0],[0.2,0.9,0.4],[0.1,0.3,0.95],[0.5,0.5,0.5],[1.0,0.0,0.0]]{assert!(close(hsv_to_rgb(rgb_to_hsv(c)),c),"{c:?}");}}
 #[test]fn gray_keeps_previous_hue(){let p=[0.6,0.7,0.8];assert!(close(hsv_keeping(p,[0.4,0.4,0.4]),[0.6,0.0,0.4]));assert!(close(hsv_keeping(p,[0.0,0.0,0.0]),[0.6,0.7,0.0]));}
 #[test]fn temperature_warms_and_cools(){let c=[0.5,0.5,0.5];assert_eq!(shift_temperature(c,0.0),c);let w=shift_temperature(c,1.0);let k=shift_temperature(c,-1.0);assert!(w[0]>c[0]&&w[2]<c[2]);assert!(k[0]<c[0]&&k[2]>c[2]);}
-}
 
+    struct Hud {
+        state: ColorSliders,
+        active: [f32; 3],
+        second: [f32; 3],
+    }
+    fn hud() -> egui_kittest::Harness<'static, Hud> {
+        let start = Hud { state: ColorSliders::default(), active: [0.8, 0.2, 0.1], second: [1.0; 3] };
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(480.0, 800.0))
+            .with_accessibility_check(false)
+            .build_ui_state(|ui, hud: &mut Hud| hud.active = hud_body(ui, &mut hud.state, hud.active, &mut hud.second), start);
+        harness.run();
+        harness
+    }
+
+    /// Typing a number into a field of the Color HUD keeps it (no jump back to the old value).
+    #[test]
+    fn color_hud_keeps_typed_red() {
+        use egui_kittest::kittest::Queryable;
+        let mut harness = hud();
+        let fields = harness.query_all_by_role(egui::accesskit::Role::SpinButton).count();
+        assert!(fields >= 3, "expected R, G, B fields, found {fields}");
+        harness.query_all_by_role(egui::accesskit::Role::SpinButton).next().unwrap().click();
+        harness.run();
+        harness.query_all_by_role(egui::accesskit::Role::SpinButton).next().unwrap().focus();
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        harness.query_all_by_role(egui::accesskit::Role::SpinButton).next().unwrap().type_text("128");
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        harness.run();
+        let red = harness.state().active[0] * 255.0;
+        assert!((red - 128.0).abs() < 1.0, "typed 128 into R, the colour has {red}");
+        // And it stays on later frames.
+        harness.run();
+        assert!((harness.state().active[0] * 255.0 - 128.0).abs() < 1.0);
+    }
+
+    /// Typing a hex code applies it, and the hex box keeps what is typed until it loses focus.
+    #[test]
+    fn color_hud_applies_typed_hex() {
+        use egui_kittest::kittest::Queryable;
+        let mut harness = hud();
+        let hex = harness.get_by_role(egui::accesskit::Role::TextInput);
+        hex.click();
+        harness.run();
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        harness.get_by_role(egui::accesskit::Role::TextInput).type_text("336699");
+        harness.run();
+        harness.run();
+        let c = harness.state().active.map(|v| (v * 255.0).round() as u8);
+        assert_eq!(c, [0x33, 0x66, 0x99]);
+    }
+}
