@@ -370,9 +370,9 @@ fn entries() -> Vec<(PathBuf, u64, std::time::SystemTime)> {
 fn evict(max: u64) {
     let mut all = entries();
     all.sort_by_key(|e| std::cmp::Reverse(e.2));
-    let mut total = 0;
+    let mut total = 0u64;
     for (path, len, _) in all {
-        total += len;
+        total = total.saturating_add(len);
         if total > max {
             let _ = fs::remove_file(path);
         }
