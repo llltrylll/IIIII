@@ -332,4 +332,91 @@ mod tests {
             assert!(!valid(&back[0], other));
         }
     }
+
+    /// The Properties panel's colour button inside a real dock tile: click it, then
+    /// press and drag in the square of the popup. Headless, no GPU.
+    struct ColorPane<'a> {
+        color: &'a mut [f32; 3],
+        button: &'a mut Option<egui::Rect>,
+    }
+    impl Behavior<Pane> for ColorPane<'_> {
+        fn pane_ui(&mut self, ui: &mut egui::Ui, _tile: TileId, pane: &mut Pane) -> UiResponse {
+            if *pane == Pane::Properties {
+                egui::Frame::new().inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+                    ui.set_min_size(ui.available_size());
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                        super::super::labeled(ui, "Base color", |ui| {
+                            let r = ui.cursor();
+                            super::super::color_edit(ui, self.color);
+                            *self.button = Some(egui::Rect::from_min_size(r.min, egui::vec2(28.0, 18.0)));
+                        });
+                    });
+                });
+            }
+            UiResponse::None
+        }
+        fn tab_title_for_pane(&mut self, _pane: &Pane) -> egui::WidgetText {
+            "t".into()
+        }
+    }
+
+    #[test]
+    fn properties_color_button_can_be_dragged_inside_a_dock() {
+        let mut t = Tiles::default();
+        let a = t.insert_pane(Pane::View3d);
+        let b = t.insert_pane(Pane::Properties);
+        let (a, b) = (t.insert_tab_tile(vec![a]), t.insert_tab_tile(vec![b]));
+        let root = t.insert_horizontal_tile(vec![a, b]);
+        let mut tree = Tree::new(egui::Id::unique("color_test_dock"), root, t);
+        let ctx = egui::Context::default();
+        let mut color = [0.8f32, 0.2, 0.1];
+        let mut button = None;
+        let mut time = 0.0;
+        let mut frame = |events: Vec<egui::Event>, color: &mut [f32; 3], button: &mut Option<egui::Rect>, tree: &mut Tree<Pane>| {
+            time += 0.05;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 800.0))),
+                events,
+                time: Some(time),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    tree.ui(&mut ColorPane { color: &mut *color, button: &mut *button }, ui);
+                });
+            });
+            out.textures_delta.clear();
+        };
+        let btn = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        frame(vec![], &mut color, &mut button, &mut tree);
+        frame(vec![], &mut color, &mut button, &mut tree);
+        let center = button.expect("the colour button was not drawn").center();
+        frame(vec![egui::Event::PointerMoved(center)], &mut color, &mut button, &mut tree);
+        frame(vec![btn(center, true)], &mut color, &mut button, &mut tree);
+        frame(vec![btn(center, false)], &mut color, &mut button, &mut tree);
+        frame(vec![], &mut color, &mut button, &mut tree);
+        frame(vec![], &mut color, &mut button, &mut tree);
+        assert!(egui::Popup::is_any_open(&ctx), "clicking the colour button did not open the popup");
+        // The popup is open if a press somewhere below the button changes the colour.
+        let before = color;
+        let popup = ctx
+            .memory(|m| m.areas().visible_layer_ids().into_iter().filter(|l| l.order == egui::Order::Foreground).filter_map(|l| m.area_rect(l.id)).next())
+            .expect("no popup area");
+        let mut moved = false;
+        'scan: for dy in (10..popup.height() as i32 - 10).step_by(10) {
+            for dx in (10..popup.width() as i32 - 10).step_by(10) {
+                let p = popup.min + egui::vec2(dx as f32, dy as f32);
+                frame(vec![egui::Event::PointerMoved(p)], &mut color, &mut button, &mut tree);
+                frame(vec![btn(p, true)], &mut color, &mut button, &mut tree);
+                frame(vec![egui::Event::PointerMoved(p + egui::vec2(3.0, 3.0))], &mut color, &mut button, &mut tree);
+                let changed = color != before;
+                frame(vec![btn(p, false)], &mut color, &mut button, &mut tree);
+                if changed {
+                    moved = true;
+                    break 'scan;
+                }
+            }
+        }
+        assert!(moved, "pressing and dragging inside the colour popup never changed the colour");
+    }
 }

@@ -441,6 +441,10 @@ pub struct PainterApp {
     baked_id_source: IdSource,
     /// Latest material edit; the expensive preview rebuild waits until this settles.
     preview_update_at: Option<Instant>,
+    /// A pointer button was down at the last frame (a slider or the colour square may be held).
+    preview_pointer_down: bool,
+    /// How long the last preview rebuild took.
+    last_composite: Duration,
     cam: OrbitCam,
     cam2d: Cam2d,
     layout: Layout,
@@ -539,7 +543,10 @@ pub(crate) const REPO_URL: &str = "https://github.com/alla2001/material-painter"
 /// `selected` when no layer is selected.
 const NO_LAYER: usize = usize::MAX;
 /// Wait until material controls have been idle before rebuilding the preview.
-const MATERIAL_PREVIEW_DELAY: Duration = Duration::from_millis(1200);
+/// Wait after a settings change (or after letting go of a slider) before the preview is rebuilt.
+const MATERIAL_PREVIEW_DELAY: Duration = Duration::from_millis(150);
+/// While a slider or the colour square is held, the preview is rebuilt at most this often.
+const MATERIAL_PREVIEW_LIVE: Duration = Duration::from_millis(250);
 
 fn srgb_u8(c: [f32; 3]) -> Color32 {
     Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8)
@@ -1523,6 +1530,8 @@ impl PainterApp {
             vertex_id: Default::default(),
             baked_id_source: IdSource::MeshParts,
             preview_update_at: None,
+            preview_pointer_down: false,
+            last_composite: Duration::ZERO,
             cam: OrbitCam::default(),
             cam2d: Cam2d::default(),
             layout: Layout::Split,
@@ -2553,26 +2562,39 @@ impl PainterApp {
         if (self.tool == Tool::Eraser) != (tool == Tool::Eraser) { swap_brushes(&mut self.brush,&mut self.other_brush); }
         self.tool=tool;
     }
+    /// How long to wait before the next preview rebuild: while a control is held the
+    /// preview follows at a steady pace (never less than 3x what a rebuild costs, so a slow
+    /// one can't pile up), and right after letting go it catches up quickly.
+    fn preview_delay(&self) -> Duration {
+        if self.preview_pointer_down {
+            MATERIAL_PREVIEW_LIVE.max(self.last_composite * 3).min(Duration::from_millis(2000))
+        } else {
+            MATERIAL_PREVIEW_DELAY
+        }
+    }
     /// Debounce expensive material preview recomposites without blocking UI controls.
+    /// An earlier pending deadline is kept, so a held slider can't starve the preview.
     fn defer_preview_update(&mut self) {
-        self.preview_update_at = Some(Instant::now() + MATERIAL_PREVIEW_DELAY);
+        let at = Instant::now() + self.preview_delay();
+        self.preview_update_at = Some(self.preview_update_at.map_or(at, |old| old.min(at)));
     }
     fn schedule_preview_update(&mut self, ctx: &egui::Context) {
         self.defer_preview_update();
-        ctx.request_repaint_after(MATERIAL_PREVIEW_DELAY);
+        ctx.request_repaint_after(self.preview_delay());
     }
     /// Service the material preview timer once per app frame, even when the
-    /// paint viewport is hidden. A held pointer postpones the rebuild until release.
+    /// paint viewport is hidden. The preview follows a held control live (throttled)
+    /// and is rebuilt shortly after release.
     fn service_preview_debounce(&mut self, ctx: &egui::Context) {
-        let Some(deadline) = self.preview_update_at else { return; };
-        // Keep extending the debounce while a pointer interaction is active.
-        // This guarantees the full delay starts after the slider is released,
-        // even when someone holds the knob without moving it.
-        if ctx.input(|i| i.pointer.any_down()) {
-            self.defer_preview_update();
-            ctx.request_repaint_after(MATERIAL_PREVIEW_DELAY);
-            return;
+        let down = ctx.input(|i| i.pointer.any_down());
+        // Let go: whatever is still waiting for the next live step is brought forward.
+        if self.preview_pointer_down && !down {
+            if let Some(deadline) = self.preview_update_at {
+                self.preview_update_at = Some(deadline.min(Instant::now() + MATERIAL_PREVIEW_DELAY));
+            }
         }
+        self.preview_pointer_down = down;
+        let Some(deadline) = self.preview_update_at else { return; };
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             self.preview_update_at = None;
@@ -5889,7 +5911,9 @@ impl PainterApp {
 
         // GPU: apply a settled material edit once, then render this view.
         if self.engine.dirty {
+            let started = Instant::now();
             self.engine.composite();
+            self.last_composite = started.elapsed();
         }
         self.composite_parked();
         let size = [(rect.width() * self.ppp).round() as u32, (rect.height() * self.ppp).round() as u32];
