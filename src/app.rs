@@ -447,6 +447,8 @@ pub struct PainterApp {
     last_composite: Duration,
     /// The next rebuild reports how long it took (F5).
     time_composite: bool,
+    /// The running bake only makes the ID map (from vertex colors).
+    bake_id_only: bool,
     cam: OrbitCam,
     cam2d: Cam2d,
     layout: Layout,
@@ -1535,6 +1537,7 @@ impl PainterApp {
             preview_pointer_down: false,
             last_composite: Duration::ZERO,
             time_composite: false,
+            bake_id_only: false,
             cam: OrbitCam::default(),
             cam2d: Cam2d::default(),
             layout: Layout::Split,
@@ -1632,7 +1635,27 @@ impl PainterApp {
     }
 
     /// Bakes every texture set, the edited one first.
+    /// The settings a bake runs with: a "vertex colors only" bake skips the slow
+    /// ray-traced maps (AO, cavity, thickness, sky...) and keeps just the ID map.
+    fn job_bake_settings(&self) -> bake::BakeSettings {
+        let mut settings = self.bake_settings.clone();
+        if self.bake_id_only {
+            settings.maps = 0;
+            settings.custom.clear();
+        }
+        settings
+    }
+
+    /// Bakes the ID map alone from the vertex colors and leaves every other baked map as it is.
+    fn start_bake_id_only(&mut self, ctx: &egui::Context) {
+        self.bake_id_only = true;
+        let active = self.sets.active;
+        self.sets.bake_queue = (0..self.mesh.sets.len()).filter(|&k| k != active).collect();
+        self.start_bake_set(active, ctx);
+    }
+
     fn start_bake_all(&mut self, ctx: &egui::Context) {
+        self.bake_id_only = false;
         let active = self.sets.active;
         self.sets.bake_queue = (0..self.mesh.sets.len()).filter(|&k| k != active).collect();
         self.start_bake_set(active, ctx);
@@ -1645,7 +1668,7 @@ impl PainterApp {
         let Some(res) = self.set_engine_mut(set).map(|e| e.res.min(bake::MAX_BAKE_RES)) else { return };
         self.sets.baking = set;
         let mesh = self.mesh.clone();
-        let settings = self.bake_settings.clone();
+        let settings = self.job_bake_settings();
         self.baked_id_source = settings.id_source;
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
@@ -1684,8 +1707,9 @@ impl PainterApp {
                     match out_of_memory_guard(&rs.device, || entry.upload(&rs.device, &rs.queue)) {
                         Ok((maps, report)) => {
                             self.status = format!("Loaded {} cached mesh maps ({}², from {}).", report.baked.count_ones(), report.resolution, report.source);
+                            let id_only = self.bake_id_only;
                             if let Some(e) = self.set_engine_mut(self.sets.baking) {
-                                e.set_maps(maps, Arc::new(report));
+                                if id_only { e.replace_id_map(maps, Arc::new(report)) } else { e.set_maps(maps, Arc::new(report)) }
                             }
                         }
                         Err(e) => {
@@ -1697,8 +1721,9 @@ impl PainterApp {
                 }
                 Ok(Ok(Prepared::Scene(scene, key))) => {
                     let res = self.set_engines().get(self.sets.baking).map_or(self.engine.res, |e| e.res);
-                    let (baker, rs, mesh, settings) = (&self.baker, &self.rs, &self.gpu_mesh, &self.bake_settings);
-                    match out_of_memory_guard(&rs.device, || baker.start(&rs.device, &rs.queue, mesh, &scene, settings, res)) {
+                    let settings = self.job_bake_settings();
+                    let (baker, rs, mesh) = (&self.baker, &self.rs, &self.gpu_mesh);
+                    match out_of_memory_guard(&rs.device, || baker.start(&rs.device, &rs.queue, mesh, &scene, &settings, res)) {
                         Ok(run) => {
                             self.bake_job = Some(BakeJob::Running(run, key));
                             ctx.request_repaint();
@@ -1754,8 +1779,12 @@ impl PainterApp {
                         report.resolution
                     );
                     bake_cache::store(key.clone(), &maps, report.clone(), &self.rs.device, &self.rs.queue);
+                    let id_only = self.bake_id_only;
                     if let Some(e) = self.set_engine_mut(self.sets.baking) {
-                        e.set_maps(maps, report);
+                        if id_only { e.replace_id_map(maps, report) } else { e.set_maps(maps, report) }
+                    }
+                    if id_only {
+                        self.status = "Baked the ID map from the vertex colors.".into();
                     }
                     self.bake_next(ctx);
                 }
@@ -5244,8 +5273,8 @@ impl PainterApp {
     fn service_vertex_id_requests(&mut self, ctx: &egui::Context) {
         if std::mem::take(&mut self.vertex_id.want_rebake) {
             self.bake_settings.id_source = IdSource::VertexColors;
-            self.start_bake_all(ctx);
-            self.status = "Baking the mesh maps from the vertex colors (the ID mask shows up when it finishes).".into();
+            self.start_bake_id_only(ctx);
+            self.status = "Baking the ID map from the vertex colors (the other maps stay as they are).".into();
         }
         if std::mem::take(&mut self.vertex_id.want_import) {
             let Some(path) = rfd::FileDialog::new().add_filter("Mesh (FBX, OBJ)", &crate::import::EXTENSIONS).set_title("The mesh file this project was made from").pick_file() else {

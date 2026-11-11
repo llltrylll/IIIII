@@ -121,6 +121,11 @@ pub fn key(mesh: &Mesh, settings: &BakeSettings, res: u32, set: usize) -> Key {
         Some(c) => h.bytes(bytemuck::cast_slice(c)),
         None => h.word(0),
     }
+    // The ID map from vertex colors reads the per-corner colors.
+    match &mesh.tri_vertex_color {
+        Some(c) => h.bytes(bytemuck::cast_slice(c)),
+        None => h.word(0),
+    }
     h.bytes(bytemuck::cast_slice(&mesh.center.to_array()));
     h.word(mesh.scale.to_bits() as u64);
     Key(format!("{:016x}", h.0))

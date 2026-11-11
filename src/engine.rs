@@ -1772,6 +1772,23 @@ impl Engine {
 
     /// Adopts freshly baked maps. Painted fixes and levels are kept, so artists
     /// can re-bake with new settings without losing their corrections.
+    /// Swaps in only the ID map of a fresh bake (made from vertex colors); every other
+    /// baked map stays. Without an earlier bake it is a normal `set_maps`.
+    pub fn replace_id_map(&mut self, baked: BakedMaps, report: Arc<BakeReport>) {
+        if !self.has_bake {
+            return self.set_maps(baked, report);
+        }
+        let BakedMaps { maps, .. } = baked;
+        let [_, _, _, _, id] = maps;
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        let id = if id.width != self.res { self.resample(&mut encoder, &id, self.res) } else { id };
+        self.queue.submit([encoder.finish()]);
+        self.maps[4] = id;
+        self.map_fix = Default::default();
+        self.maps_dirty = true;
+        self.mark_dirty();
+    }
+
     pub fn set_maps(&mut self, baked: BakedMaps, report: Arc<BakeReport>) {
         // Bakes stop at `bake::MAX_BAKE_RES`; bigger texture sets get them upscaled.
         let mut encoder = self.device.create_command_encoder(&Default::default());
