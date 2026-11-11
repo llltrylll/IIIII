@@ -111,14 +111,29 @@ impl Writer {
     }
 }
 
-struct Reader {
-    blobs: Vec<Vec<u8>>,
+struct Reader<'a> {
+    // Borrow the compressed data from the project file instead of copying
+    // every blob while the entire container is already resident in memory.
+    blobs: Vec<&'a [u8]>,
 }
 
-impl Reader {
+impl Reader<'_> {
     fn blob(&self, v: &Value) -> Result<Vec<u8>, String> {
-        let i = v.as_u64().ok_or("missing blob reference")? as usize;
+        const MAX_UNCOMPRESSED_BLOB: usize = 1024 * 1024 * 1024;
+        let i = v
+            .as_u64()
+            .and_then(|index| usize::try_from(index).ok())
+            .ok_or("missing or invalid blob reference")?;
         let packed = self.blobs.get(i).ok_or(format!("blob {i} is missing"))?;
+        let prefix: [u8; 4] = packed
+            .get(..4)
+            .ok_or_else(|| format!("blob {i} is truncated"))?
+            .try_into()
+            .map_err(|_| format!("blob {i} has an invalid size prefix"))?;
+        let expected = u32::from_le_bytes(prefix) as usize;
+        if expected > MAX_UNCOMPRESSED_BLOB {
+            return Err(format!("blob {i} declares an unreasonable uncompressed size"));
+        }
         lz4_flex::decompress_size_prepended(packed).map_err(|e| format!("blob {i} is damaged: {e}"))
     }
 }
@@ -623,20 +638,35 @@ impl PainterApp {
         if data.len() < 24 || &data[..8] != MAGIC {
             return Err(bad());
         }
-        let mut at = 8;
+        let mut at = 8usize;
         let mut take = |n: usize| -> Result<&[u8], String> {
-            let slice = data.get(at..at + n).ok_or_else(bad)?;
-            at += n;
+            let end = at.checked_add(n).ok_or_else(bad)?;
+            let slice = data.get(at..end).ok_or_else(bad)?;
+            at = end;
             Ok(slice)
         };
-        let u64_at = |b: &[u8]| u64::from_le_bytes(b.try_into().unwrap()) as usize;
-        let len = u64_at(take(8)?);
+        let u64_at = |b: &[u8]| -> Result<usize, String> {
+            let bytes: [u8; 8] = b.try_into().map_err(|_| bad())?;
+            usize::try_from(u64::from_le_bytes(bytes)).map_err(|_| bad())
+        };
+        const MAX_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
+        const MAX_PROJECT_BLOBS: usize = 1_000_000;
+        let len = u64_at(take(8)?)?;
+        if len > MAX_MANIFEST_BYTES {
+            return Err(bad());
+        }
         let manifest: Value = serde_json::from_slice(take(len)?).map_err(|e| format!("{}: {e}", bad()))?;
-        let count = u64_at(take(8)?);
+        let count = u64_at(take(8)?)?;
+        if count > MAX_PROJECT_BLOBS || count > data.len().saturating_sub(at) / 8 {
+            return Err(bad());
+        }
         let mut blobs = Vec::with_capacity(count);
         for _ in 0..count {
-            let n = u64_at(take(8)?);
-            blobs.push(take(n)?.to_vec());
+            let n = u64_at(take(8)?)?;
+            blobs.push(take(n)?);
+        }
+        if at != data.len() {
+            return Err(bad());
         }
         let r = Reader { blobs };
 
