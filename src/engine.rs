@@ -903,6 +903,109 @@ impl Layer {
     }
 }
 
+/// Builds the compositor's pass order in linear time.
+///
+/// Layer order is bottom-to-top: a folder is stored after its children. The
+/// parent links therefore point toward a larger index. Propagating each
+/// child's block start to its parent in ascending order computes the same
+/// contiguous folder ranges as Engine::block without repeatedly walking the
+/// parent chain for every possible folder/layer pair.
+fn composite_passes(layers: &[Layer]) -> (Vec<Pass>, usize) {
+    let n = layers.len();
+    if n == 0 {
+        return (Vec::new(), 0);
+    }
+
+    let by_id: HashMap<u64, usize> = layers.iter().enumerate().map(|(i, layer)| (layer.id, i)).collect();
+    let parents: Vec<Option<usize>> =
+        layers.iter().map(|layer| layer.parent.and_then(|id| by_id.get(&id).copied())).collect();
+
+    // A folder's block starts at the earliest child (including nested
+    // folders) immediately below it. Parents before children are invalid for
+    // this stack ordering and, as in block(), do not extend the folder block.
+    let mut block_starts: Vec<usize> = (0..n).collect();
+    for (child, parent) in parents.iter().copied().enumerate() {
+        if let Some(parent) = parent
+            && parent > child
+        {
+            block_starts[parent] = block_starts[parent].min(block_starts[child]);
+        }
+    }
+
+    // Resolve inherited visibility once. The iterative walk also handles
+    // malformed parent cycles safely instead of looping forever.
+    let mut shown = vec![false; n];
+    let mut resolved = vec![false; n];
+    let mut visiting = vec![false; n];
+    for start in 0..n {
+        if resolved[start] {
+            continue;
+        }
+        let mut chain = Vec::new();
+        let mut current = Some(start);
+        let mut visible = true;
+        while let Some(i) = current {
+            if resolved[i] {
+                visible &= shown[i];
+                break;
+            }
+            if visiting[i] {
+                visible = false;
+                break;
+            }
+            visiting[i] = true;
+            chain.push(i);
+            current = parents[i];
+        }
+        for i in chain.into_iter().rev() {
+            visible &= layers[i].visible;
+            shown[i] = visible;
+            resolved[i] = true;
+            visiting[i] = false;
+        }
+    }
+
+    let isolates: Vec<bool> = layers
+        .iter()
+        .map(|layer| layer.is_folder() && (layer.opacity < 1.0 || layer.mask.is_some()))
+        .collect();
+
+    // Scanning folder indices backwards preserves the old outermost-first
+    // opening order without sorting every frame.
+    let mut opening_at: Vec<Vec<usize>> = (0..n).map(|_| Vec::new()).collect();
+    for folder in (0..n).rev() {
+        if isolates[folder] && shown[folder] {
+            opening_at[block_starts[folder]].push(folder);
+        }
+    }
+
+    let mut passes = Vec::with_capacity(n + isolates.iter().filter(|&&v| v).count() * 2);
+    let (mut depth, mut max_depth) = (0, 0);
+    for i in 0..n {
+        for _ in &opening_at[i] {
+            passes.push(Pass::Begin);
+            depth += 1;
+            max_depth = max_depth.max(depth);
+        }
+
+        let layer = &layers[i];
+        let has_content = match &layer.content {
+            Content::Paint(ch) => ch.iter().any(|c| c.is_some()),
+            Content::Fill(fill) => fill.mat.enabled.iter().any(|&enabled| enabled),
+            Content::Folder(_) => false,
+        };
+        if has_content && layer.opacity > 0.0 && shown[i] {
+            passes.push(Pass::Layer(i));
+        }
+        if isolates[i] && shown[i] {
+            passes.push(Pass::End(i));
+            depth -= 1;
+        }
+    }
+
+    (passes, max_depth)
+}
+
 /// The ID mask's colors as shader uniforms: the first color with the
 /// tolerance, then the others.
 fn id_uniform(g: &Generator) -> ([f32; 4], [[f32; 4]; MAX_ID_COLORS - 1]) {
@@ -3357,17 +3460,6 @@ impl Engine {
         u
     }
 
-    /// Shown: the layer and every folder around it are visible.
-    fn shown(&self, idx: usize) -> bool {
-        self.layers[idx].visible && self.ancestors(idx).all(|a| self.layers[a].visible)
-    }
-
-    /// A folder that fades or masks its contents, so it composites them apart.
-    fn isolates(&self, idx: usize) -> bool {
-        let l = &self.layers[idx];
-        l.is_folder() && (l.opacity < 1.0 || l.mask.is_some())
-    }
-
     /// Re-composites the whole stack. Cheap enough to run every painting frame:
     /// one fullscreen pass per visible layer, plus one per faded or masked folder.
     /// Waits until the GPU has finished everything submitted so far.
@@ -3379,33 +3471,7 @@ impl Engine {
         if self.maps_dirty {
             self.resolve_maps();
         }
-        let n = self.layers.len();
-        let mut passes = Vec::new();
-        let (mut depth, mut max_depth) = (0, 0);
-        for i in 0..n {
-            // Folders whose contents start here open, outermost (highest index) first.
-            let mut opening: Vec<usize> =
-                (i..n).filter(|&f| self.isolates(f) && self.shown(f) && self.block(f).start == i).collect();
-            opening.sort_by(|a, b| b.cmp(a));
-            for _ in opening {
-                passes.push(Pass::Begin);
-                depth += 1;
-                max_depth = max_depth.max(depth);
-            }
-            let l = &self.layers[i];
-            let has_content = match &l.content {
-                Content::Paint(ch) => ch.iter().any(|c| c.is_some()),
-                Content::Fill(f) => f.mat.enabled.iter().any(|&e| e),
-                Content::Folder(_) => false,
-            };
-            if has_content && l.opacity > 0.0 && self.shown(i) {
-                passes.push(Pass::Layer(i));
-            }
-            if self.isolates(i) && self.shown(i) {
-                passes.push(Pass::End(i));
-                depth -= 1;
-            }
-        }
+        let (passes, max_depth) = composite_passes(&self.layers);
         self.folder_below.retain(|set| set[0].width == self.res);
         self.folder_below.truncate(max_depth);
         while self.folder_below.len() < max_depth {
@@ -3963,5 +4029,81 @@ impl Engine {
             ("paint layers", mb(self.layers.iter().map(|l| l.vram_bytes()).sum())),
             ("fill images", mb(unique_images)),
         ]
+    }
+}
+
+#[cfg(test)]
+mod composite_tests {
+    use super::*;
+
+    fn layer(id: u64, parent: Option<u64>, content: Content, opacity: f32, visible: bool) -> Layer {
+        Layer {
+            id,
+            name: format!("Layer {id}"),
+            visible,
+            opacity,
+            blend: Blend::Normal,
+            content,
+            mask: None,
+            parent,
+            images: std::array::from_fn(|_| None),
+            thumb: None,
+        }
+    }
+
+    fn fill(id: u64, parent: Option<u64>) -> Layer {
+        layer(id, parent, Content::Fill(FillParams::default()), 1.0, true)
+    }
+
+    fn folder(id: u64, parent: Option<u64>, opacity: f32, visible: bool) -> Layer {
+        layer(id, parent, Content::Folder(Folder { open: true, graph: None }), opacity, visible)
+    }
+
+    #[test]
+    fn nested_faded_folders_open_outermost_first_and_close_inside_out() {
+        let layers = vec![
+            fill(10, Some(30)),
+            fill(20, Some(40)),
+            folder(30, Some(40), 0.5, true),
+            folder(40, None, 0.5, true),
+        ];
+
+        let (passes, depth) = composite_passes(&layers);
+        assert_eq!(
+            passes,
+            vec![Pass::Begin, Pass::Begin, Pass::Layer(0), Pass::Layer(1), Pass::End(2), Pass::End(3)]
+        );
+        assert_eq!(depth, 2);
+    }
+
+    #[test]
+    fn hidden_folder_suppresses_its_contents_but_not_root_layers() {
+        let layers = vec![
+            fill(10, Some(20)),
+            fill(30, None),
+            folder(20, None, 0.5, false),
+        ];
+
+        let (passes, depth) = composite_passes(&layers);
+        assert_eq!(passes, vec![Pass::Layer(1)]);
+        assert_eq!(depth, 0);
+    }
+
+    #[test]
+    fn opaque_unmasked_folder_does_not_add_isolation_passes() {
+        let layers = vec![fill(10, Some(20)), folder(20, None, 1.0, true)];
+
+        let (passes, depth) = composite_passes(&layers);
+        assert_eq!(passes, vec![Pass::Layer(0)]);
+        assert_eq!(depth, 0);
+    }
+
+    #[test]
+    fn missing_parent_does_not_hide_a_layer() {
+        let layers = vec![fill(10, Some(999))];
+
+        let (passes, depth) = composite_passes(&layers);
+        assert_eq!(passes, vec![Pass::Layer(0)]);
+        assert_eq!(depth, 0);
     }
 }
