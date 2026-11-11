@@ -56,6 +56,7 @@ mod shelf_ui;
 mod view_ui;
 mod windows_ui;
 use color_ui::{ColorSliders, color_edit, hsv_to_rgb, rgb_to_hsv};
+pub(crate) use color_ui::parse_color_hex;
 mod vertex_id;
 
 use export_ui::{ExportDialog, open_in_file_browser};

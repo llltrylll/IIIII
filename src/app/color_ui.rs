@@ -89,7 +89,7 @@ pub(super) struct ColorSliders {
     /// Color when the panel was opened, for the old | new swatch.
     pub(super) opened: [f32; 3],
 }
-pub(super) fn parse_color_hex(value: &str) -> Option<[f32; 3]> {
+pub(crate) fn parse_color_hex(value: &str) -> Option<[f32; 3]> {
     let raw = value.trim().strip_prefix('#').unwrap_or(value.trim());
     if raw.len() != 6 { return None; }
     let packed = u32::from_str_radix(raw, 16).ok()?;
