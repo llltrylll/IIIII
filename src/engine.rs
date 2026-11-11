@@ -1212,6 +1212,7 @@ pub struct Engine {
     /// alternate between (the result is in one of them).
     mask_out: HashMap<u64, [Tex; 3]>,
     mask_filter_ubuf: wgpu::Buffer,
+    mask_filter_ubuf_slots: u64,
     /// Texels the stroke changed since the last composite (x0, y0, x1, y1,
     /// exclusive), so stroke frames recomposite only that patch; `None`
     /// with `region_unknown` when a step didn't say.
@@ -1331,6 +1332,7 @@ impl Engine {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
+            mask_filter_ubuf_slots: MAX_MASK_FILTER_STEPS,
             stroke_region: None,
             region_unknown: false,
             generation: 0,
@@ -2872,14 +2874,26 @@ impl Engine {
                 std::mem::swap(target, tex);
             }
             Edit::Group(edits) => {
-                if undoing {
-                    for edit in edits.iter_mut().rev() {
-                        self.apply_edit(edit, true)?;
-                    }
+                let order: Vec<usize> = if undoing {
+                    (0..edits.len()).rev().collect()
                 } else {
-                    for edit in edits {
-                        self.apply_edit(edit, false)?;
+                    (0..edits.len()).collect()
+                };
+                let mut applied = Vec::with_capacity(order.len());
+                for index in order {
+                    if let Err(error) = self.apply_edit(&mut edits[index], undoing) {
+                        // A group is one user-visible history step. Restore the
+                        // children already applied so a failed group stays atomic.
+                        for applied_index in applied.into_iter().rev() {
+                            if let Err(rollback_error) = self.apply_edit(&mut edits[applied_index], !undoing) {
+                                return Err(format!(
+                                    "{error}; rollback also failed: {rollback_error}"
+                                ));
+                            }
+                        }
+                        return Err(error);
                     }
+                    applied.push(index);
                 }
             }
         }
@@ -3321,7 +3335,7 @@ impl Engine {
             let mut pass = gpu::pass(encoder, "mask filter", &[gpu::color_attachment(&out.view, load)]);
             clip(&mut pass);
             pass.set_pipeline(&self.p.mask_filter);
-            pass.set_bind_group(0, &bg, &[(step.min(MAX_MASK_FILTER_STEPS as usize - 1) as u64 * MASK_FILTER_STRIDE) as u32]);
+            pass.set_bind_group(0, &bg, &[(step as u64 * MASK_FILTER_STRIDE) as u32]);
             pass.draw(0..3, 0..1);
         };
         let mut cur = 0;
@@ -3611,7 +3625,16 @@ impl Engine {
             ops.extend((begin..steps.len()).map(MaskOp::Filter));
             layer_ops.insert(li, ops);
         }
-        steps.truncate(MAX_MASK_FILTER_STEPS as usize);
+        if steps.len() as u64 > self.mask_filter_ubuf_slots {
+            let slots = (steps.len() as u64).next_power_of_two();
+            self.mask_filter_ubuf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("mask filter uniforms"),
+                size: MASK_FILTER_STRIDE * slots,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.mask_filter_ubuf_slots = slots;
+        }
         let mut sdata = vec![0u8; (MASK_FILTER_STRIDE as usize) * steps.len().max(1)];
         for (i, s) in steps.iter().enumerate() {
             let off = i * MASK_FILTER_STRIDE as usize;
