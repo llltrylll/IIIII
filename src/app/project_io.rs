@@ -657,14 +657,22 @@ impl PainterApp {
         }
         let manifest: Value = serde_json::from_slice(take(len)?).map_err(|e| format!("{}: {e}", bad()))?;
         let count = u64_at(take(8)?)?;
+        drop(take);
         if count > MAX_PROJECT_BLOBS || count > data.len().saturating_sub(at) / 8 {
             return Err(bad());
         }
+        let mut take = |n: usize| -> Result<&[u8], String> {
+            let end = at.checked_add(n).ok_or_else(bad)?;
+            let slice = data.get(at..end).ok_or_else(bad)?;
+            at = end;
+            Ok(slice)
+        };
         let mut blobs = Vec::with_capacity(count);
         for _ in 0..count {
             let n = u64_at(take(8)?)?;
             blobs.push(take(n)?);
         }
+        drop(take);
         if at != data.len() {
             return Err(bad());
         }
