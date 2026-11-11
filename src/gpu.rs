@@ -361,9 +361,21 @@ impl GpuMesh {
     }
 }
 
-/// Read several textures in one submission and poll, decoding each mapped
-/// buffer before moving to the next one. This avoids a GPU wait per texture
-/// without retaining an extra raw-byte copy of every map at once.
+struct ReadbackItem {
+    buffer: wgpu::Buffer,
+    format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+    row_bytes: u32,
+    padded_row_bytes: u32,
+}
+
+/// GPU copies already submitted for a consistent snapshot of the source textures.
+/// Mapping and CPU decoding can happen later, on a worker thread.
+pub struct ReadbackBatch {
+    items: Vec<ReadbackItem>,
+}
+
 fn unpad_readback_rows(data: &[u8], row_bytes: u32, padded_row_bytes: u32, height: u32) -> Result<Vec<u8>, String> {
     if row_bytes == 0 || padded_row_bytes < row_bytes || padded_row_bytes % 256 != 0 || height == 0 {
         return Err("Invalid GPU texture readback row layout.".into());
@@ -388,25 +400,16 @@ fn unpad_readback_rows(data: &[u8], row_bytes: u32, padded_row_bytes: u32, heigh
     Ok(output)
 }
 
-pub fn read_wgpu_textures_with<T>(
+/// Records and submits copies of all requested texture mip-zero levels.
+/// This must be called before the document can be edited again, so the copy
+/// commands capture the exact pixels the user asked to export.
+pub fn prepare_wgpu_textures(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     textures: &[&wgpu::Texture],
-    mut decode: impl FnMut(&wgpu::Texture, &[u8]) -> Result<T, String>,
-) -> Result<Vec<T>, String> {
-    struct Staging {
-        buffer: wgpu::Buffer,
-        row_bytes: u32,
-        padded_row_bytes: u32,
-        height: u32,
-    }
-
-    if textures.is_empty() {
-        return Ok(Vec::new());
-    }
-
+) -> Result<ReadbackBatch, String> {
     let mut encoder = device.create_command_encoder(&Default::default());
-    let mut staging = Vec::with_capacity(textures.len());
+    let mut items = Vec::with_capacity(textures.len());
     for texture in textures {
         let width = texture.width();
         let height = texture.height();
@@ -438,90 +441,123 @@ pub fn read_wgpu_textures_with<T>(
             },
             wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         );
-        staging.push(Staging { buffer, row_bytes, padded_row_bytes, height });
+        items.push(ReadbackItem { buffer, format: texture.format(), width, height, row_bytes, padded_row_bytes });
     }
-
-    queue.submit([encoder.finish()]);
-    let (tx, rx) = std::sync::mpsc::channel();
-    for (index, item) in staging.iter().enumerate() {
-        let tx = tx.clone();
-        item.buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
-            let result = result.map_err(|error| format!("{error:?}"));
-            let _ = tx.send((index, result));
-        });
+    if !items.is_empty() {
+        queue.submit([encoder.finish()]);
     }
-    drop(tx);
+    Ok(ReadbackBatch { items })
+}
 
-    if let Err(error) = device.poll(wgpu::PollType::wait_indefinitely()) {
-        for item in &staging {
+impl ReadbackBatch {
+    /// Maps the already-submitted copies and decodes one texture at a time.
+    pub fn decode<T>(
+        self,
+        device: &wgpu::Device,
+        mut decode: impl FnMut(wgpu::TextureFormat, u32, u32, &[u8]) -> Result<T, String>,
+    ) -> Result<Vec<T>, String> {
+        if self.items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        for (index, item) in self.items.iter().enumerate() {
+            let tx = tx.clone();
+            item.buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+                let result = result.map_err(|error| format!("{error:?}"));
+                let _ = tx.send((index, result));
+            });
+        }
+        drop(tx);
+
+        if let Err(error) = device.poll(wgpu::PollType::wait_indefinitely()) {
+            for item in &self.items {
+                item.buffer.unmap();
+            }
+            return Err(format!("GPU texture readback did not complete: {error:?}"));
+        }
+
+        let mut mapped = vec![false; self.items.len()];
+        let mut failure = None;
+        for _ in 0..self.items.len() {
+            match rx.recv() {
+                Ok((index, Ok(()))) if index < mapped.len() => mapped[index] = true,
+                Ok((_, Err(error))) => {
+                    if failure.is_none() {
+                        failure = Some(format!("GPU texture mapping failed: {error}"));
+                    }
+                }
+                Ok(_) => {
+                    if failure.is_none() {
+                        failure = Some("GPU texture mapping returned an invalid result.".into());
+                    }
+                }
+                Err(error) => {
+                    if failure.is_none() {
+                        failure = Some(format!("GPU texture mapping callback stopped: {error}"));
+                    }
+                    break;
+                }
+            }
+        }
+        if let Some(error) = failure {
+            for (item, is_mapped) in self.items.iter().zip(mapped) {
+                if is_mapped {
+                    item.buffer.unmap();
+                }
+            }
+            return Err(error);
+        }
+
+        let mut output = Vec::with_capacity(self.items.len());
+        let mut decode_error = None;
+        for item in &self.items {
+            let view = match item.buffer.slice(..).get_mapped_range() {
+                Ok(view) => view,
+                Err(error) => {
+                    item.buffer.unmap();
+                    if decode_error.is_none() {
+                        decode_error = Some(format!("GPU texture mapping could not be read: {error:?}"));
+                    }
+                    continue;
+                }
+            };
+            let raw = unpad_readback_rows(&view, item.row_bytes, item.padded_row_bytes, item.height);
+            drop(view);
             item.buffer.unmap();
-        }
-        return Err(format!("GPU texture readback did not complete: {error:?}"));
-    }
 
-    let mut mapped = vec![false; staging.len()];
-    let mut failure = None;
-    for _ in 0..staging.len() {
-        match rx.recv() {
-            Ok((index, Ok(()))) if index < mapped.len() => mapped[index] = true,
-            Ok((_, Err(error))) => {
-                if failure.is_none() {
-                    failure = Some(format!("GPU texture mapping failed: {error}"));
-                }
-            }
-            Ok(_) => {
-                if failure.is_none() {
-                    failure = Some("GPU texture mapping returned an invalid result.".into());
-                }
-            }
-            Err(error) => {
-                if failure.is_none() {
-                    failure = Some(format!("GPU texture mapping callback stopped: {error}"));
-                }
-                break;
+            match raw.and_then(|bytes| decode(item.format, item.width, item.height, &bytes)) {
+                Ok(value) => output.push(value),
+                Err(error) if decode_error.is_none() => decode_error = Some(error),
+                Err(_) => {}
             }
         }
-    }
-    if let Some(error) = failure {
-        for (item, is_mapped) in staging.iter().zip(mapped) {
-            if is_mapped {
-                item.buffer.unmap();
-            }
-        }
-        return Err(error);
-    }
 
-    let mut output = Vec::with_capacity(textures.len());
-    let mut decode_error = None;
-    for (texture, item) in textures.iter().zip(&staging) {
-        let view = match item.buffer.slice(..).get_mapped_range() {
-            Ok(view) => view,
-            Err(error) => {
-                item.buffer.unmap();
-                if decode_error.is_none() {
-                    decode_error = Some(format!("GPU texture mapping could not be read: {error:?}"));
-                }
-                continue;
-            }
-        };
-        let raw = unpad_readback_rows(&view, item.row_bytes, item.padded_row_bytes, item.height);
-        drop(view);
-        item.buffer.unmap();
-
-        match raw.and_then(|bytes| decode(texture, &bytes)) {
-            Ok(value) => output.push(value),
-            Err(error) if decode_error.is_none() => decode_error = Some(error),
-            Err(_) => {}
+        if let Some(error) = decode_error {
+            Err(error)
+        } else if output.len() == self.items.len() {
+            Ok(output)
+        } else {
+            Err("GPU texture readback returned an incomplete result.".into())
         }
     }
+}
 
-    if let Some(error) = decode_error {
-        Err(error)
-    } else if output.len() == textures.len() {
-        Ok(output)
-    } else {
-        Err("GPU texture readback returned an incomplete result.".into())
-    }
+/// Synchronous convenience wrapper for callers that need the texture handles
+/// throughout decoding; the copy itself is still submitted only once.
+pub fn read_wgpu_textures_with<T>(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    textures: &[&wgpu::Texture],
+    mut decode: impl FnMut(&wgpu::Texture, &[u8]) -> Result<T, String>,
+) -> Result<Vec<T>, String> {
+    let batch = prepare_wgpu_textures(device, queue, textures)?;
+    let mut index = 0usize;
+    batch.decode(device, |_, _, _, bytes| {
+        let texture = textures.get(index)
+            .ok_or_else(|| "GPU readback returned more textures than requested.".to_string())?;
+        index += 1;
+        decode(texture, bytes)
+    })
 }
 
 /// Blocking texture readback, used for export (an explicit user action).
