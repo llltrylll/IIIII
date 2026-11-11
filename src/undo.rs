@@ -18,6 +18,7 @@ pub struct TexInfo {
     pub width: u32,
     pub height: u32,
     pub bpp: u32,
+    pub format: wgpu::TextureFormat,
 }
 
 enum SnapState {
@@ -64,7 +65,7 @@ impl Snapshot {
                 },
                 tex.extent(),
             );
-            infos.push(TexInfo { width: tex.width, height: tex.height, bpp });
+            infos.push(TexInfo { width: tex.width, height: tex.height, bpp, format: tex.format });
             buffers.push(buffer);
         }
         let remaining = Arc::new(AtomicUsize::new(buffers.len()));
@@ -187,8 +188,8 @@ impl Snapshot {
         // Validate the complete snapshot before writing any part of it.
         let mut decoded = Vec::with_capacity(data.len());
         for ((tex, packed), info) in textures.iter().zip(data).zip(&self.infos) {
-            if tex.width != info.width || tex.height != info.height {
-                return Err("Undo snapshot dimensions no longer match its target.".into());
+            if tex.width != info.width || tex.height != info.height || tex.format != info.format {
+                return Err("Undo snapshot dimensions or format no longer match its target.".into());
             }
             let raw = lz4_flex::decompress_size_prepended(packed)
                 .map_err(|error| format!("Undo snapshot decompression failed: {error}"))?;
