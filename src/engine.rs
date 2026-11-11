@@ -855,6 +855,9 @@ const COMBINE_STEP: f32 = 7.0;
 const FILTER_REF_RES: f32 = 2048.0;
 
 pub struct Mask {
+    /// Made as a black mask and not changed since: a mask layer added to it should
+    /// reveal (Add), because Multiply with a black base shows nothing.
+    pub black_base: bool,
     pub paint: Option<Tex>,
     pub generator: Option<Generator>,
     /// Filters on the mask, in order.
@@ -2459,6 +2462,7 @@ impl Engine {
             Content::Folder(f) => Content::Folder(Folder { graph: None, ..*f }),
         };
         let mask = src.mask.as_ref().map(|m| Mask {
+            black_base: m.black_base,
             paint: m.paint.as_ref().map(|t| copy(&mut encoder, t)),
             generator: m.generator,
             graph: m.graph,
@@ -2503,8 +2507,9 @@ impl Engine {
         }
         self.commit_props(undo);
         let paint = generator.is_none().then(|| self.new_mask_texture(white));
+        let black_base = generator.is_none() && !white;
         let layer = &mut self.layers[idx];
-        let old = layer.mask.replace(Mask { paint, generator, graph: None, filters: Vec::new(), layers: Vec::new() });
+        let old = layer.mask.replace(Mask { black_base, paint, generator, graph: None, filters: Vec::new(), layers: Vec::new() });
         let (id, label) = (layer.id, format!("Add mask to {}", layer.name));
         self.record(undo, label, Edit::Mask { id, mask: old });
         self.mark_dirty();
@@ -2582,7 +2587,7 @@ impl Engine {
         let paint = (generator.is_none() && graph.is_none()).then(|| self.new_mask_texture(true));
         let layer = &mut self.layers[idx];
         let (filters, layers) = layer.mask.as_ref().map_or_else(Default::default, |m| (m.filters.clone(), m.layers.clone()));
-        let old = layer.mask.replace(Mask { paint, generator, graph, filters, layers });
+        let old = layer.mask.replace(Mask { black_base: false, paint, generator, graph, filters, layers });
         let (id, label) = (layer.id, format!("Change the mask of {}", layer.name));
         self.record(undo, label, Edit::Mask { id, mask: old });
         self.mark_dirty();

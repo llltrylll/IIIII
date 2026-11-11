@@ -760,6 +760,7 @@ impl PainterApp {
                 };
                 let mask = match lv.get("mask").filter(|m| !m.is_null()) {
                     Some(mv) => Some(Mask {
+                        black_base: false,
                         paint: match mv.get("paint").filter(|p| !p.is_null()) {
                             Some(t) => Some(self.tex_from(&r, t, "mask")?),
                             None => None,

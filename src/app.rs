@@ -4414,7 +4414,9 @@ impl PainterApp {
         ui.menu_button(theme::with_icon(icons::STACK, "Add mask layer ▾"), |ui| {
             for k in GenKind::ALL {
                 if ui.button(k.name()).clicked() {
-                    mask.layers.push(MaskLayer { source: MaskSource::Generator(new_generator(k, &custom)), blend: MaskBlend::Multiply, opacity: 1.0, enabled: true });
+                    // On a black mask nothing shows through Multiply: reveal with Add instead.
+                    let blend = if mask.black_base && mask.layers.is_empty() { MaskBlend::Add } else { MaskBlend::Multiply };
+                    mask.layers.push(MaskLayer { source: MaskSource::Generator(new_generator(k, &custom)), blend, opacity: 1.0, enabled: true });
                     dirty = true;
                     ui.close();
                 }
