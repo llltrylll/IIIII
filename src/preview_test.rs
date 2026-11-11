@@ -2850,7 +2850,7 @@ fn emission_paints_glows_and_exports() {
     let mut plain = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 64);
     plain.add_fill_layer(0, None, "Dark".into(), FillParams { mat: dark, ..Default::default() }, &mut undo);
     plain.composite();
-    let snap = export::snapshot(&plain, &rs.device, &rs.queue, mesh.clone());
+    let snap = export::snapshot(&plain, &rs.device, &rs.queue, mesh.clone()).expect("export GPU snapshot succeeds");
     let files = export::export(&snap, &gltf, &settings("Plain")).expect("exports");
     assert!(!files.iter().any(|f| f.to_string_lossy().contains("emissive")), "no emission map for a set that emits nothing: {files:?}");
 }
