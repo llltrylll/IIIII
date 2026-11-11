@@ -328,4 +328,25 @@ fn close(a:[f32;3],b:[f32;3])->bool{a.iter().zip(b).all(|(x,y)|(x-y).abs()<1e-4)
         let c = harness.state().active.map(|v| (v * 255.0).round() as u8);
         assert_eq!(c, [0x33, 0x66, 0x99]);
     }
+
+    /// Typing a hue in HSV mode keeps it.
+    #[test]
+    fn color_hud_keeps_typed_hue() {
+        use egui_kittest::kittest::Queryable;
+        let mut harness = hud();
+        harness.get_by_label("HSV").click();
+        harness.run();
+        harness.query_all_by_role(egui::accesskit::Role::SpinButton).next().unwrap().click();
+        harness.run();
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        harness.query_all_by_role(egui::accesskit::Role::SpinButton).next().unwrap().type_text("62");
+        harness.key_press(egui::Key::Enter);
+        for _ in 0..4 {
+            harness.run();
+        }
+        let hue = harness.state().state.hsv[0] * 360.0;
+        assert!((hue - 62.0).abs() < 0.5, "typed 62 in H, the hue is {hue}");
+        let from_color = rgb_to_hsv(harness.state().active)[0] * 360.0;
+        assert!((from_color - 62.0).abs() < 0.5, "the applied colour has hue {from_color}");
+    }
 }

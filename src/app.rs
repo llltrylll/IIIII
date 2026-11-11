@@ -557,7 +557,7 @@ pub(crate) const REPO_URL: &str = "https://github.com/alla2001/material-painter"
 const NO_LAYER: usize = usize::MAX;
 /// Wait until material controls have been idle before rebuilding the preview.
 /// Wait after the last settings change (and while a slider is held) before the preview is rebuilt.
-const MATERIAL_PREVIEW_DELAY: Duration = Duration::from_millis(1500);
+const MATERIAL_PREVIEW_DELAY: Duration = Duration::from_millis(650);
 
 fn srgb_u8(c: [f32; 3]) -> Color32 {
     Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8)
