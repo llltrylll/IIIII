@@ -193,7 +193,7 @@ fn export_templates() {
     let smart = presets::SMART_MATERIALS.iter().find(|s| s.name == "Painted Steel Worn").unwrap();
     crate::app::add_smart_material(&mut engine, &mut crate::undo::UndoStack::default(), smart, 0, None);
     engine.composite();
-    let snap = export::snapshot(&engine, &rs.device, &rs.queue, mesh.clone());
+    let snap = export::snapshot(&engine, &rs.device, &rs.queue, mesh.clone()).expect("export GPU snapshot succeeds");
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/bake_test/export");
     let _ = std::fs::remove_dir_all(&root);
@@ -2233,7 +2233,7 @@ fn transparency_paints_shows_and_exports() {
     let _ = std::fs::remove_dir_all(&folder);
     let glb = export::builtin_templates().into_iter().find(|t| t.name.starts_with("glTF")).unwrap();
     for (name, engine, want) in [("Glass", &right, 4), ("Red", &left, 4)] {
-        let snap = export::snapshot(engine, &rs.device, &rs.queue, mesh.clone());
+        let snap = export::snapshot(engine, &rs.device, &rs.queue, mesh.clone()).expect("export GPU snapshot succeeds");
         let settings = Settings {
             folder: folder.clone(),
             mesh_name: "Plane".into(),
@@ -2257,7 +2257,7 @@ fn transparency_paints_shows_and_exports() {
     let mut opaque = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
     opaque.add_fill_layer(0, None, "Red".into(), FillParams { mat: red, ..Default::default() }, &mut undo);
     opaque.composite();
-    let snap = export::snapshot(&opaque, &rs.device, &rs.queue, mesh.clone());
+    let snap = export::snapshot(&opaque, &rs.device, &rs.queue, mesh.clone()).expect("export GPU snapshot succeeds");
     let settings = Settings {
         folder: folder.clone(),
         mesh_name: "Opaque".into(),
@@ -2558,7 +2558,7 @@ fn normal_and_specular_channels() {
         normal_strength: 1.0,
         use_baked_normal: false,
     };
-    let files = export::export(&export::snapshot(&engine, &rs.device, &rs.queue, mesh.clone()), &template, &settings("Set")).unwrap();
+    let files = export::export(&export::snapshot(&engine, &rs.device, &rs.queue, mesh.clone()).expect("export GPU snapshot succeeds"), &template, &settings("Set")).unwrap();
     let normal = files.iter().find(|f| f.to_string_lossy().contains("Normal")).expect("a normal map");
     let n = image::open(normal).unwrap().to_rgb8();
     let c = n.get_pixel(res / 2, res / 2);
@@ -2570,7 +2570,7 @@ fn normal_and_specular_channels() {
     let mut plain = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
     plain.add_fill_layer(0, None, "Base".into(), FillParams { mat: grey, ..Default::default() }, &mut undo);
     plain.composite();
-    let files = export::export(&export::snapshot(&plain, &rs.device, &rs.queue, mesh.clone()), &template, &settings("Plain")).unwrap();
+    let files = export::export(&export::snapshot(&plain, &rs.device, &rs.queue, mesh.clone()).expect("export GPU snapshot succeeds"), &template, &settings("Plain")).unwrap();
     assert!(!files.iter().any(|f| f.to_string_lossy().contains("Specular")), "no specular map when none is set");
 }
 
@@ -2839,7 +2839,7 @@ fn emission_paints_glows_and_exports() {
         normal_strength: 1.0,
         use_baked_normal: false,
     };
-    let snap = export::snapshot(&engine, &rs.device, &rs.queue, mesh.clone());
+    let snap = export::snapshot(&engine, &rs.device, &rs.queue, mesh.clone()).expect("export GPU snapshot succeeds");
     let files = export::export(&snap, &gltf, &settings("Glow")).expect("exports");
     let file = files.iter().find(|f| f.to_string_lossy().contains("emissive")).expect("an emission map");
     let img = image::open(file).unwrap().to_rgb8();
