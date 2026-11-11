@@ -692,12 +692,23 @@ impl PainterApp {
         let m = &manifest["mesh"];
         let vertices: Vec<Vertex> = bytemuck::pod_collect_to_vec(&r.blob(&m["vertices"])?);
         let indices: Vec<u32> = bytemuck::pod_collect_to_vec(&r.blob(&m["indices"])?);
-        if indices.iter().any(|&i| i as usize >= vertices.len()) {
+        if vertices.is_empty()
+            || indices.is_empty()
+            || !indices.len().is_multiple_of(3)
+            || indices.iter().any(|&i| i as usize >= vertices.len())
+            || vertices.iter().any(|v| {
+                v.pos.iter().chain(&v.normal).chain(&v.uv).chain(&v.tangent).any(|x| !x.is_finite())
+            })
+        {
             return Err(bad());
         }
         let center = glam::Vec3::from_array(arr(m, "center", [0.0; 3]));
+        let scale = f(m, "scale", 1.0);
+        if !center.is_finite() || !scale.is_finite() || scale <= 0.0 {
+            return Err(bad());
+        }
         let tris = indices.len() / 3;
-        let mut mesh = Mesh::from_saved(s(m, "name").unwrap_or("Mesh").to_string(), vertices, indices, center, f(m, "scale", 1.0));
+        let mut mesh = Mesh::from_saved(s(m, "name").unwrap_or("Mesh").to_string(), vertices, indices, center, scale);
         if let Some(names) = m["objects"].as_array() {
             let tri_object: Vec<u32> = bytemuck::pod_collect_to_vec(&r.blob(&m["tri_object"])?);
             if tri_object.len() == tris && tri_object.iter().all(|&o| (o as usize) < names.len()) {
@@ -706,14 +717,17 @@ impl PainterApp {
             }
         }
         if !m["tri_color"].is_null() {
-            let colors: Vec<[u8; 3]> = r.blob(&m["tri_color"])?.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
-            if colors.len() == tris {
-                mesh.tri_color = Some(colors);
+            let bytes = r.blob(&m["tri_color"])?;
+            if bytes.len() != tris.checked_mul(3).ok_or_else(bad)? {
+                return Err(bad());
             }
+            mesh.tri_color = Some(bytes.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect());
         }
         // Projects saved before this key existed only have the per-triangle average.
         if !m["tri_vertex_color"].is_null() {
-            mesh.tri_vertex_color = corner_colors_from_bytes(&r.blob(&m["tri_vertex_color"])?, tris);
+            mesh.tri_vertex_color = Some(
+                corner_colors_from_bytes(&r.blob(&m["tri_vertex_color"])?, tris).ok_or_else(bad)?
+            );
         }
         let bv = &manifest["bake"];
         let mut bs = crate::bake::BakeSettings::default();
@@ -752,6 +766,7 @@ impl PainterApp {
             .into_iter()
             .flatten()
             .enumerate()
+            .take(crate::bake::MAX_CUSTOM_MAPS)
             .filter_map(|(k, cv)| custom_map_from(cv, k as u32 + 1))
             .collect();
         bs.id_source = match s(bv, "id_source") {
@@ -767,53 +782,60 @@ impl PainterApp {
             Some(a) if !a.is_empty() => a.iter().collect(),
             _ => vec![&manifest],
         };
-        let ranges: Vec<(String, std::ops::Range<u32>)> = set_values
-            .iter()
-            .filter_map(|sv| {
-                let t = sv["tris"].as_array()?;
-                let (a, b) = (t.first()?.as_u64()? as u32, t.get(1)?.as_u64()? as u32);
-                Some((s(sv, "name").unwrap_or("Material").to_string(), a..b))
-            })
-            .collect();
-        if ranges.len() == set_values.len() {
+        if set_values.len() > 1024 {
+            return Err("The project contains too many texture sets.".into());
+        }
+        let has_saved_sets = manifest["texture_sets"].as_array().is_some_and(|a| !a.is_empty());
+        if has_saved_sets {
+            let mut ranges: Vec<(String, std::ops::Range<u32>)> = Vec::with_capacity(set_values.len());
+            for sv in &set_values {
+                let t = sv["tris"].as_array().ok_or_else(bad)?;
+                let start = t.first().and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).ok_or_else(bad)?;
+                let end = t.get(1).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).ok_or_else(bad)?;
+                ranges.push((s(sv, "name").unwrap_or("Material").to_string(), start..end));
+            }
+            if ranges.first().is_none_or(|r| r.1.start != 0)
+                || ranges.last().is_none_or(|r| r.1.end != tris as u32)
+                || ranges.iter().any(|r| r.1.start >= r.1.end)
+                || ranges.windows(2).any(|w| w[0].1.end != w[1].1.start)
+            {
+                return Err(bad());
+            }
             mesh.set_ranges(ranges);
+            if mesh.sets.len() != set_values.len() {
+                return Err(bad());
+            }
         }
         let set_count = mesh.sets.len();
+        let max_res = self.rs.device.limits().max_texture_dimension_2d;
+        let sizes: Vec<u32> = set_values.iter().map(|sv| {
+            sv["resolution"].as_u64()
+                .and_then(|v| u32::try_from(v).ok())
+                .filter(|v| super::prefs::RESOLUTIONS.contains(v) && *v <= max_res)
+                .unwrap_or(self.prefs.default_resolution.min(max_res))
+        }).collect();
 
-        // Switch mesh first, then each set's size: layers are created at it.
-        self.bake_settings = bs;
-        let sizes: Vec<u32> = set_values.iter().map(|sv| sv["resolution"].as_u64().unwrap_or(2048) as u32).collect();
-        self.load_mesh_sized(mesh, ctx, &sizes);
-        self.graphs.clear(&self.rs);
-        for gv in manifest["graphs"].as_array().into_iter().flatten() {
-            let Some(id) = gv["id"].as_u64() else { continue };
-            match crate::graph::Graph::from_json(&gv["graph"], &self.graphs.lib) {
-                Ok(g) => {
-                    self.graphs.insert(&self.rs, g, Some(id));
+        // Decode every fallible layer/map/image before switching the current document.
+        // A damaged later texture must not leave the open project half replaced.
+        let mut staged_sets = Vec::with_capacity(set_count);
+        for (set_index, sv) in set_values.iter().enumerate().take(set_count) {
+            let layer_values = sv["layers_bottom_to_top"].as_array().ok_or_else(bad)?;
+            let mut layers = Vec::with_capacity(layer_values.len());
+            let mut ids = std::collections::HashSet::with_capacity(layer_values.len());
+            for lv in layer_values {
+                let id = lv["id"].as_u64().ok_or_else(bad)?;
+                if !ids.insert(id) {
+                    return Err(bad());
                 }
-                Err(e) => self.status = format!("A material graph didn't load: {e}"),
-            }
-        }
-        for (k, sv) in set_values.iter().enumerate().take(set_count) {
-            self.switch_set(k);
-            while !self.engine.layers.is_empty() {
-                self.engine.delete_layer(0, &mut self.undo);
-            }
-            let res = sv["resolution"].as_u64().unwrap_or(2048) as u32;
-            if res != self.engine.res {
-                self.engine.set_resolution(res, &self.gpu_mesh, &mut self.undo);
-            }
-            let mut layers = Vec::new();
-            for lv in sv["layers_bottom_to_top"].as_array().ok_or_else(bad)? {
                 let name = s(lv, "name").unwrap_or("Layer").to_string();
                 let c = &lv["content"];
                 let content = match s(c, "kind") {
                     Some("paint") => {
-                        let ch = c["channels"].as_array().ok_or_else(bad)?;
+                        let channels = c["channels"].as_array().ok_or_else(bad)?;
                         let mut out: [Option<Tex>; crate::engine::CHANNELS] = Default::default();
-                        for (k, t) in ch.iter().enumerate().take(crate::engine::CHANNELS) {
-                            if !t.is_null() {
-                                out[k] = Some(self.tex_from(&r, t, "layer")?);
+                        for (channel, texture) in channels.iter().enumerate().take(crate::engine::CHANNELS) {
+                            if !texture.is_null() {
+                                out[channel] = Some(self.tex_from(&r, texture, "layer")?);
                             }
                         }
                         Content::Paint(out)
@@ -840,15 +862,17 @@ impl PainterApp {
                     None => None,
                 };
                 let mut images: [Option<crate::engine::FillImage>; crate::engine::CHANNELS] = Default::default();
-                for (k, iv) in lv["images"].as_array().into_iter().flatten().enumerate().take(crate::engine::CHANNELS) {
-                    if !iv.is_null() {
-                        let data = std::sync::Arc::new(r.blob(&iv["data"])?);
-                        images[k] = Some(self.engine.decode_channel_image(k, s(iv, "name").unwrap_or("image").to_string(), data)?);
+                for (channel, image) in lv["images"].as_array().into_iter().flatten().enumerate().take(crate::engine::CHANNELS) {
+                    if !image.is_null() {
+                        let data = std::sync::Arc::new(r.blob(&image["data"])?);
+                        images[channel] = Some(self.engine.decode_channel_image(
+                            channel, s(image, "name").unwrap_or("image").to_string(), data
+                        )?);
                     }
                 }
                 let blend_name = s(lv, "blend").unwrap_or("Normal");
                 layers.push(Layer {
-                    id: lv["id"].as_u64().ok_or_else(bad)?,
+                    id,
                     name,
                     visible: b(lv, "visible", true),
                     opacity: f(lv, "opacity", 1.0),
@@ -860,25 +884,52 @@ impl PainterApp {
                     thumb: None,
                 });
             }
-            self.engine.restore_layers(layers);
-            self.engine.map_fix = Default::default();
-            for fv in sv["map_fixes"].as_array().into_iter().flatten() {
-                let map = fv["map"].as_u64().unwrap_or(u64::MAX) as usize;
-                if map < self.engine.map_fix.len() {
-                    self.engine.map_fix[map] = Some(self.tex_from(&r, &fv["texture"], "map fix")?);
+            let mut map_fixes: [Option<Tex>; crate::engine::MAP_COUNT] = Default::default();
+            for fix in sv["map_fixes"].as_array().into_iter().flatten() {
+                let map = fix["map"].as_u64().and_then(|v| usize::try_from(v).ok()).ok_or_else(bad)?;
+                let target = map_fixes.get_mut(map).ok_or_else(bad)?;
+                if target.is_some() {
+                    return Err(bad());
                 }
+                *target = Some(self.tex_from(&r, &fix["texture"], "map fix")?);
             }
-            for (dst, lv) in self.engine.map_levels.iter_mut().zip(sv["map_levels"].as_array().into_iter().flatten()) {
+            let mut map_levels = [Levels::default(); crate::engine::MAP_COUNT];
+            for (dst, lv) in map_levels.iter_mut().zip(sv["map_levels"].as_array().into_iter().flatten()) {
                 let a = lv.as_array().filter(|a| a.len() == 3);
                 if let Some(a) = a {
-                    let g = |i: usize| a[i].as_f64().unwrap_or(0.0) as f32;
-                    // Version 1 projects stored the inverse gamma; keep their look.
-                    let gamma = if manifest["version"].as_u64().unwrap_or(1) < 2 { 1.0 / g(2).max(1e-3) } else { g(2) };
-                    *dst = Levels { black: g(0), white: g(1), gamma };
+                    let value = |i: usize| a[i].as_f64().unwrap_or(0.0) as f32;
+                    let gamma = if manifest["version"].as_u64().unwrap_or(1) < 2 {
+                        1.0 / value(2).max(1e-3)
+                    } else {
+                        value(2)
+                    };
+                    *dst = Levels { black: value(0), white: value(1), gamma };
                 }
             }
+            let selected = sv["selected"].as_u64().and_then(|v| usize::try_from(v).ok()).unwrap_or(0);
+            staged_sets.push((layers, map_fixes, map_levels, selected, set_index));
+        }
+
+        // All fallible project payload decoding succeeded. Commit the new document.
+        self.bake_settings = bs;
+        self.load_mesh_sized(mesh, ctx, &sizes);
+        self.graphs.clear(&self.rs);
+        for gv in manifest["graphs"].as_array().into_iter().flatten() {
+            let Some(id) = gv["id"].as_u64() else { continue };
+            match crate::graph::Graph::from_json(&gv["graph"], &self.graphs.lib) {
+                Ok(g) => {
+                    self.graphs.insert(&self.rs, g, Some(id));
+                }
+                Err(e) => self.status = format!("A material graph didn't load: {e}"),
+            }
+        }
+        for (k, (layers, fixes, levels, selected, _set_index)) in staged_sets.into_iter().enumerate() {
+            self.switch_set(k);
+            self.engine.restore_layers(layers);
+            self.engine.map_fix = fixes;
+            self.engine.map_levels = levels;
             self.engine.map_levels_changed();
-            self.selected = sv["selected"].as_u64().map_or(0, |x| x as usize).min(self.engine.layers.len().saturating_sub(1));
+            self.selected = selected.min(self.engine.layers.len().saturating_sub(1));
         }
         self.switch_set(manifest["active_set"].as_u64().map_or(0, |x| x as usize).min(set_count - 1));
         self.repush_graphs();
