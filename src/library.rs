@@ -234,20 +234,37 @@ fn get_json(agent: &ureq::Agent, url: &str) -> Result<Value, String> {
     serde_json::from_str(&get_text(agent, url)?).map_err(|e| format!("{url}: {e}"))
 }
 
-/// Downloads a file, reporting progress, with a size cap.
+/// Downloads a file, reporting progress, with a hard size cap.
 fn get_bytes(agent: &ureq::Agent, url: &str, progress: &dyn Fn(u64, u64)) -> Result<Vec<u8>, String> {
+    const MAX_DOWNLOAD_BYTES: u64 = 1 << 30;
+    const INITIAL_RESERVE: u64 = 16 << 20;
+
     let mut resp = agent.get(url).call().map_err(|e| format!("{url}: {e}"))?;
     let total = resp.body().content_length().unwrap_or(0);
-    let mut reader = resp.body_mut().with_config().limit(1 << 30).reader();
-    let mut out = Vec::with_capacity(total as usize);
+    if total > MAX_DOWNLOAD_BYTES {
+        return Err(format!("{url}: file exceeds the 1 GiB download limit"));
+    }
+    let initial = usize::try_from(total.min(INITIAL_RESERVE))
+        .map_err(|_| format!("{url}: invalid Content-Length"))?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(initial).map_err(|e| format!("{url}: can't reserve download buffer: {e}"))?;
+    let mut reader = resp.body_mut().with_config().limit(MAX_DOWNLOAD_BYTES).reader();
     let mut buf = vec![0u8; 256 * 1024];
     loop {
         let n = reader.read(&mut buf).map_err(|e| format!("{url}: {e}"))?;
         if n == 0 {
             break;
         }
+        let next_len = out
+            .len()
+            .checked_add(n)
+            .ok_or_else(|| format!("{url}: downloaded size overflow"))?;
+        if next_len as u64 > MAX_DOWNLOAD_BYTES {
+            return Err(format!("{url}: file exceeds the 1 GiB download limit"));
+        }
+        out.try_reserve(n).map_err(|e| format!("{url}: can't grow download buffer: {e}"))?;
         out.extend_from_slice(&buf[..n]);
-        progress(out.len() as u64, total);
+        progress(next_len as u64, total);
     }
     Ok(out)
 }
