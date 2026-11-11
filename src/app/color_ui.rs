@@ -36,13 +36,34 @@ pub(super) fn color_button(ui: &mut egui::Ui, c: &mut [f32; 3], tip: Option<&str
                     changed |= labeled(ui, label, |ui| ui.add(egui::Slider::new(&mut channels[index], 0.0..=255.0).max_decimals(0)).changed());
                 }
                 if changed { *c = channels.map(|v| (v / 255.0).clamp(0.0, 1.0)); }
-                let mut hex = color_picker::hex_string(*c);
+                let hex_memory = response.id.with("picker_hex");
+                let hex_dirty_memory = response.id.with("picker_hex_dirty");
+                let mut hex = ui.data(|d| d.get_temp::<String>(hex_memory))
+                    .unwrap_or_else(|| color_picker::hex_string(*c));
+                let mut hex_dirty = ui.data(|d| d.get_temp::<bool>(hex_dirty_memory)).unwrap_or(false);
+                if !hex_dirty {
+                    hex = color_picker::hex_string(*c);
+                }
                 ui.horizontal(|ui| {
                     ui.label("HEX");
-                    if ui.add(egui::TextEdit::singleline(&mut hex).desired_width(90.0)).changed()
-                        && let Some(parsed) = parse_color_hex(&hex) { *c = parsed; changed = true; }
+                    let edit = ui.add(egui::TextEdit::singleline(&mut hex).desired_width(90.0));
+                    if edit.changed() {
+                        hex_dirty = true;
+                        if let Some(parsed) = parse_color_hex(&hex) {
+                            *c = parsed;
+                            changed = true;
+                        }
+                    }
+                    if edit.lost_focus() {
+                        hex_dirty = false;
+                        hex = color_picker::hex_string(*c);
+                    }
                 });
-                ui.data_mut(|d| d.insert_temp(memory, if changed { hsv_keeping(hsv, *c) } else { hsv }));
+                ui.data_mut(|d| {
+                    d.insert_temp(memory, if changed { hsv_keeping(hsv, *c) } else { hsv });
+                    d.insert_temp(hex_memory, hex);
+                    d.insert_temp(hex_dirty_memory, hex_dirty);
+                });
             });
         });
     changed
