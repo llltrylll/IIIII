@@ -9,6 +9,7 @@
 //! local heaps, version-1 B-trees) and byte datasets stored as compact, contiguous or chunked
 //! (unfiltered) data. Anything else is reported as an error instead of being guessed at.
 
+use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
 
 const SIGNATURE: [u8; 8] = [0x89, b'H', b'D', b'F', 0x0d, 0x0a, 0x1a, 0x0a];
@@ -17,6 +18,8 @@ const UNDEFINED: u64 = u64::MAX;
 /// unreasonable metadata sizes before allocating from an untrusted HDF5 file.
 const MAX_DATASET_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_HDF5_METADATA_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_BTREE_DEPTH: usize = 64;
+const MAX_HEADER_BLOCKS: usize = 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Hdf5Error {
@@ -173,6 +176,13 @@ impl<R: Read + Seek> Hdf5File<R> {
     }
 
     fn read_chunks(&mut self, node: u64, rank: usize, out: &mut [u8]) -> Result<()> {
+        self.read_chunks_depth(node, rank, out, 0)
+    }
+
+    fn read_chunks_depth(&mut self, node: u64, rank: usize, out: &mut [u8], depth: usize) -> Result<()> {
+        if depth > MAX_BTREE_DEPTH {
+            return corrupt("chunk B-tree is cyclic or too deep");
+        }
         let head = read_at(&mut self.r, node, 24)?;
         if &head[..4] != b"TREE" || head[4] != 1 {
             return corrupt("chunk B-tree node");
@@ -193,7 +203,7 @@ impl<R: Read + Seek> Hdf5File<R> {
             let mask = u32_at(&body, key + 4)?;
             let child = u64_at(&body, key + key_size)?;
             if level > 0 {
-                self.read_chunks(child, rank, out)?;
+                self.read_chunks_depth(child, rank, out, depth + 1)?;
                 continue;
             }
             if mask != 0 {
@@ -240,6 +250,19 @@ impl<R: Read + Seek> Hdf5File<R> {
     }
 
     fn walk_btree(&mut self, node: u64, heap: &[u8], f: &mut dyn FnMut(&str, u64) -> bool) -> Result<bool> {
+        self.walk_btree_depth(node, heap, f, 0)
+    }
+
+    fn walk_btree_depth(
+        &mut self,
+        node: u64,
+        heap: &[u8],
+        f: &mut dyn FnMut(&str, u64) -> bool,
+        depth: usize,
+    ) -> Result<bool> {
+        if depth > MAX_BTREE_DEPTH {
+            return corrupt("group B-tree is cyclic or too deep");
+        }
         let head = read_at(&mut self.r, node, 24)?;
         if &head[..4] != b"TREE" || head[4] != 0 {
             return corrupt("group B-tree node");
@@ -253,7 +276,7 @@ impl<R: Read + Seek> Hdf5File<R> {
         for i in 0..used {
             let child = u64_at(&body, 8 + i * 16)?;
             if level > 0 {
-                if self.walk_btree(child, heap, f)? {
+                if self.walk_btree_depth(child, heap, f, depth + 1)? {
                     return Ok(true);
                 }
                 continue;
@@ -267,7 +290,8 @@ impl<R: Read + Seek> Hdf5File<R> {
             let entries_at = child.checked_add(8).ok_or_else(|| Hdf5Error::Corrupt("symbol table address overflow".into()))?;
             let entries = read_at(&mut self.r, entries_at, entries_len)?;
             for e in 0..count {
-                let name_off = u64_at(&entries, e * 40)? as usize;
+                let name_off = usize::try_from(u64_at(&entries, e * 40)?)
+                    .map_err(|_| Hdf5Error::Corrupt("symbol name offset".into()))?;
                 let addr = u64_at(&entries, e * 40 + 8)?;
                 let end = heap.get(name_off..).and_then(|s| s.iter().position(|&c| c == 0)).ok_or_else(|| Hdf5Error::Corrupt("link name".into()))?;
                 let name = String::from_utf8_lossy(&heap[name_off..name_off + end]);
@@ -292,8 +316,15 @@ impl<R: Read + Seek> Hdf5File<R> {
             return Err(Hdf5Error::Unsupported("object header exceeds the metadata size limit".into()));
         }
         let mut blocks = vec![(first_block, first_len)];
+        let mut visited = HashSet::new();
         let mut out = Vec::new();
         while let Some((start, len)) = blocks.pop() {
+            if !visited.insert(start) {
+                return corrupt("cyclic object header continuation");
+            }
+            if visited.len() > MAX_HEADER_BLOCKS {
+                return Err(Hdf5Error::Unsupported("too many object header continuation blocks".into()));
+            }
             if len > MAX_HDF5_METADATA_BYTES {
                 return Err(Hdf5Error::Unsupported("object header continuation exceeds the metadata size limit".into()));
             }
