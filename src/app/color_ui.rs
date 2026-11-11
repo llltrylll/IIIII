@@ -21,21 +21,28 @@ pub(super) fn color_button(ui: &mut egui::Ui, c: &mut [f32; 3], tip: Option<&str
                     None => rgb_to_hsv(*c),
                 };
                 let picked = color_picker::picker(ui, &mut hsv);
-                if picked { *c = hsv_to_rgb(hsv); changed = true; }
+                let mut hsv_changed = false;
                 let mut hsv_values = [hsv[0] * 360.0, hsv[1] * 100.0, hsv[2] * 100.0];
                 for (label, index, range) in [("H", 0usize, 0.0..=360.0), ("S", 1usize, 0.0..=100.0), ("V", 2usize, 0.0..=100.0)] {
-                    changed |= labeled(ui, label, |ui| ui.add(egui::Slider::new(&mut hsv_values[index], range).max_decimals(2)).changed());
+                    hsv_changed |= labeled(ui, label, |ui| ui.add(egui::Slider::new(&mut hsv_values[index], range).max_decimals(2)).changed());
                 }
-                if changed && !picked {
+                if hsv_changed {
                     hsv = [hsv_values[0] / 360.0, hsv_values[1] / 100.0, hsv_values[2] / 100.0];
+                }
+                if picked || hsv_changed {
                     *c = hsv_to_rgb(hsv);
+                    changed = true;
                 }
                 ui.separator();
                 let mut channels = c.map(|v| v * 255.0);
+                let mut rgb_changed = false;
                 for (label, index) in [("R", 0usize), ("G", 1usize), ("B", 2usize)] {
-                    changed |= labeled(ui, label, |ui| ui.add(egui::Slider::new(&mut channels[index], 0.0..=255.0).max_decimals(0)).changed());
+                    rgb_changed |= labeled(ui, label, |ui| ui.add(egui::Slider::new(&mut channels[index], 0.0..=255.0).max_decimals(0)).changed());
                 }
-                if changed { *c = channels.map(|v| (v / 255.0).clamp(0.0, 1.0)); }
+                if rgb_changed {
+                    *c = channels.map(|v| (v / 255.0).clamp(0.0, 1.0));
+                    changed = true;
+                }
                 let hex_memory = response.id.with("picker_hex");
                 let hex_dirty_memory = response.id.with("picker_hex_dirty");
                 let mut hex = ui.data(|d| d.get_temp::<String>(hex_memory))
