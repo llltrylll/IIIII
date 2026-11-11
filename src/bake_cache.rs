@@ -259,8 +259,9 @@ pub fn store(key: Key, baked: &BakedMaps, report: Arc<BakeReport>, device: &wgpu
     let custom: Vec<wgpu::Texture> = baked.custom.iter().map(|m| m.texture.clone()).collect();
     let (device, queue) = (device.clone(), queue.clone());
     let spawned = std::thread::Builder::new().name("bake cache".into()).spawn(move || {
-        let bytes = encode(&textures, &custom, &report, &device, &queue);
-        if write_atomic(&path, &bytes).is_ok() {
+        if let Some(bytes) = encode(&textures, &custom, &report, &device, &queue)
+            && write_atomic(&path, &bytes).is_ok()
+        {
             evict(MAX_BYTES);
         }
     });
@@ -271,33 +272,79 @@ pub fn store(key: Key, baked: &BakedMaps, report: Arc<BakeReport>, device: &wgpu
 
 /// Reads the maps back (blocking until the bake's GPU work is done) and
 /// serializes them with the report.
-fn encode(textures: &[wgpu::Texture], custom: &[wgpu::Texture], report: &BakeReport, device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<u8> {
-    // Map by map, so only one uncompressed map is in memory at a time.
-    let mut body = Vec::new();
-    let put = |body: &mut Vec<u8>, tex: &wgpu::Texture| {
-        let raw = gpu::read_wgpu_texture(device, queue, tex);
-        let packed = lz4_flex::compress_prepend_size(&raw);
-        body.extend_from_slice(&tex.width().to_le_bytes());
-        body.extend_from_slice(&(packed.len() as u32).to_le_bytes());
-        body.extend_from_slice(&packed);
-    };
-    for tex in textures {
-        put(&mut body, tex);
+fn encode(textures: &[wgpu::Texture], custom: &[wgpu::Texture], report: &BakeReport, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Vec<u8>> {
+    if textures.len() != MAP_TEXTURES
+        || custom.len() != report.custom.len().div_ceil(CUSTOM_PER_TEXTURE)
+        || custom.len() > MAX_CUSTOM_MAPS.div_ceil(CUSTOM_PER_TEXTURE)
+    {
+        return None;
     }
-    // The custom map textures, after their count.
-    body.extend_from_slice(&(custom.len() as u32).to_le_bytes());
-    for tex in custom {
-        put(&mut body, tex);
+
+    let resolution = textures.first()?.width();
+    if resolution == 0 || resolution > MAX_BAKE_RES
+        || textures.iter().enumerate().any(|(i, texture)| {
+            texture.width() != resolution
+                || texture.height() != resolution
+                || texture.format() != MAP_FORMATS[i]
+        })
+        || custom.iter().any(|texture| {
+            texture.width() != resolution
+                || texture.height() != resolution
+                || texture.format() != CUSTOM_FORMAT
+        })
+        || report.resolution != resolution
+    {
+        return None;
     }
-    // The readback waited for the bake to finish, so the report is final.
-    let json = serde_json::to_vec(&report.cache_json()).expect("report serializes");
-    let mut out = Vec::with_capacity(12 + json.len() + body.len());
+
+    // Avoid reading the GPU back at all when the uncompressed maps alone
+    // already exceed the on-disk cache budget.
+    let raw_bytes = textures.iter().chain(custom).try_fold(0u64, |total, texture| {
+        let bytes = (texture.width() as u64)
+            .checked_mul(texture.height() as u64)?
+            .checked_mul(gpu::bytes_per_texel(texture.format()) as u64)?;
+        total.checked_add(bytes)
+    })?;
+    if raw_bytes > MAX_BYTES {
+        return None;
+    }
+
+    // Stream each compressed map directly into the final buffer. The old
+    // layout built a body buffer and then copied it all into the final buffer.
+    let json = serde_json::to_vec(&report.cache_json()).ok()?;
+    let header_bytes = 12usize.checked_add(json.len())?.checked_add(4)?;
+    if header_bytes as u64 > MAX_BYTES {
+        return None;
+    }
+    let mut out = Vec::new();
+    out.try_reserve(header_bytes).ok()?;
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
-    out.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    out.extend_from_slice(&u32::try_from(json.len()).ok()?.to_le_bytes());
     out.extend_from_slice(&json);
-    out.extend_from_slice(&body);
-    out
+    out.extend_from_slice(&u32::try_from(custom.len()).ok()?.to_le_bytes());
+
+    let put = |out: &mut Vec<u8>, texture: &wgpu::Texture| -> Option<()> {
+        let raw = gpu::read_wgpu_texture(device, queue, texture);
+        let packed = lz4_flex::compress_prepend_size(&raw);
+        let packed_len = u32::try_from(packed.len()).ok()?;
+        let next_len = out.len().checked_add(8)?.checked_add(packed.len())?;
+        if next_len as u64 > MAX_BYTES {
+            return None;
+        }
+        out.extend_from_slice(&texture.width().to_le_bytes());
+        out.extend_from_slice(&packed_len.to_le_bytes());
+        out.extend_from_slice(&packed);
+        Some(())
+    };
+
+    for texture in textures {
+        put(&mut out, texture)?;
+    }
+    for texture in custom {
+        put(&mut out, texture)?;
+    }
+    Some(out)
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -475,7 +522,7 @@ mod tests {
         let textures: Vec<wgpu::Texture> = baked.maps.iter().map(|m| m.texture.clone()).collect();
         let custom: Vec<wgpu::Texture> = baked.custom.iter().map(|m| m.texture.clone()).collect();
         let t = std::time::Instant::now();
-        let bytes = encode(&textures, &custom, &report, &device, &queue);
+        let bytes = encode(&textures, &custom, &report, &device, &queue).expect("cache entry fits the configured limit");
         let all: Vec<&Tex> = baked.maps.iter().chain(&baked.custom).collect();
         let raw: usize = all.iter().map(|m| (m.width * m.height * gpu::bytes_per_texel(m.format)) as usize).sum();
         println!("  encoded {} KB ({} KB raw) in {:.0} ms", bytes.len() / 1024, raw / 1024, t.elapsed().as_secs_f32() * 1000.0);
