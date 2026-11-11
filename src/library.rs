@@ -502,7 +502,8 @@ fn download_ambientcg(agent: &ureq::Agent, entry: &Entry, res: Res, progress: &d
     let mut out: HashMap<&'static str, String> = HashMap::new();
     for i in 0..zip.len() {
         let mut f = zip.by_index(i).map_err(|e| e.to_string())?;
-        if f.size() > MAX_ENTRY_BYTES {
+        let declared_size = f.size();
+        if declared_size > MAX_ENTRY_BYTES {
             return Err(format!("{} contains an image larger than the supported download limit", entry.name));
         }
         let name = f.name().to_string();
@@ -523,6 +524,9 @@ fn download_ambientcg(agent: &ureq::Agent, entry: &Entry, res: Res, progress: &d
         let ext = Path::new(&name).extension().and_then(|e| e.to_str()).unwrap_or("jpg").to_lowercase();
         let mut bytes = Vec::new();
         f.by_ref().take(MAX_ENTRY_BYTES + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        if bytes.len() as u64 != declared_size {
+            return Err(format!("{} contains a truncated or inconsistent archive entry", entry.name));
+        }
         if bytes.len() as u64 > MAX_ENTRY_BYTES {
             return Err(format!("{} contains an oversized image entry", entry.name));
         }
