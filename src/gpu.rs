@@ -361,6 +361,161 @@ impl GpuMesh {
     }
 }
 
+/// Read several textures in one submission and poll, decoding each mapped
+/// buffer before moving to the next one. This avoids a GPU wait per texture
+/// without retaining an extra raw-byte copy of every map at once.
+pub fn read_wgpu_textures_with<T>(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    textures: &[&wgpu::Texture],
+    mut decode: impl FnMut(&wgpu::Texture, &[u8]) -> Result<T, String>,
+) -> Result<Vec<T>, String> {
+    struct Staging {
+        buffer: wgpu::Buffer,
+        row_bytes: u32,
+        padded_row_bytes: u32,
+        height: u32,
+    }
+
+    if textures.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut encoder = device.create_command_encoder(&Default::default());
+    let mut staging = Vec::with_capacity(textures.len());
+    for texture in textures {
+        let width = texture.width();
+        let height = texture.height();
+        let bpp = bytes_per_texel(texture.format());
+        let row_bytes = width.checked_mul(bpp)
+            .ok_or_else(|| "GPU texture readback row size overflow.".to_string())?;
+        let padded_row_bytes = row_bytes.div_ceil(256).checked_mul(256)
+            .ok_or_else(|| "GPU texture readback alignment overflow.".to_string())?;
+        let buffer_size = (padded_row_bytes as u64).checked_mul(height as u64)
+            .ok_or_else(|| "GPU texture readback buffer size overflow.".to_string())?;
+        if width == 0 || height == 0 {
+            return Err("Cannot read an empty GPU texture.".into());
+        }
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("batched texture readback"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row_bytes),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        staging.push(Staging { buffer, row_bytes, padded_row_bytes, height });
+    }
+
+    queue.submit([encoder.finish()]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    for (index, item) in staging.iter().enumerate() {
+        let tx = tx.clone();
+        item.buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+            let result = result.map_err(|error| format!("{error:?}"));
+            let _ = tx.send((index, result));
+        });
+    }
+    drop(tx);
+
+    if let Err(error) = device.poll(wgpu::PollType::wait_indefinitely()) {
+        for item in &staging {
+            item.buffer.unmap();
+        }
+        return Err(format!("GPU texture readback did not complete: {error:?}"));
+    }
+
+    let mut mapped = vec![false; staging.len()];
+    let mut failure = None;
+    for _ in 0..staging.len() {
+        match rx.recv() {
+            Ok((index, Ok(()))) if index < mapped.len() => mapped[index] = true,
+            Ok((_, Err(error))) => {
+                if failure.is_none() {
+                    failure = Some(format!("GPU texture mapping failed: {error}"));
+                }
+            }
+            Ok(_) => {
+                if failure.is_none() {
+                    failure = Some("GPU texture mapping returned an invalid result.".into());
+                }
+            }
+            Err(error) => {
+                if failure.is_none() {
+                    failure = Some(format!("GPU texture mapping callback stopped: {error}"));
+                }
+                break;
+            }
+        }
+    }
+    if let Some(error) = failure {
+        for (item, is_mapped) in staging.iter().zip(mapped) {
+            if is_mapped {
+                item.buffer.unmap();
+            }
+        }
+        return Err(error);
+    }
+
+    let mut output = Vec::with_capacity(textures.len());
+    let mut decode_error = None;
+    for (texture, item) in textures.iter().zip(&staging) {
+        let view = match item.buffer.slice(..).get_mapped_range() {
+            Ok(view) => view,
+            Err(error) => {
+                item.buffer.unmap();
+                if decode_error.is_none() {
+                    decode_error = Some(format!("GPU texture mapping could not be read: {error:?}"));
+                }
+                continue;
+            }
+        };
+        let raw_size = (item.row_bytes as usize).checked_mul(item.height as usize);
+        let mut raw = Vec::new();
+        if let Some(size) = raw_size {
+            if raw.try_reserve_exact(size).is_ok() {
+                for y in 0..item.height as usize {
+                    let start = y * item.padded_row_bytes as usize;
+                    let end = start + item.row_bytes as usize;
+                    raw.extend_from_slice(&view[start..end]);
+                }
+            } else if decode_error.is_none() {
+                decode_error = Some("Cannot allocate the GPU texture readback buffer.".into());
+            }
+        } else if decode_error.is_none() {
+            decode_error = Some("GPU texture readback size overflow.".into());
+        }
+        drop(view);
+        item.buffer.unmap();
+
+        if raw_size.is_some_and(|size| raw.len() == size) {
+            match decode(texture, &raw) {
+                Ok(value) => output.push(value),
+                Err(error) if decode_error.is_none() => decode_error = Some(error),
+                Err(_) => {}
+            }
+        }
+    }
+
+    if let Some(error) = decode_error {
+        Err(error)
+    } else if output.len() == textures.len() {
+        Ok(output)
+    } else {
+        Err("GPU texture readback returned an incomplete result.".into())
+    }
+}
+
 /// Blocking texture readback, used for export (an explicit user action).
 pub fn read_texture(device: &wgpu::Device, queue: &wgpu::Queue, tex: &Tex) -> Vec<u8> {
     read_wgpu_texture(device, queue, &tex.texture)
