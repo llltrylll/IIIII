@@ -166,11 +166,11 @@ fn undo_redo_roundtrip() {
     println!("  labels: {:?}", undo.undo.iter().map(|e| e.label.as_str()).collect::<Vec<_>>());
     assert_eq!(undo.undo.len(), n, "one history entry per step: {:?}", undo.undo.iter().map(|e| &e.label).collect::<Vec<_>>());
     for i in (0..n).rev() {
-        engine.undo(&mut undo);
+        engine.undo(&mut undo).expect("test undo succeeds");
         assert_eq!(snapshot(&engine), states[i], "undo back to step {i}");
     }
     for (i, state) in states.iter().enumerate().skip(1) {
-        engine.redo(&mut undo);
+        engine.redo(&mut undo).expect("test redo succeeds");
         assert_eq!(&snapshot(&engine), state, "redo to step {i}");
     }
     println!("  {} steps undone and redone: {:?}", n, undo.undo.iter().map(|e| e.label.as_str()).collect::<Vec<_>>());
