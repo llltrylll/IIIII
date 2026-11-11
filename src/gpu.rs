@@ -364,6 +364,30 @@ impl GpuMesh {
 /// Read several textures in one submission and poll, decoding each mapped
 /// buffer before moving to the next one. This avoids a GPU wait per texture
 /// without retaining an extra raw-byte copy of every map at once.
+fn unpad_readback_rows(data: &[u8], row_bytes: u32, padded_row_bytes: u32, height: u32) -> Result<Vec<u8>, String> {
+    if row_bytes == 0 || padded_row_bytes < row_bytes || padded_row_bytes % 256 != 0 || height == 0 {
+        return Err("Invalid GPU texture readback row layout.".into());
+    }
+    let mapped_size = (padded_row_bytes as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| "GPU mapped readback size overflow.".to_string())?;
+    if data.len() != mapped_size {
+        return Err("GPU mapped readback has an unexpected size.".into());
+    }
+    let output_size = (row_bytes as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| "GPU output readback size overflow.".to_string())?;
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_size)
+        .map_err(|_| "Cannot allocate the GPU texture readback buffer.".to_string())?;
+    for y in 0..height as usize {
+        let start = y * padded_row_bytes as usize;
+        let end = start + row_bytes as usize;
+        output.extend_from_slice(&data[start..end]);
+    }
+    Ok(output)
+}
+
 pub fn read_wgpu_textures_with<T>(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -480,30 +504,14 @@ pub fn read_wgpu_textures_with<T>(
                 continue;
             }
         };
-        let raw_size = (item.row_bytes as usize).checked_mul(item.height as usize);
-        let mut raw = Vec::new();
-        if let Some(size) = raw_size {
-            if raw.try_reserve_exact(size).is_ok() {
-                for y in 0..item.height as usize {
-                    let start = y * item.padded_row_bytes as usize;
-                    let end = start + item.row_bytes as usize;
-                    raw.extend_from_slice(&view[start..end]);
-                }
-            } else if decode_error.is_none() {
-                decode_error = Some("Cannot allocate the GPU texture readback buffer.".into());
-            }
-        } else if decode_error.is_none() {
-            decode_error = Some("GPU texture readback size overflow.".into());
-        }
+        let raw = unpad_readback_rows(&view, item.row_bytes, item.padded_row_bytes, item.height);
         drop(view);
         item.buffer.unmap();
 
-        if raw_size.is_some_and(|size| raw.len() == size) {
-            match decode(texture, &raw) {
-                Ok(value) => output.push(value),
-                Err(error) if decode_error.is_none() => decode_error = Some(error),
-                Err(_) => {}
-            }
+        match raw.and_then(|bytes| decode(texture, &bytes)) {
+            Ok(value) => output.push(value),
+            Err(error) if decode_error.is_none() => decode_error = Some(error),
+            Err(_) => {}
         }
     }
 
@@ -567,6 +575,26 @@ pub fn f16_to_f32(h: u16) -> f32 {
 
 /// Shaders are checked here without a GPU: a WGSL mistake would otherwise only
 /// show when the app starts.
+#[cfg(test)]
+mod readback_row_tests {
+    use super::unpad_readback_rows;
+
+    #[test]
+    fn removes_padding_without_shifting_rows() {
+        let mut mapped = vec![0u8; 512];
+        mapped[..4].copy_from_slice(&[1, 2, 3, 4]);
+        mapped[256..260].copy_from_slice(&[5, 6, 7, 8]);
+        assert_eq!(unpad_readback_rows(&mapped, 4, 256, 2).unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn rejects_invalid_or_truncated_row_layouts() {
+        assert!(unpad_readback_rows(&[0; 8], 4, 4, 2).is_err());
+        assert!(unpad_readback_rows(&[0; 256], 4, 256, 2).is_err());
+        assert!(unpad_readback_rows(&[0; 256], 257, 256, 1).is_err());
+    }
+}
+
 #[cfg(test)]
 mod texture_memory_tests {
     use super::texture_allocation_bytes;
