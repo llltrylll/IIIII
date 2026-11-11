@@ -1449,7 +1449,9 @@ impl BakeReport {
         let valid_texels = u32_value("valid_texels")?;
         let missed_texels = u32_value("missed_texels")?;
         let filled_texels = u32_value("filled_texels").unwrap_or(0);
-        if missed_texels > valid_texels || filled_texels > missed_texels {
+        // A texel filled from its nearest surface is counted separately
+        // from a texel that remains missed; the two counters are disjoint.
+        if missed_texels > valid_texels || filled_texels > valid_texels - missed_texels {
             return None;
         }
 
@@ -3017,5 +3019,46 @@ pub(crate) mod tests {
         let mean = agree.iter().sum::<f32>() / agree.len().max(1) as f32;
         println!("  bulge normals, filled vs fitted cage: {mean:.3}");
         assert!(mean > 0.9, "the nearest surface is the bulge itself ({mean})");
+    }
+}
+
+
+#[cfg(test)]
+mod cache_report_validation_tests {
+    use super::BakeReport;
+
+    fn report_json(valid: u64, missed: u64, filled: u64) -> serde_json::Value {
+        serde_json::json!({
+            "source": "test",
+            "triangles": 1,
+            "parts": 1,
+            "hard_edges": 0,
+            "resolution": 256,
+            "rays_per_texel": 1,
+            "prep_seconds": 0.0,
+            "edge_max_distance": 1.0,
+            "id_regions": [],
+            "matched_names": 0,
+            "used_cage": false,
+            "baked": crate::bake::ALL_MAPS,
+            "custom": [],
+            "gpu_seconds": 0.0,
+            "valid_texels": valid,
+            "missed_texels": missed,
+            "filled_texels": filled
+        })
+    }
+
+    #[test]
+    fn cached_report_accepts_filled_and_missed_texels_as_disjoint_counts() {
+        // 12 rays missed but recovered from nearest surface, 3 remain empty.
+        let report = BakeReport::from_cache_json(&report_json(20, 3, 12));
+        assert!(report.is_some());
+    }
+
+    #[test]
+    fn cached_report_rejects_counter_totals_above_valid_texels() {
+        assert!(BakeReport::from_cache_json(&report_json(20, 9, 12)).is_none());
+        assert!(BakeReport::from_cache_json(&report_json(20, 21, 0)).is_none());
     }
 }
