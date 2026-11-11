@@ -676,79 +676,122 @@ pub struct Snapshot {
     tris: std::ops::Range<u32>,
 }
 
-/// Reads the document's maps back from the GPU (call after compositing).
-pub fn snapshot(engine: &Engine, device: &wgpu::Device, queue: &wgpu::Queue, mesh: Arc<Mesh>) -> Result<Snapshot, String> {
-    let res = engine.res;
-    let map_textures: Vec<&Tex> = (0..crate::bake::MAP_TEXTURES).map(|index| engine.map_tex(index)).collect();
+/// Owned GPU resources for an export. The interface thread can prepare
+/// this lightweight job without waiting for readbacks; the worker performs
+/// the GPU copy, conversion and file writing.
+pub struct SnapshotSource {
+    res: u32,
+    textures: Vec<wgpu::Texture>,
+    opaque: bool,
+    emissive: bool,
+    specular: bool,
+    bounds: (Vec3, Vec3),
+    has_bake: bool,
+    uvs: Arc<Mesh>,
+    tris: std::ops::Range<u32>,
+}
+
+pub fn snapshot_source(engine: &Engine, mesh: Arc<Mesh>) -> SnapshotSource {
+    let mut textures = Vec::with_capacity(crate::bake::MAP_TEXTURES + 9);
+    for index in 0..crate::bake::MAP_TEXTURES {
+        textures.push(engine.map_tex(index).texture.clone());
+    }
+    textures.push(engine.final_tex(0).texture.clone());
+    textures.push(engine.final_tex(crate::engine::FINAL_EMISSION).texture.clone());
+    textures.push(engine.final_tex(crate::engine::FINAL_NORMAL).texture.clone());
+    textures.push(engine.final_tex(crate::engine::FINAL_SPECULAR).texture.clone());
+    textures.push(engine.final_tex(1).texture.clone());
+    textures.push(engine.final_tex(2).texture.clone());
+    textures.push(engine.final_tex(3).texture.clone());
     let (pos, nrm) = engine.surface_maps();
+    textures.push(nrm.texture.clone());
+    textures.push(pos.texture.clone());
 
-    // Submit every export readback together and wait once. Decode each staging
-    // buffer before unmapping the next, so raw readback bytes aren't retained
-    // alongside all of the expanded CPU planes.
-    let mut textures = Vec::with_capacity(map_textures.len() + 9);
-    textures.extend(map_textures.iter().map(|texture| &texture.texture));
-    textures.push(&engine.final_tex(0).texture);
-    textures.push(&engine.final_tex(crate::engine::FINAL_EMISSION).texture);
-    textures.push(&engine.final_tex(crate::engine::FINAL_NORMAL).texture);
-    textures.push(&engine.final_tex(crate::engine::FINAL_SPECULAR).texture);
-    textures.push(&engine.final_tex(1).texture);
-    textures.push(&engine.final_tex(2).texture);
-    textures.push(&engine.final_tex(3).texture);
-    textures.push(&nrm.texture);
-    textures.push(&pos.texture);
-    let decoded = gpu::read_wgpu_textures_with(device, queue, &textures, decode_plane)?;
-    let mut planes = decoded.into_iter();
-
-    let mut mesh_planes = Vec::with_capacity(map_textures.len());
-    for texture in &map_textures {
-        let plane = planes.next().ok_or_else(|| "Missing baked mesh map in export readback.".to_string())?;
-        mesh_planes.push(resample(plane, texture.width, res));
-    }
-    let mesh_maps: [Plane; crate::bake::MAP_TEXTURES] = mesh_planes
-        .try_into()
-        .map_err(|_| "Export readback returned the wrong number of mesh maps.".to_string())?;
-
-    let color = planes.next().ok_or_else(|| "Missing color map in export readback.".to_string())?;
-    let emission = planes.next().ok_or_else(|| "Missing emission map in export readback.".to_string())?;
-    let normal = planes.next().ok_or_else(|| "Missing normal map in export readback.".to_string())?;
-    let spec = planes.next().ok_or_else(|| "Missing specular map in export readback.".to_string())?;
-    let rough = planes.next().ok_or_else(|| "Missing roughness map in export readback.".to_string())?;
-    let metal = planes.next().ok_or_else(|| "Missing metallic map in export readback.".to_string())?;
-    let height = planes.next().ok_or_else(|| "Missing height map in export readback.".to_string())?;
-    let world_normal = resample(
-        planes.next().ok_or_else(|| "Missing world normal map in export readback.".to_string())?,
-        nrm.width,
-        res,
-    );
-    let position = resample(
-        planes.next().ok_or_else(|| "Missing position map in export readback.".to_string())?,
-        pos.width,
-        res,
-    );
-    if planes.next().is_some() {
-        return Err("Export readback returned unexpected extra textures.".into());
-    }
-
-    Ok(Snapshot {
-        res,
-        color,
+    SnapshotSource {
+        res: engine.res,
+        textures,
         opaque: !engine.uses_opacity(),
-        emission,
         emissive: engine.uses_emission(),
-        normal,
-        spec,
         specular: engine.uses_channel(crate::engine::SPECULAR),
-        rough,
-        metal,
-        height,
-        mesh: mesh_maps,
-        world_normal,
-        position,
         bounds: engine.bounds(),
         has_bake: engine.has_bake,
         uvs: mesh,
         tris: engine.triangles(),
-    })
+    }
+}
+
+impl SnapshotSource {
+    /// Reads all textures in one submission and one GPU poll. Each raw staging
+    /// buffer is converted immediately, so only the expanded planes persist.
+    pub fn read(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Result<Snapshot, String> {
+        let expected_textures = crate::bake::MAP_TEXTURES + 9;
+        if self.textures.len() != expected_textures {
+            return Err("Export snapshot has an incomplete texture list.".into());
+        }
+        let textures: Vec<&wgpu::Texture> = self.textures.iter().collect();
+        let decoded = gpu::read_wgpu_textures_with(device, queue, &textures, decode_plane)?;
+        let mut planes = decoded.into_iter();
+
+        let mut mesh_planes = Vec::with_capacity(crate::bake::MAP_TEXTURES);
+        for texture in self.textures.iter().take(crate::bake::MAP_TEXTURES) {
+            let plane = planes.next().ok_or_else(|| "Missing baked mesh map in export readback.".to_string())?;
+            mesh_planes.push(resample(plane, texture.width(), self.res));
+        }
+        let mesh_maps: [Plane; crate::bake::MAP_TEXTURES] = mesh_planes
+            .try_into()
+            .map_err(|_| "Export readback returned the wrong number of mesh maps.".to_string())?;
+
+        let color = planes.next().ok_or_else(|| "Missing color map in export readback.".to_string())?;
+        let emission = planes.next().ok_or_else(|| "Missing emission map in export readback.".to_string())?;
+        let normal = planes.next().ok_or_else(|| "Missing normal map in export readback.".to_string())?;
+        let spec = planes.next().ok_or_else(|| "Missing specular map in export readback.".to_string())?;
+        let rough = planes.next().ok_or_else(|| "Missing roughness map in export readback.".to_string())?;
+        let metal = planes.next().ok_or_else(|| "Missing metallic map in export readback.".to_string())?;
+        let height = planes.next().ok_or_else(|| "Missing height map in export readback.".to_string())?;
+        let nrm = self.textures.get(crate::bake::MAP_TEXTURES + 7)
+            .ok_or_else(|| "Missing world-normal texture in export snapshot.".to_string())?;
+        let pos = self.textures.get(crate::bake::MAP_TEXTURES + 8)
+            .ok_or_else(|| "Missing position texture in export snapshot.".to_string())?;
+        let world_normal = resample(
+            planes.next().ok_or_else(|| "Missing world normal map in export readback.".to_string())?,
+            nrm.width(),
+            self.res,
+        );
+        let position = resample(
+            planes.next().ok_or_else(|| "Missing position map in export readback.".to_string())?,
+            pos.width(),
+            self.res,
+        );
+        if planes.next().is_some() {
+            return Err("Export readback returned unexpected extra textures.".into());
+        }
+
+        Ok(Snapshot {
+            res: self.res,
+            color,
+            opaque: self.opaque,
+            emission,
+            emissive: self.emissive,
+            normal,
+            spec,
+            specular: self.specular,
+            rough,
+            metal,
+            height,
+            mesh: mesh_maps,
+            world_normal,
+            position,
+            bounds: self.bounds,
+            has_bake: self.has_bake,
+            uvs: self.uvs.clone(),
+            tris: self.tris.clone(),
+        })
+    }
+}
+
+/// Synchronous convenience wrapper for callers that need an immediate snapshot.
+pub fn snapshot(engine: &Engine, device: &wgpu::Device, queue: &wgpu::Queue, mesh: Arc<Mesh>) -> Result<Snapshot, String> {
+    snapshot_source(engine, mesh).read(device, queue)
 }
 
 // ------------------------------------------------------------------ evaluation
