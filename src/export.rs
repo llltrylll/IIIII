@@ -872,6 +872,25 @@ fn nearest_covered(cover: &[bool], res: u32, limit: u32) -> Vec<u32> {
     }
     src
 }
+/// Copies dilated texels in place. Each source index points at an original
+/// covered texel, never another padded texel, so source pixels remain stable
+/// while destinations are filled. This avoids cloning the full RGBA image.
+fn apply_padding(pixels: &mut [f32], near: &[u32], cover: &[bool], transparent: bool) {
+    debug_assert_eq!(pixels.len(), cover.len() * 4);
+    debug_assert_eq!(near.len(), cover.len());
+    for (i, &source) in near.iter().enumerate() {
+        let dst = i * 4;
+        if source != NO_SOURCE {
+            let src = source as usize * 4;
+            let sample = [pixels[src], pixels[src + 1], pixels[src + 2], pixels[src + 3]];
+            pixels[dst..dst + 4].copy_from_slice(&sample);
+        }
+        if transparent && !cover[i] {
+            pixels[dst + 3] = 0.0;
+        }
+    }
+}
+
 
 // ------------------------------------------------------------------ writing
 
@@ -944,19 +963,7 @@ pub fn export(s: &Snapshot, template: &Template, settings: &Settings) -> Result<
             }
             if let Some(near) = &nearest {
                 let cover = cover.as_ref().expect("with nearest");
-                for i in 0..n {
-                    let dst = i * 4;
-                    if near[i] != NO_SOURCE {
-                        let src = near[i] as usize * 4;
-                        // nearest_covered always points at an original covered
-                        // texel; those source texels are never overwritten.
-                        let pixel = [px[src], px[src + 1], px[src + 2], px[src + 3]];
-                        px[dst..dst + 4].copy_from_slice(&pixel);
-                    }
-                    if settings.padding == Padding::Transparent && map.layout == Layout::Rgba && !cover[i] {
-                        px[dst + 3] = 0.0;
-                    }
-                }
+                apply_padding(&mut px, near, cover, settings.padding == Padding::Transparent && map.layout == Layout::Rgba);
             }
             let mut img: ImageBuffer<Rgba<f32>, Vec<f32>> =
                 ImageBuffer::from_vec(res, res, px).expect("sized");
@@ -1047,6 +1054,36 @@ mod tests {
         assert!(near.iter().all(|&s| s == 5 * 16 + 5));
         let near = nearest_covered(&cover, res, 2);
         assert_eq!(near.iter().filter(|&&s| s != NO_SOURCE).count(), 25);
+    }
+
+    #[test]
+    fn in_place_padding_matches_copy_based_padding() {
+        let res = 8;
+        let mut cover = vec![false; (res * res) as usize];
+        cover[1 * res as usize + 1] = true;
+        cover[1 * res as usize + 6] = true;
+        cover[6 * res as usize + 3] = true;
+        for limit in [0, 1, 2, u32::MAX] {
+            let near = nearest_covered(&cover, res, limit);
+            let original: Vec<f32> = (0..cover.len() * 4).map(|i| (i as f32 + 1.0) / 257.0).collect();
+
+            let mut expected = original.clone();
+            for i in 0..cover.len() {
+                if near[i] != NO_SOURCE {
+                    let src = near[i] as usize * 4;
+                    let dst = i * 4;
+                    let sample = [original[src], original[src + 1], original[src + 2], original[src + 3]];
+                    expected[dst..dst + 4].copy_from_slice(&sample);
+                }
+                if !cover[i] {
+                    expected[i * 4 + 3] = 0.0;
+                }
+            }
+
+            let mut actual = original;
+            apply_padding(&mut actual, &near, &cover, true);
+            assert_eq!(actual, expected, "limit {limit}");
+        }
     }
 
     #[test]
