@@ -168,10 +168,20 @@ impl Snapshot {
         }
     }
 
-    pub fn compressed_bytes(&self) -> usize {
+    /// Estimated memory retained by this snapshot. While a readback or
+    /// compression is pending, its uncompressed size is used as a conservative
+    /// estimate rather than reporting zero.
+    pub fn resident_bytes(&self) -> usize {
+        let raw = self.infos.iter().fold(0usize, |total, info| {
+            let bytes = (info.width as usize)
+                .saturating_mul(info.height as usize)
+                .saturating_mul(info.bpp as usize);
+            total.saturating_add(bytes)
+        });
         match &self.state {
-            SnapState::Ready(d) => d.iter().map(|v| v.len()).sum(),
-            _ => 0,
+            SnapState::Ready(data) => data.iter().fold(0usize, |total, blob| total.saturating_add(blob.len())),
+            SnapState::Mapping { .. } | SnapState::Compressing(_) => raw,
+            SnapState::Failed(error) => error.len(),
         }
     }
 
@@ -236,7 +246,7 @@ pub struct UndoEntry {
 
 impl UndoEntry {
     fn bytes(&self) -> usize {
-        self.before.compressed_bytes() + self.after.compressed_bytes()
+        self.before.resident_bytes().saturating_add(self.after.resident_bytes())
     }
 }
 
@@ -294,7 +304,7 @@ impl Edit {
     fn bytes(&self) -> usize {
         match self {
             Edit::Stroke(e) => e.bytes(),
-            Edit::Group(edits) => edits.iter().map(|e| e.bytes()).sum(),
+            Edit::Group(edits) => edits.iter().fold(0usize, |total, edit| total.saturating_add(edit.bytes())),
             _ => 0,
         }
     }
@@ -389,7 +399,10 @@ impl UndoStack {
     }
 
     pub fn ram_bytes(&self) -> usize {
-        self.undo.iter().chain(self.redo.iter()).map(|e| e.edit.bytes()).sum()
+        let total = self.undo.iter().chain(self.redo.iter()).fold(0usize, |total, entry| {
+            total.saturating_add(entry.edit.bytes())
+        });
+        self.group.as_ref().map_or(total, |entry| total.saturating_add(entry.edit.bytes()))
     }
 }
 
