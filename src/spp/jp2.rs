@@ -44,11 +44,13 @@ fn unsupported<T>(what: impl Into<String>) -> Result<T> {
 }
 
 fn be16(b: &[u8], o: usize) -> Result<usize> {
-    b.get(o..o + 2).map(|s| u16::from_be_bytes([s[0], s[1]]) as usize).ok_or(Jp2Error::Corrupt("short marker"))
+    let end = o.checked_add(2).ok_or(Jp2Error::Corrupt("short marker"))?;
+    b.get(o..end).map(|s| u16::from_be_bytes([s[0], s[1]]) as usize).ok_or(Jp2Error::Corrupt("short marker"))
 }
 
 fn be32(b: &[u8], o: usize) -> Result<usize> {
-    b.get(o..o + 4).map(|s| u32::from_be_bytes([s[0], s[1], s[2], s[3]]) as usize).ok_or(Jp2Error::Corrupt("short marker"))
+    let end = o.checked_add(4).ok_or(Jp2Error::Corrupt("short marker"))?;
+    b.get(o..end).map(|s| u32::from_be_bytes([s[0], s[1], s[2], s[3]]) as usize).ok_or(Jp2Error::Corrupt("short marker"))
 }
 
 #[derive(Default, Clone)]
@@ -467,8 +469,11 @@ fn build_bands(prm: &Params, res: usize) -> Vec<Band> {
 }
 
 fn read_packet(prm: &Params, data: &[u8], pos: &mut usize, bands: &mut [Band], layer: usize) -> Result<()> {
-    if prm.sop && data.get(*pos..*pos + 2) == Some(&[0xff, 0x91]) {
-        *pos += 6;
+    if prm.sop {
+        let end = pos.checked_add(6).ok_or(Jp2Error::Corrupt("SOP marker offset"))?;
+        if data.get(*pos..end).is_some_and(|marker| marker[..2] == [0xff, 0x91]) {
+            *pos = end;
+        }
     }
     let mut br = BitReader { data, pos: *pos, buf: 0, bits: 0 };
     let mut included: Vec<(usize, usize, usize)> = Vec::new();
@@ -523,8 +528,11 @@ fn read_packet(prm: &Params, data: &[u8], pos: &mut usize, bands: &mut [Band], l
     }
     br.align();
     *pos = br.pos;
-    if prm.eph && data.get(*pos..*pos + 2) == Some(&[0xff, 0x92]) {
-        *pos += 2;
+    if prm.eph {
+        let end = pos.checked_add(2).ok_or(Jp2Error::Corrupt("EPH marker offset"))?;
+        if data.get(*pos..end) == Some(&[0xff, 0x92]) {
+            *pos = end;
+        }
     }
     for (bi, k, len) in included {
         let chunk = data.get(*pos..*pos + len).ok_or(Jp2Error::Corrupt("code-block data past end"))?;
