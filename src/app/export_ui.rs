@@ -228,7 +228,7 @@ impl PainterApp {
 
     /// Every texture set's maps, read back now (after compositing), with
     /// the settings that name its files.
-    fn export_snapshots(&mut self, settings: &export::Settings) -> Vec<(export::Snapshot, export::Settings)> {
+    fn export_snapshots(&mut self, settings: &export::Settings) -> Result<Vec<(export::Snapshot, export::Settings)>, String> {
         if self.engine.dirty {
             self.engine.composite();
         }
@@ -239,8 +239,8 @@ impl PainterApp {
             .iter()
             .zip(engines)
             .map(|(set, engine)| {
-                let snapshot = export::snapshot(engine, &self.rs.device, &self.rs.queue, self.mesh.clone());
-                (snapshot, export::Settings { set_name: set.name.replace(' ', ""), ..settings.clone() })
+                let snapshot = export::snapshot(engine, &self.rs.device, &self.rs.queue, self.mesh.clone())?;
+                Ok((snapshot, export::Settings { set_name: set.name.replace(' ', ""), ..settings.clone() }))
             })
             .collect()
     }
@@ -248,7 +248,15 @@ impl PainterApp {
     /// Reads the maps back now and writes the files on a worker thread.
     fn start_export(&mut self, template: Template, ctx: &egui::Context) {
         let settings = self.export_settings();
-        let jobs = self.export_snapshots(&settings);
+        let jobs = match self.export_snapshots(&settings) {
+            Ok(jobs) => jobs,
+            Err(error) => {
+                self.status = format!("Export failed: {error}");
+                self.export.job = None;
+                self.export.result = Some(Err(error));
+                return;
+            }
+        };
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
@@ -267,7 +275,7 @@ impl PainterApp {
     /// Exports synchronously (agents wait for the files).
     pub(super) fn export_now(&mut self, template: usize, settings: &export::Settings) -> Result<Vec<PathBuf>, String> {
         let mut files = Vec::new();
-        for (snapshot, settings) in self.export_snapshots(settings) {
+        for (snapshot, settings) in self.export_snapshots(settings)? {
             files.extend(export::export(&snapshot, &self.export.templates[template], &settings)?);
         }
         Ok(files)
