@@ -133,7 +133,7 @@ impl<R: Read + Seek> Hdf5File<R> {
         if info.len > MAX_DATASET_BYTES {
             return Err(Hdf5Error::Unsupported("dataset exceeds the safe import size limit".into()));
         }
-        let len = usize::try_from(info.len).map_err(|_| Hdf5Error::Corrupt("dataset size"))?;
+        let len = usize::try_from(info.len).map_err(|_| Hdf5Error::Corrupt("dataset size".into()))?;
         match &info.layout {
             Layout::Compact(data) => {
                 if data.len() != len {
