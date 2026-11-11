@@ -2815,53 +2815,67 @@ impl Engine {
             }
             Edit::Layer { index, id, layer } => match layer.take() {
                 Some(mut l) => {
+                    if l.id != *id || self.layers.iter().any(|existing| existing.id == *id) {
+                        *layer = Some(l);
+                        return Err("The layer targeted by this history step already exists or has changed identity.".into());
+                    }
                     Self::attach_thumb(&self.rs, &mut l);
                     let at = (*index).min(self.layers.len());
                     self.layers.insert(at, l);
                 }
                 None => {
-                    if let Some(pos) = self.layers.iter().position(|l| l.id == *id) {
-                        let mut l = self.layers.remove(pos);
-                        Self::release_thumb(&self.rs, &mut l);
-                        *index = pos;
-                        *layer = Some(l);
-                    }
+                    let pos = self.layers.iter().position(|l| l.id == *id)
+                        .ok_or_else(|| "The layer targeted by this history step no longer exists.".to_string())?;
+                    let mut l = self.layers.remove(pos);
+                    Self::release_thumb(&self.rs, &mut l);
+                    *index = pos;
+                    *layer = Some(l);
                 }
             },
             Edit::Order(order) => {
                 let current: Vec<u64> = self.layers.iter().map(|l| l.id).collect();
+                let expected: std::collections::HashSet<u64> = order.iter().copied().collect();
+                let present: std::collections::HashSet<u64> = current.iter().copied().collect();
+                if order.len() != current.len() || expected.len() != order.len() || present != expected {
+                    return Err("The layer stack no longer matches this history step.".into());
+                }
                 let rank = |id: u64| order.iter().position(|&o| o == id).unwrap_or(usize::MAX);
                 self.layers.sort_by_key(|l| rank(l.id));
                 *order = current;
             }
             Edit::Content { id, content } => {
-                if let Some(l) = self.layers.iter_mut().find(|l| l.id == *id) {
-                    Self::release_thumb(&self.rs, l);
-                    std::mem::swap(&mut l.content, content);
-                    Self::attach_thumb(&self.rs, l);
-                }
+                let layer = self.layers.iter_mut().find(|layer| layer.id == *id)
+                    .ok_or_else(|| "The layer targeted by this content edit no longer exists.".to_string())?;
+                Self::release_thumb(&self.rs, layer);
+                std::mem::swap(&mut layer.content, content);
+                Self::attach_thumb(&self.rs, layer);
             }
             Edit::Mask { id, mask } => {
-                if let Some(l) = self.layers.iter_mut().find(|l| l.id == *id) {
-                    std::mem::swap(&mut l.mask, mask);
-                }
+                let layer = self.layers.iter_mut().find(|layer| layer.id == *id)
+                    .ok_or_else(|| "The layer targeted by this mask edit no longer exists.".to_string())?;
+                std::mem::swap(&mut layer.mask, mask);
             }
             Edit::Images { id, images } => {
-                if let Some(l) = self.layers.iter_mut().find(|l| l.id == *id) {
-                    std::mem::swap(&mut l.images, images);
-                }
+                let layer = self.layers.iter_mut().find(|layer| layer.id == *id)
+                    .ok_or_else(|| "The layer targeted by this image edit no longer exists.".to_string())?;
+                std::mem::swap(&mut layer.images, images);
             }
             Edit::Parent { id, parent } => {
-                if let Some(l) = self.layers.iter_mut().find(|l| l.id == *id) {
-                    std::mem::swap(&mut l.parent, parent);
-                }
+                let layer = self.layers.iter_mut().find(|layer| layer.id == *id)
+                    .ok_or_else(|| "The layer targeted by this parent edit no longer exists.".to_string())?;
+                std::mem::swap(&mut layer.parent, parent);
             }
             Edit::Props(props) => {
+                if props.levels.len() != self.map_levels.len()
+                    || props.layers.iter().any(|(id, _)| !self.layers.iter().any(|layer| layer.id == *id))
+                {
+                    return Err("The document no longer matches this property history step.".into());
+                }
                 let current = self.doc_props();
-                for (id, p) in &props.layers {
-                    if let Some(l) = self.layers.iter_mut().find(|l| l.id == *id) {
-                        Self::set_layer_props(l, p);
-                    }
+                for (id, properties) in &props.layers {
+                    let layer = self.layers.iter_mut().find(|layer| layer.id == *id)
+                        .expect("all property targets were validated above");
+                    Self::set_layer_props(layer, properties);
                 }
                 for (dst, src) in self.map_levels.iter_mut().zip(&props.levels) {
                     *dst = *src;
