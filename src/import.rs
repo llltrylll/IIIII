@@ -282,6 +282,51 @@ impl Builder {
 
 #[cfg(test)]
 mod tests {
+    fn valid_raw_mesh() -> super::RawMesh {
+        super::RawMesh {
+            name: "test".into(),
+            positions: vec![glam::Vec3::ZERO, glam::Vec3::X, glam::Vec3::Y],
+            normals: Some(vec![glam::Vec3::Z; 3]),
+            uvs: Some(vec![glam::Vec2::ZERO, glam::Vec2::X, glam::Vec2::Y]),
+            indices: vec![0, 1, 2],
+            tri_material: vec![0],
+            material_count: 1,
+            material_names: vec!["Material".into()],
+            tri_object: vec![0],
+            objects: vec!["Object".into()],
+            tri_color: Some(vec![[128, 128, 128]]),
+            tri_vertex_color: Some(vec![[[255, 0, 0], [0, 255, 0], [0, 0, 255]]]),
+            missing_uvs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn raw_mesh_validation_accepts_consistent_triangle_data() {
+        assert!(super::validate_raw_mesh(&valid_raw_mesh()).is_ok());
+    }
+
+    #[test]
+    fn raw_mesh_validation_rejects_invalid_indices_and_non_finite_positions() {
+        let mut mesh = valid_raw_mesh();
+        mesh.indices[2] = 3;
+        assert!(super::validate_raw_mesh(&mesh).is_err());
+
+        let mut mesh = valid_raw_mesh();
+        mesh.positions[0].x = f32::NAN;
+        assert!(super::validate_raw_mesh(&mesh).is_err());
+    }
+
+    #[test]
+    fn raw_mesh_validation_rejects_misaligned_triangle_attributes() {
+        let mut mesh = valid_raw_mesh();
+        mesh.tri_vertex_color.as_mut().unwrap().clear();
+        assert!(super::validate_raw_mesh(&mesh).is_err());
+
+        let mut mesh = valid_raw_mesh();
+        mesh.tri_object[0] = 2;
+        assert!(super::validate_raw_mesh(&mesh).is_err());
+    }
+
     /// Opt-in smoke test: `MP_IMPORT_TEST="a.fbx;b.obj" cargo test -- --ignored`.
     #[test]
     #[ignore]
