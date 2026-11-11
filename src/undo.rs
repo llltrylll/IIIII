@@ -288,9 +288,8 @@ impl UndoStack {
         }
     }
 
-    /// Collects every push until [`UndoStack::end_group`] into one step.
-    /// Starts collecting edits into one step. Nested calls join the outer
-    /// group, so composite operations can be built from smaller ones.
+    /// Collects nested edits into one history step until [`UndoStack::end_group`]
+    /// closes the outermost group.
     pub fn begin_group(&mut self, label: impl Into<String>) {
         if self.group_depth == 0 {
             self.group = Some(Entry { label: label.into(), edit: Edit::Group(Vec::new()), serial: 0, set: self.set });
@@ -304,7 +303,7 @@ impl UndoStack {
             return;
         }
         if let Some(entry) = self.group.take() {
-            if matches!(&entry.edit, Edit::Group(e) if !e.is_empty()) {
+            if matches!(&entry.edit, Edit::Group(edits) if !edits.is_empty()) {
                 self.push(entry.label, entry.edit);
             }
         }
