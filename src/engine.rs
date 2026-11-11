@@ -2802,13 +2802,14 @@ impl Engine {
     }
 
     /// Applies a swap edit (see [`Edit`]): afterwards `edit` holds the state it replaced.
-    fn apply_edit(&mut self, edit: &mut Edit, undoing: bool) {
+    fn apply_edit(&mut self, edit: &mut Edit, undoing: bool) -> Result<(), String> {
         match edit {
             Edit::Stroke(e) => {
-                if let Some(textures) = self.target_textures(e.layer_id, e.target, &e.channels) {
-                    let snap = if undoing { &mut e.before } else { &mut e.after };
-                    snap.restore(&self.device, &self.queue, &textures);
-                }
+                let textures = self
+                    .target_textures(e.layer_id, e.target, &e.channels)
+                    .ok_or_else(|| "The layer or texture targeted by this undo step no longer exists.".to_string())?;
+                let snap = if undoing { &mut e.before } else { &mut e.after };
+                snap.restore(&self.device, &self.queue, &textures)?;
             }
             Edit::Layer { index, id, layer } => match layer.take() {
                 Some(mut l) => {
@@ -2865,15 +2866,24 @@ impl Engine {
                 }
                 *props = current;
             }
-            Edit::Fix { map, tex } => std::mem::swap(&mut self.map_fix[*map], tex),
+            Edit::Fix { map, tex } => {
+                let target = self.map_fix.get_mut(*map)
+                    .ok_or_else(|| "The baked map targeted by this undo step no longer exists.".to_string())?;
+                std::mem::swap(target, tex);
+            }
             Edit::Group(edits) => {
                 if undoing {
-                    edits.iter_mut().rev().for_each(|e| self.apply_edit(e, true));
+                    for edit in edits.iter_mut().rev() {
+                        self.apply_edit(edit, true)?;
+                    }
                 } else {
-                    edits.iter_mut().for_each(|e| self.apply_edit(e, false));
+                    for edit in edits {
+                        self.apply_edit(edit, false)?;
+                    }
                 }
             }
         }
+        Ok(())
     }
 
     fn new_mask_texture(&self, white: bool) -> Tex {
@@ -3365,27 +3375,37 @@ impl Engine {
         })
     }
 
-    pub fn undo(&mut self, stack: &mut UndoStack) {
+    pub fn undo(&mut self, stack: &mut UndoStack) -> Result<bool, String> {
         if self.active.is_some() {
-            return;
+            return Ok(false);
         }
         self.commit_props(stack);
-        if let Some(mut e) = stack.undo.pop() {
-            self.apply_edit(&mut e.edit, true);
-            stack.redo.push(e);
+        if let Some(mut entry) = stack.undo.pop() {
+            if let Err(error) = self.apply_edit(&mut entry.edit, true) {
+                stack.undo.push(entry);
+                return Err(error);
+            }
+            stack.redo.push(entry);
             self.after_history_step();
+            return Ok(true);
         }
+        Ok(false)
     }
 
-    pub fn redo(&mut self, stack: &mut UndoStack) {
+    pub fn redo(&mut self, stack: &mut UndoStack) -> Result<bool, String> {
         if self.active.is_some() {
-            return;
+            return Ok(false);
         }
-        if let Some(mut e) = stack.redo.pop() {
-            self.apply_edit(&mut e.edit, false);
-            stack.undo.push(e);
+        if let Some(mut entry) = stack.redo.pop() {
+            if let Err(error) = self.apply_edit(&mut entry.edit, false) {
+                stack.redo.push(entry);
+                return Err(error);
+            }
+            stack.undo.push(entry);
             self.after_history_step();
+            return Ok(true);
         }
+        Ok(false)
     }
 
     fn after_history_step(&mut self) {
