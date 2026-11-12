@@ -1257,6 +1257,58 @@ fn scissor_overlap_area(a: [u32; 4], b: [u32; 4]) -> u64 {
         * u64::from(a[3].min(b[3]).saturating_sub(a[1].max(b[1])))
 }
 
+/// Expands one half-open interval, optionally wrapping across the texture seam.
+fn expand_scissor_axis(start: u32, end: u32, margin: u32, limit: u32, wrap: bool) -> ([(u32, u32); 2], usize) {
+    if limit == 0 {
+        return ([(0, 0); 2], 0);
+    }
+    if !wrap {
+        return ([(start.saturating_sub(margin), end.saturating_add(margin).min(limit)), (0, 0)], 1);
+    }
+    let length = u64::from(end.saturating_sub(start)) + 2 * u64::from(margin);
+    if length >= u64::from(limit) {
+        return ([(0, limit), (0, 0)], 1);
+    }
+    let start = (i64::from(start) - i64::from(margin)).rem_euclid(i64::from(limit)) as u32;
+    let end = start + length as u32;
+    if end <= limit {
+        ([(start, end), (0, 0)], 1)
+    } else {
+        ([(start, limit), (0, end - limit)], 2)
+    }
+}
+
+/// Expands patches for mask-filter neighborhoods. Warp uses a repeating
+/// sampler, so its affected region can cross the UV seam and split in two
+/// along either axis (at most four rectangles per input patch).
+fn expand_scissors(rects: &mut Vec<[u32; 4]>, margin: u32, limit: u32, wrap: bool) {
+    if wrap {
+        let mut expanded = Vec::with_capacity(rects.len().saturating_mul(4));
+        for &[x0, y0, x1, y1] in rects.iter() {
+            let (xs, nx) = expand_scissor_axis(x0, x1, margin, limit, true);
+            let (ys, ny) = expand_scissor_axis(y0, y1, margin, limit, true);
+            for &(xa, xb) in &xs[..nx] {
+                for &(ya, yb) in &ys[..ny] {
+                    if xb > xa && yb > ya {
+                        expanded.push([xa, ya, xb, yb]);
+                    }
+                }
+            }
+        }
+        *rects = expanded;
+    } else {
+        for r in rects.iter_mut() {
+            *r = [
+                r[0].saturating_sub(margin),
+                r[1].saturating_sub(margin),
+                r[2].saturating_add(margin).min(limit),
+                r[3].saturating_add(margin).min(limit),
+            ];
+        }
+    }
+    compact_scissors(rects);
+}
+
 /// Keep scissors disjoint. If the list exceeds the cap, merge the cheapest
 /// pair by added texel area; a merge only expands coverage, never drops it.
 fn compact_scissors(rects: &mut Vec<[u32; 4]>) {
@@ -3863,7 +3915,7 @@ impl Engine {
         // Filtered masks above the change read around it: widen every patch
         // by the farthest filter reach, then compact any newly overlapping rectangles.
         if let (Some(rects), Some(at)) = (scissors.as_mut(), resume.as_ref().map(|p| p.at)) {
-            let reach = passes[at..]
+            let (reach, wraps) = passes[at..]
                 .iter()
                 .filter_map(|p| match *p {
                     // A filtered folder mask is evaluated at Pass::End, not
@@ -3871,17 +3923,16 @@ impl Engine {
                     Pass::Layer(li) | Pass::End(li) => self.layers[li].mask.as_ref(),
                     Pass::Begin => None,
                 })
-                .map(|m| m.filters.iter().filter(|f| f.enabled).map(|f| f.reach(self.res)).sum::<f32>())
-                .fold(0.0f32, f32::max);
+                .map(|m| {
+                    (
+                        m.filters.iter().filter(|f| f.enabled).map(|f| f.reach(self.res)).sum::<f32>(),
+                        m.filters.iter().any(|f| f.enabled && f.kind == FilterKind::Warp),
+                    )
+                })
+                .fold((0.0f32, false), |(max_reach, any_wrap), (reach, wraps)| (max_reach.max(reach), any_wrap || wraps));
             if reach > 0.0 {
-                let e = reach.ceil() as u32 + 2;
-                for r in rects.iter_mut() {
-                    if r[2] > r[0] && r[3] > r[1] {
-                        *r = [r[0].saturating_sub(e), r[1].saturating_sub(e), (r[2] + e).min(self.res), (r[3] + e).min(self.res)];
-                    }
-                }
+                expand_scissors(rects, reach.ceil() as u32 + 2, self.res, wraps);
             }
-            compact_scissors(rects);
         }
         let full_area = u64::from(self.res) * u64::from(self.res);
         self.last_scissor_pixels = scissors.as_ref().map_or(full_area, |rects| rects.iter().map(|&r| scissor_area(r)).sum());
@@ -4348,6 +4399,26 @@ mod scissor_tests {
                 assert_eq!(scissor_overlap_area(rects[i], rects[j]), 0, "scissors overlap");
             }
         }
+    }
+
+    #[test]
+    fn warp_filter_scissors_wrap_across_uv_seams() {
+        let (x, nx) = expand_scissor_axis(2, 5, 4, 100, true);
+        assert_eq!(nx, 2);
+        assert_eq!(&x[..nx], &[(98, 100), (0, 9)]);
+
+        let (y, ny) = expand_scissor_axis(20, 30, 5, 100, true);
+        assert_eq!(ny, 1);
+        assert_eq!(y[0], (15, 35));
+
+        let (full, nf) = expand_scissor_axis(10, 20, 50, 100, true);
+        assert_eq!(nf, 1);
+        assert_eq!(full[0], (0, 100));
+
+        let mut rects = vec![[2, 20, 5, 24]];
+        expand_scissors(&mut rects, 4, 100, true);
+        assert_eq!(rects, vec![[0, 16, 9, 28], [98, 16, 100, 28]]);
+        assert_disjoint(&rects);
     }
 
     #[test]
