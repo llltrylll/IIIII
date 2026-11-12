@@ -1023,6 +1023,94 @@ struct Pipelines {
     resolve_bgl: wgpu::BindGroupLayout,
 }
 
+#[derive(Clone)]
+struct GpuStrokeProfileResources {
+    query_set: Arc<wgpu::QuerySet>,
+    resolve: Arc<wgpu::Buffer>,
+    readback: Arc<wgpu::Buffer>,
+}
+
+struct GpuStrokeProfiler {
+    resources: GpuStrokeProfileResources,
+    tx: mpsc::Sender<bool>,
+    rx: mpsc::Receiver<bool>,
+    pending: bool,
+}
+
+impl GpuStrokeProfiler {
+    fn new(device: &wgpu::Device) -> Self {
+        let query_set = Arc::new(device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("stroke GPU timestamps"),
+            ty: wgpu::QueryType::Timestamp,
+            count: 4,
+        }));
+        let resolve = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("stroke timestamp resolve"),
+            size: 32,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        }));
+        let readback = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("stroke timestamp readback"),
+            size: 32,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        }));
+        let (tx, rx) = mpsc::channel();
+        Self {
+            resources: GpuStrokeProfileResources { query_set, resolve, readback },
+            tx,
+            rx,
+            pending: false,
+        }
+    }
+
+    fn resources(&self) -> Option<GpuStrokeProfileResources> {
+        (!self.pending).then(|| self.resources.clone())
+    }
+
+    fn request_map(&mut self) {
+        self.pending = true;
+        let tx = self.tx.clone();
+        self.resources.readback.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result.is_ok());
+        });
+    }
+
+    fn poll(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<(f64, f64)> {
+        if !self.pending {
+            return None;
+        }
+        let _ = device.poll(wgpu::PollType::Poll);
+        let mapped = match self.rx.try_recv() {
+            Ok(mapped) => mapped,
+            Err(mpsc::TryRecvError::Empty) => return None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.pending = false;
+                return None;
+            }
+        };
+        self.pending = false;
+        if !mapped {
+            return None;
+        }
+        let data = self.resources.readback.slice(..).get_mapped_range();
+        let read = |i: usize| u64::from_ne_bytes(data[i * 8..i * 8 + 8].try_into().expect("timestamp is 8 bytes"));
+        let (s0, s1, a0, a1) = (read(0), read(1), read(2), read(3));
+        drop(data);
+        self.resources.readback.unmap();
+        let period_ns = queue.get_timestamp_period();
+        if period_ns <= 0.0 {
+            return None;
+        }
+        let period_ms = f64::from(period_ns) / 1_000_000.0;
+        Some((
+            s1.wrapping_sub(s0) as f64 * period_ms,
+            a1.wrapping_sub(a0) as f64 * period_ms,
+        ))
+    }
+}
+
 pub struct Engine {
     /// Tiling, mipmapped sampler for fill images.
     repeat_sampler: wgpu::Sampler,
@@ -1032,6 +1120,8 @@ pub struct Engine {
     rs: egui_wgpu::RenderState,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// Optional non-blocking GPU timings when the adapter supports timestamps.
+    gpu_profiler: Option<GpuStrokeProfiler>,
     /// Shared by the texture sets of a document.
     p: Arc<Pipelines>,
     pub res: u32,
@@ -1144,6 +1234,7 @@ impl Engine {
         let device = rs.device.clone();
         let queue = rs.queue.clone();
         let sampler = gpu::linear_sampler(&device, wgpu::AddressMode::ClampToEdge);
+        let gpu_profiler = device.features().contains(wgpu::Features::TIMESTAMP_QUERY).then(|| GpuStrokeProfiler::new(&device));
 
         let dummy = Tex::new(&device, "dummy", 1, 1, F::Rgba8Unorm, LAYER_USAGE);
         queue.write_texture(dummy.copy_info(), &[0, 0, 0, 0], Default::default(), dummy.extent());
@@ -1165,6 +1256,7 @@ impl Engine {
 
         let mut engine = Engine {
             rs: rs.clone(),
+            gpu_profiler,
             pos: Tex::new(&device, "position map", res, res, POS_FORMAT, LAYER_USAGE),
             nrm: Tex::new(&device, "normal map", res, res, NRM_FORMAT, LAYER_USAGE),
             tan: Tex::new(&device, "tangent map", res, res, TAN_FORMAT, LAYER_USAGE),
@@ -2935,6 +3027,7 @@ impl Engine {
         depth: &wgpu::TextureView,
         paint: &BrushPaint,
         region: Option<[f32; 4]>,
+        profile_gpu: bool,
     ) {
         if self.active.is_none() || stamps.is_empty() {
             return;
@@ -2959,19 +3052,54 @@ impl Engine {
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.sampler) },
             ],
         });
+        let profile = if profile_gpu {
+            self.gpu_profiler.as_ref().and_then(GpuStrokeProfiler::resources)
+        } else {
+            None
+        };
+        let stamp_attachments = [gpu::color_attachment(&self.stroke.view, wgpu::LoadOp::Load)];
         let mut encoder = device.create_command_encoder(&Default::default());
         {
-            let mut pass = gpu::pass(
-                &mut encoder,
-                "stamp",
-                &[gpu::color_attachment(&self.stroke.view, wgpu::LoadOp::Load)],
-            );
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("stamp"),
+                color_attachments: &stamp_attachments,
+                depth_stencil_attachment: None,
+                timestamp_writes: profile.as_ref().map(|p| wgpu::RenderPassTimestampWrites {
+                    query_set: &p.query_set,
+                    beginning_of_pass_write_index: Some(0),
+                    end_of_pass_write_index: Some(1),
+                }),
+                occlusion_query_set: None,
+                multiview_mask: None,
+            }).forget_lifetime();
             pass.set_pipeline(&self.p.stamp);
             pass.set_bind_group(0, &stamp_bg, &[]);
             pass.draw(0..3, 0..1);
         }
-        self.encode_apply(&mut encoder, paint);
+        self.encode_apply(&mut encoder, paint, profile.as_ref());
+        if let Some(p) = &profile {
+            encoder.resolve_query_set(&p.query_set, 0..4, &p.resolve, 0);
+            encoder.copy_buffer_to_buffer(&p.resolve, 0, &p.readback, 0, 32);
+        }
         self.queue.submit([encoder.finish()]);
+        if profile.is_some() {
+            if let Some(profiler) = &mut self.gpu_profiler {
+                profiler.request_map();
+            }
+        }
+    }
+
+    /// Returns completed GPU timings for stamp and apply; does not wait for the GPU.
+    pub fn poll_gpu_stroke_times(&mut self) -> Option<(f64, f64)> {
+        self.gpu_profiler.as_mut()?.poll(&self.device, &self.queue)
+    }
+
+    pub fn gpu_stroke_profile_pending(&self) -> bool {
+        self.gpu_profiler.as_ref().is_some_and(|p| p.pending)
+    }
+
+    pub fn gpu_stroke_profile_supported(&self) -> bool {
+        self.gpu_profiler.is_some()
     }
 
     /// Polygon fill: adds whole triangles to the stroke (UV-space vertices,
@@ -3014,7 +3142,7 @@ impl Engine {
                 pass.draw(faces.len() as u32..all.len() as u32, 0..1);
             }
         }
-        self.encode_apply(&mut encoder, paint);
+        self.encode_apply(&mut encoder, paint, None);
         self.queue.submit([encoder.finish()]);
     }
 
@@ -3047,7 +3175,12 @@ impl Engine {
     }
 
     /// Writes the stroke mask into the active stroke's target.
-    fn encode_apply(&mut self, encoder: &mut wgpu::CommandEncoder, paint: &BrushPaint) {
+    fn encode_apply(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        paint: &BrushPaint,
+        profile: Option<&GpuStrokeProfileResources>,
+    ) {
         let Some(active) = &self.active else { return };
         let (target, channels, layer_id) = (active.target, active.channels.clone(), active.layer_id);
         let mut ch = [0.0f32; CHANNELS];
@@ -3116,7 +3249,18 @@ impl Engine {
                     (paint_pipeline.as_ref().expect("made above for paint targets"), att)
                 }
             };
-            let mut pass = gpu::pass(encoder, "apply", &attachments);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("apply"),
+                color_attachments: &attachments,
+                depth_stencil_attachment: None,
+                timestamp_writes: profile.map(|p| wgpu::RenderPassTimestampWrites {
+                    query_set: &p.query_set,
+                    beginning_of_pass_write_index: Some(2),
+                    end_of_pass_write_index: Some(3),
+                }),
+                occlusion_query_set: None,
+                multiview_mask: None,
+            }).forget_lifetime();
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &apply_bg, &[]);
             pass.draw(0..3, 0..1);

@@ -462,6 +462,8 @@ struct StrokeMeter {
     /// The recomposition right after letting go is still due.
     after_pending: bool,
     after_release_cpu: Stat,
+    gpu_stamp: Stat,
+    gpu_apply: Stat,
 }
 
 impl StrokeMeter {
@@ -479,13 +481,15 @@ impl StrokeMeter {
     /// Status-bar text: average/peak in ms (steps: calls per frame).
     fn text(&self) -> String {
         format!(
-            "F6 CPU avg/peak ms: steps/frame {}, stamp {}, begin {}, recomp {}, end {}, recomp after release {}",
+            "F6 CPU avg/peak ms: steps/frame {}, stamp {}, begin {}, recomp {}, end {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}",
             self.steps_per_frame.text(),
             self.step_cpu.text(),
             self.begin_cpu.text(),
             self.composite_cpu.text(),
             self.end_cpu.text(),
-            self.after_release_cpu.text()
+            self.after_release_cpu.text(),
+            self.gpu_stamp.text(),
+            self.gpu_apply.text()
         )
     }
 }
@@ -3855,7 +3859,7 @@ impl PainterApp {
             }
         };
         let stamp_started = Instant::now();
-        self.engine.stroke_step(&stamps, su, self.views.view3d.depth_view(), &paint, region);
+        self.engine.stroke_step(&stamps, su, self.views.view3d.depth_view(), &paint, region, self.meter.on);
         if self.meter.on {
             self.meter.steps_now += 1;
             self.meter.step_cpu.add(stamp_started.elapsed().as_secs_f64() * 1000.0);

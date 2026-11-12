@@ -365,6 +365,15 @@ impl PainterApp {
     /// After every view drew: strokes end when the button is released, and
     /// the 3D depth the brush reads stays valid when no 3D view is showing.
     pub(super) fn views_end_frame(&mut self, ctx: &egui::Context) {
+        if let Some((stamp_ms, apply_ms)) = self.engine.poll_gpu_stroke_times() {
+            if self.meter.on {
+                self.meter.gpu_stamp.add(stamp_ms);
+                self.meter.gpu_apply.add(apply_ms);
+            }
+        }
+        if self.engine.gpu_stroke_profile_pending() {
+            ctx.request_repaint();
+        }
         if self.stroke.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
             self.end_stroke();
         }
