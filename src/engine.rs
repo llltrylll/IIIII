@@ -3526,6 +3526,11 @@ impl Engine {
             self.maps_dirty = true;
             self.mark_dirty();
         } else {
+            // Painting a mask changes its filtered result, but ordinary layer
+            // painting does not change any mask source or filter inputs.
+            if target == StrokeTarget::Mask {
+                self.mask_final.remove(&layer_id);
+            }
             // Only this layer changed: the next composite can start at its pass.
             if self.stroke_layer.is_some_and(|id| id != layer_id) {
                 self.full_dirty = true;
@@ -3649,6 +3654,8 @@ impl Engine {
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
         self.full_dirty = true;
+        // Property edits, undo/redo and bake changes may affect any mask.
+        self.mask_final.clear();
     }
 
     /// Finishes the stroke and returns its undo record.
@@ -3877,7 +3884,15 @@ impl Engine {
         self.queue.write_buffer(&self.layer_ubuf, 0, &data);
         // Textures for the filtered masks; forget layers that lost theirs.
         let filtered_ids: Vec<u64> = source_slot.keys().map(|&li| self.layers[li].id).collect();
-        self.mask_out.retain(|id, t| filtered_ids.contains(id) && t[0].width == self.res);
+        let res = self.res;
+        let mask_final = &mut self.mask_final;
+        self.mask_out.retain(|id, t| {
+            let keep = filtered_ids.contains(id) && t[0].width == res;
+            if !keep {
+                mask_final.remove(id);
+            }
+            keep
+        });
         for id in &filtered_ids {
             if !self.mask_out.contains_key(id) {
                 let t = || Tex::new(&self.device, "filtered mask", self.res, self.res, MASK_FILTER_FORMAT, LAYER_USAGE);
@@ -4132,16 +4147,25 @@ impl Engine {
                     wgpu::BindGroupEntry { binding: 26, resource: view(Some(&self.tan)) },
                 ],
             });
-            // Mask filters: render the mask, run its filters, then read the result.
+            // A filtered mask depends on its own paint/generator/filter data,
+            // not on the accumulated layers below it. Reuse the previous result
+            // until that mask is edited; a mask-paint stroke invalidates only
+            // its own cache and can refresh it with the current scissors.
             let filtered = match (*pass, source_slot.get(&li)) {
-                (Pass::Layer(_) | Pass::End(_), Some(&slot)) => Some(self.encode_mask_filters(
-                    &mut encoder,
-                    layer.id,
-                    &make_bg(mask),
-                    (slot as u64 * UNIFORM_STRIDE) as u32,
-                    layer_ops.get(&li).map_or(&[][..], |o| &o[..]),
-                    scissors.as_deref(),
-                )),
+                (Pass::Layer(_) | Pass::End(_), Some(&slot)) => {
+                    if let Some(&cached) = self.mask_final.get(&layer.id) {
+                        Some(&self.mask_out[&layer.id][cached])
+                    } else {
+                        Some(self.encode_mask_filters(
+                            &mut encoder,
+                            layer.id,
+                            &make_bg(mask),
+                            (slot as u64 * UNIFORM_STRIDE) as u32,
+                            layer_ops.get(&li).map_or(&[][..], |o| &o[..]),
+                            scissors.as_deref(),
+                        ))
+                    }
+                }
                 _ => None,
             };
             if let Some(t) = filtered
