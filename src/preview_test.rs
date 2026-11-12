@@ -383,6 +383,97 @@ fn paint_projections() {
     println!("  frames in {}", dir.display());
 }
 
+/// A filtered Vertex ID mask stroke must match full-frame painting exactly.
+#[test]
+#[ignore]
+fn scissored_mask_stroke_matches_full_frame() {
+    use crate::app::{BrushProjection, resolve_stamps, stroke_region};
+    use crate::engine::{BrushPaint, CHANNELS, FillParams, FilterKind, GenKind, MaskFilter, MatValues, StampUniform};
+    use crate::undo::{StrokeTarget, UndoStack};
+    use glam::Vec2;
+
+    let mesh = crate::mesh::Primitive::RoundedCube.build();
+    let bvh = crate::bvh::Bvh::from_mesh(&mesh);
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let res = 512;
+    let fill = FillParams {
+        mat: MatValues {
+            enabled: [true, true, true, false, false, false, false, false],
+            color: [0.65, 0.25, 0.08],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut optimized = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+    let mut reference = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+    let mut optimized_undo = UndoStack::default();
+    let mut reference_undo = UndoStack::default();
+
+    let configure = |engine: &mut Engine, undo: &mut UndoStack| {
+        let layer = engine.add_fill_layer(0, None, "ID-masked fill".into(), fill, undo);
+        engine.add_mask(layer, true, Some(GenKind::IdMask.default_generator()), undo);
+        let mask = engine.layers[layer].mask.as_mut().expect("mask was added");
+        mask.filters = vec![MaskFilter::new(FilterKind::Blur), MaskFilter::new(FilterKind::Warp)];
+        engine.mark_dirty();
+        engine.composite();
+        layer
+    };
+    let target = configure(&mut optimized, &mut optimized_undo);
+    let reference_target = configure(&mut reference, &mut reference_undo);
+
+    let cam = OrbitCam { target: (mesh.bounds_min + mesh.bounds_max) * 0.5, ..Default::default() };
+    let size = [512u32, 512u32];
+    let fsize = Vec2::new(size[0] as f32, size[1] as f32);
+    let mut views = ViewRenderer::new(&rs);
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+    views.render_3d(&rs, size, &[&optimized], &env, &gpu_mesh, &cam, &ViewSettings::default(), None);
+
+    assert!(optimized.begin_stroke(target, StrokeTarget::Mask, [false; CHANNELS], false));
+    assert!(reference.begin_stroke(reference_target, StrokeTarget::Mask, [false; CHANNELS], false));
+    let radius = 34.0;
+    let raw: Vec<([f32; 4], f32)> = (0..32)
+        .map(|i| ([178.0 + i as f32 * 4.0, 256.0, 1.0, 0.0], 1.0))
+        .collect();
+    let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+    assert!(!stamps.is_empty(), "the test stroke must resolve stamps");
+    let regions = stroke_region(
+        &mesh, &bvh, optimized.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps,
+    ).expect("test mesh UVs fit the base tile");
+    assert!(!regions.is_empty(), "the mask stroke must have a conservative region");
+
+    let su = StampUniform {
+        view_proj: cam.view_proj(fsize.x / fsize.y).to_cols_array_2d(),
+        cam_pos: cam.eye().extend(1.0).to_array(),
+        view: [fsize.x, fsize.y, 0.0, 0.0],
+        view2d: [0.0; 4],
+        brush: [radius, 0.6, 1.0, 0.0],
+        clip: [crate::viewport::NEAR, crate::viewport::FAR, 0.0, 0.0],
+        proj: [BrushProjection::Screen as u32 as f32, 0.0, 85f32.to_radians().cos(), 0.0],
+    };
+    let paint = BrushPaint { mat: MatValues::default(), mask_value: 0.0, opacity: 1.0, erase: false, grain: [0.0; 4] };
+    optimized.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, Some(regions));
+    reference.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, None);
+    optimized.end_stroke();
+    reference.end_stroke();
+    optimized.composite();
+    reference.composite();
+
+    let optimized_mask = optimized.layers[target].mask.as_ref().unwrap().paint.as_ref().unwrap();
+    let reference_mask = reference.layers[reference_target].mask.as_ref().unwrap().paint.as_ref().unwrap();
+    assert_eq!(
+        read_texture(&rs.device, &rs.queue, optimized_mask),
+        read_texture(&rs.device, &rs.queue, reference_mask),
+        "scissored mask paint differs from full-frame mask paint",
+    );
+    for channel in 0..7 {
+        let partial = read_texture(&rs.device, &rs.queue, optimized.final_tex(channel));
+        let full = read_texture(&rs.device, &rs.queue, reference.final_tex(channel));
+        assert_eq!(partial, full, "filtered ID-mask composite differs in channel {channel}");
+    }
+}
+
 /// GPU time of one painting frame at 4K: stamping + applying a stroke step,
 /// then recompositing a smart material stack with a paint layer on top.
 /// `cargo test --bin material_painter perf_4k -- --ignored --nocapture`
