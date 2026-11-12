@@ -3887,6 +3887,10 @@ impl Engine {
             self.dirty = false;
             self.queue.submit([encoder.finish()]);
             self.active_gpu_profile = None;
+            if let Some(rects) = scissors.take() {
+                self.stroke_regions = rects;
+                self.stroke_regions.clear();
+            }
             return;
         }
         if scissors.is_none() {
@@ -4091,6 +4095,10 @@ impl Engine {
         self.mask_final.retain(|id, _| self.mask_out.contains_key(id));
         self.mask_final.extend(finals);
         self.update_thumbs();
+        if let Some(rects) = scissors.take() {
+            self.stroke_regions = rects;
+            self.stroke_regions.clear();
+        }
     }
 
     /// Whether any visible layer sets opacity: only then can the result be
