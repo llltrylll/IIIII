@@ -3305,10 +3305,10 @@ impl Engine {
     }
 
     /// Lays down this frame's stamps and writes the stroke into the target.
-    /// Keep painting passes unscissored: composite bounds are not yet proven safe
-    /// as raster bounds for every brush projection and texture-set layout.
-    /// `region` bounds the texels the stamps can reach, in UV (u0, v0, u1,
-    /// v1), or `None` if unknown.
+    /// A conservative UV `region` clips the stamp/apply passes to the texels
+    /// the brush can reach, including the mesh-map dilation halo. `None`
+    /// means the bounds are unknown and the pass must cover the full texture;
+    /// an empty region means no texel can be affected this frame.
     pub fn stroke_step(
         &mut self,
         stamps: &[Stamp],
@@ -3353,6 +3353,11 @@ impl Engine {
         let full_area = u64::from(self.res) * u64::from(self.res);
         self.last_paint_scissor_pixels = frame_scissors.as_ref().map_or(full_area, |rects| rects.iter().map(|&r| scissor_area(r)).sum());
         self.last_paint_scissor_rects = frame_scissors.as_ref().map_or(1, |rects| rects.len() as u32);
+        if frame_scissors.as_ref().is_some_and(|rects| rects.is_empty()) {
+            // A known empty region means no texel can change; avoid both GPU
+            // passes and a pointless full composite.
+            return;
+        }
         self.add_regions(regions);
         let stamps = &stamps[..stamps.len().min(MAX_STAMPS)];
         su.view[3] = stamps.len() as f32;
