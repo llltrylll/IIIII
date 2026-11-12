@@ -177,6 +177,31 @@ fn texel_size(c: vec2<i32>, p: vec3<f32>) -> f32 {
 // (the inputs and breakup are in wear.wgsl). Sample only the maps an active
 // input needs: a Vertex ID mask, for example, reads just the ID-color map.
 fn generator(c: vec2<i32>, uv: vec2<f32>) -> f32 {
+    // Fast path for the common pure Vertex ID mask: no loop over the other
+    // generator inputs, no mesh maps, and no position/normal reads.
+    let only_id = all(u.gw[0] == vec4<f32>(0.0))
+        && all(u.gw[1] == vec4<f32>(0.0))
+        && all(u.gw[2] == vec4<f32>(0.0))
+        && u.gw[3].x == 0.0 && u.gw[3].y == 0.0 && u.gw[3].w == 0.0
+        && all(u.gw[4] == vec4<f32>(0.0))
+        && all(u.gc < vec4<f32>(0.0))
+        && u.gp0.w == 0.0;
+    if (only_id) {
+        let id = textureSampleLevel(map_e, samp, uv, 0.0).rgb;
+        let tolerance = max(u.gid.w, 1e-3);
+        var value = 1.0 - smoothstep(tolerance * 0.5, tolerance, distance(id, u.gid.rgb));
+        for (var k = 0; k < 7; k++) {
+            if (u.gids[k].w > 0.5) {
+                value = max(value, 1.0 - smoothstep(tolerance * 0.5, tolerance, distance(id, u.gids[k].xyz)));
+            }
+        }
+        value *= u.gw[3].z;
+        let contrast = max(u.gp0.y, 0.001);
+        var result = smoothstep(u.gp0.x - contrast, u.gp0.x + contrast, value);
+        if (u.gp1.x > 0.5) { result = 1.0 - result; }
+        return result;
+    }
+
     var s: MaskSurface;
     let need_a = weight(0) != 0.0 || weight(1) != 0.0 || weight(2) != 0.0
         || weight(3) != 0.0 || weight(4) != 0.0 || weight(7) != 0.0;
