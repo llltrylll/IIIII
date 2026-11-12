@@ -678,6 +678,15 @@ struct Prefix {
     input: Option<usize>,
 }
 
+/// Picks the ping-pong source so the last resumed pass writes into the
+/// accumulation set that already contains the previous final composite.
+/// Intermediate passes only need to be correct inside the scissors; the
+/// final destination must preserve the previous result everywhere else.
+fn resume_source_index(final_idx: usize, passes: &[Pass]) -> usize {
+    let swaps = passes.iter().filter(|p| !matches!(**p, Pass::Begin)).count() & 1;
+    final_idx ^ swaps
+}
+
 /// Where a moved layer goes, relative to another layer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Drop {
@@ -3901,7 +3910,10 @@ impl Engine {
         // `src` is the accum set holding the stack so far; `from_cache` reads
         // the first pass's input from the prefix cache instead.
         let (start, mut src, mut depth, mut from_cache) = match &resume {
-            Some(p) => (p.at, p.input.map_or(1, |i| i), p.depth, p.input.is_none()),
+            Some(p) => {
+                let src = p.input.unwrap_or_else(|| resume_source_index(self.final_idx, &passes[p.at..]));
+                (p.at, src, p.depth, p.input.is_none())
+            }
             None => (0, 0, 0, false),
         };
         let mut finals: Vec<(u64, usize)> = Vec::new();
@@ -4334,6 +4346,28 @@ mod scissor_tests {
         for i in 0..rects.len() {
             for j in i + 1..rects.len() {
                 assert_eq!(scissor_overlap_area(rects[i], rects[j]), 0, "scissors overlap");
+            }
+        }
+    }
+
+    #[test]
+    fn resumed_composite_finishes_in_previous_final_accum_set() {
+        let sequences: &[&[Pass]] = &[
+            &[Pass::Layer(0)],
+            &[Pass::Layer(0), Pass::Layer(1)],
+            &[Pass::Layer(0), Pass::Layer(1), Pass::Layer(2)],
+            &[Pass::Begin, Pass::Layer(0), Pass::Begin, Pass::Layer(1), Pass::End(1), Pass::End(0)],
+            &[Pass::Layer(0), Pass::Begin, Pass::Layer(1), Pass::End(1), Pass::Layer(2)],
+        ];
+        for final_idx in 0..2 {
+            for passes in sequences {
+                let mut src = resume_source_index(final_idx, passes);
+                for pass in *passes {
+                    if !matches!(pass, Pass::Begin) {
+                        src = 1 - src;
+                    }
+                }
+                assert_eq!(src, final_idx, "resumed pass sequence ended in the wrong accum set");
             }
         }
     }
