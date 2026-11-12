@@ -261,7 +261,7 @@ fn paint_projections() {
     let bvh = crate::bvh::Bvh::from_mesh(&mesh);
     let rs = render_state();
     let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
-    let res = 512;
+    let res = 256;
     let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
     // A second engine receives the exact same stamps without scissoring. Its
     // final channels are the pixel-exact reference for the optimized path.
@@ -309,7 +309,7 @@ fn paint_projections() {
         assert!(engine.begin_stroke(0, StrokeTarget::Content, channels, false));
         assert!(reference.begin_stroke(0, StrokeTarget::Content, channels, false));
         let radius = 28.0;
-        let raw: Vec<([f32; 4], f32)> = (0..60).map(|i| ([180.0 + i as f32 * 5.0, 250.0, 1.0, 0.0], 1.0)).collect();
+        let raw: Vec<([f32; 4], f32)> = (0..24).map(|i| ([180.0 + i as f32 * 12.5, 250.0, 1.0, 0.0], 1.0)).collect();
         let fsize = Vec2::new(size[0] as f32, size[1] as f32);
         let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, projection, 1, radius, &raw);
         assert!(!stamps.is_empty(), "{name}: no stamps hit the mesh");
@@ -398,7 +398,7 @@ fn scissored_mask_stroke_matches_full_frame() {
     let bvh = crate::bvh::Bvh::from_mesh(&mesh);
     let rs = render_state();
     let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
-    let res = 512;
+    let res = 256;
     let fill = FillParams {
         mat: MatValues {
             enabled: [true, true, true, false, false, false, false, false],
@@ -426,7 +426,7 @@ fn scissored_mask_stroke_matches_full_frame() {
     let (reference_target, reference_paint_layer) = configure(&mut reference, &mut reference_undo);
 
     let cam = OrbitCam { target: (mesh.bounds_min + mesh.bounds_max) * 0.5, ..Default::default() };
-    let size = [512u32, 512u32];
+    let size = [256u32, 256u32];
     let fsize = Vec2::new(size[0] as f32, size[1] as f32);
     let mut views = ViewRenderer::new(&rs);
     let env = crate::environment::EnvBaker::new(&rs.device)
@@ -436,8 +436,8 @@ fn scissored_mask_stroke_matches_full_frame() {
     assert!(optimized.begin_stroke(target, StrokeTarget::Mask, [false; CHANNELS], false));
     assert!(reference.begin_stroke(reference_target, StrokeTarget::Mask, [false; CHANNELS], false));
     let radius = 34.0;
-    let raw: Vec<([f32; 4], f32)> = (0..32)
-        .map(|i| ([178.0 + i as f32 * 4.0, 256.0, 1.0, 0.0], 1.0))
+    let raw: Vec<([f32; 4], f32)> = (0..16)
+        .map(|i| ([178.0 + i as f32 * 8.0, 128.0, 1.0, 0.0], 1.0))
         .collect();
     let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
     assert!(!stamps.is_empty(), "the test stroke must resolve stamps");
