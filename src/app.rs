@@ -455,6 +455,8 @@ struct StrokeMeter {
     /// `stroke_step` calls since the last recomposition.
     steps_now: u32,
     steps_per_frame: Stat,
+    /// CPU time spent resolving the 3D/2D UV region before GPU stamp submission.
+    region_cpu: Stat,
     step_cpu: Stat,
     begin_cpu: Stat,
     composite_cpu: Stat,
@@ -494,8 +496,9 @@ impl StrokeMeter {
         let patch_percent = if texture_pixels == 0 { 0.0 } else { scissor_pixels as f64 * 100.0 / texture_pixels as f64 };
         let bbox_percent = if texture_pixels == 0 { 0.0 } else { bbox_pixels as f64 * 100.0 / texture_pixels as f64 };
         format!(
-            "F6 CPU avg/peak ms: steps/frame {}, stamp {}, begin {}, recomp {}, end {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {} | patch {:.1}% (bbox {:.1}%, {} scissors) | since F6: full recomps {full}, thumbnails {thumbs}",
+            "F6 CPU avg/peak ms: steps/frame {}, region {}, stamp {}, begin {}, recomp {}, end {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {} | patch {:.1}% (bbox {:.1}%, {} scissors) | since F6: full recomps {full}, thumbnails {thumbs}",
             self.steps_per_frame.text(),
+            self.region_cpu.text(),
             self.step_cpu.text(),
             self.begin_cpu.text(),
             self.composite_cpu.text(),
@@ -3945,6 +3948,7 @@ impl PainterApp {
             erase: self.tool == Tool::Eraser,
             grain: self.grain_params(),
         };
+        let region_started = self.meter.on.then(Instant::now);
         let region = match kind {
             ViewKind::V3d => {
                 let [w, h] = self.views.view3d.size;
@@ -3968,6 +3972,9 @@ impl PainterApp {
                     .map(|region| vec![region])
             }
         };
+        if let Some(started) = region_started {
+            self.meter.region_cpu.add(started.elapsed().as_secs_f64() * 1000.0);
+        }
         let stamp_started = Instant::now();
         if self.meter.on {
             self.engine.stroke_step_profiled(&stamps, su, self.views.view3d.depth_view(), &paint, region);
