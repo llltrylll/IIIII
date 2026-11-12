@@ -3117,7 +3117,7 @@ impl Engine {
     }
 
     /// Returns completed GPU timings for stamp and apply; does not wait for the GPU.
-    pub fn poll_gpu_stroke_times(&mut self) -> Option<(f64, f64)> {
+    pub fn poll_gpu_stroke_times(&mut self) -> Option<(f64, f64, f64)> {
         self.gpu_profiler.as_mut()?.poll(&self.device, &self.queue)
     }
 
