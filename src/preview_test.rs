@@ -518,7 +518,12 @@ fn multi_scissor_nested_folder_matches_full() {
         mat: MatValues { enabled: [true, true, true, false, false, false, false, false], color: [0.65, 0.25, 0.08], ..Default::default() },
         ..Default::default()
     };
-    engine.add_fill_layer(2, Some(inner_id), "Paint target".into(), fill, &mut undo);
+    let target = engine.add_fill_layer(2, Some(inner_id), "Paint target".into(), fill, &mut undo);
+    engine.add_mask(target, true, None, &mut undo);
+    engine.layers[target].mask.as_mut().unwrap().filters = vec![
+        MaskFilter::new(FilterKind::Blur),
+        MaskFilter::new(FilterKind::Warp),
+    ];
     engine.mark_dirty();
     engine.composite();
 
@@ -529,7 +534,7 @@ fn multi_scissor_nested_folder_matches_full() {
     let env = crate::environment::EnvBaker::new(&rs.device)
         .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
 
-    assert!(engine.begin_stroke(inner, StrokeTarget::Mask, [false; CHANNELS], false));
+    assert!(engine.begin_stroke(target, StrokeTarget::Mask, [false; CHANNELS], false));
     let radius = 30.0;
     let su = StampUniform {
         view_proj: cam.view_proj(fsize.x / fsize.y).to_cols_array_2d(),
@@ -555,14 +560,16 @@ fn multi_scissor_nested_folder_matches_full() {
 
         engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, Some(regions));
         engine.composite();
-    }
 
-    let partial: Vec<Vec<u8>> = (0..7).map(|c| read_texture(&rs.device, &rs.queue, engine.final_tex(c))).collect();
-    engine.mark_dirty();
-    engine.composite();
-    for c in 0..7 {
-        let full = read_texture(&rs.device, &rs.queue, engine.final_tex(c));
-        assert_eq!(full, partial[c], "final texture channel {c} differs after full recomposition");
+        // Compare after every incremental frame, not only after the final
+        // accumulated stroke. Rebuild the prefix before the next frame too.
+        let partial: Vec<Vec<u8>> = (0..7).map(|c| read_texture(&rs.device, &rs.queue, engine.final_tex(c))).collect();
+        engine.mark_dirty();
+        engine.composite();
+        for c in 0..7 {
+            let full = read_texture(&rs.device, &rs.queue, engine.final_tex(c));
+            assert_eq!(full, partial[c], "frame {frame}: final texture channel {c} differs after full recomposition");
+        }
     }
     engine.end_stroke();
 }
