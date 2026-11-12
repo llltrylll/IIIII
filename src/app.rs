@@ -488,12 +488,13 @@ impl StrokeMeter {
     }
 
     /// Status-bar text: average/peak in ms (steps: calls per frame).
-    fn text(&self, res: u32, scissor_pixels: u64) -> String {
+    fn text(&self, res: u32, scissor_pixels: u64, bbox_pixels: u64, scissor_rects: u32) -> String {
         let (full, thumbs) = self.counters_base.map_or((0, 0), |b| (self.counters.0.wrapping_sub(b.0), self.counters.1.wrapping_sub(b.1)));
         let texture_pixels = u64::from(res) * u64::from(res);
         let patch_percent = if texture_pixels == 0 { 0.0 } else { scissor_pixels as f64 * 100.0 / texture_pixels as f64 };
+        let bbox_percent = if texture_pixels == 0 { 0.0 } else { bbox_pixels as f64 * 100.0 / texture_pixels as f64 };
         format!(
-            "F6 CPU avg/peak ms: steps/frame {}, stamp {}, begin {}, recomp {}, end {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {} | patch {:.1}% | since F6: full recomps {full}, thumbnails {thumbs}",
+            "F6 CPU avg/peak ms: steps/frame {}, stamp {}, begin {}, recomp {}, end {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {} | patch {:.1}% (bbox {:.1}%, {} scissors) | since F6: full recomps {full}, thumbnails {thumbs}",
             self.steps_per_frame.text(),
             self.step_cpu.text(),
             self.begin_cpu.text(),
@@ -504,7 +505,9 @@ impl StrokeMeter {
             self.gpu_apply.text(),
             self.gpu_composite.text(),
             self.gpu_composite_total.text(),
-            patch_percent
+            patch_percent,
+            bbox_percent,
+            scissor_rects
         )
     }
 }
@@ -2787,7 +2790,7 @@ impl PainterApp {
                 ui.label(
                     egui::RichText::new(format!(
                         "{}{:.1} ms (peak {:.0})  │  VRAM {:.0} MB  │  Undo {:.1} MB RAM ({} steps)  │  {}²  │  {} tris",
-                        if self.meter.on { format!("{}  │  ", self.meter.text(self.engine.res, self.engine.last_scissor_pixels)) } else { String::new() },
+                        if self.meter.on { format!("{}  │  ", self.meter.text(self.engine.res, self.engine.last_scissor_pixels, self.engine.last_scissor_bbox_pixels, self.engine.last_scissor_rects)) } else { String::new() },
                         self.frame_ms,
                         self.frame_peak_ms,
                         mb(self.engine.vram_bytes()),
