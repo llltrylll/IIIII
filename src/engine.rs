@@ -4301,3 +4301,56 @@ impl Engine {
         ]
     }
 }
+
+
+#[cfg(test)]
+mod scissor_tests {
+    use super::*;
+
+    fn assert_covered(original: &[[u32; 4]], compacted: &[[u32; 4]]) {
+        for &[x0, y0, x1, y1] in original {
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    assert!(
+                        compacted.iter().any(|r| r[0] <= x && x < r[2] && r[1] <= y && y < r[3]),
+                        "original texel ({x}, {y}) was dropped"
+                    );
+                }
+            }
+        }
+    }
+
+    fn assert_disjoint(rects: &[[u32; 4]]) {
+        for i in 0..rects.len() {
+            for j in i + 1..rects.len() {
+                assert_eq!(scissor_overlap_area(rects[i], rects[j]), 0, "scissors overlap");
+            }
+        }
+    }
+
+    #[test]
+    fn compact_scissors_merges_overlaps_without_losing_coverage() {
+        let original = vec![[0, 0, 10, 10], [5, 5, 15, 15], [20, 0, 25, 5], [25, 0, 30, 5]];
+        let mut compacted = original.clone();
+        compact_scissors(&mut compacted);
+        assert_covered(&original, &compacted);
+        assert_disjoint(&compacted);
+        assert!(compacted.len() <= original.len());
+    }
+
+    #[test]
+    fn compact_scissors_caps_draw_count_without_losing_coverage() {
+        let original: Vec<[u32; 4]> = (0..65)
+            .map(|i| {
+                let x = (i % 13) * 4;
+                let y = (i / 13) * 4;
+                [x, y, x + 2, y + 2]
+            })
+            .collect();
+        let mut compacted = original.clone();
+        compact_scissors(&mut compacted);
+        assert!(compacted.len() <= MAX_COMPOSITE_SCISSORS);
+        assert_covered(&original, &compacted);
+        assert_disjoint(&compacted);
+    }
+}
