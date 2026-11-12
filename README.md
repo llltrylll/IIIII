@@ -1,5 +1,7 @@
 # Material Painter
 
+> **Scope of this fork:** a personal production tool focused on reliable, responsive texturing of Roblox assets on the owner's machine. The representative workload is 6 MeshParts, 6 UV maps, and 50,000–100,000 triangles. The maximum planned workload is 12 UV maps and 200,000 triangles. Correctness, stability, and maintainable code take priority over hypothetical 100-item projects, universal hardware optimization, public distribution, or cosmetic work. See [PROJECT_SCOPE.md](PROJECT_SCOPE.md).
+
 ![Smart materials painted in Material Painter](assets/ui/welcome.jpg)
 
 <p align="center">
@@ -29,7 +31,7 @@ maps, build materials in a node graph and write your own node shaders.
   quad, face loop, flat area (up to an angle), loose part, object, UV island
   or texture set, by click, drag, box or lasso.
 - **Channels**: base color, roughness, metallic, height, opacity, emission,
-  normal and specular level, each painted and filled like any other.
+  normal and specular level, each painted and filled like any other channel.
   Opacity (or an image's alpha) is see-through in the 3D view and the path
   tracer and exports as the base color's alpha; emission glows with bloom;
   normal-map images on fills add detail, projected in UV or tri-planar, and
@@ -68,8 +70,9 @@ maps, build materials in a node graph and write your own node shaders.
   image files with a `meta.json`, so nothing is locked into Material Painter.
 - **Open Substance 3D Painter projects** (`.spp`): the model and every
   texture set, with the final look of base color, roughness, metallic,
-  height, opacity, emission and painted normal details, and as much of each layer stack as maps onto Material Painter's
-  layers. Procedural materials, brush
+  height, opacity, emission and painted normal details, and as much of each
+  layer stack as maps onto Material Painter's layers. Procedural materials,
+  brush
   strokes and Painter-only channels don't come across; the import report
   says exactly what did. Details and limits:
   [docs/substance-painter-import.md](docs/substance-painter-import.md).
