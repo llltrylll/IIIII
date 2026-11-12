@@ -1173,6 +1173,8 @@ pub struct Engine {
     thumbs: thumbs::Thumbs,
     /// Composites that redid the whole texture instead of a stroke's patch (the F6 meter counts them).
     pub full_recomps: u32,
+    /// Texel area processed by the most recent composite scissor (full texture on full recomposites).
+    pub last_scissor_pixels: u64,
     /// Which of a filtered mask's textures (`mask_out`) holds its result.
     mask_final: HashMap<u64, usize>,
     pub bake_report: Option<Arc<BakeReport>>,
@@ -1294,6 +1296,7 @@ impl Engine {
             uv_version: 0,
             thumbs: Default::default(),
             full_recomps: 0,
+            last_scissor_pixels: 0,
             mask_final: HashMap::new(),
             bake_report: None,
             edge_max: 0.2,
@@ -3778,6 +3781,10 @@ impl Engine {
                 *r = [r[0].saturating_sub(e), r[1].saturating_sub(e), (r[2] + e).min(self.res), (r[3] + e).min(self.res)];
             }
         }
+        self.last_scissor_pixels = scissor.map_or(
+            u64::from(self.res) * u64::from(self.res),
+            |r| u64::from(r[2].saturating_sub(r[0])) * u64::from(r[3].saturating_sub(r[1])),
+        );
         if scissor.is_some_and(|r| r[2] <= r[0] || r[3] <= r[1]) {
             // Nothing visible changed.
             let resume = resume.expect("scissor implies resume");

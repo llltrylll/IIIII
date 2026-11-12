@@ -488,10 +488,12 @@ impl StrokeMeter {
     }
 
     /// Status-bar text: average/peak in ms (steps: calls per frame).
-    fn text(&self) -> String {
+    fn text(&self, res: u32, scissor_pixels: u64) -> String {
         let (full, thumbs) = self.counters_base.map_or((0, 0), |b| (self.counters.0.wrapping_sub(b.0), self.counters.1.wrapping_sub(b.1)));
+        let texture_pixels = u64::from(res) * u64::from(res);
+        let patch_percent = if texture_pixels == 0 { 0.0 } else { scissor_pixels as f64 * 100.0 / texture_pixels as f64 };
         format!(
-            "F6 CPU avg/peak ms: steps/frame {}, stamp {}, begin {}, recomp {}, end {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {} | since F6: full recomps {full}, thumbnails {thumbs}",
+            "F6 CPU avg/peak ms: steps/frame {}, stamp {}, begin {}, recomp {}, end {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {} | patch {:.1}% | since F6: full recomps {full}, thumbnails {thumbs}",
             self.steps_per_frame.text(),
             self.step_cpu.text(),
             self.begin_cpu.text(),
@@ -501,7 +503,8 @@ impl StrokeMeter {
             self.gpu_stamp.text(),
             self.gpu_apply.text(),
             self.gpu_composite.text(),
-            self.gpu_composite_total.text()
+            self.gpu_composite_total.text(),
+            patch_percent
         )
     }
 }
@@ -818,6 +821,26 @@ pub(crate) fn stroke_region(
             }
             let vp = cam.view_proj(size.x / size.y.max(1.0));
             let on_screen = move |lo: Vec3, hi: Vec3| {
+                // Clip-space w is linear over the AABB, so its extrema
+                // occur at corners. Reject boxes wholly behind the eye;
+                // keep boxes crossing the eye plane conservatively.
+                let (mut w_min, mut w_max) = (f32::INFINITY, f32::NEG_INFINITY);
+                for k in 0..8 {
+                    let p = Vec3::new(
+                        if k & 1 == 0 { lo.x } else { hi.x },
+                        if k & 2 == 0 { lo.y } else { hi.y },
+                        if k & 4 == 0 { lo.z } else { hi.z },
+                    );
+                    let w = (vp * p.extend(1.0)).w;
+                    w_min = w_min.min(w);
+                    w_max = w_max.max(w);
+                }
+                if w_max <= 1e-4 {
+                    return false;
+                }
+                if w_min <= 1e-4 {
+                    return true;
+                }
                 let (mut smin, mut smax) = (Vec2::MAX, Vec2::MIN);
                 for k in 0..8 {
                     let p = Vec3::new(
@@ -826,9 +849,6 @@ pub(crate) fn stroke_region(
                         if k & 4 == 0 { lo.z } else { hi.z },
                     );
                     let c = vp * p.extend(1.0);
-                    if c.w <= 1e-4 {
-                        return true;
-                    }
                     let q = (Vec2::new(c.x, -c.y) / c.w * 0.5 + 0.5) * size;
                     smin = smin.min(q);
                     smax = smax.max(q);
@@ -2701,7 +2721,7 @@ impl PainterApp {
                 ui.label(
                     egui::RichText::new(format!(
                         "{}{:.1} ms (peak {:.0})  │  VRAM {:.0} MB  │  Undo {:.1} MB RAM ({} steps)  │  {}²  │  {} tris",
-                        if self.meter.on { format!("{}  │  ", self.meter.text()) } else { String::new() },
+                        if self.meter.on { format!("{}  │  ", self.meter.text(self.engine.res, self.engine.last_scissor_pixels)) } else { String::new() },
                         self.frame_ms,
                         self.frame_peak_ms,
                         mb(self.engine.vram_bytes()),
