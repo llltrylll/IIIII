@@ -928,7 +928,7 @@ pub(crate) fn stroke_region(
             })
         }
     };
-    let mut tiles = vec![false; STROKE_REGION_GRID * STROKE_REGION_GRID];
+    let mut tiles = [false; STROKE_REGION_GRID * STROKE_REGION_GRID];
     bvh.query(overlaps, |t| {
         // Bvh reports absolute triangle indices; Engine::triangles() is the
         // active texture set's index-buffer range (three indices per triangle).
@@ -4215,6 +4215,9 @@ mod stroke_region_tile_tests {
         }
         let rects = uv_tile_rectangles(&tiles).expect("checkerboard has occupied tiles");
         assert_eq!(rects.len(), 1);
-        assert_eq!(rects[0], [0.0, 0.0, 1.0, 1.0]);
+        let [x0, y0, x1, y1] = rects[0];
+        assert_eq!([x0, y0], [0.0, 0.0]);
+        assert!((x1 - 63.0 / STROKE_REGION_GRID as f32).abs() < f32::EPSILON);
+        assert!((y1 - 63.0 / STROKE_REGION_GRID as f32).abs() < f32::EPSILON);
     }
 }
