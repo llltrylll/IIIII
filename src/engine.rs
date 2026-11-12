@@ -24,7 +24,7 @@ use eframe::{egui, egui_wgpu, wgpu};
 use glam::Vec3;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use wgpu::TextureFormat as F;
 
 /// Paint channels: base color, roughness, metallic, height, opacity,
