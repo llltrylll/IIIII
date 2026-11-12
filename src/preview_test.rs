@@ -263,8 +263,13 @@ fn paint_projections() {
     let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
     let res = 512;
     let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+    // A second engine receives the exact same stamps without scissoring. Its
+    // final channels are the pixel-exact reference for the optimized path.
+    let mut reference = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
     let mut undo = UndoStack::default();
+    let mut reference_undo = UndoStack::default();
     engine.add_paint_layer(0, None, None, &mut undo);
+    reference.add_paint_layer(0, None, None, &mut reference_undo);
 
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/bake_test/paint");
     std::fs::create_dir_all(&dir).unwrap();
@@ -293,9 +298,11 @@ fn paint_projections() {
         ("surface_grain", BrushProjection::Surface, true),
     ] {
         engine.clear_layer(0, &mut undo);
+        reference.clear_layer(0, &mut reference_undo);
         if grain {
             let px = crate::textures::TEXTURES[0].render(256);
             engine.set_brush_grain(Some((&px, 256)));
+            reference.set_brush_grain(Some((&px, 256)));
         }
         views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &settings, None);
         assert!(engine.begin_stroke(0, StrokeTarget::Content, [true, false, false, false, false, false, false, false], false));
@@ -320,9 +327,21 @@ fn paint_projections() {
             erase: false,
             grain: if grain { [1.0, 3.0 / extent, 0.0, 0.0] } else { [0.0; 4] },
         };
-        engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, None);
+        let regions = crate::app::stroke_region(
+            &mesh, &bvh, engine.triangles(), &cam, fsize, projection, 1, radius, &stamps,
+        ).expect("the test mesh uses UVs inside the base tile");
+        assert!(!regions.is_empty(), "{name}: no conservative stroke region");
+        engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, Some(regions));
+        reference.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, None);
         engine.end_stroke();
+        reference.end_stroke();
         engine.composite();
+        reference.composite();
+        for channel in 0..7 {
+            let optimized = read_texture(&rs.device, &rs.queue, engine.final_tex(channel));
+            let full = read_texture(&rs.device, &rs.queue, reference.final_tex(channel));
+            assert_eq!(optimized, full, "{name}: scissored paint differs from full-frame channel {channel}");
+        }
         views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &settings, None);
         save(&views, name);
         let n = red_texels(&engine);
