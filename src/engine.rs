@@ -3029,6 +3029,29 @@ impl Engine {
     pub fn stroke_step(
         &mut self,
         stamps: &[Stamp],
+        su: StampUniform,
+        depth: &wgpu::TextureView,
+        paint: &BrushPaint,
+        region: Option<[f32; 4]>,
+    ) {
+        self.stroke_step_inner(stamps, su, depth, paint, region, false);
+    }
+
+    /// Same paint path, with optional GPU timestamps for F6.
+    pub fn stroke_step_profiled(
+        &mut self,
+        stamps: &[Stamp],
+        su: StampUniform,
+        depth: &wgpu::TextureView,
+        paint: &BrushPaint,
+        region: Option<[f32; 4]>,
+    ) {
+        self.stroke_step_inner(stamps, su, depth, paint, region, true);
+    }
+
+    fn stroke_step_inner(
+        &mut self,
+        stamps: &[Stamp],
         mut su: StampUniform,
         depth: &wgpu::TextureView,
         paint: &BrushPaint,

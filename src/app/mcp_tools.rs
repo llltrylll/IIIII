@@ -621,7 +621,7 @@ impl PainterApp {
                 };
                 let depth = self.mcp_views.as_ref().expect("rendered above").view3d.depth_view();
                 for chunk in stamps.chunks(MAX_STAMPS) {
-                    self.engine.stroke_step(chunk, su, depth, &paint, None, false);
+                    self.engine.stroke_step(chunk, su, depth, &paint, None);
                 }
                 if let Some(entry) = self.engine.end_stroke() {
                     self.undo.push("Paint stroke", crate::undo::Edit::Stroke(entry));

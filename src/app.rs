@@ -3859,7 +3859,11 @@ impl PainterApp {
             }
         };
         let stamp_started = Instant::now();
-        self.engine.stroke_step(&stamps, su, self.views.view3d.depth_view(), &paint, region, self.meter.on);
+        if self.meter.on {
+            self.engine.stroke_step_profiled(&stamps, su, self.views.view3d.depth_view(), &paint, region);
+        } else {
+            self.engine.stroke_step(&stamps, su, self.views.view3d.depth_view(), &paint, region);
+        }
         if self.meter.on {
             self.meter.steps_now += 1;
             self.meter.step_cpu.add(stamp_started.elapsed().as_secs_f64() * 1000.0);
