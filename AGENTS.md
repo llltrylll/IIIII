@@ -1,14 +1,16 @@
 # Guide for AI coding agents
 
-Read this before changing code in this repository. Humans: see
-[CONTRIBUTING.md](CONTRIBUTING.md) too.
+Read `PROJECT_SCOPE.md` first. It defines the actual product objective, target workload, non-goals, and the owner's authorization for substantial refactors. Those priorities govern decisions in this fork. Humans: see [CONTRIBUTING.md](CONTRIBUTING.md) too.
+
+## Active fork objective
+
+This is a personal production fork of Material Painter, primarily for texturing Roblox assets on the owner's own machine. The representative target is an asset with 6 MeshParts, 6 UV maps, and 50,000–100,000 triangles. The maximum planned target is 12 UV maps and 200,000 triangles. The expected workload includes realistic layer stacks, masks, and filters.
+
+Prioritize correctness, data integrity, stability, and responsive work inside that envelope. Do not spend time optimizing hypothetical 100-item projects, extreme asset sizes, universal hardware coverage, public distribution, or cosmetic HUD redesign ahead of the core. The owner explicitly allows substantial or risky refactors when they are the best way to make the program work well; validate them carefully rather than avoiding them for the sake of small diffs.
 
 ## What this is
 
-Material Painter is a PBR texture painter (in the spirit of Substance
-Painter) in **Rust**, with **eframe/egui 0.37** for the UI and **wgpu 30** for
-all GPU work. One binary crate, edition 2024. Goals: fast, low memory, and
-artist-first UI.
+Material Painter is a PBR texture painter (in the spirit of Substance Painter) in **Rust**, with **eframe/egui 0.37** for the UI and **wgpu 30** for all GPU work. One binary crate, edition 2024. Goals: fast, low memory, and artist-first UI.
 
 ## Commands
 
@@ -53,53 +55,30 @@ offscreen with egui_kittest into `target/bake_test/ui/`.
 
 ## Conventions (follow these)
 
-- **No timing hacks.** Never fix ordering problems with sleeps, frame
-  counting or timeouts. Use the existing patterns: worker threads that send
-  results over `mpsc` channels, `queue.on_submitted_work_done` callbacks,
-  `ctx.request_repaint()`, and the `Action` queue in `app.rs`.
-- **Never block the UI thread** on disk, decoding or GPU readback. Heavy work
-  goes to a worker thread; GPU work is split so a frame stays fast.
-- **Every document edit is undoable.** Go through the engine's existing edit
-  functions (they record undo entries) rather than mutating layers directly.
-- **Partial updates.** Painting and compositing redraw only dirty regions; use
-  `mark_dirty()` / stroke regions as the surrounding code does instead of
-  forcing full recomposites.
-- **Projects must stay loadable.** If you change what a project saves, keep
-  reading old files (see the version handling in `project_io.rs`).
-- **WGSL must compile on every backend** (DX12 via FXC/DXC, Vulkan, Metal).
-  FXC rejects some things Naga accepts, for example writing to a vector with
-  a dynamic index; use `select` or a local array. Test with the GPU tests.
-- **egui 0.37 API.** Many examples online are for older egui, and several
-  names changed (for example `ctx.global_style()` instead of `ctx.style()`,
-  and `egui::Panel` for side and top panels). When in doubt, copy the pattern
-  from this codebase and let the compiler's deprecation warnings guide you.
-- **UI text** is short, plain and specific: say what a control does, not how
-  it works. Tooltips explain the non-obvious.
-- **Comments explain why**, not what. Doc comments on modules and public
-  items, like the existing ones. No commented-out code.
-- **Warning-free** under `-D warnings`. No `#[allow(dead_code)]` to silence
-  unfinished work.
+- **No timing hacks.** Never fix ordering problems with sleeps, frame counting or timeouts. Use the existing patterns: worker threads that send results over `mpsc` channels, `queue.on_submitted_work_done` callbacks, `ctx.request_repaint()`, and the `Action` queue in `app.rs`.
+- **Never block the UI thread** on disk, decoding or GPU readback. Heavy work goes to a worker thread; GPU work is split so a frame stays fast.
+- **Every document edit is undoable.** Go through the engine's existing edit functions (they record undo entries) rather than mutating layers directly.
+- **Partial updates.** Painting and compositing redraw only dirty regions; use `mark_dirty()` / stroke regions as the surrounding code does instead of forcing full recomposites.
+- **Projects must stay loadable.** If you change what a project saves, keep reading old files (see the version handling in `project_io.rs`).
+- **WGSL must compile on every backend** (DX12 via FXC/DXC, Vulkan, Metal). FXC rejects some things Naga accepts, for example writing to a vector with a dynamic index; use `select` or a local array. Test with the GPU tests.
+- **egui 0.37 API.** Many examples online are for older egui, and several names changed (for example `ctx.global_style()` instead of `ctx.style()`, and `egui::Panel` for side and top panels). When in doubt, copy the pattern from this codebase and let the compiler's deprecation warnings guide you.
+- **UI text** is short, plain and specific: say what a control does, not how it works. Tooltips explain the non-obvious.
+- **Comments explain why**, not what. Doc comments on modules and public items, like the existing ones. No commented-out code.
+- **Warning-free** under `-D warnings`. No `#[allow(dead_code)]` to silence unfinished work.
 - **No new dependencies** without a clear need; say why in the PR.
-- **Cross-platform:** Windows, Linux and macOS. Don't hardcode paths; data
-  lives in the settings folder (`crash::data_dir()`), assets are found with
-  `environment::asset_dir`.
+- **Cross-platform:** Windows, Linux and macOS. Don't hardcode paths; data lives in the settings folder (`crash::data_dir()`), assets are found with `environment::asset_dir`.
 
 ## Common agent mistakes here
 
-- Rewriting or reformatting unrelated code. Change only what the task needs.
-- Adding a new abstraction layer for a one-off. Prefer a small function next
-  to the code that uses it.
-- Re-implementing something that exists: check `gpu.rs` helpers, `theme.rs`
-  widgets (`theme::selectable`, `theme::pill`, `theme::card`), and the engine's
-  edit functions first.
-- Assuming a shader change works because it compiles: run the GPU tests and
-  look at the output images.
-- Forgetting the 2D (UV) view or the path tracer when changing how the 3D view
-  draws something.
+- Avoid unrelated rewrites and formatting churn. However, do not reject a major refactor solely because it creates a large diff: this owner authorizes invasive changes when they materially improve reliability, architecture, or performance inside the target workload.
+- Adding a new abstraction layer for a one-off. Prefer a small function next to the code that uses it unless a real subsystem boundary justifies the abstraction.
+- Re-implementing something that exists: check `gpu.rs` helpers, `theme.rs` widgets (`theme::selectable`, `theme::pill`, `theme::card`), and the engine's edit functions first.
+- Assuming a shader change works because it compiles: run the GPU tests and look at the output images.
+- Forgetting the 2D (UV) view or the path tracer when changing how the 3D view draws something.
 
 ## Before you finish
 
 1. `cargo build` with no warnings, and `cargo test` passes.
 2. GPU tests pass if you touched rendering, baking, painting, nodes or export.
-3. You tried the change in the running app.
-4. The diff contains only your change.
+3. You tried the change in the running app, or clearly state when runtime validation requires the owner.
+4. The diff contains only changes that serve the stated task.
