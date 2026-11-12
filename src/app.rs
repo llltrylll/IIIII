@@ -2833,7 +2833,17 @@ impl PainterApp {
                 ui.label(
                     egui::RichText::new(format!(
                         "{}{:.1} ms (peak {:.0})  │  VRAM {:.0} MB  │  Undo {:.1} MB RAM ({} steps)  │  {}²  │  {} tris",
-                        if self.meter.on { format!("{}  │  ", self.meter.text(self.engine.res, self.engine.last_scissor_pixels, self.engine.last_scissor_bbox_pixels, self.engine.last_scissor_rects)) } else { String::new() },
+                        if self.meter.on { format!("{}  │  ", self.meter.text(
+                            self.engine.res,
+                            self.engine.last_scissor_pixels,
+                            self.engine.last_scissor_bbox_pixels,
+                            self.engine.last_scissor_rects,
+                            self.engine.last_composite_layer_passes,
+                            self.engine.last_composite_folder_passes,
+                            self.engine.last_mask_cache_hits,
+                            self.engine.last_mask_cache_misses,
+                            self.engine.last_mask_gpu_passes
+                        )) } else { String::new() },
                         self.frame_ms,
                         self.frame_peak_ms,
                         mb(self.engine.vram_bytes()),
