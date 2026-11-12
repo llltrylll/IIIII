@@ -3782,17 +3782,6 @@ impl Engine {
         u
     }
 
-    /// Shown: the layer and every folder around it are visible.
-    fn shown(&self, idx: usize) -> bool {
-        self.layers[idx].visible && self.ancestors(idx).all(|a| self.layers[a].visible)
-    }
-
-    /// A folder that fades or masks its contents, so it composites them apart.
-    fn isolates(&self, idx: usize) -> bool {
-        let l = &self.layers[idx];
-        l.is_folder() && (l.opacity < 1.0 || l.mask.is_some())
-    }
-
     /// Re-composites the whole stack. Cheap enough to run every painting frame:
     /// one fullscreen pass per visible layer, plus one per faded or masked folder.
     /// Waits until the GPU has finished everything submitted so far.
