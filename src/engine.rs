@@ -3566,14 +3566,12 @@ impl Engine {
             self.resolve_maps();
         }
         let n = self.layers.len();
-        let mut passes = Vec::new();
+        // At most one layer pass and two folder-boundary passes per layer.
+        let mut passes = Vec::with_capacity(n.saturating_mul(3));
         let (mut depth, mut max_depth) = (0, 0);
         for i in 0..n {
-            // Folders whose contents start here open, outermost (highest index) first.
-            let mut opening: Vec<usize> =
-                (i..n).filter(|&f| self.isolates(f) && self.shown(f) && self.block(f).start == i).collect();
-            opening.sort_by(|a, b| b.cmp(a));
-            for _ in opening {
+            // Reverse iteration keeps outer folders first without allocating and sorting a temporary Vec.
+            for _ in (i..n).rev().filter(|&f| self.isolates(f) && self.shown(f) && self.block(f).start == i) {
                 passes.push(Pass::Begin);
                 depth += 1;
                 max_depth = max_depth.max(depth);
