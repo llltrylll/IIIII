@@ -3857,8 +3857,10 @@ impl Engine {
             let reach = passes[at..]
                 .iter()
                 .filter_map(|p| match *p {
-                    Pass::Layer(li) => self.layers[li].mask.as_ref(),
-                    _ => None,
+                    // A filtered folder mask is evaluated at Pass::End, not
+                    // Pass::Layer; its neighborhood must be included too.
+                    Pass::Layer(li) | Pass::End(li) => self.layers[li].mask.as_ref(),
+                    Pass::Begin => None,
                 })
                 .map(|m| m.filters.iter().filter(|f| f.enabled).map(|f| f.reach(self.res)).sum::<f32>())
                 .fold(0.0f32, f32::max);
