@@ -1035,6 +1035,7 @@ struct GpuStrokeProfiler {
     tx: mpsc::Sender<bool>,
     rx: mpsc::Receiver<bool>,
     pending: bool,
+    encoder_timestamps: bool,
 }
 
 impl GpuStrokeProfiler {
@@ -1042,17 +1043,17 @@ impl GpuStrokeProfiler {
         let query_set = Arc::new(device.create_query_set(&wgpu::QuerySetDescriptor {
             label: Some("stroke GPU timestamps"),
             ty: wgpu::QueryType::Timestamp,
-            count: 6,
+            count: 8,
         }));
         let resolve = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("stroke timestamp resolve"),
-            size: 48,
+            size: 64,
             usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         }));
         let readback = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("stroke timestamp readback"),
-            size: 48,
+            size: 64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         }));
@@ -1062,6 +1063,7 @@ impl GpuStrokeProfiler {
             tx,
             rx,
             pending: false,
+            encoder_timestamps: device.features().contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS),
         }
     }
 
@@ -1077,7 +1079,7 @@ impl GpuStrokeProfiler {
         });
     }
 
-    fn poll(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<(f64, f64, f64)> {
+    fn poll(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<(f64, f64, f64, Option<f64>)> {
         if !self.pending {
             return None;
         }
@@ -1102,7 +1104,8 @@ impl GpuStrokeProfiler {
             }
         };
         let read = |i: usize| u64::from_ne_bytes(data[i * 8..i * 8 + 8].try_into().expect("timestamp is 8 bytes"));
-        let (s0, s1, a0, a1, c0, c1) = (read(0), read(1), read(2), read(3), read(4), read(5));
+        let (s0, s1, a0, a1, c0, c1, t0, t1) =
+            (read(0), read(1), read(2), read(3), read(4), read(5), read(6), read(7));
         drop(data);
         self.resources.readback.unmap();
         let period_ns = queue.get_timestamp_period();
@@ -1114,6 +1117,7 @@ impl GpuStrokeProfiler {
             s1.wrapping_sub(s0) as f64 * period_ms,
             a1.wrapping_sub(a0) as f64 * period_ms,
             c1.wrapping_sub(c0) as f64 * period_ms,
+            self.encoder_timestamps.then(|| t1.wrapping_sub(t0) as f64 * period_ms),
         ))
     }
 }
@@ -3715,6 +3719,10 @@ impl Engine {
         }
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
+        if self.gpu_profiler.as_ref().is_some_and(|p| p.encoder_timestamps)
+            && let Some(p) = &self.active_gpu_profile {
+                encoder.write_timestamp(&p.query_set, 6);
+            }
         if resume.is_none() {
             let c = |v: f64| wgpu::LoadOp::Clear(wgpu::Color { r: v, g: v, b: v, a: 1.0 });
             let a = &self.accum[0];
@@ -3928,8 +3936,11 @@ impl Engine {
         }
         if composite_profiled {
             if let Some(p) = &self.active_gpu_profile {
-                encoder.resolve_query_set(&p.query_set, 0..6, &p.resolve, 0);
-                encoder.copy_buffer_to_buffer(&p.resolve, 0, &p.readback, 0, 48);
+                if self.gpu_profiler.as_ref().is_some_and(|profiler| profiler.encoder_timestamps) {
+                    encoder.write_timestamp(&p.query_set, 7);
+                }
+                encoder.resolve_query_set(&p.query_set, 0..8, &p.resolve, 0);
+                encoder.copy_buffer_to_buffer(&p.resolve, 0, &p.readback, 0, 64);
             }
         }
         self.queue.submit([encoder.finish()]);

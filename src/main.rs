@@ -53,7 +53,7 @@ fn main() -> eframe::Result {
         setup.power_preference = app::prefs::Preferences::power_preference();
         setup.device_descriptor = Arc::new(|adapter| wgpu::DeviceDescriptor {
             label: Some("material painter device"),
-            required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
+            required_features: adapter.features() & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS),
             required_limits: adapter.limits(),
             ..Default::default()
         });
