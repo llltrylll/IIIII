@@ -841,11 +841,10 @@ fn uv_tile_rectangles(tiles: &[bool]) -> Option<Vec<[f32; 4]>> {
     )
 }
 
-/// UV bounds of what a frame's stamps can paint in the 3D view: the UV
-/// boxes of every triangle they can reach. Screen stamps reach whatever
-/// projects into their circles at any depth (and, with symmetry, whatever
-/// mirrors into them), surface stamps whatever lies near their discs, UV
-/// stamps their own squares. `None` when nothing is reachable.
+/// Conservative UV rectangles for a frame's 3D stamps. Candidate triangle
+/// UV bounds are rasterized into a coarse grid and compressed into disjoint
+/// rectangles, preserving coverage while avoiding one large bbox across islands.
+/// Screen stamps include all depths; the shader's depth test remains authoritative.
 pub(crate) fn stroke_region(
     mesh: &Mesh,
     bvh: &Bvh,
@@ -857,7 +856,7 @@ pub(crate) fn stroke_region(
     stamps: &[Stamp],
 ) -> Option<Vec<[f32; 4]>> {
     if projection == BrushProjection::Uv {
-        let mut tiles = vec![false; STROKE_REGION_GRID * STROKE_REGION_GRID];
+        let mut tiles = [false; STROKE_REGION_GRID * STROKE_REGION_GRID];
         for s in stamps.iter().filter(|s| s[1][3] > 0.0) {
             let (uv, r) = (Vec2::new(s[4][0], s[4][1]), s[2][3]);
             mark_uv_tiles(&mut tiles, uv - Vec2::splat(r), uv + Vec2::splat(r));
@@ -876,8 +875,8 @@ pub(crate) fn stroke_region(
             Box::new(move |lo: Vec3, hi: Vec3| spheres.iter().any(|&(c, r)| c.clamp(lo, hi).distance_squared(c) <= r * r))
         }
         _ => {
-            // Screen box of all the circles; boxes that reach behind the
-            // camera count as overlapping.
+            // Screen box of all the circles; boxes crossing the eye plane
+            // are kept conservatively, while boxes wholly behind are rejected.
             let (mut a, mut b) = (Vec2::MAX, Vec2::MIN);
             for s in stamps {
                 let r = radius * s[0][2];
