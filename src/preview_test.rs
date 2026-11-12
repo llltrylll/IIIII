@@ -337,6 +337,13 @@ fn paint_projections() {
         reference.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, None);
         engine.end_stroke();
         reference.end_stroke();
+        let paint_texture = |engine: &Engine| match &engine.layers[0].content {
+            crate::engine::Content::Paint(ch) => ch[0].as_ref().expect("color channel was painted"),
+            _ => panic!("expected a paint layer"),
+        };
+        let optimized_paint = read_texture(&rs.device, &rs.queue, &paint_texture(&engine).texture);
+        let reference_paint = read_texture(&rs.device, &rs.queue, &paint_texture(&reference).texture);
+        assert_eq!(optimized_paint, reference_paint, "{name}: scissored paint target differs before composite");
         engine.composite();
         reference.composite();
         for channel in 0..7 {
