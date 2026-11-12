@@ -883,6 +883,11 @@ fn uv_tile_rectangles(tiles: &[bool]) -> Option<Vec<[f32; 4]>> {
     )
 }
 
+/// An empty tile set is a known empty paint region, not an unknown one.
+fn uv_tile_rectangles_or_empty(tiles: &[bool]) -> Vec<[f32; 4]> {
+    uv_tile_rectangles(tiles).unwrap_or_default()
+}
+
 /// Conservative UV rectangles for a frame's 3D stamps. Candidate triangle
 /// UV bounds are rasterized into a coarse grid and compressed into disjoint
 /// rectangles, preserving coverage while avoiding one large bbox across islands.
@@ -940,7 +945,7 @@ pub(crate) fn stroke_region(
             }
             mark_uv_tiles(&mut tiles, lo, hi);
         }
-        return uv_tile_rectangles(&tiles);
+        return Some(uv_tile_rectangles_or_empty(&tiles));
     }
 
     let mut tiles = [false; STROKE_REGION_GRID * STROKE_REGION_GRID];
@@ -1022,7 +1027,7 @@ pub(crate) fn stroke_region(
     if needs_full_region {
         None
     } else {
-        uv_tile_rectangles(&tiles)
+        Some(uv_tile_rectangles_or_empty(&tiles))
     }
 }
 
@@ -4286,6 +4291,11 @@ mod stroke_region_tile_tests {
             }
         }
         assert_eq!(covered, tiles);
+    }
+
+    #[test]
+    fn empty_tile_set_is_a_known_empty_region() {
+        assert!(uv_tile_rectangles_or_empty(&[false; CELLS]).is_empty());
     }
 
     #[test]
