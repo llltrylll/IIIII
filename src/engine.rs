@@ -1415,9 +1415,20 @@ fn normalized_scissors(regions: &[[f32; 4]], res: u32) -> Vec<[u32; 4]> {
     let size = res.max(1) as f32;
     let low = |v: f32| (v * size).floor().clamp(0.0, size) as u32;
     let high = |v: f32| (v * size).ceil().clamp(0.0, size) as u32;
+    // Position/normal maps are dilated around UV islands. Keep that halo in
+    // the raster bounds too, or a brush near an island edge can lose texels.
+    let margin = DILATE_PASSES + 2;
     let mut rects: Vec<[u32; 4]> = regions
         .iter()
-        .map(|&[u0, v0, u1, v1]| [low(u0), low(v0), high(u1), high(v1)])
+        .map(|&[u0, v0, u1, v1]| {
+            let [x0, y0, x1, y1] = [low(u0), low(v0), high(u1), high(v1)];
+            [
+                x0.saturating_sub(margin),
+                y0.saturating_sub(margin),
+                x1.saturating_add(margin).min(res),
+                y1.saturating_add(margin).min(res),
+            ]
+        })
         .filter(|r| r[2] > r[0] && r[3] > r[1])
         .collect();
     compact_scissors(&mut rects);
@@ -4705,8 +4716,15 @@ mod scissor_tests {
 
     #[test]
     fn normalized_scissors_round_outward_and_clip_to_texture() {
+        let margin = DILATE_PASSES + 2;
         let rects = normalized_scissors(&[[-0.1, 0.2, 0.251, 1.2], [0.7, 0.7, 0.8, 0.8]], 100);
-        assert_eq!(rects, vec![[0, 20, 26, 100], [70, 70, 80, 80]]);
+        assert_eq!(
+            rects,
+            vec![
+                [0, 20 - margin, 26 + margin, 100],
+                [70 - margin, 70 - margin, 80 + margin, 80 + margin],
+            ],
+        );
     }
 
     #[test]
