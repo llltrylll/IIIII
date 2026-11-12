@@ -827,18 +827,33 @@ fn uv_tile_rectangles(tiles: &[bool]) -> Option<Vec<[f32; 4]>> {
                 r[3] = y + 1;
             } else {
                 rects.push([x0, y, x, y + 1]);
+                if rects.len() > MAX_STROKE_REGION_RECTS {
+                    // The run count cannot shrink later; bound pathological
+                    // checkerboard layouts to one fixed 64x64 scan.
+                    let mut bounds = [N, N, 0, 0];
+                    for (i, &occupied) in tiles.iter().enumerate() {
+                        if occupied {
+                            let (tx, ty) = (i % N, i / N);
+                            bounds[0] = bounds[0].min(tx);
+                            bounds[1] = bounds[1].min(ty);
+                            bounds[2] = bounds[2].max(tx + 1);
+                            bounds[3] = bounds[3].max(ty + 1);
+                        }
+                    }
+                    return Some(vec![
+                        [
+                            bounds[0] as f32 / N as f32,
+                            bounds[1] as f32 / N as f32,
+                            bounds[2] as f32 / N as f32,
+                            bounds[3] as f32 / N as f32,
+                        ],
+                    ]);
+                }
             }
         }
     }
     if rects.is_empty() {
         return None;
-    }
-    if rects.len() > MAX_STROKE_REGION_RECTS {
-        let x0 = rects.iter().map(|r| r[0]).min().unwrap_or(0);
-        let y0 = rects.iter().map(|r| r[1]).min().unwrap_or(0);
-        let x1 = rects.iter().map(|r| r[2]).max().unwrap_or(N);
-        let y1 = rects.iter().map(|r| r[3]).max().unwrap_or(N);
-        return Some(vec![[x0 as f32 / N as f32, y0 as f32 / N as f32, x1 as f32 / N as f32, y1 as f32 / N as f32]]);
     }
     Some(
         rects.into_iter()
