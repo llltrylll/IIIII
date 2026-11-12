@@ -1230,6 +1230,83 @@ fn accum_set(device: &wgpu::Device, res: u32, label: &str) -> [Tex; ACCUM] {
     ACCUM_FORMATS.map(|f| Tex::new(device, label, res, res, f, LAYER_USAGE))
 }
 
+/// Maximum number of disjoint scissors per composite. Above this, merge
+/// the pair with the least added area; this is conservative and bounds draw
+/// submission cost even for highly fragmented UV layouts.
+const MAX_COMPOSITE_SCISSORS: usize = 64;
+
+fn scissor_area(r: [u32; 4]) -> u64 {
+    u64::from(r[2].saturating_sub(r[0])) * u64::from(r[3].saturating_sub(r[1]))
+}
+
+fn scissor_union(a: [u32; 4], b: [u32; 4]) -> [u32; 4] {
+    [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]
+}
+
+fn scissor_overlap_area(a: [u32; 4], b: [u32; 4]) -> u64 {
+    u64::from(a[2].min(b[2]).saturating_sub(a[0].max(b[0])))
+        * u64::from(a[3].min(b[3]).saturating_sub(a[1].max(b[1])))
+}
+
+/// Keep scissors disjoint. If the list exceeds the cap, merge the cheapest
+/// pair by added texel area; a merge only expands coverage, never drops it.
+fn compact_scissors(rects: &mut Vec<[u32; 4]>) {
+    loop {
+        let mut merge = None;
+        let mut best_extra = u64::MAX;
+        for i in 0..rects.len() {
+            for j in i + 1..rects.len() {
+                let a = rects[i];
+                let b = rects[j];
+                let union = scissor_union(a, b);
+                let covered = scissor_area(a) + scissor_area(b) - scissor_overlap_area(a, b);
+                let extra = scissor_area(union).saturating_sub(covered);
+                let overlaps = scissor_overlap_area(a, b) > 0;
+                if (overlaps || extra == 0) && extra < best_extra {
+                    best_extra = extra;
+                    merge = Some((i, j, union));
+                    if extra == 0 {
+                        break;
+                    }
+                }
+            }
+            if best_extra == 0 {
+                break;
+            }
+        }
+        let Some((i, j, union)) = merge else { break };
+        rects[i] = union;
+        rects.swap_remove(j);
+    }
+
+    while rects.len() > MAX_COMPOSITE_SCISSORS {
+        let mut best = (u64::MAX, 0usize, 1usize, [0; 4]);
+        for i in 0..rects.len() {
+            for j in i + 1..rects.len() {
+                let a = rects[i];
+                let b = rects[j];
+                let union = scissor_union(a, b);
+                let covered = scissor_area(a) + scissor_area(b) - scissor_overlap_area(a, b);
+                let extra = scissor_area(union).saturating_sub(covered);
+                if extra < best.0 {
+                    best = (extra, i, j, union);
+                    if extra == 0 {
+                        break;
+                    }
+                }
+            }
+            if best.0 == 0 {
+                break;
+            }
+        }
+        rects[best.1] = best.3;
+        rects.swap_remove(best.2);
+        compact_scissors(rects);
+    }
+    rects.sort_unstable_by_key(|r| (r[1], r[0], r[3], r[2]));
+}
+
+
 impl Engine {
     /// A document of one texture set covering the whole mesh.
     pub fn new(rs: &egui_wgpu::RenderState, mesh: &GpuMesh, bounds: (Vec3, Vec3), res: u32) -> Engine {
