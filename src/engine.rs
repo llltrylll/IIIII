@@ -3800,7 +3800,6 @@ impl Engine {
         if self.maps_dirty {
             self.resolve_maps();
         }
-        let n = self.layers.len();
         let (passes, max_depth) = composite_passes(&self.layers);
         self.folder_below.retain(|set| set[0].width == self.res);
         self.folder_below.truncate(max_depth);
