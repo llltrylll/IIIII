@@ -464,6 +464,7 @@ struct StrokeMeter {
     after_release_cpu: Stat,
     gpu_stamp: Stat,
     gpu_apply: Stat,
+    gpu_composite: Stat,
 }
 
 impl StrokeMeter {
@@ -481,7 +482,7 @@ impl StrokeMeter {
     /// Status-bar text: average/peak in ms (steps: calls per frame).
     fn text(&self) -> String {
         format!(
-            "F6 CPU avg/peak ms: steps/frame {}, stamp {}, begin {}, recomp {}, end {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}",
+            "F6 CPU avg/peak ms: steps/frame {}, stamp {}, begin {}, recomp {}, end {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite {}",
             self.steps_per_frame.text(),
             self.step_cpu.text(),
             self.begin_cpu.text(),
@@ -489,7 +490,8 @@ impl StrokeMeter {
             self.end_cpu.text(),
             self.after_release_cpu.text(),
             self.gpu_stamp.text(),
-            self.gpu_apply.text()
+            self.gpu_apply.text(),
+            self.gpu_composite.text()
         )
     }
 }

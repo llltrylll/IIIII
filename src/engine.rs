@@ -1042,17 +1042,17 @@ impl GpuStrokeProfiler {
         let query_set = Arc::new(device.create_query_set(&wgpu::QuerySetDescriptor {
             label: Some("stroke GPU timestamps"),
             ty: wgpu::QueryType::Timestamp,
-            count: 4,
+            count: 6,
         }));
         let resolve = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("stroke timestamp resolve"),
-            size: 32,
+            size: 48,
             usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         }));
         let readback = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("stroke timestamp readback"),
-            size: 32,
+            size: 48,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         }));
@@ -1077,7 +1077,7 @@ impl GpuStrokeProfiler {
         });
     }
 
-    fn poll(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<(f64, f64)> {
+    fn poll(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<(f64, f64, f64)> {
         if !self.pending {
             return None;
         }
@@ -1102,7 +1102,7 @@ impl GpuStrokeProfiler {
             }
         };
         let read = |i: usize| u64::from_ne_bytes(data[i * 8..i * 8 + 8].try_into().expect("timestamp is 8 bytes"));
-        let (s0, s1, a0, a1) = (read(0), read(1), read(2), read(3));
+        let (s0, s1, a0, a1, c0, c1) = (read(0), read(1), read(2), read(3), read(4), read(5));
         drop(data);
         self.resources.readback.unmap();
         let period_ns = queue.get_timestamp_period();
@@ -1113,6 +1113,7 @@ impl GpuStrokeProfiler {
         Some((
             s1.wrapping_sub(s0) as f64 * period_ms,
             a1.wrapping_sub(a0) as f64 * period_ms,
+            c1.wrapping_sub(c0) as f64 * period_ms,
         ))
     }
 }
@@ -1128,6 +1129,8 @@ pub struct Engine {
     queue: wgpu::Queue,
     /// Optional non-blocking GPU timings when the adapter supports timestamps.
     gpu_profiler: Option<GpuStrokeProfiler>,
+    /// Holds the current sample until its layer composite pass is recorded.
+    active_gpu_profile: Option<GpuStrokeProfileResources>,
     /// Shared by the texture sets of a document.
     p: Arc<Pipelines>,
     pub res: u32,
@@ -1263,6 +1266,7 @@ impl Engine {
         let mut engine = Engine {
             rs: rs.clone(),
             gpu_profiler,
+            active_gpu_profile: None,
             pos: Tex::new(&device, "position map", res, res, POS_FORMAT, LAYER_USAGE),
             nrm: Tex::new(&device, "normal map", res, res, NRM_FORMAT, LAYER_USAGE),
             tan: Tex::new(&device, "tangent map", res, res, TAN_FORMAT, LAYER_USAGE),
@@ -3081,11 +3085,14 @@ impl Engine {
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.sampler) },
             ],
         });
-        let profile = if profile_gpu {
+        let profile = if profile_gpu && self.active_gpu_profile.is_none() {
             self.gpu_profiler.as_ref().and_then(GpuStrokeProfiler::resources)
         } else {
             None
         };
+        if let Some(p) = &profile {
+            self.active_gpu_profile = Some(p.clone());
+        }
         let stamp_attachments = [gpu::color_attachment(&self.stroke.view, wgpu::LoadOp::Load)];
         let mut encoder = device.create_command_encoder(&Default::default());
         {
@@ -3106,16 +3113,7 @@ impl Engine {
             pass.draw(0..3, 0..1);
         }
         self.encode_apply(&mut encoder, paint, profile.as_ref());
-        if let Some(p) = &profile {
-            encoder.resolve_query_set(&p.query_set, 0..4, &p.resolve, 0);
-            encoder.copy_buffer_to_buffer(&p.resolve, 0, &p.readback, 0, 32);
-        }
         self.queue.submit([encoder.finish()]);
-        if profile.is_some() {
-            if let Some(profiler) = &mut self.gpu_profiler {
-                profiler.request_map();
-            }
-        }
     }
 
     /// Returns completed GPU timings for stamp and apply; does not wait for the GPU.
@@ -3769,6 +3767,7 @@ impl Engine {
             self.prefix = Some(resume);
             self.dirty = false;
             self.queue.submit([encoder.finish()]);
+            self.active_gpu_profile = None;
             return;
         }
         // `src` is the accum set holding the stack so far; `from_cache` reads
@@ -3778,6 +3777,8 @@ impl Engine {
             None => (0, 0, 0, false),
         };
         let mut finals: Vec<(u64, usize)> = Vec::new();
+        let profile_layer = self.stroke_layer;
+        let mut composite_profiled = false;
         for (k, pass) in passes.iter().enumerate().skip(start) {
             if record == Some(k) {
                 let input = if k + 1 < passes.len() {
@@ -3896,19 +3897,29 @@ impl Engine {
             let out = &self.accum[dst];
             // A patch keeps what is around it.
             let load = if scissor.is_some() { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(wgpu::Color::BLACK) };
-            let mut pass = gpu::pass(
-                &mut encoder,
-                "composite layer",
-                &[
-                    gpu::color_attachment(&out[0].view, load),
-                    gpu::color_attachment(&out[1].view, load),
-                    gpu::color_attachment(&out[2].view, load),
-                    gpu::color_attachment(&out[3].view, load),
-                    gpu::color_attachment(&out[4].view, load),
-                    gpu::color_attachment(&out[5].view, load),
-                    gpu::color_attachment(&out[6].view, load),
-                ],
-            );
+            let attachments = [
+                gpu::color_attachment(&out[0].view, load),
+                gpu::color_attachment(&out[1].view, load),
+                gpu::color_attachment(&out[2].view, load),
+                gpu::color_attachment(&out[3].view, load),
+                gpu::color_attachment(&out[4].view, load),
+                gpu::color_attachment(&out[5].view, load),
+                gpu::color_attachment(&out[6].view, load),
+            ];
+            let profile = self.active_gpu_profile.as_ref().filter(|_| profile_layer == Some(layer.id));
+            composite_profiled |= profile.is_some();
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("composite layer"),
+                color_attachments: &attachments,
+                depth_stencil_attachment: None,
+                timestamp_writes: profile.map(|p| wgpu::RenderPassTimestampWrites {
+                    query_set: &p.query_set,
+                    beginning_of_pass_write_index: Some(4),
+                    end_of_pass_write_index: Some(5),
+                }),
+                occlusion_query_set: None,
+                multiview_mask: None,
+            }).forget_lifetime();
             if let Some([x0, y0, x1, y1]) = scissor {
                 pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
             }
@@ -3919,7 +3930,21 @@ impl Engine {
             src = dst;
             from_cache = false;
         }
+        if composite_profiled {
+            if let Some(p) = &self.active_gpu_profile {
+                encoder.resolve_query_set(&p.query_set, 0..6, &p.resolve, 0);
+                encoder.copy_buffer_to_buffer(&p.resolve, 0, &p.readback, 0, 48);
+            }
+        }
         self.queue.submit([encoder.finish()]);
+        if composite_profiled {
+            self.active_gpu_profile = None;
+            if let Some(profiler) = &mut self.gpu_profiler {
+                profiler.request_map();
+            }
+        } else {
+            self.active_gpu_profile = None;
+        }
         if let Some(p) = resume {
             self.prefix = Some(p);
         }
