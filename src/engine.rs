@@ -1315,6 +1315,8 @@ pub struct Engine {
     next_id: u64,
     bounds: (Vec3, Vec3),
     active: Option<ActiveStroke>,
+    /// Apply bindings are stable for a stroke; reuse them across its frames.
+    apply_bg: Option<wgpu::BindGroup>,
     /// Set whenever the layer stack changes; cleared by [`Engine::composite`].
     pub dirty: bool,
     /// Something besides the painted layer changed since the last composite.
@@ -1595,6 +1597,7 @@ impl Engine {
             next_id: 1,
             bounds,
             active: None,
+            apply_bg: None,
             dirty: true,
             full_dirty: true,
             stroke_layer: None,
@@ -3287,6 +3290,7 @@ impl Engine {
         let before = Snapshot::encode(&self.device, &mut encoder, &textures);
         self.queue.submit([encoder.finish()]);
         before.request_map();
+        self.apply_bg = None;
         self.active = Some(ActiveStroke { layer_id, target, channels, before });
         true
     }
@@ -3473,6 +3477,8 @@ impl Engine {
 
     /// Brush grain (`size`² grayscale, tileable), or `None` for no grain.
     pub fn set_brush_grain(&mut self, grain: Option<(&[u8], u32)>) {
+        // The cached apply bind group holds the current grain texture view.
+        self.apply_bg = None;
         let (pixels, size) = grain.unwrap_or((&[255], 1));
         if self.brush_grain.width != size {
             self.brush_grain = Tex::new(&self.device, "brush grain", size, size, F::R8Unorm, LAYER_USAGE);
@@ -3540,26 +3546,30 @@ impl Engine {
             }
             _ => self.snap[c].as_ref().filter(|_| ch[c] > 0.5).map_or(&self.dummy.view, |t| &t.view),
         };
-        let apply_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("apply"),
-            layout: &self.p.apply_bgl,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.apply_ubuf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.stroke.view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(snap_view(0)) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(snap_view(1)) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(snap_view(2)) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(snap_view(3)) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.pos.view) },
-                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.nrm.view) },
-                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.brush_grain.view) },
-                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&self.repeat_sampler) },
-                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(snap_view(OPACITY)) },
-                wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(snap_view(EMISSION)) },
-                wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(snap_view(NORMAL)) },
-                wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::TextureView(snap_view(SPECULAR)) },
-            ],
-        });
+        if self.apply_bg.is_none() {
+            let apply_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("apply"),
+                layout: &self.p.apply_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.apply_ubuf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.stroke.view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(snap_view(0)) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(snap_view(1)) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(snap_view(2)) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(snap_view(3)) },
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.pos.view) },
+                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.nrm.view) },
+                    wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.brush_grain.view) },
+                    wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&self.repeat_sampler) },
+                    wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(snap_view(OPACITY)) },
+                    wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(snap_view(EMISSION)) },
+                    wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(snap_view(NORMAL)) },
+                    wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::TextureView(snap_view(SPECULAR)) },
+                ],
+            });
+            self.apply_bg = Some(apply_bg);
+        }
+        let apply_bg = self.apply_bg.as_ref().expect("created above");
 
         {
             let textures = self.target_textures(layer_id, target, &channels).expect("stroke target exists");
@@ -3736,6 +3746,7 @@ impl Engine {
 
     /// Finishes the stroke and returns its undo record.
     pub fn end_stroke(&mut self) -> Option<UndoEntry> {
+        self.apply_bg = None;
         self.stroke_layer = None;
         self.prefix = None;
         self.prefix_cache = None;
@@ -4481,6 +4492,7 @@ impl Engine {
                     );
                 }
         }
+        self.apply_bg = None;
         self.res = res;
         self.uv_version += 1;
         self.pos = Tex::new(&self.device, "position map", res, res, POS_FORMAT, LAYER_USAGE);
