@@ -3930,13 +3930,20 @@ impl Engine {
             let li = match *pass {
                 Pass::Begin => {
                     // Keep the stack below the folder to fade its result over.
-                    let [x0, y0, x1, y1] = scissor.unwrap_or([0, 0, self.res, self.res]);
                     fn at(t: &Tex, x: u32, y: u32) -> wgpu::TexelCopyTextureInfo<'_> {
                         wgpu::TexelCopyTextureInfo { origin: wgpu::Origin3d { x, y, z: 0 }, ..t.copy_info() }
                     }
-                    let size = wgpu::Extent3d { width: x1 - x0, height: y1 - y0, depth_or_array_layers: 1 };
-                    for (from, to) in self.accum[src].iter().zip(&self.folder_below[depth]) {
-                        encoder.copy_texture_to_texture(at(from, x0, y0), at(to, x0, y0), size);
+                    if let Some(rects) = &scissors {
+                        for &[x0, y0, x1, y1] in rects {
+                            let size = wgpu::Extent3d { width: x1 - x0, height: y1 - y0, depth_or_array_layers: 1 };
+                            for (from, to) in self.accum[src].iter().zip(&self.folder_below[depth]) {
+                                encoder.copy_texture_to_texture(at(from, x0, y0), at(to, x0, y0), size);
+                            }
+                        }
+                    } else {
+                        for (from, to) in self.accum[src].iter().zip(&self.folder_below[depth]) {
+                            encoder.copy_texture_to_texture(from.copy_info(), to.copy_info(), from.extent());
+                        }
                     }
                     depth += 1;
                     continue;
