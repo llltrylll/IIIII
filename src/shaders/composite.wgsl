@@ -193,7 +193,8 @@ fn generator(c: vec2<i32>, uv: vec2<f32>) -> f32 {
     if (need_e) { s.e = textureSampleLevel(map_e, samp, uv, 0.0); }
 
     let need_position = u.gp0.w != 0.0 || weight(9) != 0.0 || weight(12) != 0.0
-        || weight(13) != 0.0 || weight(17) != 0.0 || weight(19) != 0.0;
+        || weight(13) != 0.0 || weight(16) != 0.0 || weight(17) != 0.0
+        || weight(18) != 0.0 || weight(19) != 0.0;
     let need_normal = weight(6) != 0.0 || weight(15) != 0.0
         || weight(16) != 0.0 || weight(18) != 0.0;
     var p = vec3<f32>(0.0);
@@ -202,7 +203,9 @@ fn generator(c: vec2<i32>, uv: vec2<f32>) -> f32 {
     if (need_normal) { n = normalize(textureLoad(nrm_map, c, 0).xyz * 2.0 - 1.0); }
     s.p = p;
     s.n = n;
-    s.texel_world = select(0.0, texel_size(c, p), weight(18) != 0.0);
+    var texel_world = 0.0;
+    if (weight(18) != 0.0) { texel_world = texel_size(c, p); }
+    s.texel_world = texel_world;
     s.bmin = u.bmin.xyz;
     s.bsize = u.bsize.xyz;
     s.emax = u.gx.x;
