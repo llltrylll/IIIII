@@ -4148,3 +4148,59 @@ impl eframe::App for PainterApp {
     }
 }
 
+
+
+#[cfg(test)]
+mod stroke_region_tile_tests {
+    use super::*;
+
+    const CELLS: usize = STROKE_REGION_GRID * STROKE_REGION_GRID;
+
+    #[test]
+    fn tile_rectangles_cover_each_marked_cell_exactly_once() {
+        let mut tiles = [false; CELLS];
+        mark_uv_tiles(&mut tiles, Vec2::new(0.02, 0.03), Vec2::new(0.16, 0.12));
+        mark_uv_tiles(&mut tiles, Vec2::new(0.72, 0.68), Vec2::new(0.91, 0.87));
+        let rects = uv_tile_rectangles(&tiles).expect("occupied tiles produce rectangles");
+        let mut covered = [false; CELLS];
+
+        for [u0, v0, u1, v1] in rects {
+            let x0 = (u0 * STROKE_REGION_GRID as f32).round() as usize;
+            let y0 = (v0 * STROKE_REGION_GRID as f32).round() as usize;
+            let x1 = (u1 * STROKE_REGION_GRID as f32).round() as usize;
+            let y1 = (v1 * STROKE_REGION_GRID as f32).round() as usize;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = y * STROKE_REGION_GRID + x;
+                    assert!(!covered[i], "tile rectangles overlap at ({x}, {y})");
+                    covered[i] = true;
+                }
+            }
+        }
+        assert_eq!(covered, tiles);
+    }
+
+    #[test]
+    fn uv_bounds_at_zero_and_one_stay_inside_the_grid() {
+        let mut tiles = [false; CELLS];
+        mark_uv_tiles(&mut tiles, Vec2::ZERO, Vec2::ZERO);
+        mark_uv_tiles(&mut tiles, Vec2::ONE, Vec2::ONE);
+        assert!(tiles[0]);
+        assert!(tiles[CELLS - 1]);
+        let rects = uv_tile_rectangles(&tiles).expect("edge tiles are occupied");
+        assert!(rects.iter().all(|r| r.iter().all(|v| (0.0..=1.0).contains(v))));
+    }
+
+    #[test]
+    fn fragmented_grid_falls_back_to_one_conservative_rectangle() {
+        let mut tiles = [false; CELLS];
+        for y in (0..STROKE_REGION_GRID).step_by(2) {
+            for x in (0..STROKE_REGION_GRID).step_by(2) {
+                tiles[y * STROKE_REGION_GRID + x] = true;
+            }
+        }
+        let rects = uv_tile_rectangles(&tiles).expect("checkerboard has occupied tiles");
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects[0], [0.0, 0.0, 1.0, 1.0]);
+    }
+}
