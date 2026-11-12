@@ -9,7 +9,7 @@ use crate::environment::{self, EnvBaker, EnvImage, EnvSource, Environment};
 use crate::engine::{Drop, Folder, Layer, Projection};
 use crate::engine::{
     Blend, BrushPaint, Content, Engine, FillParams, GEN_INPUTS, GenKind, Levels, MAPS, MapKind, MatValues, Stamp,
-    StampUniform,
+    StampUniform, MAX_STAMPS,
 };
 use crate::gpu::GpuMesh;
 use crate::icons;
@@ -935,6 +935,8 @@ pub(crate) fn stroke_region(
     radius: f32,
     stamps: &[Stamp],
 ) -> Option<Vec<[f32; 4]>> {
+    // Keep region calculation aligned with the GPU's actual stamp limit.
+    let stamps = &stamps[..stamps.len().min(MAX_STAMPS)];
     if projection == BrushProjection::Uv {
         let mut tiles = [false; STROKE_REGION_GRID * STROKE_REGION_GRID];
         for s in stamps.iter().filter(|s| s[1][3] > 0.0) {
@@ -954,11 +956,13 @@ pub(crate) fn stroke_region(
         BrushProjection::Surface => {
             // Resolve mirrored stamps before querying; no symmetry transform is
             // needed here, and the sphere test stays conservative for each disc.
-            let spheres: Vec<(Vec3, f32)> = stamps
-                .iter()
-                .filter(|s| s[1][3] > 0.0)
-                .map(|s| (Vec3::new(s[1][0], s[1][1], s[1][2]), s[1][3] * 1.5))
-                .collect();
+            let mut spheres = [(Vec3::ZERO, 0.0); MAX_STAMPS];
+            let mut sphere_count = 0;
+            for s in stamps.iter().filter(|s| s[1][3] > 0.0) {
+                spheres[sphere_count] = (Vec3::new(s[1][0], s[1][1], s[1][2]), s[1][3] * 1.5);
+                sphere_count += 1;
+            }
+            let spheres = &spheres[..sphere_count];
             bvh.query(
                 |lo, hi| spheres.iter().any(|&(c, r)| c.clamp(lo, hi).distance_squared(c) <= r * r),
                 |t| needs_full_region |= !mark_candidate_triangle_uv(&mut tiles, mesh, &triangle_indices, t),
