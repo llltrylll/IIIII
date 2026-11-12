@@ -1175,6 +1175,10 @@ pub struct Engine {
     pub full_recomps: u32,
     /// Texel area processed by the most recent composite scissor (full texture on full recomposites).
     pub last_scissor_pixels: u64,
+    /// Bounding-box area of the last scissor set (for F6 comparison).
+    pub last_scissor_bbox_pixels: u64,
+    /// Number of non-overlapping scissors used by the last composite.
+    pub last_scissor_rects: u32,
     /// Which of a filtered mask's textures (`mask_out`) holds its result.
     mask_final: HashMap<u64, usize>,
     pub bake_report: Option<Arc<BakeReport>>,
@@ -1214,10 +1218,9 @@ pub struct Engine {
     /// alternate between (the result is in one of them).
     mask_out: HashMap<u64, [Tex; 3]>,
     mask_filter_ubuf: wgpu::Buffer,
-    /// Texels the stroke changed since the last composite (x0, y0, x1, y1,
-    /// exclusive), so stroke frames recomposite only that patch; `None`
-    /// with `region_unknown` when a step didn't say.
-    stroke_region: Option<[u32; 4]>,
+    /// Disjoint UV-space rectangles changed by the active stroke, in texels.
+    /// Multiple scissors keep distant UV islands from forcing one large bbox.
+    stroke_regions: Vec<[u32; 4]>,
     region_unknown: bool,
     /// Incremented on every composite, so dependent views know the material changed.
     pub generation: u64,
@@ -1297,6 +1300,8 @@ impl Engine {
             thumbs: Default::default(),
             full_recomps: 0,
             last_scissor_pixels: 0,
+            last_scissor_bbox_pixels: 0,
+            last_scissor_rects: 0,
             mask_final: HashMap::new(),
             bake_report: None,
             edge_max: 0.2,
@@ -1338,7 +1343,7 @@ impl Engine {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
-            stroke_region: None,
+            stroke_regions: Vec::new(),
             region_unknown: false,
             generation: 0,
             res,
@@ -3046,9 +3051,9 @@ impl Engine {
         su: StampUniform,
         depth: &wgpu::TextureView,
         paint: &BrushPaint,
-        region: Option<[f32; 4]>,
+        regions: Option<Vec<[f32; 4]>>,
     ) {
-        self.stroke_step_inner(stamps, su, depth, paint, region, false);
+        self.stroke_step_inner(stamps, su, depth, paint, regions, false);
     }
 
     /// Same paint path, with optional GPU timestamps for F6.
@@ -3060,7 +3065,7 @@ impl Engine {
         paint: &BrushPaint,
         region: Option<[f32; 4]>,
     ) {
-        self.stroke_step_inner(stamps, su, depth, paint, region, true);
+        self.stroke_step_inner(stamps, su, depth, paint, regions, true);
     }
 
     fn stroke_step_inner(
@@ -3075,7 +3080,7 @@ impl Engine {
         if self.active.is_none() || stamps.is_empty() {
             return;
         }
-        self.add_region(region);
+        self.add_regions(regions);
         let stamps = &stamps[..stamps.len().min(MAX_STAMPS)];
         su.view[3] = stamps.len() as f32;
         self.queue.write_buffer(&self.stamp_ubuf, 0, bytemuck::bytes_of(&su));
@@ -3311,11 +3316,11 @@ impl Engine {
         }
     }
 
-    /// Grows the stroke region by a UV rectangle, plus the padding the
-    /// position map is dilated into (stamps paint it too) and a texel for
-    /// filtering.
-    fn add_region(&mut self, region: Option<[f32; 4]>) {
-        let Some([u0, v0, u1, v1]) = region else {
+    /// Grows the changed UV area by the position-map dilation margin.
+    /// Rectangles stay separate unless they overlap or the draw-count cap
+    /// requires a conservative merge.
+    fn add_regions(&mut self, regions: Option<Vec<[f32; 4]>>) {
+        let Some(regions) = regions else {
             self.region_unknown = true;
             return;
         };
@@ -3323,14 +3328,13 @@ impl Engine {
         let margin = (DILATE_PASSES + 2) as f32;
         let lo = |v: f32| (v * res - margin).floor().clamp(0.0, res) as u32;
         let hi = |v: f32| (v * res + margin).ceil().clamp(0.0, res) as u32;
-        let r = [lo(u0), lo(v0), hi(u1), hi(v1)];
-        if r[2] <= r[0] || r[3] <= r[1] {
-            return;
+        for [u0, v0, u1, v1] in regions {
+            let rect = [lo(u0), lo(v0), hi(u1), hi(v1)];
+            if rect[2] > rect[0] && rect[3] > rect[1] {
+                self.stroke_regions.push(rect);
+            }
         }
-        self.stroke_region = Some(match self.stroke_region {
-            Some(o) => [o[0].min(r[0]), o[1].min(r[1]), o[2].max(r[2]), o[3].max(r[3])],
-            None => r,
-        });
+        compact_scissors(&mut self.stroke_regions);
     }
 
     /// The layer's mask has filters that are on.
@@ -3420,7 +3424,7 @@ impl Engine {
         self.stroke_layer = None;
         self.prefix = None;
         self.prefix_cache = None;
-        self.stroke_region = None;
+        self.stroke_regions.clear();
         self.region_unknown = false;
         let Some(active) = self.active.take() else {
             self.invalidate_thumbs();
