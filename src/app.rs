@@ -818,6 +818,26 @@ pub(crate) fn stroke_region(
             }
             let vp = cam.view_proj(size.x / size.y.max(1.0));
             let on_screen = move |lo: Vec3, hi: Vec3| {
+                // Clip-space w is linear over the AABB, so its extrema
+                // occur at corners. Reject boxes wholly behind the eye;
+                // keep boxes crossing the eye plane conservatively.
+                let (mut w_min, mut w_max) = (f32::INFINITY, f32::NEG_INFINITY);
+                for k in 0..8 {
+                    let p = Vec3::new(
+                        if k & 1 == 0 { lo.x } else { hi.x },
+                        if k & 2 == 0 { lo.y } else { hi.y },
+                        if k & 4 == 0 { lo.z } else { hi.z },
+                    );
+                    let w = (vp * p.extend(1.0)).w;
+                    w_min = w_min.min(w);
+                    w_max = w_max.max(w);
+                }
+                if w_max <= 1e-4 {
+                    return false;
+                }
+                if w_min <= 1e-4 {
+                    return true;
+                }
                 let (mut smin, mut smax) = (Vec2::MAX, Vec2::MIN);
                 for k in 0..8 {
                     let p = Vec3::new(
@@ -826,9 +846,6 @@ pub(crate) fn stroke_region(
                         if k & 4 == 0 { lo.z } else { hi.z },
                     );
                     let c = vp * p.extend(1.0);
-                    if c.w <= 1e-4 {
-                        return true;
-                    }
                     let q = (Vec2::new(c.x, -c.y) / c.w * 0.5 + 0.5) * size;
                     smin = smin.min(q);
                     smax = smax.max(q);
