@@ -3125,10 +3125,6 @@ impl Engine {
         self.gpu_profiler.as_ref().is_some_and(|p| p.pending)
     }
 
-    pub fn gpu_stroke_profile_supported(&self) -> bool {
-        self.gpu_profiler.is_some()
-    }
-
     /// Polygon fill: adds whole triangles to the stroke (UV-space vertices,
     /// three per triangle) and writes the stroke into the target.
     pub fn stroke_polys(&mut self, geometry: &PolyGeometry, paint: &BrushPaint) {
