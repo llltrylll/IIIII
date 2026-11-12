@@ -1,6 +1,6 @@
 # Material Painter
 
-> **Scope of this fork:** a personal production tool focused on reliable, responsive texturing of Roblox assets on the owner's machine. The representative workload is 6 MeshParts, 6 UV maps, and 50,000–100,000 triangles. The maximum planned workload is 12 UV maps and 200,000 triangles. Correctness, stability, and maintainable code take priority over hypothetical 100-item projects, universal hardware optimization, public distribution, or cosmetic work. See [PROJECT_SCOPE.md](PROJECT_SCOPE.md).
+> **Scope of this fork:** a personal production tool for Roblox asset texturing on the owner's machine. Current order: first finish and validate brush and mask systems; only then continue general optimization. Representative workload: 6 MeshParts, 6 UV maps, 50,000–100,000 triangles. Maximum planned workload: 12 UV maps and 200,000 triangles. Major internal refactors are explicitly allowed when they produce a more reliable result. See [PROJECT_SCOPE.md](PROJECT_SCOPE.md) for requirements and shared GPT/Claude rules.
 
 ![Smart materials painted in Material Painter](assets/ui/welcome.jpg)
 
