@@ -305,7 +305,9 @@ fn paint_projections() {
             reference.set_brush_grain(Some((&px, 256)));
         }
         views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &settings, None);
-        assert!(engine.begin_stroke(0, StrokeTarget::Content, [true, false, false, false, false, false, false, false], false));
+        let channels = [true, false, false, false, false, false, false, false];
+        assert!(engine.begin_stroke(0, StrokeTarget::Content, channels, false));
+        assert!(reference.begin_stroke(0, StrokeTarget::Content, channels, false));
         let radius = 28.0;
         let raw: Vec<([f32; 4], f32)> = (0..60).map(|i| ([180.0 + i as f32 * 5.0, 250.0, 1.0, 0.0], 1.0)).collect();
         let fsize = Vec2::new(size[0] as f32, size[1] as f32);
