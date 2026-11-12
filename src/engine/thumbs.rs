@@ -149,10 +149,11 @@ impl Engine {
                     return None;
                 }
                 let key = self.thumb_key(li);
-                // A layer being painted on changes without its key changing.
-                let painting = self.stroke_layer == Some(layer.id);
+                // Keep the previous thumbnail during a stroke. Rebuilding the
+                // 512² mask preview every paint frame stalls the GPU; end_stroke()
+                // invalidates the key so the preview is rendered once on release.
                 let current = self.thumbs.entries.get(&layer.id).is_some_and(|e| e.key == key);
-                (painting || !current).then_some((li, key))
+                (!current).then_some((li, key))
             })
             .collect();
         if todo.is_empty() {
