@@ -983,7 +983,7 @@ pub(crate) fn stroke_region(
                     w_min = w_min.min(w);
                     w_max = w_max.max(w);
                 }
-                if w_max <= 1e-4 {
+                if w_max <= 0.0 {
                     return false;
                 }
                 if w_min <= 1e-4 {
