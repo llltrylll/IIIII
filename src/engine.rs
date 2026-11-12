@@ -1415,7 +1415,10 @@ fn expand_scissors(rects: &mut Vec<[u32; 4]>, margin: u32, limit: u32, wrap: boo
 /// Keep scissors disjoint. If the list exceeds the cap, merge the cheapest
 /// pair by added texel area; a merge only expands coverage, never drops it.
 /// Converts conservative normalized paint bounds to half-open pixel rectangles.
-fn normalized_scissors(regions: &[[f32; 4]], res: u32) -> Vec<[u32; 4]> {
+fn normalized_scissors(regions: &[[f32; 4]], res: u32) -> Option<Vec<[u32; 4]>> {
+    if regions.iter().flatten().any(|v| !v.is_finite()) {
+        return None;
+    }
     let size = res.max(1) as f32;
     let low = |v: f32| (v * size).floor().clamp(0.0, size) as u32;
     let high = |v: f32| (v * size).ceil().clamp(0.0, size) as u32;
@@ -1436,7 +1439,7 @@ fn normalized_scissors(regions: &[[f32; 4]], res: u32) -> Vec<[u32; 4]> {
         .filter(|r| r[2] > r[0] && r[3] > r[1])
         .collect();
     compact_scissors(&mut rects);
-    rects
+    Some(rects)
 }
 
 fn compact_scissors(rects: &mut Vec<[u32; 4]>) {
@@ -3343,7 +3346,10 @@ impl Engine {
         }
         // The per-frame bounds are conservative paint raster bounds. Keep
         // them separate from the wider accumulated bounds used by compositing.
-        let frame_scissors = regions.as_deref().map(|r| normalized_scissors(r, self.res));
+        let frame_scissors = regions.as_deref().and_then(|r| normalized_scissors(r, self.res));
+        // Invalid normalized bounds are not safe to scissor; force the
+        // accumulated composite path to full-frame too.
+        let regions = frame_scissors.as_ref().and(regions);
         let full_area = u64::from(self.res) * u64::from(self.res);
         self.last_paint_scissor_pixels = frame_scissors.as_ref().map_or(full_area, |rects| rects.iter().map(|&r| scissor_area(r)).sum());
         self.last_paint_scissor_rects = frame_scissors.as_ref().map_or(1, |rects| rects.len() as u32);
@@ -4726,9 +4732,15 @@ mod scissor_tests {
     }
 
     #[test]
+    fn normalized_scissors_reject_non_finite_bounds() {
+        assert!(normalized_scissors(&[[f32::NAN, 0.0, 1.0, 1.0]], 128).is_none());
+        assert!(normalized_scissors(&[[0.0, 0.0, f32::INFINITY, 1.0]], 128).is_none());
+    }
+
+    #[test]
     fn normalized_scissors_round_outward_and_clip_to_texture() {
         let margin = DILATE_PASSES + 2;
-        let rects = normalized_scissors(&[[-0.1, 0.2, 0.251, 1.2], [0.7, 0.7, 0.8, 0.8]], 100);
+        let rects = normalized_scissors(&[[-0.1, 0.2, 0.251, 1.2], [0.7, 0.7, 0.8, 0.8]], 100).expect("finite bounds");
         assert_eq!(
             rects,
             vec![
