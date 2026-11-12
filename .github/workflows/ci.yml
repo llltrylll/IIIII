@@ -2,6 +2,8 @@
 name: CI
 on:
   push:
+    branches-ignore:
+      - 'fix/**'
   pull_request:
 jobs:
   test:

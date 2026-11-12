@@ -2924,6 +2924,8 @@ impl Engine {
     }
 
     /// Lays down this frame's stamps and writes the stroke into the target.
+    /// Keep painting passes unscissored: composite bounds are not yet proven safe
+    /// as raster bounds for every brush projection and texture-set layout.
     /// `region` bounds the texels the stamps can reach, in UV (u0, v0, u1,
     /// v1), or `None` if unknown.
     pub fn stroke_step(
