@@ -778,6 +778,66 @@ fn grow(acc: Option<[f32; 4]>, lo: Vec2, hi: Vec2) -> [f32; 4] {
     }
 }
 
+/// UV tile resolution for conservative multi-rectangle stroke bounds.
+const STROKE_REGION_GRID: usize = 64;
+/// Avoid turning a complex UV layout into hundreds of tiny GPU draws.
+const MAX_STROKE_REGION_RECTS: usize = 64;
+
+fn mark_uv_tiles(tiles: &mut [bool], lo: Vec2, hi: Vec2) {
+    const N: usize = STROKE_REGION_GRID;
+    if hi.x < 0.0 || hi.y < 0.0 || lo.x > 1.0 || lo.y > 1.0 {
+        return;
+    }
+    let cell = |v: f32| ((v.clamp(0.0, 1.0) * N as f32).floor() as usize).min(N - 1);
+    let (x0, x1) = (cell(lo.x), cell(hi.x));
+    let (y0, y1) = (cell(lo.y), cell(hi.y));
+    for y in y0.min(y1)..=y0.max(y1) {
+        for x in x0.min(x1)..=x0.max(x1) {
+            tiles[y * N + x] = true;
+        }
+    }
+}
+
+/// Compresses occupied UV tiles into disjoint rectangles. If a pathological
+/// layout creates too many runs, fall back to one conservative bounding box.
+fn uv_tile_rectangles(tiles: &[bool]) -> Option<Vec<[f32; 4]>> {
+    const N: usize = STROKE_REGION_GRID;
+    let mut rects: Vec<[usize; 4]> = Vec::new();
+    for y in 0..N {
+        let mut x = 0;
+        while x < N {
+            if !tiles[y * N + x] {
+                x += 1;
+                continue;
+            }
+            let x0 = x;
+            while x < N && tiles[y * N + x] {
+                x += 1;
+            }
+            if let Some(r) = rects.iter_mut().rev().find(|r| r[0] == x0 && r[2] == x && r[3] == y) {
+                r[3] = y + 1;
+            } else {
+                rects.push([x0, y, x, y + 1]);
+            }
+        }
+    }
+    if rects.is_empty() {
+        return None;
+    }
+    if rects.len() > MAX_STROKE_REGION_RECTS {
+        let x0 = rects.iter().map(|r| r[0]).min().unwrap_or(0);
+        let y0 = rects.iter().map(|r| r[1]).min().unwrap_or(0);
+        let x1 = rects.iter().map(|r| r[2]).max().unwrap_or(N);
+        let y1 = rects.iter().map(|r| r[3]).max().unwrap_or(N);
+        return Some(vec![[x0 as f32 / N as f32, y0 as f32 / N as f32, x1 as f32 / N as f32, y1 as f32 / N as f32]]);
+    }
+    Some(
+        rects.into_iter()
+            .map(|r| [r[0] as f32 / N as f32, r[1] as f32 / N as f32, r[2] as f32 / N as f32, r[3] as f32 / N as f32])
+            .collect(),
+    )
+}
+
 /// UV bounds of what a frame's stamps can paint in the 3D view: the UV
 /// boxes of every triangle they can reach. Screen stamps reach whatever
 /// projects into their circles at any depth (and, with symmetry, whatever
@@ -792,12 +852,14 @@ pub(crate) fn stroke_region(
     symmetry: u8,
     radius: f32,
     stamps: &[Stamp],
-) -> Option<[f32; 4]> {
+) -> Option<Vec<[f32; 4]>> {
     if projection == BrushProjection::Uv {
-        return stamps.iter().filter(|s| s[1][3] > 0.0).fold(None, |acc, s| {
+        let mut tiles = vec![false; STROKE_REGION_GRID * STROKE_REGION_GRID];
+        for s in stamps.iter().filter(|s| s[1][3] > 0.0) {
             let (uv, r) = (Vec2::new(s[4][0], s[4][1]), s[2][3]);
-            Some(grow(acc, uv - Vec2::splat(r), uv + Vec2::splat(r)))
-        });
+            mark_uv_tiles(&mut tiles, uv - Vec2::splat(r), uv + Vec2::splat(r));
+        }
+        return uv_tile_rectangles(&tiles);
     }
     let mut flip = Vec3::ONE;
     if symmetry > 0 {
@@ -860,14 +922,18 @@ pub(crate) fn stroke_region(
             })
         }
     };
-    let mut acc = None;
+    let mut tiles = vec![false; STROKE_REGION_GRID * STROKE_REGION_GRID];
     bvh.query(overlaps, |t| {
+        let mut lo = Vec2::splat(f32::INFINITY);
+        let mut hi = Vec2::splat(f32::NEG_INFINITY);
         for k in 0..3 {
             let uv = Vec2::from(mesh.vertices[mesh.indices[t as usize * 3 + k] as usize].uv);
-            acc = Some(grow(acc, uv, uv));
+            lo = lo.min(uv);
+            hi = hi.max(uv);
         }
+        mark_uv_tiles(&mut tiles, lo, hi);
     });
-    acc
+    uv_tile_rectangles(&tiles)
 }
 
 /// The third-party license notices shipped next to the executable (or in
