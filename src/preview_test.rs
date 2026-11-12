@@ -415,12 +415,13 @@ fn scissored_mask_stroke_matches_full_frame() {
         engine.add_mask(layer, true, Some(GenKind::IdMask.default_generator()), undo);
         let mask = engine.layers[layer].mask.as_mut().expect("mask was added");
         mask.filters = vec![MaskFilter::new(FilterKind::Blur), MaskFilter::new(FilterKind::Warp)];
+        let paint_layer = engine.add_paint_layer(1, None, None, undo);
         engine.mark_dirty();
         engine.composite();
-        layer
+        (layer, paint_layer)
     };
-    let target = configure(&mut optimized, &mut optimized_undo);
-    let reference_target = configure(&mut reference, &mut reference_undo);
+    let (target, paint_layer) = configure(&mut optimized, &mut optimized_undo);
+    let (reference_target, reference_paint_layer) = configure(&mut reference, &mut reference_undo);
 
     let cam = OrbitCam { target: (mesh.bounds_min + mesh.bounds_max) * 0.5, ..Default::default() };
     let size = [512u32, 512u32];
@@ -453,7 +454,7 @@ fn scissored_mask_stroke_matches_full_frame() {
         proj: [BrushProjection::Screen as u32 as f32, 0.0, 85f32.to_radians().cos(), 0.0],
     };
     let paint = BrushPaint { mat: MatValues::default(), mask_value: 0.0, opacity: 1.0, erase: false, grain: [0.0; 4] };
-    optimized.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, Some(regions));
+    optimized.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, Some(regions.clone()));
     reference.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, None);
     optimized.end_stroke();
     reference.end_stroke();
@@ -471,6 +472,36 @@ fn scissored_mask_stroke_matches_full_frame() {
         let partial = read_texture(&rs.device, &rs.queue, optimized.final_tex(channel));
         let full = read_texture(&rs.device, &rs.queue, reference.final_tex(channel));
         assert_eq!(partial, full, "filtered ID-mask composite differs in channel {channel}");
+    }
+    assert!(optimized.last_mask_cache_misses > 0, "editing a mask must rebuild its filtered result");
+
+    // Editing only another layer's paint must reuse the unchanged ID mask.
+    let channels = [true, false, false, false, false, false, false, false];
+    assert!(optimized.begin_stroke(paint_layer, StrokeTarget::Content, channels, false));
+    assert!(reference.begin_stroke(reference_paint_layer, StrokeTarget::Content, channels, false));
+    let content_paint = BrushPaint {
+        mat: MatValues {
+            enabled: channels,
+            color: [0.85, 0.08, 0.04],
+            ..Default::default()
+        },
+        mask_value: 1.0,
+        opacity: 1.0,
+        erase: false,
+        grain: [0.0; 4],
+    };
+    optimized.stroke_step(&stamps, su, views.view3d.depth_view(), &content_paint, Some(regions));
+    reference.stroke_step(&stamps, su, views.view3d.depth_view(), &content_paint, None);
+    optimized.end_stroke();
+    reference.end_stroke();
+    optimized.composite();
+    reference.composite();
+    assert!(optimized.last_mask_cache_hits > 0, "content painting should reuse the unchanged filtered mask");
+    assert_eq!(optimized.last_mask_cache_misses, 0, "content painting must not invalidate the ID mask");
+    for channel in 0..7 {
+        let partial = read_texture(&rs.device, &rs.queue, optimized.final_tex(channel));
+        let full = read_texture(&rs.device, &rs.queue, reference.final_tex(channel));
+        assert_eq!(partial, full, "cached mask composite differs in channel {channel}");
     }
 }
 
