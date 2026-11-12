@@ -882,6 +882,30 @@ fn uv_tile_rectangles(tiles: &[bool]) -> Option<Vec<[f32; 4]>> {
 /// UV bounds are rasterized into a coarse grid and compressed into disjoint
 /// rectangles, preserving coverage while avoiding one large bbox across islands.
 /// Screen stamps include all depths; the shader's depth test remains authoritative.
+fn mark_candidate_triangle_uv(
+    tiles: &mut [bool],
+    mesh: &Mesh,
+    triangle_indices: &std::ops::Range<u32>,
+    triangle: u32,
+) {
+    let first_index = triangle * 3;
+    if first_index < triangle_indices.start || first_index + 3 > triangle_indices.end {
+        return;
+    }
+    let mut lo = Vec2::splat(f32::INFINITY);
+    let mut hi = Vec2::splat(f32::NEG_INFINITY);
+    for k in 0..3 {
+        let uv = Vec2::from(mesh.vertices[mesh.indices[triangle as usize * 3 + k] as usize].uv);
+        lo = lo.min(uv);
+        hi = hi.max(uv);
+    }
+    mark_uv_tiles(tiles, lo, hi);
+}
+
+/// Conservative UV rectangles for a frame's 3D stamps. Candidate triangle
+/// UV bounds are rasterized into a coarse grid and compressed into disjoint
+/// rectangles, preserving coverage while avoiding one large bbox across islands.
+/// Screen stamps include all depths; the shader's depth test remains authoritative.
 pub(crate) fn stroke_region(
     mesh: &Mesh,
     bvh: &Bvh,
@@ -901,20 +925,25 @@ pub(crate) fn stroke_region(
         }
         return uv_tile_rectangles(&tiles);
     }
-    let mut flip = Vec3::ONE;
-    if symmetry > 0 {
-        flip[symmetry as usize - 1] = -1.0;
-    }
-    let overlaps: Box<dyn Fn(Vec3, Vec3) -> bool> = match projection {
+
+    let mut tiles = [false; STROKE_REGION_GRID * STROKE_REGION_GRID];
+    match projection {
         BrushProjection::Surface => {
-            // Spheres around the discs (planar radius r, slab r).
-            let spheres: Vec<(Vec3, f32)> =
-                stamps.iter().filter(|s| s[1][3] > 0.0).map(|s| (Vec3::new(s[1][0], s[1][1], s[1][2]), s[1][3] * 1.5)).collect();
-            Box::new(move |lo: Vec3, hi: Vec3| spheres.iter().any(|&(c, r)| c.clamp(lo, hi).distance_squared(c) <= r * r))
+            // Resolve mirrored stamps before querying; no symmetry transform is
+            // needed here, and the sphere test stays conservative for each disc.
+            let spheres: Vec<(Vec3, f32)> = stamps
+                .iter()
+                .filter(|s| s[1][3] > 0.0)
+                .map(|s| (Vec3::new(s[1][0], s[1][1], s[1][2]), s[1][3] * 1.5))
+                .collect();
+            bvh.query(
+                |lo, hi| spheres.iter().any(|&(c, r)| c.clamp(lo, hi).distance_squared(c) <= r * r),
+                |t| mark_candidate_triangle_uv(&mut tiles, mesh, &triangle_indices, t),
+            );
         }
         _ => {
-            // Screen box of all the circles; boxes crossing the eye plane
-            // are kept conservatively, while boxes wholly behind are rejected.
+            // Screen box of all circles; boxes crossing the eye plane are
+            // kept conservatively, while boxes wholly behind it are rejected.
             let (mut a, mut b) = (Vec2::MAX, Vec2::MIN);
             for s in stamps {
                 let r = radius * s[0][2];
@@ -922,10 +951,9 @@ pub(crate) fn stroke_region(
                 b = b.max(Vec2::new(s[0][0] + r, s[0][1] + r));
             }
             let vp = cam.view_proj(size.x / size.y.max(1.0));
-            let on_screen = move |lo: Vec3, hi: Vec3| {
-                // Clip-space w is linear over the AABB, so its extrema
-                // occur at corners. Reject boxes wholly behind the eye;
-                // keep boxes crossing the eye plane conservatively.
+            let on_screen = |lo: Vec3, hi: Vec3| {
+                // Clip-space w is linear over the AABB, so its extrema occur
+                // at corners. Keep boxes crossing the eye plane conservatively.
                 let (mut w_min, mut w_max) = (f32::INFINITY, f32::NEG_INFINITY);
                 for k in 0..8 {
                     let p = Vec3::new(
@@ -957,28 +985,22 @@ pub(crate) fn stroke_region(
                 }
                 smin.x <= b.x && smax.x >= a.x && smin.y <= b.y && smax.y >= a.y
             };
-            Box::new(move |lo: Vec3, hi: Vec3| {
-                on_screen(lo, hi) || (symmetry > 0 && { let (m, n) = (lo * flip, hi * flip); on_screen(m.min(n), m.max(n)) })
-            })
+            let mut flip = Vec3::ONE;
+            if symmetry > 0 {
+                flip[symmetry as usize - 1] = -1.0;
+            }
+            bvh.query(
+                |lo, hi| {
+                    on_screen(lo, hi)
+                        || (symmetry > 0 && {
+                            let (m, n) = (lo * flip, hi * flip);
+                            on_screen(m.min(n), m.max(n))
+                        })
+                },
+                |t| mark_candidate_triangle_uv(&mut tiles, mesh, &triangle_indices, t),
+            );
         }
-    };
-    let mut tiles = [false; STROKE_REGION_GRID * STROKE_REGION_GRID];
-    bvh.query(overlaps, |t| {
-        // Bvh reports absolute triangle indices; Engine::triangles() is the
-        // active texture set's index-buffer range (three indices per triangle).
-        let first_index = t * 3;
-        if first_index < triangle_indices.start || first_index + 3 > triangle_indices.end {
-            return;
-        }
-        let mut lo = Vec2::splat(f32::INFINITY);
-        let mut hi = Vec2::splat(f32::NEG_INFINITY);
-        for k in 0..3 {
-            let uv = Vec2::from(mesh.vertices[mesh.indices[t as usize * 3 + k] as usize].uv);
-            lo = lo.min(uv);
-            hi = hi.max(uv);
-        }
-        mark_uv_tiles(&mut tiles, lo, hi);
-    });
+    }
     uv_tile_rectangles(&tiles)
 }
 
