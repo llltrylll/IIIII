@@ -432,7 +432,7 @@ fn perf_4k() {
         let raw: Vec<([f32; 4], f32)> = (0..6).map(|i| ([500.0 + (f * 6 + i) as f32 * 3.0, 500.0, 1.0, 0.0], 1.0)).collect();
         let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, 35.0, &raw);
         let t = Instant::now();
-        let region = crate::app::stroke_region(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, 35.0, &stamps);
+        let region = crate::app::stroke_region(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, 35.0, &stamps);
         engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, region);
         wait(&rs);
         t_stroke += t.elapsed().as_secs_f64();
