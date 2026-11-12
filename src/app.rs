@@ -3949,11 +3949,14 @@ impl PainterApp {
                 let center = Vec2::new(w as f32, h as f32) * 0.5;
                 let zoom = self.cam2d.zoom.max(1.0);
                 let radius = self.brush.size * 0.5 * self.ppp;
-                stamps.iter().fold(None, |acc, s| {
-                    let uv = (Vec2::new(s[0][0], s[0][1]) - center - self.cam2d.pan) / zoom + Vec2::splat(0.5);
-                    let r = radius * s[0][2] / zoom;
-                    Some(grow(acc, uv - Vec2::splat(r), uv + Vec2::splat(r)))
-                })
+                stamps
+                    .iter()
+                    .fold(None, |acc, s| {
+                        let uv = (Vec2::new(s[0][0], s[0][1]) - center - self.cam2d.pan) / zoom + Vec2::splat(0.5);
+                        let r = radius * s[0][2] / zoom;
+                        Some(grow(acc, uv - Vec2::splat(r), uv + Vec2::splat(r)))
+                    })
+                    .map(|region| vec![region])
             }
         };
         let stamp_started = Instant::now();
