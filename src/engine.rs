@@ -3140,7 +3140,7 @@ impl Engine {
         su: StampUniform,
         depth: &wgpu::TextureView,
         paint: &BrushPaint,
-        region: Option<[f32; 4]>,
+        regions: Option<Vec<[f32; 4]>>,
     ) {
         self.stroke_step_inner(stamps, su, depth, paint, regions, true);
     }
@@ -3151,7 +3151,7 @@ impl Engine {
         mut su: StampUniform,
         depth: &wgpu::TextureView,
         paint: &BrushPaint,
-        region: Option<[f32; 4]>,
+        regions: Option<Vec<[f32; 4]>>,
         profile_gpu: bool,
     ) {
         if self.active.is_none() || stamps.is_empty() {
@@ -3227,7 +3227,7 @@ impl Engine {
         let (lo, hi) = faces.iter().chain(padding).fold(([f32::MAX; 2], [f32::MIN; 2]), |(lo, hi), p| {
             ([lo[0].min(p[0]), lo[1].min(p[1])], [hi[0].max(p[0]), hi[1].max(p[1])])
         });
-        self.add_region(Some([lo[0], lo[1], hi[0], hi[1]]));
+        self.add_regions(Some(vec![[lo[0], lo[1], hi[0], hi[1]]]));
         use wgpu::util::DeviceExt;
         let all: Vec<[f32; 2]> = faces.iter().chain(padding).copied().collect();
         let vertices = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
