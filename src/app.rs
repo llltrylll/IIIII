@@ -455,7 +455,9 @@ struct StrokeMeter {
     /// `stroke_step` calls since the last recomposition.
     steps_now: u32,
     steps_per_frame: Stat,
-    /// CPU time spent resolving the 3D/2D UV region before GPU stamp submission.
+    /// CPU time spent mapping cursor samples to surface stamps.
+    resolve_cpu: Stat,
+    /// CPU time spent calculating the changed UV region before GPU submission.
     region_cpu: Stat,
     step_cpu: Stat,
     begin_cpu: Stat,
@@ -496,8 +498,9 @@ impl StrokeMeter {
         let patch_percent = if texture_pixels == 0 { 0.0 } else { scissor_pixels as f64 * 100.0 / texture_pixels as f64 };
         let bbox_percent = if texture_pixels == 0 { 0.0 } else { bbox_pixels as f64 * 100.0 / texture_pixels as f64 };
         format!(
-            "F6 CPU avg/peak ms: steps/frame {}, region {}, stamp {}, begin {}, recomp {}, end {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {} | patch {:.1}% (bbox {:.1}%, {} scissors) | since F6: full recomps {full}, thumbnails {thumbs}",
+            "F6 CPU avg/peak ms: steps/frame {}, resolve {}, region {}, stamp {}, begin {}, recomp {}, end {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {} | patch {:.1}% (bbox {:.1}%, {} scissors) | since F6: full recomps {full}, thumbnails {thumbs}",
             self.steps_per_frame.text(),
+            self.resolve_cpu.text(),
             self.region_cpu.text(),
             self.step_cpu.text(),
             self.begin_cpu.text(),
@@ -3928,6 +3931,7 @@ impl PainterApp {
 
     fn paint_stamps(&mut self, kind: ViewKind, raw: &[([f32; 4], f32)]) {
         let su = self.stamp_uniform(kind);
+        let resolve_started = self.meter.on.then(Instant::now);
         let stamps = match kind {
             ViewKind::V3d => {
                 let [w, h] = self.views.view3d.size;
@@ -3937,6 +3941,9 @@ impl PainterApp {
             // The 2D view is the texture: stamps land where they are drawn.
             ViewKind::V2d => resolve_stamps(&self.mesh, &self.bvh, &self.cam, Vec2::ONE, BrushProjection::Screen, 0, 0.0, raw),
         };
+        if let Some(started) = resolve_started {
+            self.meter.resolve_cpu.add(started.elapsed().as_secs_f64() * 1000.0);
+        }
         let mut mat = self.brush.mat;
         if let StrokeTarget::BakeFix(_) = self.target {
             mat.rough = self.brush.fix_value;
