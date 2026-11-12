@@ -1275,6 +1275,10 @@ pub struct Engine {
     thumbs: thumbs::Thumbs,
     /// Composites that redid the whole texture instead of a stroke's patch (the F6 meter counts them).
     pub full_recomps: u32,
+    /// Texel area used by the most recent stamp/apply scissor (full texture on fallback).
+    pub last_paint_scissor_pixels: u64,
+    /// Number of non-overlapping stamp/apply scissors in the most recent stroke step.
+    pub last_paint_scissor_rects: u32,
     /// Texel area processed by the most recent composite scissor (full texture on full recomposites).
     pub last_scissor_pixels: u64,
     /// Bounding-box area of the last scissor set (for F6 comparison).
@@ -1549,6 +1553,8 @@ impl Engine {
             uv_version: 0,
             thumbs: Default::default(),
             full_recomps: 0,
+            last_paint_scissor_pixels: 0,
+            last_paint_scissor_rects: 0,
             last_scissor_pixels: 0,
             last_scissor_bbox_pixels: 0,
             last_scissor_rects: 0,
@@ -3338,6 +3344,9 @@ impl Engine {
         // The per-frame bounds are conservative paint raster bounds. Keep
         // them separate from the wider accumulated bounds used by compositing.
         let frame_scissors = regions.as_deref().map(|r| normalized_scissors(r, self.res));
+        let full_area = u64::from(self.res) * u64::from(self.res);
+        self.last_paint_scissor_pixels = frame_scissors.as_ref().map_or(full_area, |rects| rects.iter().map(|&r| scissor_area(r)).sum());
+        self.last_paint_scissor_rects = frame_scissors.as_ref().map_or(1, |rects| rects.len() as u32);
         self.add_regions(regions);
         let stamps = &stamps[..stamps.len().min(MAX_STAMPS)];
         su.view[3] = stamps.len() as f32;
@@ -3415,6 +3424,8 @@ impl Engine {
         let (lo, hi) = faces.iter().chain(padding).fold(([f32::MAX; 2], [f32::MIN; 2]), |(lo, hi), p| {
             ([lo[0].min(p[0]), lo[1].min(p[1])], [hi[0].max(p[0]), hi[1].max(p[1])])
         });
+        self.last_paint_scissor_pixels = u64::from(self.res) * u64::from(self.res);
+        self.last_paint_scissor_rects = 1;
         self.add_regions(Some(vec![[lo[0], lo[1], hi[0], hi[1]]]));
         use wgpu::util::DeviceExt;
         let all: Vec<[f32; 2]> = faces.iter().chain(padding).copied().collect();
