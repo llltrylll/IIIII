@@ -563,6 +563,16 @@ fn multi_scissor_nested_folder_matches_full() {
         engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, Some(regions));
         engine.composite();
 
+        if frame == 0 {
+            let mask_tex = engine.layers[target].mask.as_ref().unwrap().paint.as_ref().unwrap();
+            let mask = read_texture(&rs.device, &rs.queue, mask_tex);
+            let painted_in = |x0: u32, y0: u32, x1: u32, y1: u32| {
+                (y0..y1).any(|y| (x0..x1).any(|x| mask[(y * res + x) as usize] < 240))
+            };
+            assert!(painted_in(0, 0, 64, 64), "the upper-left UV island received no paint");
+            assert!(painted_in(192, 192, 256, 256), "the lower-right UV island received no paint");
+        }
+
         // Compare after every incremental frame, not only after the final
         // accumulated stroke. Rebuild the prefix before the next frame too.
         let partial: Vec<Vec<u8>> = (0..7).map(|c| read_texture(&rs.device, &rs.queue, engine.final_tex(c))).collect();
