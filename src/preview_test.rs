@@ -486,10 +486,12 @@ fn multi_scissor_nested_folder_matches_full() {
     ];
     let normals = Some(vec![Vec3::Y; 8]);
     let uvs = vec![
-        Vec2::new(0.05, 0.05), Vec2::new(0.30, 0.05),
-        Vec2::new(0.30, 0.30), Vec2::new(0.05, 0.30),
-        Vec2::new(0.70, 0.70), Vec2::new(0.95, 0.70),
-        Vec2::new(0.95, 0.95), Vec2::new(0.70, 0.95),
+        // Both islands approach opposite texture corners so Warp must sample
+        // across the repeating U and V seams while the composite is partial.
+        Vec2::new(0.005, 0.005), Vec2::new(0.25, 0.005),
+        Vec2::new(0.25, 0.25), Vec2::new(0.005, 0.25),
+        Vec2::new(0.75, 0.75), Vec2::new(0.995, 0.75),
+        Vec2::new(0.995, 0.995), Vec2::new(0.75, 0.995),
     ];
     let indices = vec![0, 3, 2, 0, 2, 1, 4, 7, 6, 4, 6, 5];
     let mesh = Arc::new(Mesh::from_parts("Two UV islands".into(), positions, normals, uvs, indices));
