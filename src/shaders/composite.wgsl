@@ -242,8 +242,13 @@ fn layer_mask(c: vec2<i32>, p: vec3<f32>, n: vec3<f32>, uv: vec2<f32>) -> f32 {
 fn fs_mask_source(in: FsOut) -> @location(0) vec4<f32> {
     let c = vec2<i32>(in.pos.xy);
     let uv = in.pos.xy / vec2<f32>(textureDimensions(pos_map));
-    let p = textureLoad(pos_map, c, 0).xyz;
-    let n = normalize(textureLoad(nrm_map, c, 0).xyz * 2.0 - 1.0);
+    var p = vec3<f32>(0.0);
+    var n = vec3<f32>(0.0, 0.0, 1.0);
+    // A painted-only mask needs neither mesh position nor normal data.
+    if (u.gp1.z > 0.5) {
+        p = textureLoad(pos_map, c, 0).xyz;
+        n = normalize(textureLoad(nrm_map, c, 0).xyz * 2.0 - 1.0);
+    }
     return vec4<f32>(layer_mask(c, p, n, uv), 0.0, 0.0, 1.0);
 }
 
@@ -264,8 +269,14 @@ fn fs_layer(in: FsOut) -> AccumOut {
     let pn = textureLoad(prev_normal, c, 0).xyz * 2.0 - 1.0;
     let ps = textureLoad(prev_spec, c, 0).r;
 
-    let p = textureLoad(pos_map, c, 0).xyz;
-    let n = normalize(textureLoad(nrm_map, c, 0).xyz * 2.0 - 1.0);
+    var p = vec3<f32>(0.0);
+    var n = vec3<f32>(0.0, 0.0, 1.0);
+    // Ordinary paint layers do not use surface-space data. Avoid two texture
+    // reads per texel unless a fill projection or smart mask actually needs it.
+    if (u.p0.z > 0.5 || u.gp1.z > 0.5) {
+        p = textureLoad(pos_map, c, 0).xyz;
+        n = normalize(textureLoad(nrm_map, c, 0).xyz * 2.0 - 1.0);
+    }
 
     var sc = u.fill_color.rgb;
     var sr = u.fill_rmh.x;
