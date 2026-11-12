@@ -464,6 +464,109 @@ fn perf_4k() {
     }
 }
 
+/// Multi-scissor GPU regression: two spatially separated mesh islands map to
+/// distant UV islands. Painting a filtered inner-folder mask through nested
+/// folders must produce the same pixels as a full recomposition.
+/// Run: cargo test --bin material_painter multi_scissor_nested_folder_matches_full -- --ignored --nocapture
+#[test]
+#[ignore]
+fn multi_scissor_nested_folder_matches_full() {
+    use crate::app::{BrushProjection, resolve_stamps, stroke_region};
+    use crate::engine::{BrushPaint, CHANNELS, FillParams, FilterKind, MaskFilter, MatValues, StampUniform};
+    use crate::mesh::Mesh;
+    use crate::undo::{StrokeTarget, UndoStack};
+    use glam::{Vec2, Vec3};
+
+    // Two disconnected quads in screen space, with UV islands in opposite corners.
+    let positions = vec![
+        Vec3::new(-1.0, 0.0, -0.55), Vec3::new(-0.1, 0.0, -0.55),
+        Vec3::new(-0.1, 0.0, 0.55), Vec3::new(-1.0, 0.0, 0.55),
+        Vec3::new(0.1, 0.0, -0.55), Vec3::new(1.0, 0.0, -0.55),
+        Vec3::new(1.0, 0.0, 0.55), Vec3::new(0.1, 0.0, 0.55),
+    ];
+    let normals = Some(vec![Vec3::Y; 8]);
+    let uvs = vec![
+        Vec2::new(0.05, 0.05), Vec2::new(0.30, 0.05),
+        Vec2::new(0.30, 0.30), Vec2::new(0.05, 0.30),
+        Vec2::new(0.70, 0.70), Vec2::new(0.95, 0.70),
+        Vec2::new(0.95, 0.95), Vec2::new(0.70, 0.95),
+    ];
+    let indices = vec![0, 3, 2, 0, 2, 1, 4, 7, 6, 4, 6, 5];
+    let mesh = Arc::new(Mesh::from_parts("Two UV islands".into(), positions, normals, uvs, indices));
+    let bvh = crate::bvh::Bvh::from_mesh(&mesh);
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let res = 256;
+    let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+    let mut undo = UndoStack::default();
+
+    let outer = engine.add_folder(0, None, "Outer".into(), &mut undo);
+    let outer_id = engine.layers[outer].id;
+    engine.layers[outer].opacity = 0.8;
+    engine.add_mask(outer, true, None, &mut undo);
+    engine.layers[outer].mask.as_mut().unwrap().filters = vec![MaskFilter::new(FilterKind::Warp)];
+
+    let inner = engine.add_folder(1, Some(outer_id), "Inner".into(), &mut undo);
+    let inner_id = engine.layers[inner].id;
+    engine.add_mask(inner, true, None, &mut undo);
+    engine.layers[inner].mask.as_mut().unwrap().filters = vec![
+        MaskFilter::new(FilterKind::Blur),
+        MaskFilter::new(FilterKind::Warp),
+    ];
+
+    let fill = FillParams {
+        mat: MatValues { enabled: [true, true, true, false, false, false, false, false], color: [0.65, 0.25, 0.08], ..Default::default() },
+        ..Default::default()
+    };
+    engine.add_fill_layer(2, Some(inner_id), "Paint target".into(), fill, &mut undo);
+    engine.mark_dirty();
+    engine.composite();
+
+    let cam = OrbitCam { yaw: 0.0, pitch: 1.5, dist: 3.2, target: Vec3::ZERO, ..Default::default() };
+    let size = [512u32, 512u32];
+    let fsize = Vec2::new(size[0] as f32, size[1] as f32);
+    let mut views = ViewRenderer::new(&rs);
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+
+    assert!(engine.begin_stroke(inner, StrokeTarget::Mask, [false; CHANNELS], false));
+    let radius = 30.0;
+    let su = StampUniform {
+        view_proj: cam.view_proj(fsize.x / fsize.y).to_cols_array_2d(),
+        cam_pos: cam.eye().extend(1.0).to_array(),
+        view: [fsize.x, fsize.y, 0.0, 0.0],
+        view2d: [0.0; 4],
+        brush: [radius, 0.6, 1.0, 0.0],
+        clip: [crate::viewport::NEAR, crate::viewport::FAR, 0.0, 0.0],
+        proj: [BrushProjection::Screen as u32 as f32, 0.0, 85f32.to_radians().cos(), 0.0],
+    };
+    let paint = BrushPaint { mat: MatValues::default(), mask_value: 0.0, opacity: 1.0, erase: false, grain: [0.0; 4] };
+
+    for frame in 0..4 {
+        views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &ViewSettings::default(), None);
+        let raw = [
+            ([132.0 + frame as f32 * 4.0, 256.0, 1.0, 0.0], 1.0),
+            ([380.0 - frame as f32 * 4.0, 256.0, 1.0, 0.0], 1.0),
+        ];
+        let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+        let regions = stroke_region(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps)
+            .expect("both UV islands must be included in the changed region");
+        assert!(regions.len() >= 2, "expected disjoint UV scissors, got {}", regions.len());
+
+        engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, Some(regions));
+        engine.composite();
+    }
+
+    let partial: Vec<Vec<u8>> = (0..7).map(|c| read_texture(&rs.device, &rs.queue, engine.final_tex(c))).collect();
+    engine.mark_dirty();
+    engine.composite();
+    for c in 0..7 {
+        let full = read_texture(&rs.device, &rs.queue, engine.final_tex(c));
+        assert_eq!(full, partial[c], "final texture channel {c} differs after full recomposition");
+    }
+    engine.end_stroke();
+}
+
 /// Every built-in graph node compiles and renders, fed by noise where it has
 /// inputs; the starter graph produces its outputs. Thumbnails go to
 /// `target/bake_test/graph/`.
