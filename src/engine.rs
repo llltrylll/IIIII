@@ -657,7 +657,7 @@ pub struct Folder {
 }
 
 /// One step of compositing.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Pass {
     /// Saves the stack below a faded or masked folder.
     Begin,
