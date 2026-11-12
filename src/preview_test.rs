@@ -1459,6 +1459,62 @@ fn layer_thumbnails() {
     assert!(blue[2] > blue[0] * 2.0, "the thumbnail follows the fill's color: {blue:?}");
 }
 
+/// Painting a fill's mask rebuilds no thumbnail while the stroke is held, and
+/// on release only the mask's: the fill's content thumbnail is a full 512²
+/// composite, which once stalled every paint frame by over 100 ms.
+#[test]
+#[ignore]
+fn mask_stroke_redoes_only_the_mask_thumbnail() {
+    use crate::app::{BrushProjection, resolve_stamps};
+    use crate::engine::{BrushPaint, CHANNELS, FillParams, MatValues, StampUniform};
+    use crate::undo::{StrokeTarget, UndoStack};
+    use glam::Vec2;
+
+    let mesh = Arc::new(crate::mesh::Primitive::Plane.build());
+    let bvh = crate::bvh::Bvh::from_mesh(&mesh);
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 256);
+    let mut undo = UndoStack::default();
+    let idx = engine.add_fill_layer(0, None, "Red".into(), FillParams::default(), &mut undo);
+    engine.add_mask(idx, true, None, &mut undo);
+    engine.composite();
+    let settled = engine.thumb_renders();
+    assert_eq!(settled, 2, "a fill with a mask has a content and a mask thumbnail");
+
+    assert!(engine.begin_stroke(idx, StrokeTarget::Mask, [false; CHANNELS], false));
+    let cam = OrbitCam { pitch: 1.5, dist: 3.2, ..Default::default() };
+    let size = [512u32, 512u32];
+    let fsize = Vec2::new(size[0] as f32, size[1] as f32);
+    let mut views = ViewRenderer::new(&rs);
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &ViewSettings::default(), None);
+    let radius = 30.0;
+    let su = StampUniform {
+        view_proj: cam.view_proj(fsize.x / fsize.y).to_cols_array_2d(),
+        cam_pos: cam.eye().extend(1.0).to_array(),
+        view: [fsize.x, fsize.y, 0.0, 0.0],
+        view2d: [0.0; 4],
+        brush: [radius, 0.6, 1.0, 0.0],
+        clip: [crate::viewport::NEAR, crate::viewport::FAR, 0.0, 0.0],
+        proj: [BrushProjection::Screen as u32 as f32, 0.0, 85f32.to_radians().cos(), 0.0],
+    };
+    let paint = BrushPaint { mat: MatValues::default(), mask_value: 0.0, opacity: 1.0, erase: false, grain: [0.0; 4] };
+    // Several paint frames: stamps, then the recomposition each one triggers.
+    for frame in 0..4 {
+        let raw: Vec<([f32; 4], f32)> = (0..10).map(|i| ([100.0 + (frame * 10 + i) as f32 * 8.0, 256.0, 1.0, 0.0], 1.0)).collect();
+        let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 1, radius, &raw);
+        engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, None);
+        engine.composite();
+        assert_eq!(engine.thumb_renders(), settled, "no thumbnail is rebuilt while the stroke is held (frame {frame})");
+    }
+    engine.end_stroke();
+    assert_eq!(engine.thumb_renders(), settled + 1, "on release only the mask's thumbnail is redone");
+    engine.composite();
+    assert_eq!(engine.thumb_renders(), settled + 1, "and the next recomposition doesn't redo it");
+}
+
 /// What darkens crevices in the 3D view: the same gray material ball with
 /// the baked AO at full and at the default view strength, without AO, and
 /// without the key light.

@@ -1171,6 +1171,8 @@ pub struct Engine {
     uv_version: u64,
     /// Layer thumbnails (see `thumbs`).
     thumbs: thumbs::Thumbs,
+    /// Composites that redid the whole texture instead of a stroke's patch (the F6 meter counts them).
+    pub full_recomps: u32,
     /// Which of a filtered mask's textures (`mask_out`) holds its result.
     mask_final: HashMap<u64, usize>,
     pub bake_report: Option<Arc<BakeReport>>,
@@ -1291,6 +1293,7 @@ impl Engine {
             maps_version: 0,
             uv_version: 0,
             thumbs: Default::default(),
+            full_recomps: 0,
             mask_final: HashMap::new(),
             bake_report: None,
             edge_max: 0.2,
@@ -3411,14 +3414,21 @@ impl Engine {
 
     /// Finishes the stroke and returns its undo record.
     pub fn end_stroke(&mut self) -> Option<UndoEntry> {
-        // The stroke's layer keeps its last thumbnail; the next update redoes it.
-        self.invalidate_thumbs();
         self.stroke_layer = None;
         self.prefix = None;
         self.prefix_cache = None;
         self.stroke_region = None;
         self.region_unknown = false;
-        let active = self.active.take()?;
+        let Some(active) = self.active.take() else {
+            self.invalidate_thumbs();
+            return None;
+        };
+        // A stroke on a mask changes only that mask's thumbnail; a fill's
+        // content thumbnail (a full composite) stays as it was.
+        match active.target {
+            StrokeTarget::Mask => self.invalidate_mask_thumb(active.layer_id),
+            _ => self.invalidate_thumbs(),
+        }
         let textures = self.target_textures(active.layer_id, active.target, &active.channels)?;
         let mut encoder = self.device.create_command_encoder(&Default::default());
         let after = Snapshot::encode(&self.device, &mut encoder, &textures);
@@ -3776,6 +3786,9 @@ impl Engine {
             self.queue.submit([encoder.finish()]);
             self.active_gpu_profile = None;
             return;
+        }
+        if scissor.is_none() {
+            self.full_recomps = self.full_recomps.wrapping_add(1);
         }
         // `src` is the accum set holding the stack so far; `from_cache` reads
         // the first pass's input from the prefix cache instead.

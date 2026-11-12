@@ -31,6 +31,8 @@ pub(super) struct Thumbs {
     /// Position and normal maps at thumbnail size, for this `uv_version`.
     small: Option<(u64, Tex, Tex)>,
     entries: HashMap<u64, Entry>,
+    /// Thumbnail images rendered so far, content and mask counted apart (the F6 meter shows how many a stroke cost).
+    renders: u32,
 }
 
 struct ThumbGpu {
@@ -50,6 +52,10 @@ struct ThumbGpu {
 struct Entry {
     /// What the thumbnails were rendered from (0: render again).
     key: u64,
+    /// A stroke changed this layer's mask and nothing else: the content
+    /// thumbnail is still right (a fill's costs a full composite), so only
+    /// the mask's is rendered again.
+    mask_stale: bool,
     content: Option<Shown>,
     mask: Option<Shown>,
 }
@@ -94,6 +100,11 @@ impl Engine {
         self.thumbs.entries.get(&layer_id)?.mask.as_ref().map(|s| s.id)
     }
 
+    /// How many thumbnail images (content and mask counted apart) have been rendered so far.
+    pub fn thumb_renders(&self) -> u32 {
+        self.thumbs.renders
+    }
+
     /// A layer's thumbnail textures: content and mask (tests read them back).
     #[cfg(test)]
     pub fn thumb_textures(&self, layer_id: u64) -> (Option<&Tex>, Option<&Tex>) {
@@ -106,6 +117,14 @@ impl Engine {
     pub(super) fn invalidate_thumbs(&mut self) {
         for e in self.thumbs.entries.values_mut() {
             e.key = 0;
+        }
+    }
+
+    /// A finished stroke on a layer's mask: its mask thumbnail is rendered
+    /// again on the next update, the content thumbnail is kept.
+    pub(super) fn invalidate_mask_thumb(&mut self, layer_id: u64) {
+        if let Some(e) = self.thumbs.entries.get_mut(&layer_id) {
+            e.mask_stale = true;
         }
     }
 
@@ -141,7 +160,13 @@ impl Engine {
                 self.free_shown(e.mask);
             }
         }
-        let todo: Vec<(usize, u64)> = (0..self.layers.len())
+        // Nothing a thumbnail shows changes mid-stroke, and rebuilding them
+        // every paint frame (a fill's is a full 512² composite) stalls the
+        // GPU. end_stroke() marks what the stroke touched; it renders once on release.
+        if self.active.is_some() {
+            return;
+        }
+        let todo: Vec<(usize, u64, bool)> = (0..self.layers.len())
             .filter_map(|li| {
                 let layer = &self.layers[li];
                 let wants = matches!(layer.content, Content::Fill(_)) || layer.mask.is_some();
@@ -149,11 +174,10 @@ impl Engine {
                     return None;
                 }
                 let key = self.thumb_key(li);
-                // Keep the previous thumbnail during a stroke. Rebuilding the
-                // 512² mask preview every paint frame stalls the GPU; end_stroke()
-                // invalidates the key so the preview is rendered once on release.
-                let current = self.thumbs.entries.get(&layer.id).is_some_and(|e| e.key == key);
-                (!current).then_some((li, key))
+                let entry = self.thumbs.entries.get(&layer.id);
+                let current = entry.is_some_and(|e| e.key == key);
+                let mask_only = current && entry.is_some_and(|e| e.mask_stale);
+                (!current || mask_only).then_some((li, key, mask_only))
             })
             .collect();
         if todo.is_empty() {
@@ -164,8 +188,8 @@ impl Engine {
         }
         let mut encoder = self.device.create_command_encoder(&Default::default());
         self.shrink_surface(&mut encoder);
-        for (li, key) in todo {
-            self.render_thumbs(&mut encoder, li, key);
+        for (li, key, mask_only) in todo {
+            self.render_thumbs(&mut encoder, li, key, mask_only);
         }
         self.queue.submit([encoder.finish()]);
     }
@@ -216,7 +240,7 @@ impl Engine {
 
     /// A display texture for a thumbnail, registered with egui once.
     fn shown_tex(&mut self, layer_id: u64, mask: bool) -> &Tex {
-        let entry = self.thumbs.entries.entry(layer_id).or_insert(Entry { key: 0, content: None, mask: None });
+        let entry = self.thumbs.entries.entry(layer_id).or_insert(Entry { key: 0, mask_stale: false, content: None, mask: None });
         let slot = if mask { &mut entry.mask } else { &mut entry.content };
         if slot.is_none() {
             let tex = Tex::new(&self.device, "layer thumbnail", THUMB, THUMB, F::Rgba8Unorm, LAYER_USAGE);
@@ -226,7 +250,9 @@ impl Engine {
         &slot.as_ref().expect("just made").tex
     }
 
-    fn render_thumbs(&mut self, encoder: &mut wgpu::CommandEncoder, li: usize, key: u64) {
+    /// `mask_only`: the content thumbnail is current, redo just the mask's.
+    fn render_thumbs(&mut self, encoder: &mut wgpu::CommandEncoder, li: usize, key: u64, mask_only: bool) {
+        let mut rendered = 0u32;
         let layer_id = self.layers[li].id;
         let is_fill = matches!(self.layers[li].content, Content::Fill(_));
         let has_mask = self.layers[li].mask.is_some();
@@ -310,7 +336,7 @@ impl Engine {
 
         // Content: the fill alone over a neutral stack, showing its first
         // channel that's on (color, else roughness, metallic or height).
-        if let (Content::Fill(f), Some(shown)) = (&layer.content, entry.content.as_ref()) {
+        if let (false, Content::Fill(f), Some(shown)) = (mask_only, &layer.content, entry.content.as_ref()) {
             {
                 let c = |v: f64| wgpu::LoadOp::Clear(wgpu::Color { r: v, g: v, b: v, a: 1.0 });
                 let _clear = gpu::pass(
@@ -342,6 +368,7 @@ impl Engine {
                 _ => 1.0,
             };
             self.thumb_pass(encoder, &g.show, &g.out[channel], &shown.tex, [what, (RENDER / THUMB) as f32, THUMB as f32, 0.0]);
+            rendered += 1;
         }
 
         // Mask: the filtered result the composite made, shrunk, or else the
@@ -360,7 +387,11 @@ impl Engine {
                     self.thumb_pass(encoder, &g.show, &g.mask_value, &shown.tex, [1.0, (RENDER / THUMB) as f32, THUMB as f32, 0.0]);
                 }
             }
+            rendered += 1;
         }
-        self.thumbs.entries.get_mut(&layer_id).expect("made above").key = key;
+        self.thumbs.renders = self.thumbs.renders.wrapping_add(rendered);
+        let entry = self.thumbs.entries.get_mut(&layer_id).expect("made above");
+        entry.key = key;
+        entry.mask_stale = false;
     }
 }

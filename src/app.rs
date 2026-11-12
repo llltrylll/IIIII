@@ -466,12 +466,19 @@ struct StrokeMeter {
     gpu_apply: Stat,
     gpu_composite: Stat,
     gpu_composite_total: Stat,
+    /// Engine counters (full recompositions, thumbnails rendered) when F6
+    /// went on, and the latest values.
+    counters_base: Option<(u32, u32)>,
+    counters: (u32, u32),
 }
 
 impl StrokeMeter {
     /// The recomposition ran: counts the frame's steps while painting, or
-    /// times the first one after releasing.
-    fn composited(&mut self, painting: bool, cpu_ms: f64) {
+    /// times the first one after releasing. `counters` are the engine's
+    /// full-recomposition and thumbnail-render totals.
+    fn composited(&mut self, painting: bool, cpu_ms: f64, counters: (u32, u32)) {
+        self.counters_base.get_or_insert(counters);
+        self.counters = counters;
         if painting {
             self.composite_cpu.add(cpu_ms);
             self.steps_per_frame.add(f64::from(std::mem::take(&mut self.steps_now)));
@@ -482,8 +489,9 @@ impl StrokeMeter {
 
     /// Status-bar text: average/peak in ms (steps: calls per frame).
     fn text(&self) -> String {
+        let (full, thumbs) = self.counters_base.map_or((0, 0), |b| (self.counters.0.wrapping_sub(b.0), self.counters.1.wrapping_sub(b.1)));
         format!(
-            "F6 CPU avg/peak ms: steps/frame {}, stamp {}, begin {}, recomp {}, end {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {}",
+            "F6 CPU avg/peak ms: steps/frame {}, stamp {}, begin {}, recomp {}, end {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {} | since F6: full recomps {full}, thumbnails {thumbs}",
             self.steps_per_frame.text(),
             self.step_cpu.text(),
             self.begin_cpu.text(),
