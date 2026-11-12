@@ -3856,12 +3856,16 @@ impl Engine {
         // exact; outside it the final set keeps the last composite's result,
         // which the stroke didn't change. (Folder stacks saved after the
         // painted layer are only read inside the patch too.)
-        let region = std::mem::take(&mut self.stroke_region);
         let unknown = std::mem::take(&mut self.region_unknown);
-        let mut scissor = if resume.is_some() && !unknown { Some(region.unwrap_or([0, 0, 0, 0])) } else { None };
-        // Filtered masks above the change read around it: widen the patch by
-        // the farthest any of their filters reach.
-        if let (Some(r), Some(at)) = (scissor.as_mut(), resume.as_ref().map(|p| p.at)) {
+        let mut scissors = if resume.is_some() && !unknown {
+            Some(std::mem::take(&mut self.stroke_regions))
+        } else {
+            self.stroke_regions.clear();
+            None
+        };
+        // Filtered masks above the change read around it: widen every patch
+        // by the farthest filter reach, then compact any newly overlapping rectangles.
+        if let (Some(rects), Some(at)) = (scissors.as_mut(), resume.as_ref().map(|p| p.at)) {
             let reach = passes[at..]
                 .iter()
                 .filter_map(|p| match *p {
@@ -3870,25 +3874,34 @@ impl Engine {
                 })
                 .map(|m| m.filters.iter().filter(|f| f.enabled).map(|f| f.reach(self.res)).sum::<f32>())
                 .fold(0.0f32, f32::max);
-            if reach > 0.0 && r[2] > r[0] && r[3] > r[1] {
+            if reach > 0.0 {
                 let e = reach.ceil() as u32 + 2;
-                *r = [r[0].saturating_sub(e), r[1].saturating_sub(e), (r[2] + e).min(self.res), (r[3] + e).min(self.res)];
+                for r in rects.iter_mut() {
+                    if r[2] > r[0] && r[3] > r[1] {
+                        *r = [r[0].saturating_sub(e), r[1].saturating_sub(e), (r[2] + e).min(self.res), (r[3] + e).min(self.res)];
+                    }
+                }
             }
+            compact_scissors(rects);
         }
-        self.last_scissor_pixels = scissor.map_or(
-            u64::from(self.res) * u64::from(self.res),
-            |r| u64::from(r[2].saturating_sub(r[0])) * u64::from(r[3].saturating_sub(r[1])),
-        );
-        if scissor.is_some_and(|r| r[2] <= r[0] || r[3] <= r[1]) {
+        let full_area = u64::from(self.res) * u64::from(self.res);
+        self.last_scissor_pixels = scissors.as_ref().map_or(full_area, |rects| rects.iter().map(|&r| scissor_area(r)).sum());
+        self.last_scissor_bbox_pixels = scissors.as_ref().map_or(full_area, |rects| {
+            let Some(first) = rects.first() else { return 0 };
+            let bounds = rects.iter().skip(1).fold(*first, |a, &b| scissor_union(a, b));
+            scissor_area(bounds)
+        });
+        self.last_scissor_rects = scissors.as_ref().map_or(1, |rects| rects.len() as u32);
+        if scissors.as_ref().is_some_and(|rects| rects.is_empty()) {
             // Nothing visible changed.
-            let resume = resume.expect("scissor implies resume");
+            let resume = resume.expect("scissors imply resume");
             self.prefix = Some(resume);
             self.dirty = false;
             self.queue.submit([encoder.finish()]);
             self.active_gpu_profile = None;
             return;
         }
-        if scissor.is_none() {
+        if scissors.is_none() {
             self.full_recomps = self.full_recomps.wrapping_add(1);
         }
         // `src` is the accum set holding the stack so far; `from_cache` reads
