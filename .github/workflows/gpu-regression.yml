@@ -1,0 +1,63 @@
+name: GPU brush and mask regression
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gpu-regression:
+    name: Vulkan software GPU parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      WGPU_BACKEND: vulkan
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@v5
+
+      - name: Install Vulkan software driver and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libvulkan1 mesa-vulkan-drivers vulkan-tools \
+            pkg-config libxkbcommon-dev libwayland-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libgtk-3-dev
+
+      - name: Select Mesa Lavapipe
+        shell: bash
+        run: |
+          icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -name 'lvp_icd*.json' -print -quit)"
+          if [[ -z "$icd" ]]; then
+            echo "Mesa Lavapipe ICD was not installed"
+            exit 1
+          fi
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+          vulkaninfo --summary
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Compare brush projections with full-frame reference
+        run: cargo test --locked --bin material_painter paint_projections -- --ignored --nocapture
+
+      - name: Compare filtered Vertex ID mask strokes with full-frame reference
+        run: cargo test --locked --bin material_painter scissored_mask_stroke_matches_full_frame -- --ignored --nocapture
+
+      - name: Compare nested folders, masks, and UV islands with full recomposition
+        run: cargo test --locked --bin material_painter multi_scissor_nested_folder_matches_full -- --ignored --nocapture
+
+      - name: Upload GPU regression images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-brush-mask-regression-images
+          path: target/bake_test/
+          if-no-files-found: ignore
+          retention-days: 14
