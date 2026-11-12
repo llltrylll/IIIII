@@ -1410,6 +1410,20 @@ fn expand_scissors(rects: &mut Vec<[u32; 4]>, margin: u32, limit: u32, wrap: boo
 
 /// Keep scissors disjoint. If the list exceeds the cap, merge the cheapest
 /// pair by added texel area; a merge only expands coverage, never drops it.
+/// Converts conservative normalized paint bounds to half-open pixel rectangles.
+fn normalized_scissors(regions: &[[f32; 4]], res: u32) -> Vec<[u32; 4]> {
+    let size = res.max(1) as f32;
+    let low = |v: f32| (v * size).floor().clamp(0.0, size) as u32;
+    let high = |v: f32| (v * size).ceil().clamp(0.0, size) as u32;
+    let mut rects: Vec<[u32; 4]> = regions
+        .iter()
+        .map(|&[u0, v0, u1, v1]| [low(u0), low(v0), high(u1), high(v1)])
+        .filter(|r| r[2] > r[0] && r[3] > r[1])
+        .collect();
+    compact_scissors(&mut rects);
+    rects
+}
+
 fn compact_scissors(rects: &mut Vec<[u32; 4]>) {
     loop {
         let mut merge: Option<(usize, usize, [u32; 4])> = None;
@@ -3310,6 +3324,9 @@ impl Engine {
         if self.active.is_none() || stamps.is_empty() {
             return;
         }
+        // The per-frame bounds are conservative paint raster bounds. Keep
+        // them separate from the wider accumulated bounds used by compositing.
+        let frame_scissors = regions.as_deref().map(|r| normalized_scissors(r, self.res));
         self.add_regions(regions);
         let stamps = &stamps[..stamps.len().min(MAX_STAMPS)];
         su.view[3] = stamps.len() as f32;
@@ -3355,9 +3372,16 @@ impl Engine {
             }).forget_lifetime();
             pass.set_pipeline(&self.p.stamp);
             pass.set_bind_group(0, &stamp_bg, &[]);
-            pass.draw(0..3, 0..1);
+            if let Some(rects) = &frame_scissors {
+                for &[x0, y0, x1, y1] in rects {
+                    pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                    pass.draw(0..3, 0..1);
+                }
+            } else {
+                pass.draw(0..3, 0..1);
+            }
         }
-        self.encode_apply(&mut encoder, paint, profile.as_ref());
+        self.encode_apply(&mut encoder, paint, profile.as_ref(), frame_scissors.as_deref());
         self.queue.submit([encoder.finish()]);
     }
 
@@ -3410,7 +3434,7 @@ impl Engine {
                 pass.draw(faces.len() as u32..all.len() as u32, 0..1);
             }
         }
-        self.encode_apply(&mut encoder, paint, None);
+        self.encode_apply(&mut encoder, paint, None, None);
         self.queue.submit([encoder.finish()]);
     }
 
@@ -3448,6 +3472,7 @@ impl Engine {
         encoder: &mut wgpu::CommandEncoder,
         paint: &BrushPaint,
         profile: Option<&GpuStrokeProfileResources>,
+        scissors: Option<&[[u32; 4]]>,
     ) {
         let Some(active) = &self.active else { return };
         let (target, channels, layer_id) = (active.target, active.channels.clone(), active.layer_id);
@@ -3531,7 +3556,14 @@ impl Engine {
             }).forget_lifetime();
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &apply_bg, &[]);
-            pass.draw(0..3, 0..1);
+            if let Some(rects) = scissors {
+                for &[x0, y0, x1, y1] in rects {
+                    pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                    pass.draw(0..3, 0..1);
+                }
+            } else {
+                pass.draw(0..3, 0..1);
+            }
         }
         if matches!(target, StrokeTarget::BakeFix(_)) {
             self.maps_dirty = true;
@@ -4669,6 +4701,12 @@ mod scissor_tests {
                 assert_eq!(src, final_idx, "resumed pass sequence ended in the wrong accum set");
             }
         }
+    }
+
+    #[test]
+    fn normalized_scissors_round_outward_and_clip_to_texture() {
+        let rects = normalized_scissors(&[[-0.1, 0.2, 0.251, 1.2], [0.7, 0.7, 0.8, 0.8]], 100);
+        assert_eq!(rects, vec![[0, 20, 26, 100], [70, 70, 80, 80]]);
     }
 
     #[test]
