@@ -3429,21 +3429,22 @@ impl Engine {
         source_bg: &wgpu::BindGroup,
         source_offset: u32,
         ops: &[MaskOp],
-        scissor: Option<[u32; 4]>,
+        scissors: Option<&[[u32; 4]]>,
     ) -> &Tex {
         let pair = &self.mask_out[&layer_id];
-        let load = if scissor.is_some() { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(wgpu::Color::BLACK) };
-        let clip = |pass: &mut wgpu::RenderPass| {
-            if let Some([x0, y0, x1, y1]) = scissor {
-                pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
-            }
-        };
+        let load = if scissors.is_some() { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(wgpu::Color::BLACK) };
         {
             let mut pass = gpu::pass(encoder, "mask source", &[gpu::color_attachment(&pair[0].view, load)]);
-            clip(&mut pass);
             pass.set_pipeline(&self.p.mask_source);
             pass.set_bind_group(0, source_bg, &[source_offset]);
-            pass.draw(0..3, 0..1);
+            if let Some(rects) = scissors {
+                for &[x0, y0, x1, y1] in rects {
+                    pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                    pass.draw(0..3, 0..1);
+                }
+            } else {
+                pass.draw(0..3, 0..1);
+            }
         }
         let filter = |encoder: &mut wgpu::CommandEncoder, step: usize, input: &Tex, other: &Tex, out: &Tex| {
             let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -3464,10 +3465,16 @@ impl Engine {
                 ],
             });
             let mut pass = gpu::pass(encoder, "mask filter", &[gpu::color_attachment(&out.view, load)]);
-            clip(&mut pass);
             pass.set_pipeline(&self.p.mask_filter);
             pass.set_bind_group(0, &bg, &[(step.min(MAX_MASK_FILTER_STEPS as usize - 1) as u64 * MASK_FILTER_STRIDE) as u32]);
-            pass.draw(0..3, 0..1);
+            if let Some(rects) = scissors {
+                for &[x0, y0, x1, y1] in rects {
+                    pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                    pass.draw(0..3, 0..1);
+                }
+            } else {
+                pass.draw(0..3, 0..1);
+            }
         };
         let mut cur = 0;
         for op in ops {
@@ -3477,10 +3484,16 @@ impl Engine {
                     // The mask layer's own values, then combined over the mask so far.
                     {
                         let mut pass = gpu::pass(encoder, "mask layer", &[gpu::color_attachment(&pair[2].view, load)]);
-                        clip(&mut pass);
                         pass.set_pipeline(&self.p.mask_source);
                         pass.set_bind_group(0, source_bg, &[uniform]);
-                        pass.draw(0..3, 0..1);
+                        if let Some(rects) = scissors {
+                            for &[x0, y0, x1, y1] in rects {
+                                pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                                pass.draw(0..3, 0..1);
+                            }
+                        } else {
+                            pass.draw(0..3, 0..1);
+                        }
                     }
                     filter(encoder, combine, &pair[cur], &pair[2], &pair[1 - cur]);
                 }
