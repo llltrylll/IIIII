@@ -848,6 +848,7 @@ fn uv_tile_rectangles(tiles: &[bool]) -> Option<Vec<[f32; 4]>> {
 pub(crate) fn stroke_region(
     mesh: &Mesh,
     bvh: &Bvh,
+    triangle_indices: std::ops::Range<u32>,
     cam: &OrbitCam,
     size: Vec2,
     projection: BrushProjection,
@@ -926,6 +927,12 @@ pub(crate) fn stroke_region(
     };
     let mut tiles = vec![false; STROKE_REGION_GRID * STROKE_REGION_GRID];
     bvh.query(overlaps, |t| {
+        // Bvh reports absolute triangle indices; Engine::triangles() is the
+        // active texture set's index-buffer range (three indices per triangle).
+        let first_index = t * 3;
+        if first_index < triangle_indices.start || first_index + 3 > triangle_indices.end {
+            return;
+        }
         let mut lo = Vec2::splat(f32::INFINITY);
         let mut hi = Vec2::splat(f32::NEG_INFINITY);
         for k in 0..3 {
@@ -3943,7 +3950,7 @@ impl PainterApp {
                 let [w, h] = self.views.view3d.size;
                 let radius = self.brush.size * 0.5 * self.ppp;
                 let size = Vec2::new(w as f32, h as f32);
-                stroke_region(&self.mesh, &self.bvh, &self.cam, size, self.brush.projection, self.brush.symmetry, radius, &stamps)
+                stroke_region(&self.mesh, &self.bvh, self.engine.triangles(), &self.cam, size, self.brush.projection, self.brush.symmetry, radius, &stamps)
             }
             ViewKind::V2d => {
                 // The 2D view shows the texture: the stamps' own UV squares.
