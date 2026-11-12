@@ -4026,7 +4026,7 @@ impl Engine {
                     &make_bg(mask),
                     (slot as u64 * UNIFORM_STRIDE) as u32,
                     layer_ops.get(&li).map_or(&[][..], |o| &o[..]),
-                    scissor,
+                    scissors.as_deref(),
                 )),
                 _ => None,
             };
@@ -4037,7 +4037,7 @@ impl Engine {
             let bg = make_bg(filtered.or(mask));
             let out = &self.accum[dst];
             // A patch keeps what is around it.
-            let load = if scissor.is_some() { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(wgpu::Color::BLACK) };
+            let load = if scissors.is_some() { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(wgpu::Color::BLACK) };
             let attachments = [
                 gpu::color_attachment(&out[0].view, load),
                 gpu::color_attachment(&out[1].view, load),
@@ -4061,12 +4061,16 @@ impl Engine {
                 occlusion_query_set: None,
                 multiview_mask: None,
             }).forget_lifetime();
-            if let Some([x0, y0, x1, y1]) = scissor {
-                pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
-            }
             pass.set_pipeline(if layer.is_folder() { &self.p.folder_merge } else { &self.p.composite });
             pass.set_bind_group(0, &bg, &[(k as u64 * UNIFORM_STRIDE) as u32]);
-            pass.draw(0..3, 0..1);
+            if let Some(rects) = &scissors {
+                for &[x0, y0, x1, y1] in rects {
+                    pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                    pass.draw(0..3, 0..1);
+                }
+            } else {
+                pass.draw(0..3, 0..1);
+            }
             drop(pass);
             src = dst;
             from_cache = false;
