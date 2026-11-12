@@ -1252,7 +1252,7 @@ fn scissor_overlap_area(a: [u32; 4], b: [u32; 4]) -> u64 {
 /// pair by added texel area; a merge only expands coverage, never drops it.
 fn compact_scissors(rects: &mut Vec<[u32; 4]>) {
     loop {
-        let mut merge = None;
+        let mut merge: Option<(usize, usize, [u32; 4])> = None;
         let mut best_extra = u64::MAX;
         for i in 0..rects.len() {
             for j in i + 1..rects.len() {
@@ -1265,22 +1265,18 @@ fn compact_scissors(rects: &mut Vec<[u32; 4]>) {
                 if (overlaps || extra == 0) && extra < best_extra {
                     best_extra = extra;
                     merge = Some((i, j, union));
-                    if extra == 0 {
-                        break;
-                    }
                 }
             }
-            if best_extra == 0 {
-                break;
-            }
         }
-        let Some((i, j, union)) = merge else { break };
-        rects[i] = union;
-        rects.swap_remove(j);
-    }
-
-    while rects.len() > MAX_COMPOSITE_SCISSORS {
-        let mut best = (u64::MAX, 0usize, 1usize, [0; 4]);
+        if let Some((i, j, union)) = merge {
+            rects[i] = union;
+            rects.swap_remove(j);
+            continue;
+        }
+        if rects.len() <= MAX_COMPOSITE_SCISSORS {
+            break;
+        }
+        let mut best = (u64::MAX, 0usize, 1usize, [0u32; 4]);
         for i in 0..rects.len() {
             for j in i + 1..rects.len() {
                 let a = rects[i];
@@ -1290,22 +1286,14 @@ fn compact_scissors(rects: &mut Vec<[u32; 4]>) {
                 let extra = scissor_area(union).saturating_sub(covered);
                 if extra < best.0 {
                     best = (extra, i, j, union);
-                    if extra == 0 {
-                        break;
-                    }
                 }
-            }
-            if best.0 == 0 {
-                break;
             }
         }
         rects[best.1] = best.3;
         rects.swap_remove(best.2);
-        compact_scissors(rects);
     }
     rects.sort_unstable_by_key(|r| (r[1], r[0], r[3], r[2]));
 }
-
 
 impl Engine {
     /// A document of one texture set covering the whole mesh.
