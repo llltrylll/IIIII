@@ -1094,7 +1094,13 @@ impl GpuStrokeProfiler {
         if !mapped {
             return None;
         }
-        let data = self.resources.readback.slice(..).get_mapped_range();
+        let data = match self.resources.readback.slice(..).get_mapped_range() {
+            Ok(data) => data,
+            Err(_) => {
+                self.resources.readback.unmap();
+                return None;
+            }
+        };
         let read = |i: usize| u64::from_ne_bytes(data[i * 8..i * 8 + 8].try_into().expect("timestamp is 8 bytes"));
         let (s0, s1, a0, a1) = (read(0), read(1), read(2), read(3));
         drop(data);
