@@ -3424,6 +3424,9 @@ impl Engine {
         let after = Snapshot::encode(&self.device, &mut encoder, &textures);
         self.queue.submit([encoder.finish()]);
         after.request_map();
+        // Refresh invalidated mask/fill thumbnails once after painting, not
+        // once per composite frame while the stroke is active.
+        self.update_thumbs();
         Some(UndoEntry {
             layer_id: active.layer_id,
             target: active.target,
