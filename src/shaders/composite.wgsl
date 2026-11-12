@@ -174,16 +174,35 @@ fn texel_size(c: vec2<i32>, p: vec3<f32>) -> f32 {
 }
 
 // Smart mask: weighted sum of mesh-map inputs, noise breakup, then levels
-// (the inputs and breakup are in wear.wgsl).
-fn generator(p: vec3<f32>, n: vec3<f32>, uv: vec2<f32>, texel_world: f32) -> f32 {
+// (the inputs and breakup are in wear.wgsl). Sample only the maps an active
+// input needs: a Vertex ID mask, for example, reads just the ID-color map.
+fn generator(c: vec2<i32>, uv: vec2<f32>) -> f32 {
     var s: MaskSurface;
-    s.a = textureSampleLevel(map_a, samp, uv, 0.0);
-    s.b = textureSampleLevel(map_b, samp, uv, 0.0);
-    s.c = textureSampleLevel(map_c, samp, uv, 0.0);
-    s.e = textureSampleLevel(map_e, samp, uv, 0.0);
+    let need_a = weight(0) != 0.0 || weight(1) != 0.0 || weight(2) != 0.0
+        || weight(3) != 0.0 || weight(4) != 0.0 || weight(7) != 0.0;
+    let need_b = weight(0) != 0.0 || weight(5) != 0.0 || weight(10) != 0.0 || weight(11) != 0.0;
+    let need_c = weight(8) != 0.0;
+    let need_e = weight(14) != 0.0;
+    s.a = vec4<f32>(0.0);
+    s.b = vec4<f32>(0.0);
+    s.c = vec4<f32>(0.0);
+    s.e = vec4<f32>(0.0);
+    if (need_a) { s.a = textureSampleLevel(map_a, samp, uv, 0.0); }
+    if (need_b) { s.b = textureSampleLevel(map_b, samp, uv, 0.0); }
+    if (need_c) { s.c = textureSampleLevel(map_c, samp, uv, 0.0); }
+    if (need_e) { s.e = textureSampleLevel(map_e, samp, uv, 0.0); }
+
+    let need_position = u.gp0.w != 0.0 || weight(9) != 0.0 || weight(12) != 0.0
+        || weight(13) != 0.0 || weight(17) != 0.0 || weight(19) != 0.0;
+    let need_normal = weight(6) != 0.0 || weight(15) != 0.0
+        || weight(16) != 0.0 || weight(18) != 0.0;
+    var p = vec3<f32>(0.0);
+    var n = vec3<f32>(0.0, 0.0, 1.0);
+    if (need_position) { p = textureLoad(pos_map, c, 0).xyz; }
+    if (need_normal) { n = normalize(textureLoad(nrm_map, c, 0).xyz * 2.0 - 1.0); }
     s.p = p;
     s.n = n;
-    s.texel_world = texel_world;
+    s.texel_world = select(0.0, texel_size(c, p), weight(18) != 0.0);
     s.bmin = u.bmin.xyz;
     s.bsize = u.bsize.xyz;
     s.emax = u.gx.x;
@@ -226,13 +245,13 @@ struct AccumOut {
 
 // The layer's mask before opacity: the painted mask (or, with mask filters,
 // the filtered mask) times the smart mask.
-fn layer_mask(c: vec2<i32>, p: vec3<f32>, n: vec3<f32>, uv: vec2<f32>) -> f32 {
+fn layer_mask(c: vec2<i32>, uv: vec2<f32>) -> f32 {
     var mask = 1.0;
     if (u.p0.w > 0.5) {
         mask *= textureLoad(l_mask, c, 0).r;
     }
     if (u.gp1.z > 0.5) {
-        mask *= generator(p, n, uv, texel_size(c, p));
+        mask *= generator(c, uv);
     }
     return mask;
 }
@@ -242,14 +261,7 @@ fn layer_mask(c: vec2<i32>, p: vec3<f32>, n: vec3<f32>, uv: vec2<f32>) -> f32 {
 fn fs_mask_source(in: FsOut) -> @location(0) vec4<f32> {
     let c = vec2<i32>(in.pos.xy);
     let uv = in.pos.xy / vec2<f32>(textureDimensions(pos_map));
-    var p = vec3<f32>(0.0);
-    var n = vec3<f32>(0.0, 0.0, 1.0);
-    // A painted-only mask needs neither mesh position nor normal data.
-    if (u.gp1.z > 0.5) {
-        p = textureLoad(pos_map, c, 0).xyz;
-        n = normalize(textureLoad(nrm_map, c, 0).xyz * 2.0 - 1.0);
-    }
-    return vec4<f32>(layer_mask(c, p, n, uv), 0.0, 0.0, 1.0);
+    return vec4<f32>(layer_mask(c, uv), 0.0, 0.0, 1.0);
 }
 
 @fragment
@@ -271,9 +283,9 @@ fn fs_layer(in: FsOut) -> AccumOut {
 
     var p = vec3<f32>(0.0);
     var n = vec3<f32>(0.0, 0.0, 1.0);
-    // Ordinary paint layers do not use surface-space data. Avoid two texture
-    // reads per texel unless a fill projection or smart mask actually needs it.
-    if (u.p0.z > 0.5 || u.gp1.z > 0.5) {
+    // Fill projections use surface-space data. Smart masks fetch only the
+    // specific position/normal inputs they need inside generator().
+    if (u.p0.z > 0.5) {
         p = textureLoad(pos_map, c, 0).xyz;
         n = normalize(textureLoad(nrm_map, c, 0).xyz * 2.0 - 1.0);
     }
@@ -383,7 +395,7 @@ fn fs_layer(in: FsOut) -> AccumOut {
         sh = fill_variation(vec3<f32>(sh), 3, p, u.var0.w, vs, u.var1.x, 0.0, part).x;
     }
 
-    let mask = u.p0.x * layer_mask(c, p, n, uv);
+    let mask = u.p0.x * layer_mask(c, uv);
 
     let mode = i32(u.p0.y);
     var out: AccumOut;
@@ -412,9 +424,7 @@ fn fs_folder_merge(in: FsOut) -> AccumOut {
         m *= textureLoad(l_mask, c, 0).r;
     }
     if (u.gp1.z > 0.5) {
-        let p = textureLoad(pos_map, c, 0).xyz;
-        let n = normalize(textureLoad(nrm_map, c, 0).xyz * 2.0 - 1.0);
-        m *= generator(p, n, uv, texel_size(c, p));
+        m *= generator(c, uv);
     }
     var out: AccumOut;
     out.color = mix(textureLoad(l_color, c, 0), textureLoad(prev_color, c, 0), m);
