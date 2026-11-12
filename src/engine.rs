@@ -2937,6 +2937,9 @@ impl Engine {
         if self.active.is_none() || stamps.is_empty() {
             return;
         }
+        // Both passes only modify texels touched by this frame's stamps.
+        // Keep the scissor per step; the cumulative region is reserved for compositing.
+        let scissor = self.region_scissor(region);
         self.add_region(region);
         let stamps = &stamps[..stamps.len().min(MAX_STAMPS)];
         su.view[3] = stamps.len() as f32;
@@ -2964,11 +2967,14 @@ impl Engine {
                 "stamp",
                 &[gpu::color_attachment(&self.stroke.view, wgpu::LoadOp::Load)],
             );
+            if let Some([x0, y0, x1, y1]) = scissor {
+                pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+            }
             pass.set_pipeline(&self.p.stamp);
             pass.set_bind_group(0, &stamp_bg, &[]);
             pass.draw(0..3, 0..1);
         }
-        self.encode_apply(&mut encoder, paint);
+        self.encode_apply(&mut encoder, paint, scissor);
         self.queue.submit([encoder.finish()]);
     }
 
@@ -2982,7 +2988,9 @@ impl Engine {
         let (lo, hi) = faces.iter().chain(padding).fold(([f32::MAX; 2], [f32::MIN; 2]), |(lo, hi), p| {
             ([lo[0].min(p[0]), lo[1].min(p[1])], [hi[0].max(p[0]), hi[1].max(p[1])])
         });
-        self.add_region(Some([lo[0], lo[1], hi[0], hi[1]]));
+        let region = Some([lo[0], lo[1], hi[0], hi[1]]);
+        let scissor = self.region_scissor(region);
+        self.add_region(region);
         use wgpu::util::DeviceExt;
         let all: Vec<[f32; 2]> = faces.iter().chain(padding).copied().collect();
         let vertices = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -3002,6 +3010,9 @@ impl Engine {
                 "poly fill",
                 &[gpu::color_attachment(&self.stroke.view, wgpu::LoadOp::Load)],
             );
+            if let Some([x0, y0, x1, y1]) = scissor {
+                pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+            }
             pass.set_vertex_buffer(0, vertices.slice(..));
             pass.set_pipeline(&self.p.poly);
             pass.draw(0..faces.len() as u32, 0..1);
@@ -3012,7 +3023,7 @@ impl Engine {
                 pass.draw(faces.len() as u32..all.len() as u32, 0..1);
             }
         }
-        self.encode_apply(&mut encoder, paint);
+        self.encode_apply(&mut encoder, paint, scissor);
         self.queue.submit([encoder.finish()]);
     }
 
@@ -3045,7 +3056,7 @@ impl Engine {
     }
 
     /// Writes the stroke mask into the active stroke's target.
-    fn encode_apply(&mut self, encoder: &mut wgpu::CommandEncoder, paint: &BrushPaint) {
+    fn encode_apply(&mut self, encoder: &mut wgpu::CommandEncoder, paint: &BrushPaint, scissor: Option<[u32; 4]>) {
         let Some(active) = &self.active else { return };
         let (target, channels, layer_id) = (active.target, active.channels.clone(), active.layer_id);
         let mut ch = [0.0f32; CHANNELS];
@@ -3115,6 +3126,9 @@ impl Engine {
                 }
             };
             let mut pass = gpu::pass(encoder, "apply", &attachments);
+            if let Some([x0, y0, x1, y1]) = scissor {
+                pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+            }
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &apply_bg, &[]);
             pass.draw(0..3, 0..1);
@@ -3135,19 +3149,25 @@ impl Engine {
     /// Grows the stroke region by a UV rectangle, plus the padding the
     /// position map is dilated into (stamps paint it too) and a texel for
     /// filtering.
-    fn add_region(&mut self, region: Option<[f32; 4]>) {
-        let Some([u0, v0, u1, v1]) = region else {
-            self.region_unknown = true;
-            return;
-        };
+    /// Converts a normalized UV region to a conservative texture-space rectangle.
+    /// The margin also covers position-map dilation and the following composite.
+    fn region_scissor(&self, region: Option<[f32; 4]>) -> Option<[u32; 4]> {
+        let [u0, v0, u1, v1] = region?;
         let res = self.res as f32;
         let margin = (DILATE_PASSES + 2) as f32;
         let lo = |v: f32| (v * res - margin).floor().clamp(0.0, res) as u32;
         let hi = |v: f32| (v * res + margin).ceil().clamp(0.0, res) as u32;
         let r = [lo(u0), lo(v0), hi(u1), hi(v1)];
-        if r[2] <= r[0] || r[3] <= r[1] {
+        (r[2] > r[0] && r[3] > r[1]).then_some(r)
+    }
+
+    fn add_region(&mut self, region: Option<[f32; 4]>) {
+        let Some(r) = self.region_scissor(region) else {
+            if region.is_none() {
+                self.region_unknown = true;
+            }
             return;
-        }
+        };
         self.stroke_region = Some(match self.stroke_region {
             Some(o) => [o[0].min(r[0]), o[1].min(r[1]), o[2].max(r[2]), o[3].max(r[3])],
             None => r,
