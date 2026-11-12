@@ -1281,6 +1281,12 @@ pub struct Engine {
     pub last_scissor_bbox_pixels: u64,
     /// Number of non-overlapping scissors used by the last composite.
     pub last_scissor_rects: u32,
+    /// Pass counts and mask-cache activity from the most recent composite (F6).
+    pub last_composite_layer_passes: u32,
+    pub last_composite_folder_passes: u32,
+    pub last_mask_cache_hits: u32,
+    pub last_mask_cache_misses: u32,
+    pub last_mask_gpu_passes: u32,
     /// Which of a filtered mask's textures (`mask_out`) holds its result.
     mask_final: HashMap<u64, usize>,
     pub bake_report: Option<Arc<BakeReport>>,
@@ -1521,6 +1527,11 @@ impl Engine {
             last_scissor_pixels: 0,
             last_scissor_bbox_pixels: 0,
             last_scissor_rects: 0,
+            last_composite_layer_passes: 0,
+            last_composite_folder_passes: 0,
+            last_mask_cache_hits: 0,
+            last_mask_cache_misses: 0,
+            last_mask_gpu_passes: 0,
             mask_final: HashMap::new(),
             bake_report: None,
             edge_max: 0.2,
@@ -3801,6 +3812,11 @@ impl Engine {
             self.resolve_maps();
         }
         let (passes, max_depth) = composite_passes(&self.layers);
+        self.last_composite_layer_passes = passes.iter().filter(|p| matches!(p, Pass::Layer(_))).count() as u32;
+        self.last_composite_folder_passes = passes.iter().filter(|p| matches!(p, Pass::Begin | Pass::End(_))).count() as u32;
+        self.last_mask_cache_hits = 0;
+        self.last_mask_cache_misses = 0;
+        self.last_mask_gpu_passes = 0;
         self.folder_below.retain(|set| set[0].width == self.res);
         self.folder_below.truncate(max_depth);
         while self.folder_below.len() < max_depth {
@@ -4153,14 +4169,21 @@ impl Engine {
             let filtered = match (*pass, source_slot.get(&li)) {
                 (Pass::Layer(_) | Pass::End(_), Some(&slot)) => {
                     if let Some(&cached) = self.mask_final.get(&layer.id) {
+                        self.last_mask_cache_hits += 1;
                         Some(&self.mask_out[&layer.id][cached])
                     } else {
+                        self.last_mask_cache_misses += 1;
+                        let ops = layer_ops.get(&li).map_or(&[][..], |o| &o[..]);
+                        self.last_mask_gpu_passes += 1 + ops.iter().map(|op| match op {
+                            MaskOp::Layer { .. } => 2,
+                            MaskOp::Filter(_) => 1,
+                        }).sum::<u32>();
                         Some(self.encode_mask_filters(
                             &mut encoder,
                             layer.id,
                             &make_bg(mask),
                             (slot as u64 * UNIFORM_STRIDE) as u32,
-                            layer_ops.get(&li).map_or(&[][..], |o| &o[..]),
+                            ops,
                             scissors.as_deref(),
                         ))
                     }
