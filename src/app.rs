@@ -882,15 +882,19 @@ fn uv_tile_rectangles(tiles: &[bool]) -> Option<Vec<[f32; 4]>> {
 /// UV bounds are rasterized into a coarse grid and compressed into disjoint
 /// rectangles, preserving coverage while avoiding one large bbox across islands.
 /// Screen stamps include all depths; the shader's depth test remains authoritative.
+fn uv_bounds_inside_tile(lo: Vec2, hi: Vec2) -> bool {
+    lo.x >= 0.0 && lo.y >= 0.0 && hi.x <= 1.0 && hi.y <= 1.0
+}
+
 fn mark_candidate_triangle_uv(
     tiles: &mut [bool],
     mesh: &Mesh,
     triangle_indices: &std::ops::Range<u32>,
     triangle: u32,
-) {
+) -> bool {
     let first_index = triangle * 3;
     if first_index < triangle_indices.start || first_index + 3 > triangle_indices.end {
-        return;
+        return true;
     }
     let mut lo = Vec2::splat(f32::INFINITY);
     let mut hi = Vec2::splat(f32::NEG_INFINITY);
@@ -899,7 +903,11 @@ fn mark_candidate_triangle_uv(
         lo = lo.min(uv);
         hi = hi.max(uv);
     }
+    if !uv_bounds_inside_tile(lo, hi) {
+        return false;
+    }
     mark_uv_tiles(tiles, lo, hi);
+    true
 }
 
 /// Conservative UV rectangles for a frame's 3D stamps. Candidate triangle
@@ -921,12 +929,17 @@ pub(crate) fn stroke_region(
         let mut tiles = [false; STROKE_REGION_GRID * STROKE_REGION_GRID];
         for s in stamps.iter().filter(|s| s[1][3] > 0.0) {
             let (uv, r) = (Vec2::new(s[4][0], s[4][1]), s[2][3]);
-            mark_uv_tiles(&mut tiles, uv - Vec2::splat(r), uv + Vec2::splat(r));
+            let (lo, hi) = (uv - Vec2::splat(r), uv + Vec2::splat(r));
+            if !uv_bounds_inside_tile(lo, hi) {
+                return None;
+            }
+            mark_uv_tiles(&mut tiles, lo, hi);
         }
         return uv_tile_rectangles(&tiles);
     }
 
     let mut tiles = [false; STROKE_REGION_GRID * STROKE_REGION_GRID];
+    let mut needs_full_region = false;
     match projection {
         BrushProjection::Surface => {
             // Resolve mirrored stamps before querying; no symmetry transform is
@@ -938,7 +951,7 @@ pub(crate) fn stroke_region(
                 .collect();
             bvh.query(
                 |lo, hi| spheres.iter().any(|&(c, r)| c.clamp(lo, hi).distance_squared(c) <= r * r),
-                |t| mark_candidate_triangle_uv(&mut tiles, mesh, &triangle_indices, t),
+                |t| needs_full_region |= !mark_candidate_triangle_uv(&mut tiles, mesh, &triangle_indices, t),
             );
         }
         _ => {
@@ -997,11 +1010,15 @@ pub(crate) fn stroke_region(
                             on_screen(m.min(n), m.max(n))
                         })
                 },
-                |t| mark_candidate_triangle_uv(&mut tiles, mesh, &triangle_indices, t),
+                |t| needs_full_region |= !mark_candidate_triangle_uv(&mut tiles, mesh, &triangle_indices, t),
             );
         }
     }
-    uv_tile_rectangles(&tiles)
+    if needs_full_region {
+        None
+    } else {
+        uv_tile_rectangles(&tiles)
+    }
 }
 
 /// The third-party license notices shipped next to the executable (or in
@@ -4262,6 +4279,13 @@ mod stroke_region_tile_tests {
             }
         }
         assert_eq!(covered, tiles);
+    }
+
+    #[test]
+    fn uv_bounds_outside_tile_require_full_region_fallback() {
+        assert!(uv_bounds_inside_tile(Vec2::ZERO, Vec2::ONE));
+        assert!(!uv_bounds_inside_tile(Vec2::new(-0.01, 0.2), Vec2::new(0.1, 0.3)));
+        assert!(!uv_bounds_inside_tile(Vec2::new(0.8, 0.2), Vec2::new(1.01, 0.3)));
     }
 
     #[test]
