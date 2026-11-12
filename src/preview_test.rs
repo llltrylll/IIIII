@@ -490,7 +490,7 @@ fn scissored_mask_stroke_matches_full_frame() {
         erase: false,
         grain: [0.0; 4],
     };
-    optimized.stroke_step(&stamps, su, views.view3d.depth_view(), &content_paint, Some(regions));
+    optimized.stroke_step(&stamps, su, views.view3d.depth_view(), &content_paint, Some(regions.clone()));
     reference.stroke_step(&stamps, su, views.view3d.depth_view(), &content_paint, None);
     optimized.end_stroke();
     reference.end_stroke();
@@ -502,6 +502,22 @@ fn scissored_mask_stroke_matches_full_frame() {
         let partial = read_texture(&rs.device, &rs.queue, optimized.final_tex(channel));
         let full = read_texture(&rs.device, &rs.queue, reference.final_tex(channel));
         assert_eq!(partial, full, "cached mask composite differs in channel {channel}");
+    }
+
+    // A second mask stroke must invalidate just this mask's cached result.
+    assert!(optimized.begin_stroke(target, StrokeTarget::Mask, [false; CHANNELS], false));
+    assert!(reference.begin_stroke(reference_target, StrokeTarget::Mask, [false; CHANNELS], false));
+    optimized.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, Some(regions));
+    reference.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, None);
+    optimized.end_stroke();
+    reference.end_stroke();
+    optimized.composite();
+    reference.composite();
+    assert!(optimized.last_mask_cache_misses > 0, "a mask stroke must invalidate its cached filtered result");
+    for channel in 0..7 {
+        let partial = read_texture(&rs.device, &rs.queue, optimized.final_tex(channel));
+        let full = read_texture(&rs.device, &rs.queue, reference.final_tex(channel));
+        assert_eq!(partial, full, "repainted mask composite differs in channel {channel}");
     }
 }
 
