@@ -2,63 +2,88 @@
 
 ## Mission
 
-Maintain this fork of Material Painter as a dependable, responsive production tool for one creator. The main use is texturing and preparing assets for Roblox. The goal is not to build a general-purpose benchmark for extreme scenes or a product intended for public distribution.
+Maintain this fork of Material Painter as a dependable, responsive production tool for one creator. Its primary job is texturing and preparing assets for Roblox on the owner's own machine. This is not a general-purpose benchmark project and is not being prepared for public distribution.
 
-The owner explicitly authorizes substantial refactors, replacements, and other high-impact changes when they are the soundest way to reach the desired result. Do not preserve weak architecture merely to keep diffs small. Make invasive changes deliberately: understand the existing behavior, protect document data, add or update tests, and verify the result.
+The owner explicitly authorizes substantial, risky, and breaking internal refactors when they are the best route to a reliable, fast result. Do not preserve weak architecture merely to keep diffs small. Prefer a coherent replacement over piling workarounds onto a fundamentally poor design. Protect user projects and validate the behavior carefully.
 
 ## Target workload
-
-Use this as the actual engineering envelope:
 
 | Profile | Geometry | Mesh parts | UV maps |
 |---|---:|---:|---:|
 | Representative production asset | 50,000–100,000 triangles | 6 | 6 |
-| Maximum planned asset | Up to 200,000 triangles | Not above the representative workflow by design | Up to 12 |
+| Maximum planned asset | Up to 200,000 triangles | Up to the same 6-part workflow | Up to 12 |
 
 The maximum planned workload is approximately twice the representative asset. The application should remain comfortable with realistic production layer stacks, masks, filters, and texture work inside this envelope.
 
-The owner's actual machine is the performance target. Do not claim performance improvements from compilation or CI results alone; use profiling, GPU measurements, and real application testing. Do not optimize around hardware or workloads that are not part of this use case without a concrete reason.
+The owner's actual machine is the performance target. Do not claim gains from compilation or CI results alone; use profiling, GPU measurements, and real application testing. Do not optimize hypothetical workloads or hardware without a concrete reason tied to this target.
 
-## Priority order
+## Mandatory work order
 
-1. **Correctness and data integrity.** Painting, masks, filters, channels, 2D/3D views, undo/redo, save/load, baking, and export must produce correct and predictable results. Never trade silent corruption or lost work for a speed improvement.
-2. **Stability.** Avoid crashes, hangs, invalid GPU state, stale caches, broken projects, and regressions between editing sessions.
-3. **Responsiveness on the owner's machine.** Prioritize interactive painting, layer recomposition, mask/filter evaluation, viewport responsiveness, memory use, and project load/save within the target workload.
-4. **Maintainability for multiple AI-assisted contributors.** Keep subsystem boundaries understandable, invariants explicit, tests useful, and changes easy for another agent to review and continue.
+Work in these phases, in order. Do not skip ahead because a different optimization looks interesting.
+
+### Phase 1 — Finish brush and mask systems
+
+This is the immediate priority. Make painting and masking reliable and responsive before starting a broad optimization pass.
+
+Scope includes:
+- 3D brush stroke responsiveness and latency, including BVH/picking, stroke-region calculation, stamping, incremental recomposition, and frame-time spikes.
+- 2D/UV painting parity and correctness; fixes must not improve 3D while breaking UV workflows.
+- Vertex ID masks, painted masks, mask layers, smart-mask generators, folder masks, and mask filters.
+- Correct invalidation and reuse of mask/composite caches.
+- Correct results across layer stacks, nested folders, channels, undo/redo, save/load, and repeated strokes.
+- CPU and GPU cost of the brush/mask path, including excessive passes, texture reads, allocations, readbacks, and synchronization.
+
+Phase 1 is not complete merely because the code compiles or the brush feels faster on a nearly empty document. It must pass relevant unit and GPU regression tests, preserve rendered output, and be tested in the app on the owner's machine with a representative painted project and meaningful mask/filter use. Capture comparable F6/performance measurements and report remaining bottlenecks honestly. Where a GPU test is ignored or unavailable in CI, do not present it as validated; run it on a capable adapter or call out the remaining validation explicitly.
+
+### Phase 2 — General foundation optimization
+
+Only after Phase 1 is validated, continue a wider audit and optimization of the application inside the target workload. Consider memory ownership and peaks, resource lifetime, CPU allocations, GPU resource reuse, viewport rendering, baking, import, project load/save, export, background work, and subsystem boundaries. Prioritize based on evidence and user impact, not code aesthetics alone.
+
+### Later / deferred
+
+A major HUD redesign and work for projects with around 100 items are distant possibilities, not current deliverables. They must not displace the core work above.
 
 ## Explicit non-goals
 
-Do not spend engineering time preparing for these hypothetical requirements unless the owner changes scope:
-
-- Projects containing around 100 assets/items or similarly oversized production scenes.
-- Workloads substantially beyond 12 UV maps or 200,000 triangles per target asset.
-- Universal optimization across every possible GPU and machine configuration.
-- Public releases, distribution infrastructure, or polishing the application for a broad customer base.
-- Major HUD redesigns or cosmetic UI work ahead of core reliability and performance.
-
-These are not promises that such projects could never work. They are simply not the current engineering target.
+Unless the owner changes scope, do not spend engineering time preparing for:
+- Projects containing around 100 assets/items or similarly oversized projects.
+- Workloads substantially beyond 12 UV maps or 200,000 triangles for the target asset.
+- Universal optimization across every possible GPU or computer configuration.
+- Public releases, distribution infrastructure, or broad-market product polish.
+- Major HUD redesigns or cosmetic UI work before the production foundation is solid.
 
 ## Engineering latitude and safeguards
 
-Large or risky changes are allowed. A full subsystem rewrite can be preferable to accumulating patches around a poor design. Choose the implementation that produces the best reliable program, not the one with the smallest diff.
+Large or risky changes are allowed. Rewriting a subsystem, replacing a data flow, or changing internal APIs can be preferable to preserving a fragile implementation.
 
-Risk tolerance does not mean skipping validation. For consequential changes:
-
-- Identify the behavior and invariants that must remain true.
-- Prefer a coherent replacement over layered compatibility hacks when the old design is the problem.
-- Preserve old project compatibility unless a deliberate migration is designed and tested.
+Risk tolerance does not mean skipping safeguards:
+- Identify behavior and invariants that must remain true before replacing code.
+- Protect project data and maintain old project compatibility unless a deliberate migration is designed and tested.
 - Add regression tests for correctness-sensitive behavior.
-- Run the relevant unit and GPU tests; inspect rendered output after graphics changes.
-- Build and run the application. Separate CI evidence from real GPU/runtime evidence.
-- Measure before and after when claiming performance gains.
-- Keep commits understandable and avoid unrelated churn.
+- Run unit tests and relevant GPU tests; inspect rendered output after graphics changes.
+- Build and run the app. Distinguish CI/build evidence from real GPU/runtime evidence.
+- Measure before and after when claiming performance improvements.
+- Do not hide failures by disabling tests, broadening ignored paths, or silently degrading output.
+- Keep commits and PR notes understandable so another agent can continue safely.
 
-## Working across GPT and Claude
+## Shared GPT / Claude operating rules
 
-Both agents may work on this fork. At the start of a task, read this file and `AGENTS.md`; Claude should also follow `CLAUDE.md`. Inspect the current branch, HEAD, worktree/diff, and open PR before editing. Do not assume a previous agent's in-memory context describes the current repository state.
+This is one shared codebase used by GPT and Claude. Both agents must follow this file and `AGENTS.md`; Claude must also follow `CLAUDE.md`.
 
-Coordinate through committed code, tests, and concise notes in the relevant PR. Do not overwrite another agent's work or reset shared changes without checking the current state. The codebase should be organized for whichever agent takes the next task; do not add abstractions solely to make one agent comfortable.
+At the start of every task:
+1. Read the current scope and agent instructions.
+2. Inspect the current branch, HEAD SHA, open PRs, changed files, CI state, and relevant working diff.
+3. Check recent commits/PR comments for work performed by the other agent.
+4. State the intended files/subsystem and task boundary before making a substantial change.
+
+Coordination rules:
+- Never assume the other agent's context or local state is current.
+- Do not concurrently edit the same files or subsystem. Agree on ownership through the active PR/comment before splitting work.
+- Commit completed work in coherent units and leave a concise handoff note: changed behavior, invariants, tests run, unresolved risks, and next useful task.
+- Before every write, re-fetch the latest file/branch state and use the latest SHA. Never overwrite a newer commit or another agent's changes.
+- If another agent has an active uncommitted or in-progress change that cannot be inspected, do not reset or replace it; choose a separate task or ask for coordination.
+- Organize code for the next contributor, regardless of whether that contributor is GPT or Claude. Avoid agent-specific abstractions or style.
 
 ## Repository boundary
 
-All work for this collaboration belongs in `llltrylll/IIIII`. Never edit or push to the upstream repository `alla2001/material-painter`. Do not push tags. Do not merge a PR or publish a release without the owner's explicit instruction.
+All collaboration work belongs only in `llltrylll/IIIII`. Never edit or push to upstream `alla2001/material-painter`. Do not push tags. Do not merge PRs or publish releases without explicit owner instruction.
