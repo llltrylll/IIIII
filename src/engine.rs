@@ -4419,6 +4419,24 @@ mod scissor_tests {
         expand_scissors(&mut rects, 4, 100, true);
         assert_eq!(rects, vec![[0, 16, 9, 28], [98, 16, 100, 28]]);
         assert_disjoint(&rects);
+
+        // A patch touching both UV seams becomes the four texture corners.
+        let mut corner = vec![[2, 3, 5, 6]];
+        expand_scissors(&mut corner, 4, 100, true);
+        assert_eq!(corner.len(), 4);
+        assert_disjoint(&corner);
+        for point in [[0, 0], [99, 0], [0, 99], [99, 99]] {
+            assert!(
+                corner.iter().any(|r| r[0] <= point[0] && point[0] < r[2] && r[1] <= point[1] && point[1] < r[3]),
+                "wrapped corner texel {:?} wasn't included",
+                point
+            );
+        }
+
+        // Blur/sharpen clamp at the texture edge and must not wrap.
+        let mut clamped = vec![[2, 20, 5, 24]];
+        expand_scissors(&mut clamped, 4, 100, false);
+        assert_eq!(clamped, vec![[0, 16, 9, 28]]);
     }
 
     #[test]
