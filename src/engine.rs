@@ -58,7 +58,7 @@ const MASK_FORMAT: F = F::R8Unorm;
 /// Filtered masks keep 16 bits, so blur and levels don't band.
 const MASK_FILTER_FORMAT: F = F::R16Float;
 /// Uniform slots for mask filter steps per composite (dynamic offsets).
-const MAX_MASK_FILTER_STEPS: u64 = 256;
+const INITIAL_MASK_FILTER_STEPS: u64 = 256;
 const MASK_FILTER_STRIDE: u64 = 256;
 const STROKE_FORMAT: F = F::R16Float;
 pub const MAX_STAMPS: usize = 512;
@@ -1333,6 +1333,7 @@ pub struct Engine {
     /// alternate between (the result is in one of them).
     mask_out: HashMap<u64, [Tex; 4]>,
     mask_filter_ubuf: wgpu::Buffer,
+    mask_filter_ubuf_slots: u64,
     /// Disjoint UV-space rectangles changed by the active stroke, in texels.
     /// Multiple scissors keep distant UV islands from forcing one large bbox.
     stroke_regions: Vec<[u32; 4]>,
@@ -1607,10 +1608,11 @@ impl Engine {
             mask_out: HashMap::new(),
             mask_filter_ubuf: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("mask filter uniforms"),
-                size: MASK_FILTER_STRIDE * MAX_MASK_FILTER_STEPS,
+                size: MASK_FILTER_STRIDE * INITIAL_MASK_FILTER_STEPS,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
+            mask_filter_ubuf_slots: INITIAL_MASK_FILTER_STEPS,
             stroke_regions: Vec::new(),
             region_unknown: false,
             generation: 0,
@@ -3728,7 +3730,8 @@ impl Engine {
             });
             let mut pass = gpu::pass(encoder, "mask filter", &[gpu::color_attachment(&out.view, load)]);
             pass.set_pipeline(&self.p.mask_filter);
-            pass.set_bind_group(0, &bg, &[(step.min(MAX_MASK_FILTER_STEPS as usize - 1) as u64 * MASK_FILTER_STRIDE) as u32]);
+            let offset = u32::try_from(step as u64 * MASK_FILTER_STRIDE).expect("mask filter uniform offset fits in u32");
+            pass.set_bind_group(0, &bg, &[offset]);
             draw(&mut pass, rects);
         };
         let mut cur = 0;
@@ -4036,7 +4039,18 @@ impl Engine {
             }
             layer_ops.insert(li, ops);
         }
-        steps.truncate(MAX_MASK_FILTER_STEPS as usize);
+        // Grow for the complete active stack. Truncating here would silently make
+        // later filters reuse the final uniform slot and render the wrong mask.
+        let required_steps = steps.len().max(1) as u64;
+        if required_steps > self.mask_filter_ubuf_slots {
+            self.mask_filter_ubuf_slots = required_steps.next_power_of_two();
+            self.mask_filter_ubuf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("mask filter uniforms"),
+                size: MASK_FILTER_STRIDE * self.mask_filter_ubuf_slots,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
         let mut sdata = vec![0u8; (MASK_FILTER_STRIDE as usize) * steps.len().max(1)];
         for (i, s) in steps.iter().enumerate() {
             let off = i * MASK_FILTER_STRIDE as usize;
@@ -4528,18 +4542,59 @@ impl Engine {
 
     // ------------------------------------------------------------------ stats
 
+    fn fill_image_bytes(&self) -> u64 {
+        let mut seen = Vec::new();
+        let mut bytes = 0;
+        for image in self.layers.iter().flat_map(|layer| layer.images.iter().flatten()) {
+            let ptr = Arc::as_ptr(&image.tex);
+            if !seen.contains(&ptr) {
+                seen.push(ptr);
+                bytes += image.tex.bytes();
+            }
+        }
+        bytes
+    }
+
+    fn custom_array_bytes(&self) -> u64 {
+        let res = self.custom.first().map_or(1, |t| t.width) as u64;
+        res * res * self.custom.len().max(1) as u64 * gpu::bytes_per_texel(CUSTOM_FORMAT) as u64
+    }
+
+    fn gpu_buffer_bytes(&self) -> u64 {
+        let stroke = self.layer_ubuf.size()
+            + self.stamp_ubuf.size()
+            + self.stamp_sbuf.size()
+            + self.apply_ubuf.size()
+            + self.mask_filter_ubuf.size();
+        let profile = self.gpu_profiler.as_ref().map_or(0, |p| p.resources.resolve.size() + p.resources.readback.size());
+        stroke + profile
+    }
+
+    /// Estimated GPU memory owned by this texture set: textures and known buffers.
+    /// Driver padding, shared renderer resources and the viewport mesh are excluded.
     pub fn vram_bytes(&self) -> u64 {
-        let fixed = self.pos.bytes()
+        self.pos.bytes()
             + self.nrm.bytes()
             + self.tan.bytes()
             + self.stroke.bytes()
             + self.maps.iter().map(|t| t.bytes()).sum::<u64>()
             + self.resolved.iter().flatten().map(|t| t.bytes()).sum::<u64>()
             + self.map_fix.iter().flatten().map(|t| t.bytes()).sum::<u64>()
+            + self.custom.iter().map(|t| t.bytes()).sum::<u64>()
+            + self.custom_array_bytes()
             + self.accum.iter().flatten().map(|t| t.bytes()).sum::<u64>()
+            + self.folder_below.iter().flatten().map(|t| t.bytes()).sum::<u64>()
+            + self.prefix_cache.as_ref().map_or(0, |set| set.iter().map(|t| t.bytes()).sum())
+            + self.mask_out.values().flat_map(|set| set.iter()).map(|t| t.bytes()).sum::<u64>()
             + self.snap.iter().flatten().map(|t| t.bytes()).sum::<u64>()
-            + self.snap_mask.as_ref().map_or(0, |t| t.bytes());
-        fixed + self.layers.iter().map(|l| l.vram_bytes()).sum::<u64>()
+            + self.snap_mask.as_ref().map_or(0, |t| t.bytes())
+            + self.brush_alpha.bytes()
+            + self.brush_grain.bytes()
+            + self.dummy.bytes()
+            + self.layers.iter().map(|l| l.vram_bytes()).sum::<u64>()
+            + self.fill_image_bytes()
+            + self.thumbs.vram_bytes()
+            + self.gpu_buffer_bytes()
     }
 
     pub fn layer_vram_bytes(&self, idx: usize) -> u64 {
@@ -4565,13 +4620,18 @@ impl Engine {
         };
         vec![
             ("surface maps", mb(self.pos.bytes() + self.nrm.bytes() + self.tan.bytes() + self.stroke.bytes())),
-            ("mesh maps", mb(self.maps.iter().map(|t| t.bytes()).sum::<u64>() + self.resolved.iter().flatten().map(|t| t.bytes()).sum::<u64>())),
-            ("accum (2 sets)", mb(self.accum.iter().map(set).sum())),
-            ("folder below", mb(self.folder_below.iter().map(set).sum())),
-            ("prefix cache", mb(self.prefix_cache.as_ref().map_or(0, set))),
+            ("mesh maps and fixes", mb(self.maps.iter().map(|t| t.bytes()).sum::<u64>() + self.resolved.iter().flatten().map(|t| t.bytes()).sum::<u64>() + self.map_fix.iter().flatten().map(|t| t.bytes()).sum::<u64>())),
+            ("custom maps", mb(self.custom.iter().map(|t| t.bytes()).sum::<u64>() + self.custom_array_bytes())),
+            ("accumulation", mb(self.accum.iter().flatten().map(|t| t.bytes()).sum())),
+            ("folder cache", mb(self.folder_below.iter().flatten().map(|t| t.bytes()).sum())),
+            ("prefix cache", mb(self.prefix_cache.as_ref().map_or(0, |set| set.iter().map(|t| t.bytes()).sum()))),
             ("filtered masks", mb(self.mask_out.values().flat_map(|t| t.iter()).map(|t| t.bytes()).sum())),
-            ("paint layers", mb(self.layers.iter().map(|l| l.vram_bytes()).sum())),
+            ("paint layers and masks", mb(self.layers.iter().map(|l| l.vram_bytes()).sum())),
             ("fill images", mb(unique_images)),
+            ("thumbnails", mb(self.thumbs.vram_bytes())),
+            ("brush and fallback textures", mb(self.brush_alpha.bytes() + self.brush_grain.bytes() + self.dummy.bytes())),
+            ("stroke snapshots", mb(self.snap.iter().flatten().map(|t| t.bytes()).sum::<u64>() + self.snap_mask.as_ref().map_or(0, |t| t.bytes()))),
+            ("GPU buffers", mb(self.gpu_buffer_bytes())),
         ]
     }
 }
