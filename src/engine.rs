@@ -4622,20 +4622,7 @@ impl Engine {
     #[cfg(test)]
     pub fn vram_breakdown(&self) -> Vec<(&'static str, u64)> {
         let mb = |b: u64| b >> 20;
-        let set = |s: &[Tex; ACCUM]| s.iter().map(|t| t.bytes()).sum::<u64>();
-        // Layers can share one image texture: count each once.
-        let unique_images: u64 = {
-            let mut seen = Vec::new();
-            let mut sum = 0;
-            for i in self.layers.iter().flat_map(|l| l.images.iter().flatten()) {
-                let p = Arc::as_ptr(&i.tex);
-                if !seen.contains(&p) {
-                    seen.push(p);
-                    sum += i.tex.bytes();
-                }
-            }
-            sum
-        };
+        let unique_images = self.fill_image_bytes();
         vec![
             ("surface maps", mb(self.pos.bytes() + self.nrm.bytes() + self.tan.bytes() + self.stroke.bytes())),
             ("mesh maps and fixes", mb(self.maps.iter().map(|t| t.bytes()).sum::<u64>() + self.resolved.iter().flatten().map(|t| t.bytes()).sum::<u64>() + self.map_fix.iter().flatten().map(|t| t.bytes()).sum::<u64>())),
