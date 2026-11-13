@@ -2931,7 +2931,7 @@ impl PainterApp {
                         )) } else { String::new() },
                         self.frame_ms,
                         self.frame_peak_ms,
-                        mb(self.engine.vram_bytes()),
+                        mb(self.engine.vram_bytes() + self.sets.parked.iter().flatten().map(|p| p.engine.vram_bytes()).sum::<u64>()),
                         mb(self.undo.ram_bytes() as u64),
                         self.undo.undo.len(),
                         self.engine.res,
