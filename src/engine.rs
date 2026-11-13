@@ -945,8 +945,9 @@ enum MaskOp {
     /// A mask layer: render it with this layer-uniform offset, then blend it
     /// in with this filter step.
     Layer { uniform: u32, combine: usize },
-    /// A filter step.
-    Filter(usize),
+    /// A filter step. `reach` is how many texels it reads around the one it
+    /// writes; `wrap` is whether those reads wrap around the texture edge.
+    Filter { step: usize, reach: f32, wrap: bool },
 }
 
 /// The filter shader's step kind that blends a mask layer in.
@@ -1330,7 +1331,7 @@ pub struct Engine {
     prefix_cache: Option<[Tex; ACCUM]>,
     /// Filtered masks: per layer, the two textures its filter steps
     /// alternate between (the result is in one of them).
-    mask_out: HashMap<u64, [Tex; 3]>,
+    mask_out: HashMap<u64, [Tex; 4]>,
     mask_filter_ubuf: wgpu::Buffer,
     /// Disjoint UV-space rectangles changed by the active stroke, in texels.
     /// Multiple scissors keep distant UV islands from forcing one large bbox.
@@ -3665,13 +3666,33 @@ impl Engine {
         ops: &[MaskOp],
         scissors: Option<&[[u32; 4]]>,
     ) -> &Tex {
+        // Textures: 0 and 1 are scratch (ping-pong), 2 holds a mask layer's own
+        // values, 3 is the result and is written only by the last step.
         let pair = &self.mask_out[&layer_id];
         let load = if scissors.is_some() { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(wgpu::Color::BLACK) };
-        {
-            let mut pass = gpu::pass(encoder, "mask source", &[gpu::color_attachment(&pair[0].view, load)]);
-            pass.set_pipeline(&self.p.mask_source);
-            pass.set_bind_group(0, source_bg, &[source_offset]);
-            if let Some(rects) = scissors {
+        let steps = ops.len();
+        // A patch can't use a ping-pong buffer's leftovers outside it: step k
+        // reads its input around every texel it writes, and that input texture
+        // is overwritten by later steps. So each step writes only as far as the
+        // next one reads: the last over `scissors`, each earlier one wider by
+        // the reach of the step after it. Every read then lands on texels
+        // written in this same frame, and the result texture keeps its old
+        // values outside `scissors`.
+        let regions: Option<Vec<Vec<[u32; 4]>>> = scissors.map(|rects| {
+            let mut per_step = vec![Vec::new(); steps + 1];
+            let mut region = rects.to_vec();
+            for k in (0..steps).rev() {
+                per_step[k + 1] = region.clone();
+                if let MaskOp::Filter { reach, wrap, .. } = ops[k]
+                    && reach > 0.0 {
+                        expand_scissors(&mut region, reach.ceil() as u32 + 2, self.res, wrap);
+                    }
+            }
+            per_step[0] = region;
+            per_step
+        });
+        let draw = |pass: &mut wgpu::RenderPass<'_>, rects: Option<&[[u32; 4]]>| {
+            if let Some(rects) = rects {
                 for &[x0, y0, x1, y1] in rects {
                     pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
                     pass.draw(0..3, 0..1);
@@ -3679,8 +3700,15 @@ impl Engine {
             } else {
                 pass.draw(0..3, 0..1);
             }
+        };
+        let source_out = if steps == 0 { 3 } else { 0 };
+        {
+            let mut pass = gpu::pass(encoder, "mask source", &[gpu::color_attachment(&pair[source_out].view, load)]);
+            pass.set_pipeline(&self.p.mask_source);
+            pass.set_bind_group(0, source_bg, &[source_offset]);
+            draw(&mut pass, regions.as_ref().map(|r| &r[0][..]));
         }
-        let filter = |encoder: &mut wgpu::CommandEncoder, step: usize, input: &Tex, other: &Tex, out: &Tex| {
+        let filter = |encoder: &mut wgpu::CommandEncoder, step: usize, input: &Tex, other: &Tex, out: &Tex, rects: Option<&[[u32; 4]]>| {
             let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("mask filter"),
                 layout: &self.p.mask_filter_bgl,
@@ -3701,40 +3729,28 @@ impl Engine {
             let mut pass = gpu::pass(encoder, "mask filter", &[gpu::color_attachment(&out.view, load)]);
             pass.set_pipeline(&self.p.mask_filter);
             pass.set_bind_group(0, &bg, &[(step.min(MAX_MASK_FILTER_STEPS as usize - 1) as u64 * MASK_FILTER_STRIDE) as u32]);
-            if let Some(rects) = scissors {
-                for &[x0, y0, x1, y1] in rects {
-                    pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
-                    pass.draw(0..3, 0..1);
-                }
-            } else {
-                pass.draw(0..3, 0..1);
-            }
+            draw(&mut pass, rects);
         };
         let mut cur = 0;
-        for op in ops {
+        for (k, op) in ops.iter().enumerate() {
+            let out = if k + 1 == steps { 3 } else { 1 - cur };
+            let rects = regions.as_ref().map(|r| &r[k + 1][..]);
             match *op {
-                MaskOp::Filter(step) => filter(encoder, step, &pair[cur], &pair[2], &pair[1 - cur]),
+                MaskOp::Filter { step, .. } => filter(encoder, step, &pair[cur], &pair[2], &pair[out], rects),
                 MaskOp::Layer { uniform, combine } => {
                     // The mask layer's own values, then combined over the mask so far.
                     {
                         let mut pass = gpu::pass(encoder, "mask layer", &[gpu::color_attachment(&pair[2].view, load)]);
                         pass.set_pipeline(&self.p.mask_source);
                         pass.set_bind_group(0, source_bg, &[uniform]);
-                        if let Some(rects) = scissors {
-                            for &[x0, y0, x1, y1] in rects {
-                                pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
-                                pass.draw(0..3, 0..1);
-                            }
-                        } else {
-                            pass.draw(0..3, 0..1);
-                        }
+                        draw(&mut pass, rects);
                     }
-                    filter(encoder, combine, &pair[cur], &pair[2], &pair[1 - cur]);
+                    filter(encoder, combine, &pair[cur], &pair[2], &pair[out], rects);
                 }
             }
-            cur = 1 - cur;
+            cur = out;
         }
-        &pair[cur]
+        &pair[3]
     }
 
     /// Flags the layer stack for a full composite.
@@ -3986,7 +4002,7 @@ impl Engine {
         for id in &filtered_ids {
             if !self.mask_out.contains_key(id) {
                 let t = || Tex::new(&self.device, "filtered mask", self.res, self.res, MASK_FILTER_FORMAT, LAYER_USAGE);
-                self.mask_out.insert(*id, [t(), t(), t()]);
+                self.mask_out.insert(*id, [t(), t(), t(), t()]);
             }
         }
         // Filter steps' uniforms, written up front: (kind, a, b, c), (dir x, dir y, scale).
@@ -4004,17 +4020,20 @@ impl Engine {
                 ops.push(MaskOp::Layer { uniform: (slot as u64 * UNIFORM_STRIDE) as u32, combine: steps.len() });
                 steps.push([COMBINE_STEP, ml.blend as u32 as f32, ml.opacity, value, 0.0, 0.0, scale, 0.0]);
             }
-            let begin = steps.len();
             for f in self.layers[li].mask.as_ref().map_or(&[][..], |m| &m.filters[..]).iter().filter(|f| f.enabled) {
                 let kind = f.kind as u32 as f32;
+                // Each step of a filter reads as far as the whole filter does.
+                let (reach, wrap) = (f.reach(self.res), f.kind == FilterKind::Warp);
                 if f.kind == FilterKind::Blur {
                     steps.push([kind, f.a, f.b, f.c, 1.0, 0.0, scale, 0.0]);
+                    ops.push(MaskOp::Filter { step: steps.len() - 1, reach, wrap });
                     steps.push([kind, f.a, f.b, f.c, 0.0, 1.0, scale, 0.0]);
+                    ops.push(MaskOp::Filter { step: steps.len() - 1, reach, wrap });
                 } else {
                     steps.push([kind, f.a, f.b, f.c, 0.0, 0.0, scale, 0.0]);
+                    ops.push(MaskOp::Filter { step: steps.len() - 1, reach, wrap });
                 }
             }
-            ops.extend((begin..steps.len()).map(MaskOp::Filter));
             layer_ops.insert(li, ops);
         }
         steps.truncate(MAX_MASK_FILTER_STEPS as usize);
@@ -4251,7 +4270,7 @@ impl Engine {
                         let ops = layer_ops.get(&li).map_or(&[][..], |o| &o[..]);
                         mask_gpu_passes += 1 + ops.iter().map(|op| match op {
                             MaskOp::Layer { .. } => 2,
-                            MaskOp::Filter(_) => 1,
+                            MaskOp::Filter { .. } => 1,
                         }).sum::<u32>();
                         Some(self.encode_mask_filters(
                             &mut encoder,

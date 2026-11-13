@@ -333,7 +333,7 @@ fn paint_projections() {
             &mesh, &bvh, engine.triangles(), &cam, fsize, projection, 1, radius, &stamps,
         ).expect("the test mesh uses UVs inside the base tile");
         assert!(!regions.is_empty(), "{name}: no conservative stroke region");
-        engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, Some(regions));
+        engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, Some(regions.clone()));
         reference.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, None);
         engine.end_stroke();
         reference.end_stroke();
@@ -345,7 +345,59 @@ fn paint_projections() {
         }
         let optimized_paint = read_texture(&rs.device, &rs.queue, paint_texture(&engine));
         let reference_paint = read_texture(&rs.device, &rs.queue, paint_texture(&reference));
-        assert_eq!(optimized_paint, reference_paint, "{name}: scissored paint target differs before composite");
+        // Texels the stroke never touched keep alpha 0; the full-frame
+        // reference also writes the brush color under that zero alpha, which
+        // no composite pass reads (the final channels below prove it).
+        let visible: Vec<(u8, u8)> = optimized_paint
+            .chunks_exact(4)
+            .zip(reference_paint.chunks_exact(4))
+            .filter(|(a, b)| !(a[3] == 0 && b[3] == 0))
+            .flat_map(|(a, b)| a.iter().copied().zip(b.iter().copied()))
+            .collect();
+        let visible_differs = visible.iter().filter(|(a, b)| a != b).count();
+        println!(
+            "  {name}: scissors {}; raw: {}; texels with coverage: {} bytes, differing {visible_differs}",
+            engine.last_paint_scissor_rects,
+            diff_report(&optimized_paint, &reference_paint, 4, engine.res),
+            visible.len()
+        );
+        if visible_differs > 0 {
+            let res = engine.res as usize;
+            let near: Vec<_> = regions.iter().filter(|r| r[0] < 0.70 && r[2] > 0.63 && r[1] < 0.72 && r[3] > 0.64).collect();
+            println!("    uv regions near the texel (u~0.664, v~0.68): {near:?}; total regions {}", regions.len());
+            {
+                // The triangles whose UV box is nearest the first missed texel.
+                let uv = Vec2::new(170.5, 174.0) / res as f32;
+                let mut near: Vec<(f32, usize)> = (0..mesh.indices.len() / 3)
+                    .map(|t| {
+                        let (mut lo, mut hi) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
+                        for k in 0..3 {
+                            let v = Vec2::from(mesh.vertices[mesh.indices[t * 3 + k] as usize].uv);
+                            lo = lo.min(v);
+                            hi = hi.max(v);
+                        }
+                        let d = (lo - uv).max(uv - hi).max(Vec2::ZERO);
+                        (d.max_element() * res as f32, t)
+                    })
+                    .collect();
+                near.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let vp = cam.view_proj(fsize.x / fsize.y);
+                for &(d, t) in near.iter().take(4) {
+                    let scr: Vec<[f32; 2]> = (0..3).map(|k| {
+                        let v = &mesh.vertices[mesh.indices[t * 3 + k] as usize];
+                        let c = vp * Vec3::from(v.pos).extend(1.0);
+                        ((Vec2::new(c.x, -c.y) / c.w * 0.5 + 0.5) * fsize).to_array()
+                    }).collect();
+                    println!("    nearest tri {t}: {d:.1} texels from the texel, screen {scr:?}");
+                }
+            }
+            for (i, (a, b)) in optimized_paint.chunks_exact(4).zip(reference_paint.chunks_exact(4)).enumerate() {
+                if a != b && !(a[3] == 0 && b[3] == 0) {
+                    println!("    texel ({}, {}): scissored {a:?} full {b:?}", i % res, i / res);
+                }
+            }
+        }
+        assert_eq!(visible_differs, 0, "{name}: scissored paint target differs where the stroke has coverage");
         engine.composite();
         reference.composite();
         for channel in 0..7 {
@@ -518,7 +570,7 @@ fn scissored_mask_stroke_matches_full_frame() {
     // A second mask stroke must invalidate just this mask's cached result.
     assert!(optimized.begin_stroke(target, StrokeTarget::Mask, [false; CHANNELS], false));
     assert!(reference.begin_stroke(reference_target, StrokeTarget::Mask, [false; CHANNELS], false));
-    optimized.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, Some(regions));
+    optimized.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, Some(regions.clone()));
     reference.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, None);
     optimized.end_stroke();
     reference.end_stroke();
@@ -728,7 +780,7 @@ fn multi_scissor_nested_folder_matches_full() {
             .expect("both UV islands must be included in the changed region");
         assert!(regions.len() >= 2, "expected disjoint UV scissors, got {}", regions.len());
 
-        engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, Some(regions));
+        engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, Some(regions.clone()));
         engine.composite();
 
         if frame == 0 {
@@ -3245,4 +3297,289 @@ fn spp_screenshot() {
     }
     harness.run_steps(1);
     harness.render().expect("renders").save(dir.join("shot_raytraced.png")).unwrap();
+}
+
+/// Where two RGBA-like texel buffers first differ and the box holding every
+/// difference, to locate an artifact without opening the images.
+fn diff_report(a: &[u8], b: &[u8], bpp: usize, res: u32) -> String {
+    let (mut n, mut first) = (0usize, None);
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    for (i, (p, q)) in a.iter().zip(b).enumerate() {
+        if p != q {
+            n += 1;
+            let t = (i / bpp) as u32;
+            let (x, y) = (t % res, t / res);
+            first.get_or_insert((x, y));
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+    }
+    match first {
+        None => "identical".to_string(),
+        Some((fx, fy)) => format!("{n} bytes differ, first at ({fx}, {fy}), box x {x0}..={x1} y {y0}..={y1}"),
+    }
+}
+
+/// Incremental stroke recompositions (a few scissors around the stamps) must
+/// match a full composite texel for texel: folders (nested, with opacity), the
+/// stack saved under them, masks with blur/warp filters that read around the
+/// change, and strokes painted on a filtered mask itself.
+/// `cargo test --bin material_painter multi_scissor_matches_full_composite -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn multi_scissor_matches_full_composite() {
+    use crate::app::{BrushProjection, resolve_stamps};
+    use crate::engine::{ACCUM, BrushPaint, CHANNELS, FillParams, FilterKind, GenKind, MaskBlend, MaskFilter, MaskLayer, MaskSource, MatValues, StampUniform};
+    use crate::undo::{StrokeTarget, UndoStack};
+    use glam::Vec2;
+
+    type Build = fn(&mut Engine, &mut UndoStack) -> (u64, StrokeTarget);
+    let fill = |rgb: [f32; 3]| FillParams {
+        mat: MatValues { enabled: [true, false, false, false, false, false, false, false], color: rgb, ..Default::default() },
+        ..Default::default()
+    };
+    let pos = |e: &Engine, id: u64| e.layers.iter().position(|l| l.id == id).expect("layer exists");
+    let _ = (&fill, &pos);
+
+    fn fill_of(rgb: [f32; 3]) -> FillParams {
+        FillParams { mat: MatValues { enabled: [true, false, false, false, false, false, false, false], color: rgb, ..Default::default() }, ..Default::default() }
+    }
+    fn set_opacity(e: &mut Engine, id: u64, opacity: f32) {
+        e.layers.iter_mut().find(|l| l.id == id).unwrap().opacity = opacity;
+    }
+    /// A mask with structure (clouds over black) and filters that read their neighbors.
+    fn filtered_mask(e: &mut Engine, id: u64, undo: &mut UndoStack) {
+        let idx = e.layers.iter().position(|l| l.id == id).unwrap();
+        e.add_mask(idx, true, None, undo);
+        let m = e.layers[idx].mask.as_mut().unwrap();
+        let ml = |source, blend| MaskLayer { source, blend, opacity: 1.0, enabled: true };
+        m.layers = vec![ml(MaskSource::Fill(0.0), MaskBlend::Normal), ml(MaskSource::Generator(GenKind::Clouds.default_generator()), MaskBlend::Add)];
+        m.filters = vec![MaskFilter::new(FilterKind::Blur), MaskFilter::new(FilterKind::Warp)];
+        if let Some(f) = m.filters.get_mut(0) {
+            f.a = 40.0;
+        }
+        e.mark_dirty();
+    }
+    /// A painted mask (white) with the same neighbor-reading filters.
+    fn painted_filtered_mask(e: &mut Engine, id: u64, undo: &mut UndoStack) {
+        let idx = e.layers.iter().position(|l| l.id == id).unwrap();
+        e.add_mask(idx, true, None, undo);
+        let m = e.layers[idx].mask.as_mut().unwrap();
+        m.filters = vec![MaskFilter::new(FilterKind::Blur), MaskFilter::new(FilterKind::Warp)];
+        m.filters[0].a = 40.0;
+        e.mark_dirty();
+    }
+    let content = StrokeTarget::Content;
+    let _ = content;
+
+    let scenarios: Vec<(&str, Build)> = vec![
+        ("flat stack", |e, u| {
+            e.add_fill_layer(0, None, "A".into(), fill_of([0.2, 0.4, 0.8]), u);
+            let p = e.add_paint_layer(1, None, None, u);
+            let pid = e.layers[p].id;
+            let b = e.add_fill_layer(2, None, "B".into(), fill_of([0.9, 0.7, 0.1]), u);
+            let bid = e.layers[b].id;
+            set_opacity(e, bid, 0.5);
+            (pid, StrokeTarget::Content)
+        }),
+        ("folder, painting inside it", |e, u| {
+            e.add_fill_layer(0, None, "A".into(), fill_of([0.2, 0.4, 0.8]), u);
+            let f = e.add_folder(1, None, "F".into(), u);
+            let fid = e.layers[f].id;
+            let p = e.add_paint_layer(1, Some(fid), None, u);
+            let pid = e.layers[p].id;
+            let b = e.add_fill_layer(2, Some(fid), "B".into(), fill_of([0.1, 0.8, 0.3]), u);
+            let bid = e.layers[b].id;
+            set_opacity(e, bid, 0.6);
+            set_opacity(e, fid, 0.7);
+            let c = e.add_fill_layer(4, None, "C".into(), fill_of([0.9, 0.2, 0.2]), u);
+            let cid = e.layers[c].id;
+            set_opacity(e, cid, 0.4);
+            (pid, StrokeTarget::Content)
+        }),
+        ("nested folders", |e, u| {
+            e.add_fill_layer(0, None, "A".into(), fill_of([0.2, 0.4, 0.8]), u);
+            let f1 = e.add_folder(1, None, "F1".into(), u);
+            let f1id = e.layers[f1].id;
+            let f2 = e.add_folder(1, Some(f1id), "F2".into(), u);
+            let f2id = e.layers[f2].id;
+            let p = e.add_paint_layer(1, Some(f2id), None, u);
+            let pid = e.layers[p].id;
+            let b = e.add_fill_layer(2, Some(f2id), "B".into(), fill_of([0.1, 0.8, 0.3]), u);
+            let bid = e.layers[b].id;
+            let f2 = e.layers.iter().position(|l| l.id == f2id).unwrap();
+            let c = e.add_fill_layer(f2 + 1, Some(f1id), "C".into(), fill_of([0.9, 0.5, 0.1]), u);
+            let cid = e.layers[c].id;
+            let d = e.add_fill_layer(e.layers.len(), None, "D".into(), fill_of([0.7, 0.1, 0.7]), u);
+            let did = e.layers[d].id;
+            set_opacity(e, bid, 0.6);
+            set_opacity(e, f2id, 0.8);
+            set_opacity(e, cid, 0.6);
+            set_opacity(e, f1id, 0.7);
+            set_opacity(e, did, 0.3);
+            (pid, StrokeTarget::Content)
+        }),
+        ("filtered mask above the painted layer", |e, u| {
+            let p = e.add_paint_layer(0, None, None, u);
+            let pid = e.layers[p].id;
+            let b = e.add_fill_layer(1, None, "B".into(), fill_of([0.1, 0.3, 0.9]), u);
+            let bid = e.layers[b].id;
+            filtered_mask(e, bid, u);
+            (pid, StrokeTarget::Content)
+        }),
+        ("filtered masks inside nested folders", |e, u| {
+            e.add_fill_layer(0, None, "A".into(), fill_of([0.3, 0.3, 0.3]), u);
+            let f1 = e.add_folder(1, None, "F1".into(), u);
+            let f1id = e.layers[f1].id;
+            let f2 = e.add_folder(1, Some(f1id), "F2".into(), u);
+            let f2id = e.layers[f2].id;
+            let p = e.add_paint_layer(1, Some(f2id), None, u);
+            let pid = e.layers[p].id;
+            let b = e.add_fill_layer(2, Some(f2id), "B".into(), fill_of([0.1, 0.8, 0.3]), u);
+            let bid = e.layers[b].id;
+            filtered_mask(e, bid, u);
+            let f2 = e.layers.iter().position(|l| l.id == f2id).unwrap();
+            let c = e.add_fill_layer(f2 + 1, Some(f1id), "C".into(), fill_of([0.9, 0.5, 0.1]), u);
+            let cid = e.layers[c].id;
+            filtered_mask(e, cid, u);
+            set_opacity(e, f2id, 0.8);
+            set_opacity(e, f1id, 0.7);
+            (pid, StrokeTarget::Content)
+        }),
+        ("painting a filtered mask", |e, u| {
+            e.add_fill_layer(0, None, "A".into(), fill_of([0.2, 0.4, 0.8]), u);
+            let b = e.add_fill_layer(1, None, "B".into(), fill_of([0.9, 0.7, 0.1]), u);
+            let bid = e.layers[b].id;
+            painted_filtered_mask(e, bid, u);
+            (bid, StrokeTarget::Mask)
+        }),
+        ("painting a blur-only mask", |e, u| {
+            e.add_fill_layer(0, None, "A".into(), fill_of([0.2, 0.4, 0.8]), u);
+            let b = e.add_fill_layer(1, None, "B".into(), fill_of([0.9, 0.7, 0.1]), u);
+            let bid = e.layers[b].id;
+            painted_filtered_mask(e, bid, u);
+            e.layers[b].mask.as_mut().unwrap().filters.truncate(1);
+            (bid, StrokeTarget::Mask)
+        }),
+        ("painting a warp-only mask", |e, u| {
+            e.add_fill_layer(0, None, "A".into(), fill_of([0.2, 0.4, 0.8]), u);
+            let b = e.add_fill_layer(1, None, "B".into(), fill_of([0.9, 0.7, 0.1]), u);
+            let bid = e.layers[b].id;
+            painted_filtered_mask(e, bid, u);
+            e.layers[b].mask.as_mut().unwrap().filters.remove(0);
+            (bid, StrokeTarget::Mask)
+        }),
+        ("painting a filtered mask inside a folder", |e, u| {
+            e.add_fill_layer(0, None, "A".into(), fill_of([0.2, 0.4, 0.8]), u);
+            let f = e.add_folder(1, None, "F".into(), u);
+            let fid = e.layers[f].id;
+            let b = e.add_fill_layer(1, Some(fid), "B".into(), fill_of([0.9, 0.7, 0.1]), u);
+            let bid = e.layers[b].id;
+            painted_filtered_mask(e, bid, u);
+            let g = e.add_fill_layer(2, Some(fid), "G".into(), fill_of([0.1, 0.9, 0.5]), u);
+            let gid = e.layers[g].id;
+            set_opacity(e, gid, 0.5);
+            set_opacity(e, fid, 0.8);
+            (bid, StrokeTarget::Mask)
+        }),
+    ];
+
+    let mesh = crate::mesh::Primitive::RoundedCube.build();
+    let bvh = crate::bvh::Bvh::from_mesh(&mesh);
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let res = 512u32;
+    let size = [800u32, 500u32];
+    let fsize = Vec2::new(size[0] as f32, size[1] as f32);
+    let cam = OrbitCam { target: (mesh.bounds_min + mesh.bounds_max) * 0.5, ..Default::default() };
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+    let bpp = [4usize, 1, 1, 2, 4, 4, 1];
+    let mut failures: Vec<String> = Vec::new();
+    let mut most_rects = 0u32;
+
+    for (name, build) in scenarios {
+        let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+        let mut undo = UndoStack::default();
+        let (layer_id, target) = build(&mut engine, &mut undo);
+        let layer = engine.layers.iter().position(|l| l.id == layer_id).expect("painted layer");
+        engine.composite();
+        let mut views = ViewRenderer::new(&rs);
+        views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &ViewSettings::default(), None);
+
+        let radius = 18.0;
+        let su = StampUniform {
+            view_proj: cam.view_proj(fsize.x / fsize.y).to_cols_array_2d(),
+            cam_pos: cam.eye().extend(1.0).to_array(),
+            view: [fsize.x, fsize.y, 0.0, 0.0],
+            view2d: [0.0; 4],
+            brush: [radius, 0.6, 1.0, 0.0],
+            clip: [crate::viewport::NEAR, crate::viewport::FAR, 0.0, 0.0],
+            proj: [BrushProjection::Screen as u32 as f32, 0.0, 85f32.to_radians().cos(), 0.0],
+        };
+        let (enabled, paint) = match target {
+            StrokeTarget::Mask => ([false; CHANNELS], BrushPaint { mat: MatValues::default(), mask_value: 0.0, opacity: 1.0, erase: false, grain: [0.0; 4] }),
+            _ => (
+                [true, true, true, false, false, false, false, false],
+                BrushPaint {
+                    mat: MatValues { enabled: [true, true, true, false, false, false, false, false], color: [0.95, 0.1, 0.05], ..Default::default() },
+                    mask_value: 1.0,
+                    opacity: 1.0,
+                    erase: false,
+                    grain: [0.0; 4],
+                },
+            ),
+        };
+        assert!(engine.begin_stroke(layer, target, enabled, false), "{name}: stroke begins");
+        let (mut rects_max, mut patch_min) = (0u32, f64::MAX);
+        for f in 0..9 {
+            let raw: Vec<([f32; 4], f32)> = (0..5)
+                .map(|i| {
+                    let k = (f * 5 + i) as f32;
+                    ([215.0 + k * 8.0, 250.0 + 85.0 * (k * 0.09).sin(), 1.0, 0.0], 1.0)
+                })
+                .collect();
+            let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+            let region = crate::app::stroke_region(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps);
+            engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, region);
+            engine.composite();
+            rects_max = rects_max.max(engine.last_scissor_rects);
+            patch_min = patch_min.min(engine.last_scissor_pixels as f64 * 100.0 / (res as f64 * res as f64));
+        }
+        most_rects = most_rects.max(rects_max);
+        let partial: Vec<Vec<u8>> = (0..ACCUM).map(|c| read_texture(&rs.device, &rs.queue, engine.final_tex(c))).collect();
+        engine.mark_dirty();
+        engine.composite();
+        let mut bad = Vec::new();
+        for c in 0..ACCUM {
+            let full = read_texture(&rs.device, &rs.queue, engine.final_tex(c));
+            if full == partial[c] {
+                continue;
+            }
+            let n = full.iter().zip(&partial[c]).filter(|(a, b)| a != b).count();
+            let first = full.iter().zip(&partial[c]).position(|(a, b)| a != b).unwrap();
+            let t = first / bpp[c];
+            let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+            for (i, (a, b)) in full.iter().zip(&partial[c]).enumerate() {
+                if a != b {
+                    let t = (i / bpp[c]) as u32;
+                    let (x, y) = (t % res, t / res);
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x);
+                    y1 = y1.max(y);
+                }
+            }
+            bad.push(format!("channel {c}: {n} bytes differ, first at texel ({}, {}), diff box x {x0}..={x1} y {y0}..={y1}", t as u32 % res, t as u32 / res));
+        }
+        println!("  {name}: up to {rects_max} scissors, smallest patch {patch_min:.1}% -> {}", if bad.is_empty() { "identical".to_string() } else { bad.join("; ") });
+        if !bad.is_empty() {
+            failures.push(format!("{name}: {}", bad.join("; ")));
+        }
+        engine.end_stroke();
+    }
+    assert!(most_rects >= 2, "no scenario exercised more than one scissor (max {most_rects})");
+    assert!(failures.is_empty(), "incremental != full:\n{}", failures.join("\n"));
 }
