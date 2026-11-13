@@ -63,33 +63,33 @@ fn fs_dilate(in: FsOut) -> MapsOut {
         return out;
     }
     let dims = vec2<i32>(textureDimensions(src_pos));
-    var acc_p = vec3<f32>(0.0);
-    var acc_n = vec3<f32>(0.0);
-    var acc_t = vec3<f32>(0.0);
-    var tsign = 1.0;
-    var cnt = 0.0;
+    var best_alpha = 0.0;
+    var best_pos = vec4<f32>(0.0);
+    var best_nrm = vec4<f32>(0.0);
+    var best_tan = vec4<f32>(0.0);
     for (var dy = -1; dy <= 1; dy++) {
         for (var dx = -1; dx <= 1; dx++) {
             let q = clamp(c + vec2<i32>(dx, dy), vec2<i32>(0), dims - 1);
             let s = textureLoad(src_pos, q, 0);
-            if (s.a > 0.5) {
-                acc_p += s.xyz;
-                acc_n += textureLoad(src_nrm, q, 0).xyz * 2.0 - 1.0;
-                let t = textureLoad(src_tan, q, 0);
-                acc_t += t.xyz * 2.0 - 1.0;
-                tsign = t.w;
-                cnt += 1.0;
+            // Original island texels have alpha 1; each padding step lowers
+            // it slightly. Selecting the strongest neighbor propagates the
+            // closest source without mixing two distinct UV islands.
+            if (s.a > best_alpha) {
+                best_alpha = s.a;
+                best_pos = s;
+                best_nrm = textureLoad(src_nrm, q, 0);
+                best_tan = textureLoad(src_tan, q, 0);
             }
         }
     }
-    if (cnt == 0.0) {
+    if (best_alpha <= 0.5) {
         out.pos = vec4<f32>(0.0);
         out.nrm = vec4<f32>(0.0);
         out.tan = vec4<f32>(0.0);
         return out;
     }
-    out.pos = vec4<f32>(acc_p / cnt, GROWN);
-    out.nrm = vec4<f32>(normalize(acc_n) * 0.5 + 0.5, 1.0);
-    out.tan = vec4<f32>(normalize(acc_t) * 0.5 + 0.5, tsign);
+    out.pos = vec4<f32>(best_pos.xyz, best_alpha * DILATE_ALPHA_DECAY);
+    out.nrm = best_nrm;
+    out.tan = best_tan;
     return out;
 }
