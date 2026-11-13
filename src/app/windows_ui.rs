@@ -87,6 +87,8 @@ impl PainterApp {
                     ("F", "Frame mesh"),
                     ("M / C", "Material view / cycle channels"),
                     ("F1 / F2 / F3", "3D+2D / 3D / 2D"),
+                    ("Ctrl+F1", "Save viewport diagnostic snapshot"),
+                    ("Ctrl+F2", "Start / stop ray-hit diagnostic capture"),
                     ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
                     ("Ctrl+S / Ctrl+Shift+S", "Save / save as"),
                     ("Ctrl+O", "Open project"),
