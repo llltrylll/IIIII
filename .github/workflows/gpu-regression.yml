@@ -56,6 +56,9 @@ jobs:
       - name: Compare nine filtered-mask scenarios with full recomposition
         run: cargo test --locked --bin material_painter multi_scissor_matches_full_composite -- --ignored --nocapture
 
+      - name: Verify content strokes keep unrelated thumbnails cached
+        run: cargo test --locked --bin material_painter content_stroke_keeps_unrelated_thumbnails -- --ignored --nocapture
+
       - name: Upload GPU regression images
         if: always()
         uses: actions/upload-artifact@v4
