@@ -2647,17 +2647,44 @@ impl PainterApp {
                 ];
                 let p = v.map(|v| Vec3::from_array(v.pos));
                 let uv = v.map(|v| Vec2::from_array(v.uv));
-                let center_uv = (uv[0] + uv[1] + uv[2]) / 3.0;
+                let hit_pos = origin + direction * *distance;
+                let e0 = p[1] - p[0];
+                let e1 = p[2] - p[0];
+                let vp = hit_pos - p[0];
+                let d00 = e0.dot(e0);
+                let d01 = e0.dot(e1);
+                let d11 = e1.dot(e1);
+                let d20 = vp.dot(e0);
+                let d21 = vp.dot(e1);
+                let denominator = d00 * d11 - d01 * d01;
+                let (bary, exact_uv) = if denominator.abs() > 1.0e-12 {
+                    let b = (d11 * d20 - d01 * d21) / denominator;
+                    let c = (d00 * d21 - d01 * d20) / denominator;
+                    let bary = Vec3::new(1.0 - b - c, b, c);
+                    let exact_uv = uv[0] * bary.x + uv[1] * bary.y + uv[2] * bary.z;
+                    (bary, exact_uv)
+                } else {
+                    (Vec3::ZERO, (uv[0] + uv[1] + uv[2]) / 3.0)
+                };
                 let face_n = (p[1] - p[0]).cross(p[2] - p[0]).normalize_or_zero();
+                let shading_n = (Vec3::from_array(v[0].normal) * bary.x
+                    + Vec3::from_array(v[1].normal) * bary.y
+                    + Vec3::from_array(v[2].normal) * bary.z).normalize_or_zero();
+                let n_dot_face = shading_n.dot(face_n);
                 let facing = face_n.dot(-direction);
                 let set = self.mesh.set_of(*tri);
                 let set_name = self.mesh.sets.get(set).map(|s| s.name.as_str()).unwrap_or("(missing)");
-                format!("tri={} set={}({}) t={:.6} uvCenter={:?} geomNdotToCamera={:.4}", tri, set, set_name, distance, center_uv, facing)
+                format!(
+                    "tri={} set={}({}) t={:.6} bary={:?} uv={:?} geomNdotToCamera={:.4} shadeNdotGeomN={:.4}",
+                    tri, set, set_name, distance, bary, exact_uv, facing, n_dot_face
+                )
             }).collect::<Vec<_>>().join(" ; ");
 
             self.diagnostics.samples.push(format!(
-                "sample {} cursor_px=({:.2},{:.2}) ray_origin={:?} ray_dir={:?}\n  nearest: {}\n  all_intersections={} first_up_to_8=[{}]",
-                self.diagnostics.samples.len() + 1, stamp[0], stamp[1], origin, direction,
+                "sample {} cursor_px=({:.2},{:.2}) projection={} paint_through={} angle_limit_deg={:.2} active_set={} ray_origin={:?} ray_dir={:?}\n  nearest: {}\n  all_intersections={} first_up_to_8=[{}]",
+                self.diagnostics.samples.len() + 1, stamp[0], stamp[1],
+                self.brush.projection.name(), self.brush.paint_through, self.brush.angle_limit,
+                self.sets.active, origin, direction,
                 nearest_text, hits.len(), candidates
             ));
         }
