@@ -2032,6 +2032,7 @@ impl Engine {
         // DILATE_PASSES is even, so the result ends up back in pos/nrm.
         self.queue.submit([encoder.finish()]);
         self.uv_version += 1;
+        self.mask_final.clear();
         self.mark_dirty();
     }
 
@@ -2053,6 +2054,7 @@ impl Engine {
 
     pub fn set_bounds(&mut self, bounds: (Vec3, Vec3)) {
         self.bounds = bounds;
+        self.mask_final.clear();
         self.mark_dirty();
     }
 
@@ -2252,6 +2254,8 @@ impl Engine {
         let mut encoder = self.device.create_command_encoder(&Default::default());
         self.resample_into(&mut encoder, src, dst);
         self.queue.submit([encoder.finish()]);
+        let layer_id = self.layers[idx].id;
+        self.invalidate_mask_cache(layer_id);
         self.invalidate_thumbs();
         self.mark_dirty();
     }
@@ -2915,6 +2919,7 @@ impl Engine {
         let old = layer.mask.replace(Mask { black_base, paint, generator, graph: None, filters: Vec::new(), layers: Vec::new() });
         let (id, label) = (layer.id, format!("Add mask to {}", layer.name));
         self.record(undo, label, Edit::Mask { id, mask: old });
+        self.invalidate_mask_cache(id);
         self.mark_dirty();
     }
 
@@ -2927,6 +2932,8 @@ impl Engine {
             if let Some(m) = self.layers[idx].mask.as_mut() {
                 m.paint = Some(tex);
             }
+            let layer_id = self.layers[idx].id;
+            self.invalidate_mask_cache(layer_id);
             self.mark_dirty();
         }
     }
@@ -2970,6 +2977,7 @@ impl Engine {
         let after = Snapshot::encode(&self.device, &mut encoder, &[tex]);
         self.queue.submit([encoder.finish()]);
         after.request_map();
+        self.invalidate_mask_cache(layer_id);
 
         undo.push(
             label,
@@ -2993,6 +3001,7 @@ impl Engine {
         let old = layer.mask.replace(Mask { black_base: false, paint, generator, graph, filters, layers });
         let (id, label) = (layer.id, format!("Change the mask of {}", layer.name));
         self.record(undo, label, Edit::Mask { id, mask: old });
+        self.invalidate_mask_cache(id);
         self.mark_dirty();
     }
 
@@ -3006,6 +3015,7 @@ impl Engine {
         let old = layer.mask.take();
         let (id, label) = (layer.id, format!("Remove mask from {}", layer.name));
         self.record(undo, label, Edit::Mask { id, mask: old });
+        self.invalidate_mask_cache(id);
         self.mark_dirty();
     }
 
@@ -3069,6 +3079,34 @@ impl Engine {
         }
     }
 
+    /// Returns whether a property edit changes every mask input, and the layer
+    /// IDs whose own mask source/filter configuration changed.
+    fn mask_cache_changes(before: &DocProps, after: &DocProps) -> (bool, Vec<u64>) {
+        if before.levels != after.levels
+            || before.layers.len() != after.layers.len()
+            || before.layers.iter().zip(&after.layers).any(|(a, b)| a.0 != b.0) {
+            return (true, Vec::new());
+        }
+        let changed = before.layers.iter().zip(&after.layers)
+            .filter(|(a, b)| {
+                a.1.generator != b.1.generator
+                    || a.1.mask_filters != b.1.mask_filters
+                    || a.1.mask_layers != b.1.mask_layers
+            })
+            .map(|(a, _)| a.0)
+            .collect();
+        (false, changed)
+    }
+
+    fn apply_mask_cache_changes(&mut self, before: &DocProps, after: &DocProps) {
+        let (all, changed) = Self::mask_cache_changes(before, after);
+        if all {
+            self.mask_final.clear();
+        } else {
+            for id in changed { self.mask_final.remove(&id); }
+        }
+    }
+
     fn record(&mut self, undo: &mut UndoStack, label: String, edit: Edit) {
         undo.push(label, edit);
         self.committed = self.doc_props();
@@ -3080,6 +3118,7 @@ impl Engine {
     /// single entry; every structural edit calls it first to keep the order.
     pub fn commit_props(&mut self, undo: &mut UndoStack) {
         let current = self.doc_props();
+        self.apply_mask_cache_changes(&self.committed.clone(), &current);
         if current == self.committed {
             return;
         }
@@ -3113,6 +3152,7 @@ impl Engine {
                     let snap = if undoing { &mut e.before } else { &mut e.after };
                     snap.restore(&self.device, &self.queue, &textures);
                 }
+                if e.target == StrokeTarget::Mask { self.invalidate_mask_cache(e.layer_id); }
             }
             Edit::Layer { index, id, layer } => match layer.take() {
                 Some(mut l) => {
@@ -3146,6 +3186,7 @@ impl Engine {
                 if let Some(l) = self.layers.iter_mut().find(|l| l.id == *id) {
                     std::mem::swap(&mut l.mask, mask);
                 }
+                self.invalidate_mask_cache(*id);
             }
             Edit::Images { id, images } => {
                 if let Some(l) = self.layers.iter_mut().find(|l| l.id == *id) {
@@ -3167,9 +3208,16 @@ impl Engine {
                 for (dst, src) in self.map_levels.iter_mut().zip(&props.levels) {
                     *dst = *src;
                 }
+                let updated = self.doc_props();
+                self.apply_mask_cache_changes(&current, &updated);
+                if current.levels != updated.levels { self.maps_dirty = true; }
                 *props = current;
             }
-            Edit::Fix { map, tex } => std::mem::swap(&mut self.map_fix[*map], tex),
+            Edit::Fix { map, tex } => {
+                std::mem::swap(&mut self.map_fix[*map], tex);
+                self.maps_dirty = true;
+                self.mask_final.clear();
+            }
             Edit::Group(edits) => {
                 if undoing {
                     edits.iter_mut().rev().for_each(|e| self.apply_edit(e, true));
@@ -3779,12 +3827,19 @@ impl Engine {
         result
     }
 
-    /// Flags the layer stack for a full composite.
+    fn invalidate_mask_cache(&mut self, layer_id: u64) {
+        self.mask_final.remove(&layer_id);
+    }
+
+    /// Flags the layer stack for a full composite. Keep filtered mask results
+    /// when only material properties changed; invalidate the exact mask inputs
+    /// that changed, or all masks when mesh-map levels changed.
     pub fn mark_dirty(&mut self) {
+        let current = self.doc_props();
+        self.apply_mask_cache_changes(&self.committed.clone(), &current);
+        if self.maps_dirty { self.mask_final.clear(); }
         self.dirty = true;
         self.full_dirty = true;
-        // Property edits, undo/redo and bake changes may affect any mask.
-        self.mask_final.clear();
     }
 
     /// Finishes the stroke and returns its undo record.
@@ -3851,7 +3906,6 @@ impl Engine {
     fn after_history_step(&mut self) {
         self.invalidate_thumbs();
         self.committed = self.doc_props();
-        self.maps_dirty = true;
         self.mark_dirty();
     }
 
@@ -4562,6 +4616,59 @@ impl Engine {
     }
 
     // ------------------------------------------------------------------ stats
+
+#[cfg(test)]
+mod mask_cache_invalidation_tests {
+    use super::{Blend, Engine, FilterKind, MaskFilter};
+    use crate::undo::{DocProps, LayerProps};
+
+    fn props() -> LayerProps {
+        LayerProps {
+            name: "Layer".into(),
+            visible: true,
+            opacity: 1.0,
+            blend: Blend::Normal,
+            fill: None,
+            generator: None,
+            mask_filters: Vec::new(),
+            mask_layers: Vec::new(),
+        }
+    }
+
+    fn doc() -> DocProps {
+        DocProps { layers: vec![(7, props())], levels: Vec::new() }
+    }
+
+    #[test]
+    fn material_visibility_and_opacity_keep_filtered_mask_cache() {
+        let before = doc();
+        let mut after = before.clone();
+        after.layers[0].1.opacity = 0.35;
+        after.layers[0].1.visible = false;
+        after.layers[0].1.blend = Blend::Screen;
+        assert_eq!(Engine::mask_cache_changes(&before, &after), (false, Vec::new()));
+    }
+
+    #[test]
+    fn filter_edit_invalidates_only_its_layer_mask() {
+        let before = doc();
+        let mut after = before.clone();
+        after.layers[0].1.mask_filters.push(MaskFilter::new(FilterKind::Blur));
+        assert_eq!(Engine::mask_cache_changes(&before, &after), (false, vec![7]));
+    }
+
+    #[test]
+    fn map_level_or_layer_identity_change_invalidates_all_masks() {
+        let before = doc();
+        let mut levels = before.clone();
+        levels.levels.push(Default::default());
+        assert_eq!(Engine::mask_cache_changes(&before, &levels), (true, Vec::new()));
+
+        let mut structure = before.clone();
+        structure.layers[0].0 = 8;
+        assert_eq!(Engine::mask_cache_changes(&before, &structure), (true, Vec::new()));
+    }
+}
 
     fn fill_image_bytes(&self) -> u64 {
         let mut seen = HashSet::with_capacity(self.layers.len());
