@@ -11,7 +11,7 @@ jobs:
   gpu-regression:
     name: Vulkan software GPU parity
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     env:
       WGPU_BACKEND: vulkan
     steps:
@@ -44,20 +44,8 @@ jobs:
       - name: Restore Rust build cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Compare brush projections with full-frame reference
-        run: cargo test --locked --bin material_painter paint_projections -- --ignored --nocapture
-
-      - name: Compare filtered Vertex ID mask strokes with full-frame reference
-        run: cargo test --locked --bin material_painter scissored_mask_stroke_matches_full_frame -- --ignored --nocapture
-
-      - name: Compare nested folders, masks, and UV islands with full recomposition
-        run: cargo test --locked --bin material_painter multi_scissor_nested_folder_matches_full -- --ignored --nocapture
-
-      - name: Compare nine filtered-mask scenarios with full recomposition
-        run: cargo test --locked --bin material_painter multi_scissor_matches_full_composite -- --ignored --nocapture
-
-      - name: Verify content strokes keep unrelated thumbnails cached
-        run: cargo test --locked --bin material_painter content_stroke_keeps_unrelated_thumbnails -- --ignored --nocapture
+      - name: Run the complete ignored GPU regression suite
+        run: cargo test --locked --bin material_painter -- --ignored --nocapture --test-threads 1
 
       - name: Upload GPU regression images
         if: always()
