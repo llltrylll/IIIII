@@ -331,9 +331,17 @@ fn paint_projections() {
         };
         let regions = crate::app::stroke_region(
             &mesh, &bvh, engine.triangles(), &cam, fsize, projection, 1, radius, &stamps,
-        ).expect("the test mesh uses UVs inside the base tile");
-        assert!(!regions.is_empty(), "{name}: no conservative stroke region");
-        engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, Some(regions.clone()));
+        );
+        if projection != BrushProjection::Uv {
+            assert!(regions.is_some(), "{name}: expected a safe partial region");
+        }
+        if let Some(rects) = &regions {
+            assert!(!rects.is_empty(), "{name}: no conservative stroke region");
+        } else {
+            assert_eq!(projection, BrushProjection::Uv, "{name}: unexpected full-frame fallback");
+            println!("  {name}: UV bounds cross the safe tile; validating the conservative full-frame fallback");
+        }
+        engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, regions.clone());
         reference.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, None);
         engine.end_stroke();
         reference.end_stroke();
@@ -363,8 +371,9 @@ fn paint_projections() {
         );
         if visible_differs > 0 {
             let res = engine.res as usize;
-            let near: Vec<_> = regions.iter().filter(|r| r[0] < 0.70 && r[2] > 0.63 && r[1] < 0.72 && r[3] > 0.64).collect();
-            println!("    uv regions near the texel (u~0.664, v~0.68): {near:?}; total regions {}", regions.len());
+            let rects = regions.as_deref().unwrap_or_default();
+            let near: Vec<_> = rects.iter().filter(|r| r[0] < 0.70 && r[2] > 0.63 && r[1] < 0.72 && r[3] > 0.64).collect();
+            println!("    uv regions near the texel (u~0.664, v~0.68): {near:?}; total regions {}; full-frame fallback: {}", rects.len(), regions.is_none());
             {
                 // The triangles whose UV box is nearest the first missed texel.
                 let uv = Vec2::new(170.5, 174.0) / res as f32;
