@@ -3932,6 +3932,9 @@ impl Engine {
         self.last_composite_layer_passes = passes.iter().filter(|p| matches!(**p, Pass::Layer(_))).count() as u32;
         self.last_composite_folder_passes = passes.iter().filter(|p| matches!(**p, Pass::Begin | Pass::End(_))).count() as u32;
         let (mut mask_cache_hits, mut mask_cache_misses, mut mask_gpu_passes) = (0u32, 0u32, 0u32);
+        self.last_mask_cache_hits = 0;
+        self.last_mask_cache_misses = 0;
+        self.last_mask_gpu_passes = 0;
         self.folder_below.retain(|set| set[0].width == self.res);
         self.folder_below.truncate(max_depth);
         while self.folder_below.len() < max_depth {
