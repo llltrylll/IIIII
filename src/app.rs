@@ -481,7 +481,16 @@ impl StrokeMeter {
     /// times the first one after releasing. `counters` are the engine's
     /// full-recomposition and thumbnail-render totals.
     fn composited(&mut self, painting: bool, cpu_ms: f64, counters: (u32, u32)) {
-        self.counters_base.get_or_insert(counters);
+        // Texture-set switches and project replacement can swap in a fresh
+        // Engine whose counters start at zero. Start a new baseline rather
+        // than letting the status bar wrap an unsigned subtraction to ~4B.
+        let counters_reset = self.counters_base.is_some()
+            && (counters.0 < self.counters.0 || counters.1 < self.counters.1);
+        if counters_reset {
+            self.counters_base = Some(counters);
+        } else {
+            self.counters_base.get_or_insert(counters);
+        }
         self.counters = counters;
         if painting {
             self.composite_cpu.add(cpu_ms);
@@ -506,7 +515,7 @@ impl StrokeMeter {
         mask_cache_misses: u32,
         mask_gpu_passes: u32,
     ) -> String {
-        let (full, thumbs) = self.counters_base.map_or((0, 0), |b| (self.counters.0.wrapping_sub(b.0), self.counters.1.wrapping_sub(b.1)));
+        let (full, thumbs) = self.counters_base.map_or((0, 0), |b| (self.counters.0.saturating_sub(b.0), self.counters.1.saturating_sub(b.1)));
         let texture_pixels = u64::from(res) * u64::from(res);
         let paint_percent = if texture_pixels == 0 { 0.0 } else { paint_scissor_pixels as f64 * 100.0 / texture_pixels as f64 };
         let patch_percent = if texture_pixels == 0 { 0.0 } else { scissor_pixels as f64 * 100.0 / texture_pixels as f64 };
@@ -536,6 +545,27 @@ impl StrokeMeter {
             mask_cache_misses,
             mask_gpu_passes
         )
+    }
+}
+
+#[cfg(test)]
+mod stroke_meter_tests {
+    use super::StrokeMeter;
+
+    #[test]
+    fn counter_baseline_resets_when_texture_set_engine_changes() {
+        let mut meter = StrokeMeter::default();
+        meter.composited(false, 0.0, (3, 5));
+        meter.composited(false, 0.0, (6, 8));
+        assert_eq!(meter.counters_base, Some((3, 5)));
+
+        // A newly selected texture set owns a new Engine with fresh counters.
+        meter.composited(false, 0.0, (0, 0));
+        assert_eq!(meter.counters_base, Some((0, 0)));
+        meter.composited(false, 0.0, (2, 1));
+
+        let text = meter.text(2048, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        assert!(text.contains("since F6: full recomps 2, thumbnails 1"), "{text}");
     }
 }
 
