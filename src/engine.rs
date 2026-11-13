@@ -4617,58 +4617,6 @@ impl Engine {
 
     // ------------------------------------------------------------------ stats
 
-#[cfg(test)]
-mod mask_cache_invalidation_tests {
-    use super::{Blend, Engine, FilterKind, MaskFilter};
-    use crate::undo::{DocProps, LayerProps};
-
-    fn props() -> LayerProps {
-        LayerProps {
-            name: "Layer".into(),
-            visible: true,
-            opacity: 1.0,
-            blend: Blend::Normal,
-            fill: None,
-            generator: None,
-            mask_filters: Vec::new(),
-            mask_layers: Vec::new(),
-        }
-    }
-
-    fn doc() -> DocProps {
-        DocProps { layers: vec![(7, props())], levels: Vec::new() }
-    }
-
-    #[test]
-    fn material_visibility_and_opacity_keep_filtered_mask_cache() {
-        let before = doc();
-        let mut after = before.clone();
-        after.layers[0].1.opacity = 0.35;
-        after.layers[0].1.visible = false;
-        after.layers[0].1.blend = Blend::Screen;
-        assert_eq!(Engine::mask_cache_changes(&before, &after), (false, Vec::new()));
-    }
-
-    #[test]
-    fn filter_edit_invalidates_only_its_layer_mask() {
-        let before = doc();
-        let mut after = before.clone();
-        after.layers[0].1.mask_filters.push(MaskFilter::new(FilterKind::Blur));
-        assert_eq!(Engine::mask_cache_changes(&before, &after), (false, vec![7]));
-    }
-
-    #[test]
-    fn map_level_or_layer_identity_change_invalidates_all_masks() {
-        let before = doc();
-        let mut levels = before.clone();
-        levels.levels.push(Default::default());
-        assert_eq!(Engine::mask_cache_changes(&before, &levels), (true, Vec::new()));
-
-        let mut structure = before.clone();
-        structure.layers[0].0 = 8;
-        assert_eq!(Engine::mask_cache_changes(&before, &structure), (true, Vec::new()));
-    }
-}
 
     fn fill_image_bytes(&self) -> u64 {
         let mut seen = HashSet::with_capacity(self.layers.len());
@@ -4985,5 +4933,58 @@ mod scissor_tests {
         assert!(compacted.len() <= MAX_COMPOSITE_SCISSORS);
         assert_covered(&original, &compacted);
         assert_disjoint(&compacted);
+    }
+}
+
+#[cfg(test)]
+mod mask_cache_invalidation_tests {
+    use super::{Blend, Engine, FilterKind, MaskFilter};
+    use crate::undo::{DocProps, LayerProps};
+
+    fn props() -> LayerProps {
+        LayerProps {
+            name: "Layer".into(),
+            visible: true,
+            opacity: 1.0,
+            blend: Blend::Normal,
+            fill: None,
+            generator: None,
+            mask_filters: Vec::new(),
+            mask_layers: Vec::new(),
+        }
+    }
+
+    fn doc() -> DocProps {
+        DocProps { layers: vec![(7, props())], levels: Vec::new() }
+    }
+
+    #[test]
+    fn material_visibility_and_opacity_keep_filtered_mask_cache() {
+        let before = doc();
+        let mut after = before.clone();
+        after.layers[0].1.opacity = 0.35;
+        after.layers[0].1.visible = false;
+        after.layers[0].1.blend = Blend::Screen;
+        assert_eq!(Engine::mask_cache_changes(&before, &after), (false, Vec::new()));
+    }
+
+    #[test]
+    fn filter_edit_invalidates_only_its_layer_mask() {
+        let before = doc();
+        let mut after = before.clone();
+        after.layers[0].1.mask_filters.push(MaskFilter::new(FilterKind::Blur));
+        assert_eq!(Engine::mask_cache_changes(&before, &after), (false, vec![7]));
+    }
+
+    #[test]
+    fn map_level_or_layer_identity_change_invalidates_all_masks() {
+        let before = doc();
+        let mut levels = before.clone();
+        levels.levels.push(Default::default());
+        assert_eq!(Engine::mask_cache_changes(&before, &levels), (true, Vec::new()));
+
+        let mut structure = before.clone();
+        structure.layers[0].0 = 8;
+        assert_eq!(Engine::mask_cache_changes(&before, &structure), (true, Vec::new()));
     }
 }
