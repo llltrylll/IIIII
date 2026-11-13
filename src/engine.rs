@@ -60,6 +60,24 @@ const MASK_FILTER_FORMAT: F = F::R16Float;
 /// Uniform slots for mask filter steps per composite (dynamic offsets).
 const INITIAL_MASK_FILTER_STEPS: u64 = 256;
 const MASK_FILTER_STRIDE: u64 = 256;
+
+fn mask_filter_buffer_capacity(current: u64, required: usize) -> u64 {
+    current.max((required.max(1) as u64).next_power_of_two())
+}
+
+#[cfg(test)]
+mod mask_filter_capacity_tests {
+    use super::mask_filter_buffer_capacity;
+
+    #[test]
+    fn filter_uniform_capacity_grows_without_clamping_steps() {
+        assert_eq!(mask_filter_buffer_capacity(256, 0), 256);
+        assert_eq!(mask_filter_buffer_capacity(256, 256), 256);
+        assert_eq!(mask_filter_buffer_capacity(256, 257), 512);
+        assert_eq!(mask_filter_buffer_capacity(512, 513), 1024);
+        assert_eq!(mask_filter_buffer_capacity(1024, 300), 1024);
+    }
+}
 const STROKE_FORMAT: F = F::R16Float;
 pub const MAX_STAMPS: usize = 512;
 
@@ -4041,9 +4059,9 @@ impl Engine {
         }
         // Grow for the complete active stack. Truncating here would silently make
         // later filters reuse the final uniform slot and render the wrong mask.
-        let required_steps = steps.len().max(1) as u64;
-        if required_steps > self.mask_filter_ubuf_slots {
-            self.mask_filter_ubuf_slots = required_steps.next_power_of_two();
+        let required_capacity = mask_filter_buffer_capacity(self.mask_filter_ubuf_slots, steps.len());
+        if required_capacity > self.mask_filter_ubuf_slots {
+            self.mask_filter_ubuf_slots = required_capacity;
             self.mask_filter_ubuf = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("mask filter uniforms"),
                 size: MASK_FILTER_STRIDE * self.mask_filter_ubuf_slots,
