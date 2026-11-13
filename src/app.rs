@@ -474,26 +474,27 @@ struct StrokeMeter {
     /// went on, and the latest values.
     counters_base: Option<(u32, u32)>,
     counters: (u32, u32),
-    texture_set: Option<usize>,
+    engine_context: Option<(u64, usize)>,
 }
 
 impl StrokeMeter {
     /// The recomposition ran: counts the frame's steps while painting, or
     /// times the first one after releasing. `counters` are the engine's
     /// full-recomposition and thumbnail-render totals.
-    fn composited(&mut self, painting: bool, cpu_ms: f64, counters: (u32, u32), texture_set: usize) {
-        // Texture-set switches and project replacement can swap in a fresh
-        // Engine whose counters start at zero. Start a new baseline rather
-        // than letting the status bar wrap an unsigned subtraction to ~4B.
+    fn composited(&mut self, painting: bool, cpu_ms: f64, counters: (u32, u32), engine_epoch: u64, texture_set: usize) {
+        // The active Engine can be swapped for another one at the same address
+        // and texture-set index. Track explicit instance changes instead of
+        // relying only on counters moving backwards.
+        let engine_context = (engine_epoch, texture_set);
         let counters_reset = self.counters_base.is_some()
-            && (self.texture_set != Some(texture_set) || counters.0 < self.counters.0 || counters.1 < self.counters.1);
+            && (self.engine_context != Some(engine_context) || counters.0 < self.counters.0 || counters.1 < self.counters.1);
         if counters_reset {
             self.counters_base = Some(counters);
         } else {
             self.counters_base.get_or_insert(counters);
         }
         self.counters = counters;
-        self.texture_set = Some(texture_set);
+        self.engine_context = Some(engine_context);
         if painting {
             self.composite_cpu.add(cpu_ms);
             self.steps_per_frame.add(f64::from(std::mem::take(&mut self.steps_now)));
@@ -557,14 +558,14 @@ mod stroke_meter_tests {
     #[test]
     fn counter_baseline_resets_when_texture_set_engine_changes() {
         let mut meter = StrokeMeter::default();
-        meter.composited(false, 0.0, (3, 5), 0);
-        meter.composited(false, 0.0, (6, 8), 0);
+        meter.composited(false, 0.0, (3, 5), 0, 0);
+        meter.composited(false, 0.0, (6, 8), 0, 0);
         assert_eq!(meter.counters_base, Some((3, 5)));
 
         // A fresh engine on the same set index starts at lower counters.
-        meter.composited(false, 0.0, (0, 0), 0);
+        meter.composited(false, 0.0, (10, 10), 1, 0);
         assert_eq!(meter.counters_base, Some((0, 0)));
-        meter.composited(false, 0.0, (2, 1), 0);
+        meter.composited(false, 0.0, (12, 11), 1, 0);
 
         let text = meter.text(2048, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
         assert!(text.contains("since F6: full recomps 2, thumbnails 1"), "{text}");
@@ -573,11 +574,11 @@ mod stroke_meter_tests {
     #[test]
     fn counter_baseline_resets_when_switching_to_a_busier_texture_set() {
         let mut meter = StrokeMeter::default();
-        meter.composited(false, 0.0, (3, 2), 0);
-        meter.composited(false, 0.0, (5, 4), 0);
-        meter.composited(false, 0.0, (17, 11), 1);
+        meter.composited(false, 0.0, (3, 2), 0, 0);
+        meter.composited(false, 0.0, (5, 4), 0, 0);
+        meter.composited(false, 0.0, (17, 11), 1, 1);
         assert_eq!(meter.counters_base, Some((17, 11)));
-        meter.composited(false, 0.0, (19, 12), 1);
+        meter.composited(false, 0.0, (19, 12), 1, 1);
 
         let text = meter.text(2048, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
         assert!(text.contains("since F6: full recomps 2, thumbnails 1"), "{text}");
@@ -615,6 +616,8 @@ pub struct PainterApp {
     time_composite: bool,
     /// F6: CPU time of the paint path.
     meter: StrokeMeter,
+    /// Changes whenever the active Engine instance is replaced or swapped.
+    engine_epoch: u64,
     /// The running bake only makes the ID map (from vertex colors).
     bake_id_only: bool,
     cam: OrbitCam,
@@ -1756,6 +1759,7 @@ impl PainterApp {
             preview_update_at: None,
             time_composite: false,
             meter: StrokeMeter::default(),
+            engine_epoch: 0,
             bake_id_only: false,
             cam: OrbitCam::default(),
             cam2d: Cam2d::default(),
@@ -1858,6 +1862,7 @@ impl PainterApp {
         if self.stroke.is_some() {
             return;
         }
+        self.engine_epoch = self.engine_epoch.wrapping_add(1);
         // A bake of the old mesh can't land on the new one.
         self.bake_job = None;
         self.end_preview(false);
