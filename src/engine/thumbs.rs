@@ -391,7 +391,7 @@ impl Engine {
         // Mask: the filtered result the composite made, shrunk, or else the
         // mask (painting times smart mask) rendered at thumbnail size.
         if let Some(shown) = entry.mask.as_ref() {
-            let filtered = self.mask_final.get(&layer_id).and_then(|&i| self.mask_out.get(&layer_id).map(|t| &t[i]));
+            let filtered = self.mask_final.contains(&layer_id).then(|| self.mask_out.get(&layer_id)).flatten();
             match filtered {
                 Some(full) => self.thumb_pass(encoder, &g.show, full, &shown.tex, [1.0, SHRINK_TAPS, THUMB as f32, 0.0]),
                 None => {

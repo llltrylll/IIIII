@@ -4184,7 +4184,7 @@ impl Engine {
             }
             None => (0, 0, 0, false),
         };
-        let mut finals: Vec<(u64, usize)> = Vec::new();
+        let mut finals: Vec<u64> = Vec::new();
         let profile_layer = self.stroke_layer;
         let mut composite_profiled = false;
         for (k, pass) in passes.iter().enumerate().skip(start) {
