@@ -2691,7 +2691,6 @@ impl PainterApp {
     }
 
     fn save_diagnostic_report(&mut self, ctx: &egui::Context, stem: &str, report: String) {
-        ctx.copy_text(report.clone());
         let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs()).unwrap_or(0);
         let file_name = format!("{stem}_{timestamp}.txt");
@@ -2701,11 +2700,13 @@ impl PainterApp {
             .save_file();
         match path {
             Some(path) => match std::fs::write(&path, report.as_bytes()) {
-                Ok(()) => self.status = format!("Diagnostic report saved to {} and copied to clipboard.", path.display()),
-                Err(error) => self.status = format!("Report copied to clipboard, but saving failed: {error}"),
+                Ok(()) => self.status = format!("Diagnostic report saved to {}.", path.display()),
+                Err(error) => self.status = format!("Could not save diagnostic report: {error}"),
             },
-            None => self.status = "Diagnostic report copied to clipboard; file save cancelled.".into(),
+            None => self.status = "Diagnostic report not saved; report copied to clipboard.".into(),
         }
+        // Queue the clipboard update only after the native save dialog has closed.
+        ctx.copy_text(report);
     }
 
     fn start_diagnostic_capture(&mut self) {
@@ -2747,10 +2748,10 @@ impl PainterApp {
         let mut capture_view_snapshot = false;
         let mut toggle_ray_capture = false;
         ctx.input_mut(|i| {
-            if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::F1)) {
+            if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::CTRL, Key::F1)) {
                 capture_view_snapshot = true;
             }
-            if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::F2)) {
+            if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::CTRL, Key::F2)) {
                 toggle_ray_capture = true;
             }
             if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::E)) {
@@ -3383,6 +3384,9 @@ impl PainterApp {
         ui.horizontal_centered(|ui| {
             ui.label(egui::RichText::new(&self.status).color(theme::TEXT_DIM));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.diagnostics.active {
+                    ui.label(egui::RichText::new("RAY CAPTURE ON  ·  Ctrl+F2 TO STOP").strong().color(theme::ACCENT));
+                }
                 let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
                 ui.label(
                     egui::RichText::new(format!(
