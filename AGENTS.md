@@ -1,22 +1,23 @@
 # Guide for AI coding agents
 
-Read [PROJECT_SCOPE.md](PROJECT_SCOPE.md) first. It is the source of truth for the production objective, Air Fox workload ceiling, mandatory phase order, engineering latitude, shared GPT/Claude coordination, and repository boundaries. All instructions here are subordinate to that scope. Humans: see [CONTRIBUTING.md](CONTRIBUTING.md) too.
+Read [PROJECT_SCOPE.md](PROJECT_SCOPE.md) first. It is the source of truth for the production objective, defined production workload ceiling, mandatory phase order, engineering latitude, shared GPT/Claude coordination, and repository boundaries. All instructions here are subordinate to that scope. Humans: see [CONTRIBUTING.md](CONTRIBUTING.md) too.
 
 ## Current priority — establish the production foundation
 
-**Phase 1: finish and validate the core painting and mask systems.** Focus on 3D brush latency and spikes, UV/2D painting correctness, Vertex ID and painted masks, smart-mask generators, mask layers/folders/filters, cache invalidation, incremental recomposition, and the CPU/GPU work directly involved. Validate realistic layer/mask/filter stacks and the Air Fox production workload, not empty or nearly unpainted models.
+**Phase 1: finish and validate the core painting and mask systems.** Focus on 3D brush latency and spikes, UV/2D painting correctness, Vertex ID and painted masks, smart-mask generators, mask layers/folders/filters, cache invalidation, incremental recomposition, and the CPU/GPU work directly involved. Validate realistic layer/mask/filter stacks and the representative production workload, not empty or nearly unpainted models.
 
 Phase 1 requires relevant unit and GPU tests, correct rendered output, and runtime validation on the owner's actual machine. F6/performance measurements must be comparable. CI compilation alone is not proof. A GPU test marked ignored is not validated unless it was actually run on a GPU-capable setup; state any remaining gap.
 
-**Phase 2: optimize the rest of the production foundation only after Phase 1 is validated.** Then audit memory, CPU allocations, GPU resource lifetime/reuse, viewport, baking, import, project I/O, export, background work, and architecture inside the Air Fox workload envelope.
+**Phase 2: optimize the rest of the production foundation only after Phase 1 is validated.** Then audit memory, CPU allocations, GPU resource lifetime/reuse, viewport, baking, import, project I/O, export, background work, and architecture inside the defined production workload envelope.
 
 Do not jump to broad cleanup while core painting/masking remains unresolved. Do not let hypothetical huge projects or cosmetic HUD work displace the foundation.
 
 ## Target workload
 
 Personal production fork for Roblox asset texturing on the owner's machine:
-- Air Fox normal target: 50,000–100,000 triangles, 6 MeshParts, 6 UV maps.
-- Absolute ceiling: 200,000 triangles, up to 6 MeshParts and 12 UV maps.
+- Normal production workload: 50,000–100,000 triangles, around 6 MeshParts and 6 UV maps.
+- Absolute ceiling: 200,000 triangles, around 6 MeshParts and up to 12 UV maps.
+- Air Fox is an example asset, not a mandatory benchmark or special target.
 - Realistic production layer stacks, masks, and filters within that envelope.
 
 Projects around 100 items are a very distant possibility, not a current target. A major HUD redesign is deferred for months or until the owner explicitly reprioritizes it. Do not optimize beyond the stated envelope without approval.
