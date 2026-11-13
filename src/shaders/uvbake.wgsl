@@ -1,10 +1,14 @@
 // Rasterizes the mesh in UV space to produce per-texel world position,
-// normal and tangent maps, then grows them past island borders (dilation) so painting and
-// bilinear sampling never leave seams. The position's alpha says which is
-// which: 1 inside a UV island, GROWN in the padding around it, 0 elsewhere
-// (readers test > 0.5 for "on the surface").
-
-const GROWN: f32 = 0.75;
+// normal and tangent maps, then grows the nearest island texel into its padding.
+// This copies one source frame: averaging across nearby islands can invent
+// positions and normals that belong to no surface. Alpha decays per pass and
+// acts as a distance priority, so later passes prefer the nearest source.
+//
+// Original island texels stay at alpha 1.0. Dilated texels remain below 0.9
+// (polygon-fill coverage threshold) and above 0.5 after all eight passes
+// (brush surface threshold).
+const DILATE_ALPHA_MAX: f32 = 0.88;
+const DILATE_ALPHA_DECAY: f32 = 0.97;
 
 struct VIn {
     @location(0) pos: vec3<f32>,
@@ -88,7 +92,7 @@ fn fs_dilate(in: FsOut) -> MapsOut {
         out.tan = vec4<f32>(0.0);
         return out;
     }
-    out.pos = vec4<f32>(best_pos.xyz, best_alpha * DILATE_ALPHA_DECAY);
+    out.pos = vec4<f32>(best_pos.xyz, min(best_alpha * DILATE_ALPHA_DECAY, DILATE_ALPHA_MAX));
     out.nrm = best_nrm;
     out.tan = best_tan;
     return out;
