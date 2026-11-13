@@ -1,12 +1,12 @@
 # Claude instructions
 
-Read [PROJECT_SCOPE.md](PROJECT_SCOPE.md) first. It is the source of truth for the production objective, Air Fox workload ceiling, required sequence (first establish and validate the painting/mask foundation, then optimize the rest), refactor authorization, shared-agent coordination, and repository boundaries. Then read [AGENTS.md](AGENTS.md) for architecture, commands, invariants, and technical conventions.
+Read [PROJECT_SCOPE.md](PROJECT_SCOPE.md) first. It is the source of truth for the production objective, defined production workload ceiling, required sequence (first establish and validate the painting/mask foundation, then optimize the rest), refactor authorization, shared-agent coordination, and repository boundaries. Then read [AGENTS.md](AGENTS.md) for architecture, commands, invariants, and technical conventions.
 
 ## Immediate assignment order
 
-Do not start broad application optimization yet. Establish and validate the core production foundation: 3D brush latency, UV painting correctness, Vertex ID and painted masks, mask generators/layers/folders/filters, cache invalidation, and incremental compositing. Use realistic layer/mask/filter stacks and the Air Fox target workload. The owner must validate final behavior and performance on his actual machine. Only after the foundation is solid should work move to general optimization within the defined workload ceiling.
+Do not start broad application optimization yet. Establish and validate the core production foundation: 3D brush latency, UV painting correctness, Vertex ID and painted masks, mask generators/layers/folders/filters, cache invalidation, and incremental compositing. Use realistic layer/mask/filter stacks and representative assets within the defined workload limits. Air Fox is an example, not a required benchmark. The owner must validate final behavior and performance on his actual machine. Only after the foundation is solid should work move to general optimization within the defined workload ceiling.
 
-The Air Fox target is 50,000–100,000 triangles, 6 MeshParts, and 6 UV maps. The absolute ceiling is 200,000 triangles, up to 6 MeshParts and 12 UV maps. Projects around 100 items are a distant future possibility, not current scope. A major HUD redesign is deferred for months or until the owner explicitly reprioritizes it.
+The normal production workload is 50,000–100,000 triangles, around 6 MeshParts, and around 6 UV maps. The absolute ceiling is 200,000 triangles, around 6 MeshParts, and up to 12 UV maps. Air Fox is only an example asset, not a mandatory benchmark. Projects around 100 items are a distant future possibility, not current scope. A major HUD redesign is deferred for months or until the owner explicitly reprioritizes it.
 
 The owner authorizes large, risky, or breaking internal refactors when these are the best engineering solution. Do not protect weak design for the sake of small diffs. The goal is a reliable production tool for the owner's own machine, not a public release or universal product. Protect projects, preserve compatibility deliberately, add tests, and report validation gaps.
 
