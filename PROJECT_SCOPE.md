@@ -2,69 +2,78 @@
 
 ## Mission
 
-Maintain this fork of Material Painter as a dependable, responsive production tool for one creator. Its primary job is texturing and preparing assets for Roblox on the owner's own machine. This is not a general-purpose benchmark project and is not being prepared for public distribution.
+Build and maintain a dependable, responsive Material Painter production tool for one creator's Roblox asset workflow. This fork is a private-in-practice production tool for the owner's own machine, not a public product, general-purpose benchmark, or distribution project.
 
-The owner explicitly authorizes substantial, risky, and breaking internal refactors when they are the best route to a reliable, fast result. Do not preserve weak architecture merely to keep diffs small. Prefer a coherent replacement over piling workarounds onto a fundamentally poor design. Protect user projects and validate the behavior carefully.
+The immediate goal is to establish an exceptionally solid foundation: painting, masks, project integrity, and the core production workflow must work reliably and comfortably on the owner's actual computer. Once that foundation is solid, the owner can use the application for real production. A sound architecture also makes future fixes and improvements easier for both GPT and Claude.
 
-## Target workload
+The owner explicitly authorizes substantial, risky, and breaking internal refactors when they are the best route to a reliable, fast result. Do not preserve weak architecture merely to keep diffs small. Prefer a coherent replacement over piling workarounds onto a fundamentally poor design. Make engineering decisions that leave the codebase understandable and comfortable for either agent to maintain.
+
+## Target workload — Air Fox is the benchmark
+
+The largest planned production asset is the owner's Air Fox model. Treat it as the concrete performance and reliability target, not as a stepping stone toward arbitrary oversized projects.
 
 | Profile | Geometry | Mesh parts | UV maps |
 |---|---:|---:|---:|
-| Representative production asset | 50,000–100,000 triangles | 6 | 6 |
-| Maximum planned asset | Up to 200,000 triangles | Up to the same 6-part workflow | Up to 12 |
+| Normal production target (Air Fox) | 50,000–100,000 triangles | 6 | 6 |
+| Absolute planned ceiling | Up to 200,000 triangles | Up to 6 | Up to 12 |
 
-The maximum planned workload is approximately twice the representative asset. The application should remain comfortable with realistic production layer stacks, masks, filters, and texture work inside this envelope.
+The ceiling is approximately twice the normal target. The application should remain comfortable with realistic production layer stacks, masks, filters, and texture work within this envelope. Do not spend time preparing for workloads beyond it unless the owner explicitly changes the scope.
 
-The owner's actual machine is the performance target. Do not claim gains from compilation or CI results alone; use profiling, GPU measurements, and real application testing. Do not optimize hypothetical workloads or hardware without a concrete reason tied to this target.
+The owner's actual machine is the performance target. Profile and validate on that machine; do not optimize for hypothetical hardware or claim gains from compilation/CI results alone. Correctness and responsiveness for this specific production workload matter more than universal compatibility or benchmark records.
 
 ## Mandatory work order
 
 Work in these phases, in order. Do not skip ahead because a different optimization looks interesting.
 
-### Phase 1 — Finish brush and mask systems
+### Phase 1 — Establish and finish the production foundation
 
-This is the immediate priority. Make painting and masking reliable and responsive before starting a broad optimization pass.
+This is the immediate priority. Make the core painting and masking workflow reliable, correct, and responsive before broad optimization.
 
 Scope includes:
 - 3D brush stroke responsiveness and latency, including BVH/picking, stroke-region calculation, stamping, incremental recomposition, and frame-time spikes.
 - 2D/UV painting parity and correctness; fixes must not improve 3D while breaking UV workflows.
 - Vertex ID masks, painted masks, mask layers, smart-mask generators, folder masks, and mask filters.
 - Correct invalidation and reuse of mask/composite caches.
-- Correct results across layer stacks, nested folders, channels, undo/redo, save/load, and repeated strokes.
+- Correct results across realistic layer stacks, nested folders, channels, undo/redo, save/load, and repeated strokes.
 - CPU and GPU cost of the brush/mask path, including excessive passes, texture reads, allocations, readbacks, and synchronization.
+- Stability and integrity of normal production workflows on the owner's machine.
 
-Phase 1 is not complete merely because the code compiles or the brush feels faster on a nearly empty document. It must pass relevant unit and GPU regression tests, preserve rendered output, and be tested in the app on the owner's machine with a representative painted project and meaningful mask/filter use. Capture comparable F6/performance measurements and report remaining bottlenecks honestly. Where a GPU test is ignored or unavailable in CI, do not present it as validated; run it on a capable adapter or call out the remaining validation explicitly.
+Phase 1 is not complete merely because the code compiles or the brush feels faster on a nearly empty document. It must pass relevant unit and GPU regression tests, preserve rendered output, and be tested in the app on the owner's machine with the Air Fox workload or a representative project of similar complexity and meaningful mask/filter use. Capture comparable F6/performance measurements and report remaining bottlenecks honestly. Where a GPU test is ignored or unavailable in CI, do not present it as validated; run it on a capable adapter or call out the remaining validation explicitly.
 
-### Phase 2 — General foundation optimization
+### Phase 2 — Optimize the production foundation
 
-Only after Phase 1 is validated, continue a wider audit and optimization of the application inside the target workload. Consider memory ownership and peaks, resource lifetime, CPU allocations, GPU resource reuse, viewport rendering, baking, import, project load/save, export, background work, and subsystem boundaries. Prioritize based on evidence and user impact, not code aesthetics alone.
+After Phase 1 is validated and the application is usable for real production, audit and optimize the rest of the core application within the Air Fox workload envelope. Consider memory ownership and peaks, resource lifetime, CPU allocations, GPU resource reuse, viewport rendering, baking, import, project load/save, export, background work, and subsystem boundaries.
 
-### Later / deferred
+Prioritize by measured user impact and risk to production reliability, not code aesthetics alone. Do not optimize subsystems merely because they are interesting; establish whether they materially affect the target workflow.
 
-A major HUD redesign and work for projects with around 100 items are distant possibilities, not current deliverables. They must not displace the core work above.
+### Later / explicitly deferred
+
+- A major HUD redesign may be considered months from now, only after the production foundation is solid and the owner has time and suitable paid-agent capacity. It is not a current deliverable.
+- Projects containing around 100 items/assets are a very distant possibility and are not a target for current engineering.
+- The owner may request other changes later, but do not anticipate them by expanding the present scope.
 
 ## Explicit non-goals
 
 Unless the owner changes scope, do not spend engineering time preparing for:
 - Projects containing around 100 assets/items or similarly oversized projects.
-- Workloads substantially beyond 12 UV maps or 200,000 triangles for the target asset.
+- Workloads beyond 12 UV maps, 200,000 triangles, or the 6-MeshPart Air Fox workflow.
 - Universal optimization across every possible GPU or computer configuration.
-- Public releases, distribution infrastructure, or broad-market product polish.
-- Major HUD redesigns or cosmetic UI work before the production foundation is solid.
+- Public releases, distribution infrastructure, broad-market product polish, or preparing this private production tool for external users.
+- Major HUD redesigns, cosmetic UI work, or speculative future features before the production foundation is solid.
 
 ## Engineering latitude and safeguards
 
-Large or risky changes are allowed. Rewriting a subsystem, replacing a data flow, or changing internal APIs can be preferable to preserving a fragile implementation.
+Large, risky, and breaking internal changes are allowed. Rewriting a subsystem, replacing a data flow, changing internal APIs, or removing a weak implementation can be preferable to preserving it. The desired end state is a program that works well for production, not a small diff or superficial compatibility.
 
 Risk tolerance does not mean skipping safeguards:
 - Identify behavior and invariants that must remain true before replacing code.
-- Protect project data and maintain old project compatibility unless a deliberate migration is designed and tested.
+- Protect user projects and existing project data. Preserve old project compatibility unless a deliberate migration is designed and tested.
 - Add regression tests for correctness-sensitive behavior.
-- Run unit tests and relevant GPU tests; inspect rendered output after graphics changes.
+- Run unit and relevant GPU tests; inspect rendered output after graphics changes.
 - Build and run the app. Distinguish CI/build evidence from real GPU/runtime evidence.
 - Measure before and after when claiming performance improvements.
 - Do not hide failures by disabling tests, broadening ignored paths, or silently degrading output.
-- Keep commits and PR notes understandable so another agent can continue safely.
+- Keep commits and handoff notes understandable so either GPT or Claude can continue the work.
 
 ## Shared GPT / Claude operating rules
 
