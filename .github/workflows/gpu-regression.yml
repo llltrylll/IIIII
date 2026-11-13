@@ -53,6 +53,9 @@ jobs:
       - name: Compare nested folders, masks, and UV islands with full recomposition
         run: cargo test --locked --bin material_painter multi_scissor_nested_folder_matches_full -- --ignored --nocapture
 
+      - name: Compare nine filtered-mask scenarios with full recomposition
+        run: cargo test --locked --bin material_painter multi_scissor_matches_full_composite -- --ignored --nocapture
+
       - name: Upload GPU regression images
         if: always()
         uses: actions/upload-artifact@v4
