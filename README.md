@@ -1,7 +1,6 @@
 # Material Painter
 
-> **Scope of this fork:** a personal production tool for Roblox asset texturing on the owner's machine. Current order: first finish and validate brush and mask systems; only then continue general optimization. Representative workload: 6 MeshParts, 6 UV maps, 50,000–100,000 triangles. Maximum planned workload: 12 UV maps and 200,000 triangles. Major internal refactors are explicitly allowed when they produce a more reliable result. See [PROJECT_SCOPE.md](PROJECT_SCOPE.md) for requirements and shared GPT/Claude rules.
-
+> **Purpose of this fork:** a personal production tool for Roblox asset texturing on the owner's own machine. The Air Fox is the benchmark: 50,000–100,000 triangles, 6 MeshParts and 6 UV maps; absolute ceiling 200,000 triangles and 12 UV maps. Priority: establish a reliable painting/mask foundation first, then optimize the rest of the production workflow. Large internal refactors are allowed when they improve the result. This is not a public-distribution project. See [PROJECT_SCOPE.md](PROJECT_SCOPE.md) for the complete scope and GPT/Claude coordination rules.
 ![Smart materials painted in Material Painter](assets/ui/welcome.jpg)
 
 <p align="center">
