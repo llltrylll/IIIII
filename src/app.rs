@@ -556,15 +556,15 @@ mod stroke_meter_tests {
     use super::StrokeMeter;
 
     #[test]
-    fn counter_baseline_resets_when_texture_set_engine_changes() {
+    fn counter_baseline_resets_when_engine_epoch_changes_even_if_counters_increase() {
         let mut meter = StrokeMeter::default();
         meter.composited(false, 0.0, (3, 5), 0, 0);
         meter.composited(false, 0.0, (6, 8), 0, 0);
         assert_eq!(meter.counters_base, Some((3, 5)));
 
-        // A fresh engine on the same set index starts at lower counters.
+        // A replacement engine on the same set can start with larger counters.
         meter.composited(false, 0.0, (10, 10), 1, 0);
-        assert_eq!(meter.counters_base, Some((0, 0)));
+        assert_eq!(meter.counters_base, Some((10, 10)));
         meter.composited(false, 0.0, (12, 11), 1, 0);
 
         let text = meter.text(2048, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
