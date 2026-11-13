@@ -22,7 +22,7 @@ use crate::gpu::{self, GpuMesh, LAYER_USAGE, Tex};
 use crate::undo::{DocProps, Edit, LayerProps, Snapshot, StrokeTarget, UndoEntry, UndoStack};
 use eframe::{egui, egui_wgpu, wgpu};
 use glam::Vec3;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU64;
 use std::sync::{mpsc, Arc};
 use wgpu::TextureFormat as F;
@@ -4561,16 +4561,13 @@ impl Engine {
     // ------------------------------------------------------------------ stats
 
     fn fill_image_bytes(&self) -> u64 {
-        let mut seen = Vec::new();
-        let mut bytes = 0;
-        for image in self.layers.iter().flat_map(|layer| layer.images.iter().flatten()) {
-            let ptr = Arc::as_ptr(&image.tex);
-            if !seen.contains(&ptr) {
-                seen.push(ptr);
-                bytes += image.tex.bytes();
-            }
-        }
-        bytes
+        let mut seen = HashSet::with_capacity(self.layers.len());
+        self.layers
+            .iter()
+            .flat_map(|layer| layer.images.iter().flatten())
+            .filter(|image| seen.insert(Arc::as_ptr(&image.tex)))
+            .map(|image| image.tex.bytes())
+            .sum()
     }
 
     fn custom_array_bytes(&self) -> u64 {
