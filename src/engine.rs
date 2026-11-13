@@ -3798,7 +3798,10 @@ impl Engine {
         // content thumbnail (a full composite) stays as it was.
         match active.target {
             StrokeTarget::Mask => self.invalidate_mask_thumb(active.layer_id),
-            _ => self.invalidate_thumbs(),
+            StrokeTarget::BakeFix(_) => self.invalidate_thumbs(),
+            // Content strokes only target Paint layers. Their contents are not
+            // shown in layer thumbnails, and they do not change mask sources.
+            StrokeTarget::Content => {}
         }
         let textures = self.target_textures(active.layer_id, active.target, &active.channels)?;
         let mut encoder = self.device.create_command_encoder(&Default::default());
