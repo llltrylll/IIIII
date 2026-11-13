@@ -8,18 +8,18 @@ The immediate goal is to establish an exceptionally solid foundation: painting, 
 
 The owner explicitly authorizes substantial, risky, and breaking internal refactors when they are the best route to a reliable, fast result. Do not preserve weak architecture merely to keep diffs small. Prefer a coherent replacement over piling workarounds onto a fundamentally poor design. Make engineering decisions that leave the codebase understandable and comfortable for either agent to maintain.
 
-## Target workload — Air Fox is the benchmark
+## Target workload — representative Roblox assets
 
-The largest planned production asset is the owner's Air Fox model. Treat it as the concrete performance and reliability target, not as a stepping stone toward arbitrary oversized projects.
+Air Fox is an example of the kind of asset the owner creates, not a special benchmark or a required test model. The limits below describe the owner's normal asset workload in general.
 
 | Profile | Geometry | Mesh parts | UV maps |
 |---|---:|---:|---:|
-| Normal production target (Air Fox) | 50,000–100,000 triangles | 6 | 6 |
-| Absolute planned ceiling | Up to 200,000 triangles | Up to 6 | Up to 12 |
+| Normal production workload | 50,000–100,000 triangles | Around 6 | Around 6 |
+| Absolute planned ceiling | Up to 200,000 triangles | Around 6 | Up to 12 |
 
-The ceiling is approximately twice the normal target. The application should remain comfortable with realistic production layer stacks, masks, filters, and texture work within this envelope. Do not spend time preparing for workloads beyond it unless the owner explicitly changes the scope.
+The ceiling is approximately twice the normal workload. The application should remain comfortable with realistic production layer stacks, masks, filters, and texture work within this envelope. Do not spend time preparing for workloads beyond it unless the owner explicitly changes the scope.
 
-The owner's actual machine is the performance target. Profile and validate on that machine; do not optimize for hypothetical hardware or claim gains from compilation/CI results alone. Correctness and responsiveness for this specific production workload matter more than universal compatibility or benchmark records.
+The owner's actual machine is the performance target. Profile and validate on that machine; do not optimize for hypothetical hardware or claim gains from compilation/CI results alone. Correctness and responsiveness for the owner's real production workflow matter more than universal compatibility or benchmark records.
 
 ## Mandatory work order
 
@@ -38,11 +38,11 @@ Scope includes:
 - CPU and GPU cost of the brush/mask path, including excessive passes, texture reads, allocations, readbacks, and synchronization.
 - Stability and integrity of normal production workflows on the owner's machine.
 
-Phase 1 is not complete merely because the code compiles or the brush feels faster on a nearly empty document. It must pass relevant unit and GPU regression tests, preserve rendered output, and be tested in the app on the owner's machine with the Air Fox workload or a representative project of similar complexity and meaningful mask/filter use. Capture comparable F6/performance measurements and report remaining bottlenecks honestly. Where a GPU test is ignored or unavailable in CI, do not present it as validated; run it on a capable adapter or call out the remaining validation explicitly.
+Phase 1 is not complete merely because the code compiles or the brush feels faster on a nearly empty document. It must pass relevant unit and GPU regression tests, preserve rendered output, and be tested in the app on the owner's machine with a representative production asset/project within the workload limits above and meaningful mask/filter use. Air Fox may be used as one convenient example, but is not mandatory. Capture comparable F6/performance measurements and report remaining bottlenecks honestly. Where a GPU test is ignored or unavailable in CI, do not present it as validated; run it on a capable adapter or call out the remaining validation explicitly.
 
 ### Phase 2 — Optimize the production foundation
 
-After Phase 1 is validated and the application is usable for real production, audit and optimize the rest of the core application within the Air Fox workload envelope. Consider memory ownership and peaks, resource lifetime, CPU allocations, GPU resource reuse, viewport rendering, baking, import, project load/save, export, background work, and subsystem boundaries.
+After Phase 1 is validated and the application is usable for real production, audit and optimize the rest of the core application within the defined production workload envelope. Consider memory ownership and peaks, resource lifetime, CPU allocations, GPU resource reuse, viewport rendering, baking, import, project load/save, export, background work, and subsystem boundaries.
 
 Prioritize by measured user impact and risk to production reliability, not code aesthetics alone. Do not optimize subsystems merely because they are interesting; establish whether they materially affect the target workflow.
 
@@ -56,7 +56,7 @@ Prioritize by measured user impact and risk to production reliability, not code 
 
 Unless the owner changes scope, do not spend engineering time preparing for:
 - Projects containing around 100 assets/items or similarly oversized projects.
-- Workloads beyond 12 UV maps, 200,000 triangles, or the 6-MeshPart Air Fox workflow.
+- Workloads beyond 12 UV maps, 200,000 triangles, or substantially beyond the owner's normal approximately 6-part asset workflow.
 - Universal optimization across every possible GPU or computer configuration.
 - Public releases, distribution infrastructure, broad-market product polish, or preparing this private production tool for external users.
 - Major HUD redesigns, cosmetic UI work, or speculative future features before the production foundation is solid.
