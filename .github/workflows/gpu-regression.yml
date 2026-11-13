@@ -45,7 +45,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run the complete ignored GPU regression suite
-        run: cargo test --locked --bin material_painter preview_test:: -- --ignored --nocapture --test-threads 1
+        run: "cargo test --locked --bin material_painter preview_test:: -- --ignored --nocapture --test-threads 1"
 
       - name: Upload GPU regression images
         if: always()
