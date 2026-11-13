@@ -22,7 +22,7 @@ use crate::gpu::{self, GpuMesh, LAYER_USAGE, Tex};
 use crate::undo::{DocProps, Edit, LayerProps, Snapshot, StrokeTarget, UndoEntry, UndoStack};
 use eframe::{egui, egui_wgpu, wgpu};
 use glam::Vec3;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU64;
 use std::sync::{mpsc, Arc};
 use wgpu::TextureFormat as F;
@@ -58,8 +58,26 @@ const MASK_FORMAT: F = F::R8Unorm;
 /// Filtered masks keep 16 bits, so blur and levels don't band.
 const MASK_FILTER_FORMAT: F = F::R16Float;
 /// Uniform slots for mask filter steps per composite (dynamic offsets).
-const MAX_MASK_FILTER_STEPS: u64 = 256;
+const INITIAL_MASK_FILTER_STEPS: u64 = 256;
 const MASK_FILTER_STRIDE: u64 = 256;
+
+fn mask_filter_buffer_capacity(current: u64, required: usize) -> u64 {
+    current.max((required.max(1) as u64).next_power_of_two())
+}
+
+#[cfg(test)]
+mod mask_filter_capacity_tests {
+    use super::mask_filter_buffer_capacity;
+
+    #[test]
+    fn filter_uniform_capacity_grows_without_clamping_steps() {
+        assert_eq!(mask_filter_buffer_capacity(256, 0), 256);
+        assert_eq!(mask_filter_buffer_capacity(256, 256), 256);
+        assert_eq!(mask_filter_buffer_capacity(256, 257), 512);
+        assert_eq!(mask_filter_buffer_capacity(512, 513), 1024);
+        assert_eq!(mask_filter_buffer_capacity(1024, 300), 1024);
+    }
+}
 const STROKE_FORMAT: F = F::R16Float;
 pub const MAX_STAMPS: usize = 512;
 
@@ -657,13 +675,106 @@ pub struct Folder {
 }
 
 /// One step of compositing.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Pass {
     /// Saves the stack below a faded or masked folder.
     Begin,
     Layer(usize),
     /// Fades the folder's result over the saved stack.
     End(usize),
+}
+
+/// Builds the composite pass list in linear time.
+///
+/// Layers are stored with a folder after its contiguous descendants. That
+/// ordering lets us resolve parent indices once, propagate each child's
+/// block start upward in a forward scan, and resolve inherited visibility in
+/// a reverse scan. Folder openings are bucketed by block start; iterating
+/// folder indices backwards preserves the old outermost-first order without
+/// allocating and sorting a temporary Vec for every layer.
+fn composite_passes(layers: &[Layer]) -> (Vec<Pass>, usize) {
+    let n = layers.len();
+    if n == 0 {
+        return (Vec::new(), 0);
+    }
+
+    let index_by_id: HashMap<u64, usize> = layers.iter().enumerate().map(|(i, layer)| (layer.id, i)).collect();
+    let parents: Vec<Option<usize>> = layers.iter().map(|layer| layer.parent.and_then(|id| index_by_id.get(&id).copied())).collect();
+
+    // A folder's block starts at the earliest descendant, including through
+    // nested folders. Descendants precede their parent in the layer vector.
+    let mut block_start: Vec<usize> = (0..n).collect();
+    for i in 0..n {
+        if let Some(parent) = parents[i]
+            && parent > i
+        {
+            block_start[parent] = block_start[parent].min(block_start[i]);
+        }
+    }
+
+    // Resolve inherited visibility from parent to child. Valid layer stacks
+    // place every parent after its descendants, so the parent's result is
+    // already available when visiting a child.
+    let mut shown = vec![false; n];
+    for i in (0..n).rev() {
+        let parent_shown = parents[i].is_none_or(|parent| {
+            if parent > i {
+                shown[parent]
+            } else {
+                // Defensive fallback for malformed ordering; preserve the
+                // previous ancestor walk rather than hiding a visible child.
+                let mut at = Some(parent);
+                while let Some(index) = at {
+                    if !layers[index].visible {
+                        return false;
+                    }
+                    at = parents[index];
+                }
+                true
+            }
+        });
+        shown[i] = layers[i].visible && parent_shown;
+    }
+
+    let mut isolates = vec![false; n];
+    let mut opening_at = vec![Vec::<usize>::new(); n];
+    let mut folder_count = 0usize;
+    for i in (0..n).rev() {
+        let layer = &layers[i];
+        let isolated = layer.is_folder() && (layer.opacity < 1.0 || layer.mask.is_some());
+        isolates[i] = isolated;
+        if isolated && shown[i] {
+            opening_at[block_start[i]].push(i);
+            folder_count += 1;
+        }
+    }
+
+    let mut passes = Vec::with_capacity(n + folder_count * 2);
+    let (mut depth, mut max_depth) = (0usize, 0usize);
+    for (i, layer) in layers.iter().enumerate() {
+        // Buckets were populated in reverse index order: outer folders first.
+        for _ in &opening_at[i] {
+            passes.push(Pass::Begin);
+            depth += 1;
+            max_depth = max_depth.max(depth);
+        }
+
+        let has_content = match &layer.content {
+            Content::Paint(ch) => ch.iter().any(Option::is_some),
+            Content::Fill(fill) => fill.mat.enabled.iter().any(|&enabled| enabled),
+            Content::Folder(_) => false,
+        };
+        if has_content && layer.opacity > 0.0 && shown[i] {
+            passes.push(Pass::Layer(i));
+        }
+        if isolates[i] && shown[i] {
+            passes.push(Pass::End(i));
+            depth -= 1;
+        }
+    }
+
+    debug_assert_eq!(depth, 0, "composite folder pass depth must balance");
+    (passes, max_depth)
 }
 
 /// A composite's state just before the painted layer's pass: the pass list
@@ -676,6 +787,15 @@ struct Prefix {
     at: usize,
     depth: usize,
     input: Option<usize>,
+}
+
+/// Picks the ping-pong source so the last resumed pass writes into the
+/// accumulation set that already contains the previous final composite.
+/// Intermediate passes only need to be correct inside the scissors; the
+/// final destination must preserve the previous result everywhere else.
+fn resume_source_index(final_idx: usize, passes: &[Pass]) -> usize {
+    let swaps = passes.iter().filter(|p| !matches!(**p, Pass::Begin)).count() & 1;
+    final_idx ^ swaps
 }
 
 /// Where a moved layer goes, relative to another layer.
@@ -843,8 +963,9 @@ enum MaskOp {
     /// A mask layer: render it with this layer-uniform offset, then blend it
     /// in with this filter step.
     Layer { uniform: u32, combine: usize },
-    /// A filter step.
-    Filter(usize),
+    /// A filter step. `reach` is how many texels it reads around the one it
+    /// writes; `wrap` is whether those reads wrap around the texture edge.
+    Filter { step: usize, reach: f32, wrap: bool },
 }
 
 /// The filter shader's step kind that blends a mask layer in.
@@ -1173,10 +1294,24 @@ pub struct Engine {
     thumbs: thumbs::Thumbs,
     /// Composites that redid the whole texture instead of a stroke's patch (the F6 meter counts them).
     pub full_recomps: u32,
+    /// Texel area used by the most recent stamp/apply scissor (full texture on fallback).
+    pub last_paint_scissor_pixels: u64,
+    /// Number of non-overlapping stamp/apply scissors in the most recent stroke step.
+    pub last_paint_scissor_rects: u32,
     /// Texel area processed by the most recent composite scissor (full texture on full recomposites).
     pub last_scissor_pixels: u64,
-    /// Which of a filtered mask's textures (`mask_out`) holds its result.
-    mask_final: HashMap<u64, usize>,
+    /// Bounding-box area of the last scissor set (for F6 comparison).
+    pub last_scissor_bbox_pixels: u64,
+    /// Number of non-overlapping scissors used by the last composite.
+    pub last_scissor_rects: u32,
+    /// Pass counts and mask-cache activity from the most recent composite (F6).
+    pub last_composite_layer_passes: u32,
+    pub last_composite_folder_passes: u32,
+    pub last_mask_cache_hits: u32,
+    pub last_mask_cache_misses: u32,
+    pub last_mask_gpu_passes: u32,
+    /// IDs whose final filtered mask texture currently holds valid contents.
+    mask_final: HashSet<u64>,
     pub bake_report: Option<Arc<BakeReport>>,
     edge_max: f32,
     dummy: Tex,
@@ -1199,6 +1334,8 @@ pub struct Engine {
     next_id: u64,
     bounds: (Vec3, Vec3),
     active: Option<ActiveStroke>,
+    /// Apply bindings are stable for a stroke; reuse them across its frames.
+    apply_bg: Option<wgpu::BindGroup>,
     /// Set whenever the layer stack changes; cleared by [`Engine::composite`].
     pub dirty: bool,
     /// Something besides the painted layer changed since the last composite.
@@ -1210,14 +1347,16 @@ pub struct Engine {
     prefix: Option<Prefix>,
     /// Holds the stack below the painted layer when more passes follow it.
     prefix_cache: Option<[Tex; ACCUM]>,
-    /// Filtered masks: per layer, the two textures its filter steps
-    /// alternate between (the result is in one of them).
-    mask_out: HashMap<u64, [Tex; 3]>,
+    /// One persistent result texture per filtered mask.
+    mask_out: HashMap<u64, Tex>,
+    /// Three scratch textures shared by every filtered mask in this engine:
+    /// two ping-pong buffers and one temporary mask-layer source.
+    mask_scratch: Option<[Tex; 3]>,
     mask_filter_ubuf: wgpu::Buffer,
-    /// Texels the stroke changed since the last composite (x0, y0, x1, y1,
-    /// exclusive), so stroke frames recomposite only that patch; `None`
-    /// with `region_unknown` when a step didn't say.
-    stroke_region: Option<[u32; 4]>,
+    mask_filter_ubuf_slots: u64,
+    /// Disjoint UV-space rectangles changed by the active stroke, in texels.
+    /// Multiple scissors keep distant UV islands from forcing one large bbox.
+    stroke_regions: Vec<[u32; 4]>,
     region_unknown: bool,
     /// Incremented on every composite, so dependent views know the material changed.
     pub generation: u64,
@@ -1225,6 +1364,151 @@ pub struct Engine {
 
 fn accum_set(device: &wgpu::Device, res: u32, label: &str) -> [Tex; ACCUM] {
     ACCUM_FORMATS.map(|f| Tex::new(device, label, res, res, f, LAYER_USAGE))
+}
+
+/// Maximum number of disjoint scissors per composite. Above this, merge
+/// the pair with the least added area; this is conservative and bounds draw
+/// submission cost even for highly fragmented UV layouts.
+const MAX_COMPOSITE_SCISSORS: usize = 64;
+
+fn scissor_area(r: [u32; 4]) -> u64 {
+    u64::from(r[2].saturating_sub(r[0])) * u64::from(r[3].saturating_sub(r[1]))
+}
+
+fn scissor_union(a: [u32; 4], b: [u32; 4]) -> [u32; 4] {
+    [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]
+}
+
+fn scissor_overlap_area(a: [u32; 4], b: [u32; 4]) -> u64 {
+    u64::from(a[2].min(b[2]).saturating_sub(a[0].max(b[0])))
+        * u64::from(a[3].min(b[3]).saturating_sub(a[1].max(b[1])))
+}
+
+/// Expands one half-open interval, optionally wrapping across the texture seam.
+fn expand_scissor_axis(start: u32, end: u32, margin: u32, limit: u32, wrap: bool) -> ([(u32, u32); 2], usize) {
+    if limit == 0 {
+        return ([(0, 0); 2], 0);
+    }
+    if !wrap {
+        return ([(start.saturating_sub(margin), end.saturating_add(margin).min(limit)), (0, 0)], 1);
+    }
+    let length = u64::from(end.saturating_sub(start)) + 2 * u64::from(margin);
+    if length >= u64::from(limit) {
+        return ([(0, limit), (0, 0)], 1);
+    }
+    let start = (i64::from(start) - i64::from(margin)).rem_euclid(i64::from(limit)) as u32;
+    let end = start + length as u32;
+    if end <= limit {
+        ([(start, end), (0, 0)], 1)
+    } else {
+        ([(start, limit), (0, end - limit)], 2)
+    }
+}
+
+/// Expands patches for mask-filter neighborhoods. Warp uses a repeating
+/// sampler, so its affected region can cross the UV seam and split in two
+/// along either axis (at most four rectangles per input patch).
+fn expand_scissors(rects: &mut Vec<[u32; 4]>, margin: u32, limit: u32, wrap: bool) {
+    if wrap {
+        let mut expanded = Vec::with_capacity(rects.len().saturating_mul(4));
+        for &[x0, y0, x1, y1] in rects.iter() {
+            let (xs, nx) = expand_scissor_axis(x0, x1, margin, limit, true);
+            let (ys, ny) = expand_scissor_axis(y0, y1, margin, limit, true);
+            for &(xa, xb) in &xs[..nx] {
+                for &(ya, yb) in &ys[..ny] {
+                    if xb > xa && yb > ya {
+                        expanded.push([xa, ya, xb, yb]);
+                    }
+                }
+            }
+        }
+        *rects = expanded;
+    } else {
+        for r in rects.iter_mut() {
+            *r = [
+                r[0].saturating_sub(margin),
+                r[1].saturating_sub(margin),
+                r[2].saturating_add(margin).min(limit),
+                r[3].saturating_add(margin).min(limit),
+            ];
+        }
+    }
+    compact_scissors(rects);
+}
+
+/// Keep scissors disjoint. If the list exceeds the cap, merge the cheapest
+/// pair by added texel area; a merge only expands coverage, never drops it.
+/// Converts conservative normalized paint bounds to half-open pixel rectangles.
+fn normalized_scissors(regions: &[[f32; 4]], res: u32) -> Option<Vec<[u32; 4]>> {
+    if regions.iter().flatten().any(|v| !v.is_finite()) {
+        return None;
+    }
+    let size = res.max(1) as f32;
+    let low = |v: f32| (v * size).floor().clamp(0.0, size) as u32;
+    let high = |v: f32| (v * size).ceil().clamp(0.0, size) as u32;
+    // Position/normal maps are dilated around UV islands. Keep that halo in
+    // the raster bounds too, or a brush near an island edge can lose texels.
+    let margin = DILATE_PASSES + 2;
+    let mut rects: Vec<[u32; 4]> = regions
+        .iter()
+        .map(|&[u0, v0, u1, v1]| {
+            let [x0, y0, x1, y1] = [low(u0), low(v0), high(u1), high(v1)];
+            [
+                x0.saturating_sub(margin),
+                y0.saturating_sub(margin),
+                x1.saturating_add(margin).min(res),
+                y1.saturating_add(margin).min(res),
+            ]
+        })
+        .filter(|r| r[2] > r[0] && r[3] > r[1])
+        .collect();
+    compact_scissors(&mut rects);
+    Some(rects)
+}
+
+fn compact_scissors(rects: &mut Vec<[u32; 4]>) {
+    loop {
+        let mut merge: Option<(usize, usize, [u32; 4])> = None;
+        let mut best_extra = u64::MAX;
+        for i in 0..rects.len() {
+            for j in i + 1..rects.len() {
+                let a = rects[i];
+                let b = rects[j];
+                let union = scissor_union(a, b);
+                let covered = scissor_area(a) + scissor_area(b) - scissor_overlap_area(a, b);
+                let extra = scissor_area(union).saturating_sub(covered);
+                let overlaps = scissor_overlap_area(a, b) > 0;
+                if (overlaps || extra == 0) && extra < best_extra {
+                    best_extra = extra;
+                    merge = Some((i, j, union));
+                }
+            }
+        }
+        if let Some((i, j, union)) = merge {
+            rects[i] = union;
+            rects.swap_remove(j);
+            continue;
+        }
+        if rects.len() <= MAX_COMPOSITE_SCISSORS {
+            break;
+        }
+        let mut best = (u64::MAX, 0usize, 1usize, [0u32; 4]);
+        for i in 0..rects.len() {
+            for j in i + 1..rects.len() {
+                let a = rects[i];
+                let b = rects[j];
+                let union = scissor_union(a, b);
+                let covered = scissor_area(a) + scissor_area(b) - scissor_overlap_area(a, b);
+                let extra = scissor_area(union).saturating_sub(covered);
+                if extra < best.0 {
+                    best = (extra, i, j, union);
+                }
+            }
+        }
+        rects[best.1] = best.3;
+        rects.swap_remove(best.2);
+    }
+    rects.sort_unstable_by_key(|r| (r[1], r[0], r[3], r[2]));
 }
 
 impl Engine {
@@ -1296,8 +1580,17 @@ impl Engine {
             uv_version: 0,
             thumbs: Default::default(),
             full_recomps: 0,
+            last_paint_scissor_pixels: 0,
+            last_paint_scissor_rects: 0,
             last_scissor_pixels: 0,
-            mask_final: HashMap::new(),
+            last_scissor_bbox_pixels: 0,
+            last_scissor_rects: 0,
+            last_composite_layer_passes: 0,
+            last_composite_folder_passes: 0,
+            last_mask_cache_hits: 0,
+            last_mask_cache_misses: 0,
+            last_mask_gpu_passes: 0,
+            mask_final: HashSet::new(),
             bake_report: None,
             edge_max: 0.2,
             dummy,
@@ -1326,19 +1619,22 @@ impl Engine {
             next_id: 1,
             bounds,
             active: None,
+            apply_bg: None,
             dirty: true,
             full_dirty: true,
             stroke_layer: None,
             prefix: None,
             prefix_cache: None,
             mask_out: HashMap::new(),
+            mask_scratch: None,
             mask_filter_ubuf: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("mask filter uniforms"),
-                size: MASK_FILTER_STRIDE * MAX_MASK_FILTER_STEPS,
+                size: MASK_FILTER_STRIDE * INITIAL_MASK_FILTER_STEPS,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
-            stroke_region: None,
+            mask_filter_ubuf_slots: INITIAL_MASK_FILTER_STEPS,
+            stroke_regions: Vec::new(),
             region_unknown: false,
             generation: 0,
             res,
@@ -1678,6 +1974,7 @@ impl Engine {
     /// Rasterizes position and normal maps for the current mesh at the
     /// current resolution, with dilation past UV island borders.
     pub fn bake_uv(&mut self, mesh: &GpuMesh) {
+        self.apply_bg = None;
         // A mesh change can leave the range past the end; the app sets the
         // new range right after, and this draws nothing meanwhile.
         let tris = self.tris.start.min(mesh.index_count)..self.tris.end.min(mesh.index_count);
@@ -1735,6 +2032,7 @@ impl Engine {
         // DILATE_PASSES is even, so the result ends up back in pos/nrm.
         self.queue.submit([encoder.finish()]);
         self.uv_version += 1;
+        self.mask_final.clear();
         self.mark_dirty();
     }
 
@@ -1756,6 +2054,7 @@ impl Engine {
 
     pub fn set_bounds(&mut self, bounds: (Vec3, Vec3)) {
         self.bounds = bounds;
+        self.mask_final.clear();
         self.mark_dirty();
     }
 
@@ -1955,6 +2254,8 @@ impl Engine {
         let mut encoder = self.device.create_command_encoder(&Default::default());
         self.resample_into(&mut encoder, src, dst);
         self.queue.submit([encoder.finish()]);
+        let layer_id = self.layers[idx].id;
+        self.invalidate_mask_cache(layer_id);
         self.invalidate_thumbs();
         self.mark_dirty();
     }
@@ -2618,6 +2919,7 @@ impl Engine {
         let old = layer.mask.replace(Mask { black_base, paint, generator, graph: None, filters: Vec::new(), layers: Vec::new() });
         let (id, label) = (layer.id, format!("Add mask to {}", layer.name));
         self.record(undo, label, Edit::Mask { id, mask: old });
+        self.invalidate_mask_cache(id);
         self.mark_dirty();
     }
 
@@ -2630,6 +2932,8 @@ impl Engine {
             if let Some(m) = self.layers[idx].mask.as_mut() {
                 m.paint = Some(tex);
             }
+            let layer_id = self.layers[idx].id;
+            self.invalidate_mask_cache(layer_id);
             self.mark_dirty();
         }
     }
@@ -2673,6 +2977,7 @@ impl Engine {
         let after = Snapshot::encode(&self.device, &mut encoder, &[tex]);
         self.queue.submit([encoder.finish()]);
         after.request_map();
+        self.invalidate_mask_cache(layer_id);
 
         undo.push(
             label,
@@ -2696,6 +3001,7 @@ impl Engine {
         let old = layer.mask.replace(Mask { black_base: false, paint, generator, graph, filters, layers });
         let (id, label) = (layer.id, format!("Change the mask of {}", layer.name));
         self.record(undo, label, Edit::Mask { id, mask: old });
+        self.invalidate_mask_cache(id);
         self.mark_dirty();
     }
 
@@ -2709,6 +3015,7 @@ impl Engine {
         let old = layer.mask.take();
         let (id, label) = (layer.id, format!("Remove mask from {}", layer.name));
         self.record(undo, label, Edit::Mask { id, mask: old });
+        self.invalidate_mask_cache(id);
         self.mark_dirty();
     }
 
@@ -2772,6 +3079,34 @@ impl Engine {
         }
     }
 
+    /// Returns whether a property edit changes every mask input, and the layer
+    /// IDs whose own mask source/filter configuration changed.
+    fn mask_cache_changes(before: &DocProps, after: &DocProps) -> (bool, Vec<u64>) {
+        if before.levels != after.levels
+            || before.layers.len() != after.layers.len()
+            || before.layers.iter().zip(&after.layers).any(|(a, b)| a.0 != b.0) {
+            return (true, Vec::new());
+        }
+        let changed = before.layers.iter().zip(&after.layers)
+            .filter(|(a, b)| {
+                a.1.generator != b.1.generator
+                    || a.1.mask_filters != b.1.mask_filters
+                    || a.1.mask_layers != b.1.mask_layers
+            })
+            .map(|(a, _)| a.0)
+            .collect();
+        (false, changed)
+    }
+
+    fn apply_mask_cache_changes(&mut self, before: &DocProps, after: &DocProps) {
+        let (all, changed) = Self::mask_cache_changes(before, after);
+        if all {
+            self.mask_final.clear();
+        } else {
+            for id in changed { self.mask_final.remove(&id); }
+        }
+    }
+
     fn record(&mut self, undo: &mut UndoStack, label: String, edit: Edit) {
         undo.push(label, edit);
         self.committed = self.doc_props();
@@ -2783,6 +3118,7 @@ impl Engine {
     /// single entry; every structural edit calls it first to keep the order.
     pub fn commit_props(&mut self, undo: &mut UndoStack) {
         let current = self.doc_props();
+        self.apply_mask_cache_changes(&self.committed.clone(), &current);
         if current == self.committed {
             return;
         }
@@ -2816,6 +3152,7 @@ impl Engine {
                     let snap = if undoing { &mut e.before } else { &mut e.after };
                     snap.restore(&self.device, &self.queue, &textures);
                 }
+                if e.target == StrokeTarget::Mask { self.invalidate_mask_cache(e.layer_id); }
             }
             Edit::Layer { index, id, layer } => match layer.take() {
                 Some(mut l) => {
@@ -2849,6 +3186,7 @@ impl Engine {
                 if let Some(l) = self.layers.iter_mut().find(|l| l.id == *id) {
                     std::mem::swap(&mut l.mask, mask);
                 }
+                self.invalidate_mask_cache(*id);
             }
             Edit::Images { id, images } => {
                 if let Some(l) = self.layers.iter_mut().find(|l| l.id == *id) {
@@ -2870,9 +3208,16 @@ impl Engine {
                 for (dst, src) in self.map_levels.iter_mut().zip(&props.levels) {
                     *dst = *src;
                 }
+                let updated = self.doc_props();
+                self.apply_mask_cache_changes(&current, &updated);
+                if current.levels != updated.levels { self.maps_dirty = true; }
                 *props = current;
             }
-            Edit::Fix { map, tex } => std::mem::swap(&mut self.map_fix[*map], tex),
+            Edit::Fix { map, tex } => {
+                std::mem::swap(&mut self.map_fix[*map], tex);
+                self.maps_dirty = true;
+                self.mask_final.clear();
+            }
             Edit::Group(edits) => {
                 if undoing {
                     edits.iter_mut().rev().for_each(|e| self.apply_edit(e, true));
@@ -3018,6 +3363,7 @@ impl Engine {
         let before = Snapshot::encode(&self.device, &mut encoder, &textures);
         self.queue.submit([encoder.finish()]);
         before.request_map();
+        self.apply_bg = None;
         self.active = Some(ActiveStroke { layer_id, target, channels, before });
         true
     }
@@ -3036,19 +3382,19 @@ impl Engine {
     }
 
     /// Lays down this frame's stamps and writes the stroke into the target.
-    /// Keep painting passes unscissored: composite bounds are not yet proven safe
-    /// as raster bounds for every brush projection and texture-set layout.
-    /// `region` bounds the texels the stamps can reach, in UV (u0, v0, u1,
-    /// v1), or `None` if unknown.
+    /// A conservative UV `region` clips the stamp/apply passes to the texels
+    /// the brush can reach, including the mesh-map dilation halo. `None`
+    /// means the bounds are unknown and the pass must cover the full texture;
+    /// an empty region means no texel can be affected this frame.
     pub fn stroke_step(
         &mut self,
         stamps: &[Stamp],
         su: StampUniform,
         depth: &wgpu::TextureView,
         paint: &BrushPaint,
-        region: Option<[f32; 4]>,
+        regions: Option<Vec<[f32; 4]>>,
     ) {
-        self.stroke_step_inner(stamps, su, depth, paint, region, false);
+        self.stroke_step_inner(stamps, su, depth, paint, regions, false);
     }
 
     /// Same paint path, with optional GPU timestamps for F6.
@@ -3058,9 +3404,9 @@ impl Engine {
         su: StampUniform,
         depth: &wgpu::TextureView,
         paint: &BrushPaint,
-        region: Option<[f32; 4]>,
+        regions: Option<Vec<[f32; 4]>>,
     ) {
-        self.stroke_step_inner(stamps, su, depth, paint, region, true);
+        self.stroke_step_inner(stamps, su, depth, paint, regions, true);
     }
 
     fn stroke_step_inner(
@@ -3069,13 +3415,27 @@ impl Engine {
         mut su: StampUniform,
         depth: &wgpu::TextureView,
         paint: &BrushPaint,
-        region: Option<[f32; 4]>,
+        regions: Option<Vec<[f32; 4]>>,
         profile_gpu: bool,
     ) {
         if self.active.is_none() || stamps.is_empty() {
             return;
         }
-        self.add_region(region);
+        // The per-frame bounds are conservative paint raster bounds. Keep
+        // them separate from the wider accumulated bounds used by compositing.
+        let frame_scissors = regions.as_deref().and_then(|r| normalized_scissors(r, self.res));
+        // Invalid normalized bounds are not safe to scissor; force the
+        // accumulated composite path to full-frame too.
+        let regions = frame_scissors.as_ref().and(regions);
+        let full_area = u64::from(self.res) * u64::from(self.res);
+        self.last_paint_scissor_pixels = frame_scissors.as_ref().map_or(full_area, |rects| rects.iter().map(|&r| scissor_area(r)).sum());
+        self.last_paint_scissor_rects = frame_scissors.as_ref().map_or(1, |rects| rects.len() as u32);
+        if frame_scissors.as_ref().is_some_and(|rects| rects.is_empty()) {
+            // A known empty region means no texel can change; avoid both GPU
+            // passes and a pointless full composite.
+            return;
+        }
+        self.add_regions(regions);
         let stamps = &stamps[..stamps.len().min(MAX_STAMPS)];
         su.view[3] = stamps.len() as f32;
         self.queue.write_buffer(&self.stamp_ubuf, 0, bytemuck::bytes_of(&su));
@@ -3120,9 +3480,16 @@ impl Engine {
             }).forget_lifetime();
             pass.set_pipeline(&self.p.stamp);
             pass.set_bind_group(0, &stamp_bg, &[]);
-            pass.draw(0..3, 0..1);
+            if let Some(rects) = &frame_scissors {
+                for &[x0, y0, x1, y1] in rects {
+                    pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                    pass.draw(0..3, 0..1);
+                }
+            } else {
+                pass.draw(0..3, 0..1);
+            }
         }
-        self.encode_apply(&mut encoder, paint, profile.as_ref());
+        self.encode_apply(&mut encoder, paint, profile.as_ref(), frame_scissors.as_deref());
         self.queue.submit([encoder.finish()]);
     }
 
@@ -3145,7 +3512,9 @@ impl Engine {
         let (lo, hi) = faces.iter().chain(padding).fold(([f32::MAX; 2], [f32::MIN; 2]), |(lo, hi), p| {
             ([lo[0].min(p[0]), lo[1].min(p[1])], [hi[0].max(p[0]), hi[1].max(p[1])])
         });
-        self.add_region(Some([lo[0], lo[1], hi[0], hi[1]]));
+        self.last_paint_scissor_pixels = u64::from(self.res) * u64::from(self.res);
+        self.last_paint_scissor_rects = 1;
+        self.add_regions(Some(vec![[lo[0], lo[1], hi[0], hi[1]]]));
         use wgpu::util::DeviceExt;
         let all: Vec<[f32; 2]> = faces.iter().chain(padding).copied().collect();
         let vertices = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -3175,12 +3544,14 @@ impl Engine {
                 pass.draw(faces.len() as u32..all.len() as u32, 0..1);
             }
         }
-        self.encode_apply(&mut encoder, paint, None);
+        self.encode_apply(&mut encoder, paint, None, None);
         self.queue.submit([encoder.finish()]);
     }
 
     /// Brush grain (`size`² grayscale, tileable), or `None` for no grain.
     pub fn set_brush_grain(&mut self, grain: Option<(&[u8], u32)>) {
+        // The cached apply bind group holds the current grain texture view.
+        self.apply_bg = None;
         let (pixels, size) = grain.unwrap_or((&[255], 1));
         if self.brush_grain.width != size {
             self.brush_grain = Tex::new(&self.device, "brush grain", size, size, F::R8Unorm, LAYER_USAGE);
@@ -3213,6 +3584,7 @@ impl Engine {
         encoder: &mut wgpu::CommandEncoder,
         paint: &BrushPaint,
         profile: Option<&GpuStrokeProfileResources>,
+        scissors: Option<&[[u32; 4]]>,
     ) {
         let Some(active) = &self.active else { return };
         let (target, channels, layer_id) = (active.target, active.channels.clone(), active.layer_id);
@@ -3247,26 +3619,30 @@ impl Engine {
             }
             _ => self.snap[c].as_ref().filter(|_| ch[c] > 0.5).map_or(&self.dummy.view, |t| &t.view),
         };
-        let apply_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("apply"),
-            layout: &self.p.apply_bgl,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.apply_ubuf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.stroke.view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(snap_view(0)) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(snap_view(1)) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(snap_view(2)) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(snap_view(3)) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.pos.view) },
-                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.nrm.view) },
-                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.brush_grain.view) },
-                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&self.repeat_sampler) },
-                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(snap_view(OPACITY)) },
-                wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(snap_view(EMISSION)) },
-                wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(snap_view(NORMAL)) },
-                wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::TextureView(snap_view(SPECULAR)) },
-            ],
-        });
+        if self.apply_bg.is_none() {
+            let apply_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("apply"),
+                layout: &self.p.apply_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.apply_ubuf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.stroke.view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(snap_view(0)) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(snap_view(1)) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(snap_view(2)) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(snap_view(3)) },
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.pos.view) },
+                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.nrm.view) },
+                    wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.brush_grain.view) },
+                    wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&self.repeat_sampler) },
+                    wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(snap_view(OPACITY)) },
+                    wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(snap_view(EMISSION)) },
+                    wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(snap_view(NORMAL)) },
+                    wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::TextureView(snap_view(SPECULAR)) },
+                ],
+            });
+            self.apply_bg = Some(apply_bg);
+        }
+        let apply_bg = self.apply_bg.as_ref().expect("created above");
 
         {
             let textures = self.target_textures(layer_id, target, &channels).expect("stroke target exists");
@@ -3295,13 +3671,25 @@ impl Engine {
                 multiview_mask: None,
             }).forget_lifetime();
             pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &apply_bg, &[]);
-            pass.draw(0..3, 0..1);
+            pass.set_bind_group(0, apply_bg, &[]);
+            if let Some(rects) = scissors {
+                for &[x0, y0, x1, y1] in rects {
+                    pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                    pass.draw(0..3, 0..1);
+                }
+            } else {
+                pass.draw(0..3, 0..1);
+            }
         }
         if matches!(target, StrokeTarget::BakeFix(_)) {
             self.maps_dirty = true;
             self.mark_dirty();
         } else {
+            // Painting a mask changes its filtered result, but ordinary layer
+            // painting does not change any mask source or filter inputs.
+            if target == StrokeTarget::Mask {
+                self.mask_final.remove(&layer_id);
+            }
             // Only this layer changed: the next composite can start at its pass.
             if self.stroke_layer.is_some_and(|id| id != layer_id) {
                 self.full_dirty = true;
@@ -3311,11 +3699,11 @@ impl Engine {
         }
     }
 
-    /// Grows the stroke region by a UV rectangle, plus the padding the
-    /// position map is dilated into (stamps paint it too) and a texel for
-    /// filtering.
-    fn add_region(&mut self, region: Option<[f32; 4]>) {
-        let Some([u0, v0, u1, v1]) = region else {
+    /// Grows the changed UV area by the position-map dilation margin.
+    /// Rectangles stay separate unless they overlap or the draw-count cap
+    /// requires a conservative merge.
+    fn add_regions(&mut self, regions: Option<Vec<[f32; 4]>>) {
+        let Some(regions) = regions else {
             self.region_unknown = true;
             return;
         };
@@ -3323,14 +3711,13 @@ impl Engine {
         let margin = (DILATE_PASSES + 2) as f32;
         let lo = |v: f32| (v * res - margin).floor().clamp(0.0, res) as u32;
         let hi = |v: f32| (v * res + margin).ceil().clamp(0.0, res) as u32;
-        let r = [lo(u0), lo(v0), hi(u1), hi(v1)];
-        if r[2] <= r[0] || r[3] <= r[1] {
-            return;
+        for [u0, v0, u1, v1] in regions {
+            let rect = [lo(u0), lo(v0), hi(u1), hi(v1)];
+            if rect[2] > rect[0] && rect[3] > rect[1] {
+                self.stroke_regions.push(rect);
+            }
         }
-        self.stroke_region = Some(match self.stroke_region {
-            Some(o) => [o[0].min(r[0]), o[1].min(r[1]), o[2].max(r[2]), o[3].max(r[3])],
-            None => r,
-        });
+        compact_scissors(&mut self.stroke_regions);
     }
 
     /// The layer's mask has filters that are on.
@@ -3340,7 +3727,7 @@ impl Engine {
     }
 
     /// Renders a layer's mask (painting times smart mask) and runs its
-    /// filter steps over it; returns the texture holding the result.
+    /// filter steps over it using engine-shared scratch textures.
     fn encode_mask_filters(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -3348,23 +3735,52 @@ impl Engine {
         source_bg: &wgpu::BindGroup,
         source_offset: u32,
         ops: &[MaskOp],
-        scissor: Option<[u32; 4]>,
+        scissors: Option<&[[u32; 4]]>,
     ) -> &Tex {
-        let pair = &self.mask_out[&layer_id];
-        let load = if scissor.is_some() { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(wgpu::Color::BLACK) };
-        let clip = |pass: &mut wgpu::RenderPass| {
-            if let Some([x0, y0, x1, y1]) = scissor {
-                pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+        // Scratch 0 and 1 ping-pong; scratch 2 holds a mask layer's own
+        // values. The per-mask result texture is kept separate from all scratch.
+        let scratch = self.mask_scratch.as_ref().expect("scratch allocated for filtered masks");
+        let result = &self.mask_out[&layer_id];
+        let load = if scissors.is_some() { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(wgpu::Color::BLACK) };
+        let steps = ops.len();
+        // A patch can't use a ping-pong buffer's leftovers outside it: step k
+        // reads its input around every texel it writes, and that input texture
+        // is overwritten by later steps. So each step writes only as far as the
+        // next one reads: the last over `scissors`, each earlier one wider by
+        // the reach of the step after it. Every read then lands on texels
+        // written in this same frame, and the result texture keeps its old
+        // values outside `scissors`.
+        let regions: Option<Vec<Vec<[u32; 4]>>> = scissors.map(|rects| {
+            let mut per_step = vec![Vec::new(); steps + 1];
+            let mut region = rects.to_vec();
+            for k in (0..steps).rev() {
+                per_step[k + 1] = region.clone();
+                if let MaskOp::Filter { reach, wrap, .. } = ops[k]
+                    && reach > 0.0 {
+                        expand_scissors(&mut region, reach.ceil() as u32 + 2, self.res, wrap);
+                    }
+            }
+            per_step[0] = region;
+            per_step
+        });
+        let draw = |pass: &mut wgpu::RenderPass<'_>, rects: Option<&[[u32; 4]]>| {
+            if let Some(rects) = rects {
+                for &[x0, y0, x1, y1] in rects {
+                    pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                    pass.draw(0..3, 0..1);
+                }
+            } else {
+                pass.draw(0..3, 0..1);
             }
         };
+        let source_out = if steps == 0 { result } else { &scratch[0] };
         {
-            let mut pass = gpu::pass(encoder, "mask source", &[gpu::color_attachment(&pair[0].view, load)]);
-            clip(&mut pass);
+            let mut pass = gpu::pass(encoder, "mask source", &[gpu::color_attachment(&source_out.view, load)]);
             pass.set_pipeline(&self.p.mask_source);
             pass.set_bind_group(0, source_bg, &[source_offset]);
-            pass.draw(0..3, 0..1);
+            draw(&mut pass, regions.as_ref().map(|r| &r[0][..]));
         }
-        let filter = |encoder: &mut wgpu::CommandEncoder, step: usize, input: &Tex, other: &Tex, out: &Tex| {
+        let filter = |encoder: &mut wgpu::CommandEncoder, step: usize, input: &Tex, other: &Tex, out: &Tex, rects: Option<&[[u32; 4]]>| {
             let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("mask filter"),
                 layout: &self.p.mask_filter_bgl,
@@ -3383,44 +3799,56 @@ impl Engine {
                 ],
             });
             let mut pass = gpu::pass(encoder, "mask filter", &[gpu::color_attachment(&out.view, load)]);
-            clip(&mut pass);
             pass.set_pipeline(&self.p.mask_filter);
-            pass.set_bind_group(0, &bg, &[(step.min(MAX_MASK_FILTER_STEPS as usize - 1) as u64 * MASK_FILTER_STRIDE) as u32]);
-            pass.draw(0..3, 0..1);
+            let offset = u32::try_from(step as u64 * MASK_FILTER_STRIDE).expect("mask filter uniform offset fits in u32");
+            pass.set_bind_group(0, &bg, &[offset]);
+            draw(&mut pass, rects);
         };
         let mut cur = 0;
-        for op in ops {
+        for (k, op) in ops.iter().enumerate() {
+            let last = k + 1 == steps;
+            let out = if last { result } else { &scratch[1 - cur] };
+            let rects = regions.as_ref().map(|r| &r[k + 1][..]);
             match *op {
-                MaskOp::Filter(step) => filter(encoder, step, &pair[cur], &pair[2], &pair[1 - cur]),
+                MaskOp::Filter { step, .. } => filter(encoder, step, &scratch[cur], &scratch[2], out, rects),
                 MaskOp::Layer { uniform, combine } => {
                     // The mask layer's own values, then combined over the mask so far.
                     {
-                        let mut pass = gpu::pass(encoder, "mask layer", &[gpu::color_attachment(&pair[2].view, load)]);
-                        clip(&mut pass);
+                        let mut pass = gpu::pass(encoder, "mask layer", &[gpu::color_attachment(&scratch[2].view, load)]);
                         pass.set_pipeline(&self.p.mask_source);
                         pass.set_bind_group(0, source_bg, &[uniform]);
-                        pass.draw(0..3, 0..1);
+                        draw(&mut pass, rects);
                     }
-                    filter(encoder, combine, &pair[cur], &pair[2], &pair[1 - cur]);
+                    filter(encoder, combine, &scratch[cur], &scratch[2], out, rects);
                 }
             }
-            cur = 1 - cur;
+            if !last { cur = 1 - cur; }
         }
-        &pair[cur]
+        result
     }
 
-    /// Flags the layer stack for a full composite.
+    fn invalidate_mask_cache(&mut self, layer_id: u64) {
+        self.mask_final.remove(&layer_id);
+    }
+
+    /// Flags the layer stack for a full composite. Keep filtered mask results
+    /// when only material properties changed; invalidate the exact mask inputs
+    /// that changed, or all masks when mesh-map levels changed.
     pub fn mark_dirty(&mut self) {
+        let current = self.doc_props();
+        self.apply_mask_cache_changes(&self.committed.clone(), &current);
+        if self.maps_dirty { self.mask_final.clear(); }
         self.dirty = true;
         self.full_dirty = true;
     }
 
     /// Finishes the stroke and returns its undo record.
     pub fn end_stroke(&mut self) -> Option<UndoEntry> {
+        self.apply_bg = None;
         self.stroke_layer = None;
         self.prefix = None;
         self.prefix_cache = None;
-        self.stroke_region = None;
+        self.stroke_regions.clear();
         self.region_unknown = false;
         let Some(active) = self.active.take() else {
             self.invalidate_thumbs();
@@ -3430,7 +3858,10 @@ impl Engine {
         // content thumbnail (a full composite) stays as it was.
         match active.target {
             StrokeTarget::Mask => self.invalidate_mask_thumb(active.layer_id),
-            _ => self.invalidate_thumbs(),
+            StrokeTarget::BakeFix(_) => self.invalidate_thumbs(),
+            // Content strokes only target Paint layers. Their contents are not
+            // shown in layer thumbnails, and they do not change mask sources.
+            StrokeTarget::Content => {}
         }
         let textures = self.target_textures(active.layer_id, active.target, &active.channels)?;
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -3475,7 +3906,6 @@ impl Engine {
     fn after_history_step(&mut self) {
         self.invalidate_thumbs();
         self.committed = self.doc_props();
-        self.maps_dirty = true;
         self.mark_dirty();
     }
 
@@ -3546,17 +3976,6 @@ impl Engine {
         u
     }
 
-    /// Shown: the layer and every folder around it are visible.
-    fn shown(&self, idx: usize) -> bool {
-        self.layers[idx].visible && self.ancestors(idx).all(|a| self.layers[a].visible)
-    }
-
-    /// A folder that fades or masks its contents, so it composites them apart.
-    fn isolates(&self, idx: usize) -> bool {
-        let l = &self.layers[idx];
-        l.is_folder() && (l.opacity < 1.0 || l.mask.is_some())
-    }
-
     /// Re-composites the whole stack. Cheap enough to run every painting frame:
     /// one fullscreen pass per visible layer, plus one per faded or masked folder.
     /// Waits until the GPU has finished everything submitted so far.
@@ -3568,33 +3987,13 @@ impl Engine {
         if self.maps_dirty {
             self.resolve_maps();
         }
-        let n = self.layers.len();
-        let mut passes = Vec::new();
-        let (mut depth, mut max_depth) = (0, 0);
-        for i in 0..n {
-            // Folders whose contents start here open, outermost (highest index) first.
-            let mut opening: Vec<usize> =
-                (i..n).filter(|&f| self.isolates(f) && self.shown(f) && self.block(f).start == i).collect();
-            opening.sort_by(|a, b| b.cmp(a));
-            for _ in opening {
-                passes.push(Pass::Begin);
-                depth += 1;
-                max_depth = max_depth.max(depth);
-            }
-            let l = &self.layers[i];
-            let has_content = match &l.content {
-                Content::Paint(ch) => ch.iter().any(|c| c.is_some()),
-                Content::Fill(f) => f.mat.enabled.iter().any(|&e| e),
-                Content::Folder(_) => false,
-            };
-            if has_content && l.opacity > 0.0 && self.shown(i) {
-                passes.push(Pass::Layer(i));
-            }
-            if self.isolates(i) && self.shown(i) {
-                passes.push(Pass::End(i));
-                depth -= 1;
-            }
-        }
+        let (passes, max_depth) = composite_passes(&self.layers);
+        self.last_composite_layer_passes = passes.iter().filter(|p| matches!(**p, Pass::Layer(_))).count() as u32;
+        self.last_composite_folder_passes = passes.iter().filter(|p| matches!(**p, Pass::Begin | Pass::End(_))).count() as u32;
+        let (mut mask_cache_hits, mut mask_cache_misses, mut mask_gpu_passes) = (0u32, 0u32, 0u32);
+        self.last_mask_cache_hits = 0;
+        self.last_mask_cache_misses = 0;
+        self.last_mask_gpu_passes = 0;
         self.folder_below.retain(|set| set[0].width == self.res);
         self.folder_below.truncate(max_depth);
         while self.folder_below.len() < max_depth {
@@ -3675,14 +4074,25 @@ impl Engine {
             }
         }
         self.queue.write_buffer(&self.layer_ubuf, 0, &data);
-        // Textures for the filtered masks; forget layers that lost theirs.
+        // One persistent result per filtered mask; intermediate ping-pong
+        // textures are shared by this engine and reused sequentially in the encoder.
         let filtered_ids: Vec<u64> = source_slot.keys().map(|&li| self.layers[li].id).collect();
-        self.mask_out.retain(|id, t| filtered_ids.contains(id) && t[0].width == self.res);
+        let res = self.res;
+        let mask_final = &mut self.mask_final;
+        self.mask_out.retain(|id, t| {
+            let keep = filtered_ids.contains(id) && t.width == res;
+            if !keep { mask_final.remove(id); }
+            keep
+        });
         for id in &filtered_ids {
             if !self.mask_out.contains_key(id) {
-                let t = || Tex::new(&self.device, "filtered mask", self.res, self.res, MASK_FILTER_FORMAT, LAYER_USAGE);
-                self.mask_out.insert(*id, [t(), t(), t()]);
+                let t = Tex::new(&self.device, "filtered mask result", res, res, MASK_FILTER_FORMAT, LAYER_USAGE);
+                self.mask_out.insert(*id, t);
             }
+        }
+        if !filtered_ids.is_empty() && self.mask_scratch.as_ref().is_none_or(|set| set[0].width != res) {
+            let t = || Tex::new(&self.device, "filtered mask scratch", res, res, MASK_FILTER_FORMAT, LAYER_USAGE);
+            self.mask_scratch = Some([t(), t(), t()]);
         }
         // Filter steps' uniforms, written up front: (kind, a, b, c), (dir x, dir y, scale).
         let mut steps: Vec<[f32; 8]> = Vec::new();
@@ -3699,20 +4109,34 @@ impl Engine {
                 ops.push(MaskOp::Layer { uniform: (slot as u64 * UNIFORM_STRIDE) as u32, combine: steps.len() });
                 steps.push([COMBINE_STEP, ml.blend as u32 as f32, ml.opacity, value, 0.0, 0.0, scale, 0.0]);
             }
-            let begin = steps.len();
             for f in self.layers[li].mask.as_ref().map_or(&[][..], |m| &m.filters[..]).iter().filter(|f| f.enabled) {
                 let kind = f.kind as u32 as f32;
+                // Each step of a filter reads as far as the whole filter does.
+                let (reach, wrap) = (f.reach(self.res), f.kind == FilterKind::Warp);
                 if f.kind == FilterKind::Blur {
                     steps.push([kind, f.a, f.b, f.c, 1.0, 0.0, scale, 0.0]);
+                    ops.push(MaskOp::Filter { step: steps.len() - 1, reach, wrap });
                     steps.push([kind, f.a, f.b, f.c, 0.0, 1.0, scale, 0.0]);
+                    ops.push(MaskOp::Filter { step: steps.len() - 1, reach, wrap });
                 } else {
                     steps.push([kind, f.a, f.b, f.c, 0.0, 0.0, scale, 0.0]);
+                    ops.push(MaskOp::Filter { step: steps.len() - 1, reach, wrap });
                 }
             }
-            ops.extend((begin..steps.len()).map(MaskOp::Filter));
             layer_ops.insert(li, ops);
         }
-        steps.truncate(MAX_MASK_FILTER_STEPS as usize);
+        // Grow for the complete active stack. Truncating here would silently make
+        // later filters reuse the final uniform slot and render the wrong mask.
+        let required_capacity = mask_filter_buffer_capacity(self.mask_filter_ubuf_slots, steps.len());
+        if required_capacity > self.mask_filter_ubuf_slots {
+            self.mask_filter_ubuf_slots = required_capacity;
+            self.mask_filter_ubuf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("mask filter uniforms"),
+                size: MASK_FILTER_STRIDE * self.mask_filter_ubuf_slots,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
         let mut sdata = vec![0u8; (MASK_FILTER_STRIDE as usize) * steps.len().max(1)];
         for (i, s) in steps.iter().enumerate() {
             let off = i * MASK_FILTER_STRIDE as usize;
@@ -3762,48 +4186,59 @@ impl Engine {
         // exact; outside it the final set keeps the last composite's result,
         // which the stroke didn't change. (Folder stacks saved after the
         // painted layer are only read inside the patch too.)
-        let region = std::mem::take(&mut self.stroke_region);
         let unknown = std::mem::take(&mut self.region_unknown);
-        let mut scissor = if resume.is_some() && !unknown { Some(region.unwrap_or([0, 0, 0, 0])) } else { None };
-        // Filtered masks above the change read around it: widen the patch by
-        // the farthest any of their filters reach.
-        if let (Some(r), Some(at)) = (scissor.as_mut(), resume.as_ref().map(|p| p.at)) {
-            let reach = passes[at..]
-                .iter()
-                .filter_map(|p| match *p {
-                    Pass::Layer(li) => self.layers[li].mask.as_ref(),
-                    _ => None,
-                })
-                .map(|m| m.filters.iter().filter(|f| f.enabled).map(|f| f.reach(self.res)).sum::<f32>())
-                .fold(0.0f32, f32::max);
-            if reach > 0.0 && r[2] > r[0] && r[3] > r[1] {
-                let e = reach.ceil() as u32 + 2;
-                *r = [r[0].saturating_sub(e), r[1].saturating_sub(e), (r[2] + e).min(self.res), (r[3] + e).min(self.res)];
+        let mut scissors = if resume.is_some() && !unknown {
+            Some(std::mem::take(&mut self.stroke_regions))
+        } else {
+            self.stroke_regions.clear();
+            None
+        };
+        // Only a mask stroke changes a filtered mask's output neighborhood.
+        // Content strokes never alter mask inputs, so expanding for every later
+        // layer's cached filter chain wastes the dirty-region optimization.
+        if let (Some(rects), Some(_)) = (scissors.as_mut(), resume.as_ref())
+            && let Some(active) = self.active.as_ref().filter(|stroke| stroke.target == StrokeTarget::Mask)
+            && let Some(mask) = self.layers.iter().find(|layer| layer.id == active.layer_id).and_then(|layer| layer.mask.as_ref()) {
+                let reach = mask.filters.iter().filter(|f| f.enabled).map(|f| f.reach(self.res)).sum::<f32>();
+                let wraps = mask.filters.iter().any(|f| f.enabled && f.kind == FilterKind::Warp);
+                if reach > 0.0 {
+                    expand_scissors(rects, reach.ceil() as u32 + 2, self.res, wraps);
+                }
             }
-        }
-        self.last_scissor_pixels = scissor.map_or(
-            u64::from(self.res) * u64::from(self.res),
-            |r| u64::from(r[2].saturating_sub(r[0])) * u64::from(r[3].saturating_sub(r[1])),
-        );
-        if scissor.is_some_and(|r| r[2] <= r[0] || r[3] <= r[1]) {
+        let full_area = u64::from(self.res) * u64::from(self.res);
+        self.last_scissor_pixels = scissors.as_ref().map_or(full_area, |rects| rects.iter().map(|&r| scissor_area(r)).sum());
+        self.last_scissor_bbox_pixels = scissors.as_ref().map_or(full_area, |rects| {
+            let Some(first) = rects.first() else { return 0 };
+            let bounds = rects.iter().skip(1).fold(*first, |a, &b| scissor_union(a, b));
+            scissor_area(bounds)
+        });
+        self.last_scissor_rects = scissors.as_ref().map_or(1, |rects| rects.len() as u32);
+        if scissors.as_ref().is_some_and(|rects| rects.is_empty()) {
             // Nothing visible changed.
-            let resume = resume.expect("scissor implies resume");
+            let resume = resume.expect("scissors imply resume");
             self.prefix = Some(resume);
             self.dirty = false;
             self.queue.submit([encoder.finish()]);
             self.active_gpu_profile = None;
+            if let Some(rects) = scissors.take() {
+                self.stroke_regions = rects;
+                self.stroke_regions.clear();
+            }
             return;
         }
-        if scissor.is_none() {
+        if scissors.is_none() {
             self.full_recomps = self.full_recomps.wrapping_add(1);
         }
         // `src` is the accum set holding the stack so far; `from_cache` reads
         // the first pass's input from the prefix cache instead.
         let (start, mut src, mut depth, mut from_cache) = match &resume {
-            Some(p) => (p.at, p.input.map_or(1, |i| i), p.depth, p.input.is_none()),
+            Some(p) => {
+                let src = p.input.unwrap_or_else(|| resume_source_index(self.final_idx, &passes[p.at..]));
+                (p.at, src, p.depth, p.input.is_none())
+            }
             None => (0, 0, 0, false),
         };
-        let mut finals: Vec<(u64, usize)> = Vec::new();
+        let mut finals: Vec<u64> = Vec::new();
         let profile_layer = self.stroke_layer;
         let mut composite_profiled = false;
         for (k, pass) in passes.iter().enumerate().skip(start) {
@@ -3823,13 +4258,20 @@ impl Engine {
             let li = match *pass {
                 Pass::Begin => {
                     // Keep the stack below the folder to fade its result over.
-                    let [x0, y0, x1, y1] = scissor.unwrap_or([0, 0, self.res, self.res]);
                     fn at(t: &Tex, x: u32, y: u32) -> wgpu::TexelCopyTextureInfo<'_> {
                         wgpu::TexelCopyTextureInfo { origin: wgpu::Origin3d { x, y, z: 0 }, ..t.copy_info() }
                     }
-                    let size = wgpu::Extent3d { width: x1 - x0, height: y1 - y0, depth_or_array_layers: 1 };
-                    for (from, to) in self.accum[src].iter().zip(&self.folder_below[depth]) {
-                        encoder.copy_texture_to_texture(at(from, x0, y0), at(to, x0, y0), size);
+                    if let Some(rects) = &scissors {
+                        for &[x0, y0, x1, y1] in rects {
+                            let size = wgpu::Extent3d { width: x1 - x0, height: y1 - y0, depth_or_array_layers: 1 };
+                            for (from, to) in self.accum[src].iter().zip(&self.folder_below[depth]) {
+                                encoder.copy_texture_to_texture(at(from, x0, y0), at(to, x0, y0), size);
+                            }
+                        }
+                    } else {
+                        for (from, to) in self.accum[src].iter().zip(&self.folder_below[depth]) {
+                            encoder.copy_texture_to_texture(from.copy_info(), to.copy_info(), from.extent());
+                        }
                     }
                     depth += 1;
                     continue;
@@ -3904,26 +4346,41 @@ impl Engine {
                     wgpu::BindGroupEntry { binding: 26, resource: view(Some(&self.tan)) },
                 ],
             });
-            // Mask filters: render the mask, run its filters, then read the result.
+            // A filtered mask depends on its own paint/generator/filter data,
+            // not on the accumulated layers below it. Reuse the previous result
+            // until that mask is edited; a mask-paint stroke invalidates only
+            // its own cache and can refresh it with the current scissors.
             let filtered = match (*pass, source_slot.get(&li)) {
-                (Pass::Layer(_) | Pass::End(_), Some(&slot)) => Some(self.encode_mask_filters(
-                    &mut encoder,
-                    layer.id,
-                    &make_bg(mask),
-                    (slot as u64 * UNIFORM_STRIDE) as u32,
-                    layer_ops.get(&li).map_or(&[][..], |o| &o[..]),
-                    scissor,
-                )),
+                (Pass::Layer(_) | Pass::End(_), Some(&slot)) => {
+                    if self.mask_final.contains(&layer.id) {
+                        mask_cache_hits += 1;
+                        Some(&self.mask_out[&layer.id])
+                    } else {
+                        mask_cache_misses += 1;
+                        let ops = layer_ops.get(&li).map_or(&[][..], |o| &o[..]);
+                        mask_gpu_passes += 1 + ops.iter().map(|op| match op {
+                            MaskOp::Layer { .. } => 2,
+                            MaskOp::Filter { .. } => 1,
+                        }).sum::<u32>();
+                        Some(self.encode_mask_filters(
+                            &mut encoder,
+                            layer.id,
+                            &make_bg(mask),
+                            (slot as u64 * UNIFORM_STRIDE) as u32,
+                            ops,
+                            scissors.as_deref(),
+                        ))
+                    }
+                }
                 _ => None,
             };
-            if let Some(t) = filtered
-                && let Some(i) = self.mask_out[&layer.id].iter().position(|x| std::ptr::eq(x, t)) {
-                    finals.push((layer.id, i));
-                }
+            if filtered.is_some() && !self.mask_final.contains(&layer.id) {
+                finals.push(layer.id);
+            }
             let bg = make_bg(filtered.or(mask));
             let out = &self.accum[dst];
             // A patch keeps what is around it.
-            let load = if scissor.is_some() { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(wgpu::Color::BLACK) };
+            let load = if scissors.is_some() { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(wgpu::Color::BLACK) };
             let attachments = [
                 gpu::color_attachment(&out[0].view, load),
                 gpu::color_attachment(&out[1].view, load),
@@ -3947,12 +4404,16 @@ impl Engine {
                 occlusion_query_set: None,
                 multiview_mask: None,
             }).forget_lifetime();
-            if let Some([x0, y0, x1, y1]) = scissor {
-                pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
-            }
             pass.set_pipeline(if layer.is_folder() { &self.p.folder_merge } else { &self.p.composite });
             pass.set_bind_group(0, &bg, &[(k as u64 * UNIFORM_STRIDE) as u32]);
-            pass.draw(0..3, 0..1);
+            if let Some(rects) = &scissors {
+                for &[x0, y0, x1, y1] in rects {
+                    pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                    pass.draw(0..3, 0..1);
+                }
+            } else {
+                pass.draw(0..3, 0..1);
+            }
             drop(pass);
             src = dst;
             from_cache = false;
@@ -3967,6 +4428,9 @@ impl Engine {
             }
         }
         self.queue.submit([encoder.finish()]);
+        self.last_mask_cache_hits = mask_cache_hits;
+        self.last_mask_cache_misses = mask_cache_misses;
+        self.last_mask_gpu_passes = mask_gpu_passes;
         if composite_profiled {
             self.active_gpu_profile = None;
             if let Some(profiler) = &mut self.gpu_profiler {
@@ -3982,9 +4446,13 @@ impl Engine {
         self.generation += 1;
         self.dirty = false;
         self.full_dirty = false;
-        self.mask_final.retain(|id, _| self.mask_out.contains_key(id));
+        self.mask_final.retain(|id| self.mask_out.contains_key(id));
         self.mask_final.extend(finals);
         self.update_thumbs();
+        if let Some(rects) = scissors.take() {
+            self.stroke_regions = rects;
+            self.stroke_regions.clear();
+        }
     }
 
     /// Whether any visible layer sets opacity: only then can the result be
@@ -4133,6 +4601,7 @@ impl Engine {
                     );
                 }
         }
+        self.apply_bg = None;
         self.res = res;
         self.uv_version += 1;
         self.pos = Tex::new(&self.device, "position map", res, res, POS_FORMAT, LAYER_USAGE);
@@ -4148,18 +4617,58 @@ impl Engine {
 
     // ------------------------------------------------------------------ stats
 
+
+    fn fill_image_bytes(&self) -> u64 {
+        let mut seen = HashSet::with_capacity(self.layers.len());
+        self.layers
+            .iter()
+            .flat_map(|layer| layer.images.iter().flatten())
+            .filter(|image| seen.insert(Arc::as_ptr(&image.tex)))
+            .map(|image| image.tex.bytes())
+            .sum()
+    }
+
+    fn custom_array_bytes(&self) -> u64 {
+        let res = self.custom.first().map_or(1, |t| t.width) as u64;
+        res * res * self.custom.len().max(1) as u64 * gpu::bytes_per_texel(CUSTOM_FORMAT) as u64
+    }
+
+    fn gpu_buffer_bytes(&self) -> u64 {
+        let stroke = self.layer_ubuf.size()
+            + self.stamp_ubuf.size()
+            + self.stamp_sbuf.size()
+            + self.apply_ubuf.size()
+            + self.mask_filter_ubuf.size();
+        let profile = self.gpu_profiler.as_ref().map_or(0, |p| p.resources.resolve.size() + p.resources.readback.size());
+        stroke + profile
+    }
+
+    /// Estimated GPU memory owned by this texture set: textures and known buffers.
+    /// Driver padding, shared renderer resources and the viewport mesh are excluded.
     pub fn vram_bytes(&self) -> u64 {
-        let fixed = self.pos.bytes()
+        self.pos.bytes()
             + self.nrm.bytes()
             + self.tan.bytes()
             + self.stroke.bytes()
             + self.maps.iter().map(|t| t.bytes()).sum::<u64>()
             + self.resolved.iter().flatten().map(|t| t.bytes()).sum::<u64>()
             + self.map_fix.iter().flatten().map(|t| t.bytes()).sum::<u64>()
+            + self.custom.iter().map(|t| t.bytes()).sum::<u64>()
+            + self.custom_array_bytes()
             + self.accum.iter().flatten().map(|t| t.bytes()).sum::<u64>()
+            + self.folder_below.iter().flatten().map(|t| t.bytes()).sum::<u64>()
+            + self.prefix_cache.as_ref().map_or(0, |set| set.iter().map(|t| t.bytes()).sum())
+            + self.mask_out.values().map(|t| t.bytes()).sum::<u64>()
+            + self.mask_scratch.as_ref().map_or(0, |set| set.iter().map(|t| t.bytes()).sum::<u64>())
             + self.snap.iter().flatten().map(|t| t.bytes()).sum::<u64>()
-            + self.snap_mask.as_ref().map_or(0, |t| t.bytes());
-        fixed + self.layers.iter().map(|l| l.vram_bytes()).sum::<u64>()
+            + self.snap_mask.as_ref().map_or(0, |t| t.bytes())
+            + self.brush_alpha.bytes()
+            + self.brush_grain.bytes()
+            + self.dummy.bytes()
+            + self.layers.iter().map(|l| l.vram_bytes()).sum::<u64>()
+            + self.fill_image_bytes()
+            + self.thumbs.vram_bytes()
+            + self.gpu_buffer_bytes()
     }
 
     pub fn layer_vram_bytes(&self, idx: usize) -> u64 {
@@ -4169,29 +4678,313 @@ impl Engine {
     #[cfg(test)]
     pub fn vram_breakdown(&self) -> Vec<(&'static str, u64)> {
         let mb = |b: u64| b >> 20;
-        let set = |s: &[Tex; ACCUM]| s.iter().map(|t| t.bytes()).sum::<u64>();
-        // Layers can share one image texture: count each once.
-        let unique_images: u64 = {
-            let mut seen = Vec::new();
-            let mut sum = 0;
-            for i in self.layers.iter().flat_map(|l| l.images.iter().flatten()) {
-                let p = Arc::as_ptr(&i.tex);
-                if !seen.contains(&p) {
-                    seen.push(p);
-                    sum += i.tex.bytes();
-                }
-            }
-            sum
-        };
+        let unique_images = self.fill_image_bytes();
         vec![
             ("surface maps", mb(self.pos.bytes() + self.nrm.bytes() + self.tan.bytes() + self.stroke.bytes())),
-            ("mesh maps", mb(self.maps.iter().map(|t| t.bytes()).sum::<u64>() + self.resolved.iter().flatten().map(|t| t.bytes()).sum::<u64>())),
-            ("accum (2 sets)", mb(self.accum.iter().map(set).sum())),
-            ("folder below", mb(self.folder_below.iter().map(set).sum())),
-            ("prefix cache", mb(self.prefix_cache.as_ref().map_or(0, set))),
-            ("filtered masks", mb(self.mask_out.values().flat_map(|t| t.iter()).map(|t| t.bytes()).sum())),
-            ("paint layers", mb(self.layers.iter().map(|l| l.vram_bytes()).sum())),
+            ("mesh maps and fixes", mb(self.maps.iter().map(|t| t.bytes()).sum::<u64>() + self.resolved.iter().flatten().map(|t| t.bytes()).sum::<u64>() + self.map_fix.iter().flatten().map(|t| t.bytes()).sum::<u64>())),
+            ("custom maps", mb(self.custom.iter().map(|t| t.bytes()).sum::<u64>() + self.custom_array_bytes())),
+            ("accumulation", mb(self.accum.iter().flatten().map(|t| t.bytes()).sum())),
+            ("folder cache", mb(self.folder_below.iter().flatten().map(|t| t.bytes()).sum())),
+            ("prefix cache", mb(self.prefix_cache.as_ref().map_or(0, |set| set.iter().map(|t| t.bytes()).sum()))),
+            ("filtered masks", mb(self.mask_out.values().map(|t| t.bytes()).sum::<u64>()
+                + self.mask_scratch.as_ref().map_or(0, |set| set.iter().map(|t| t.bytes()).sum::<u64>()))),
+            ("paint layers and masks", mb(self.layers.iter().map(|l| l.vram_bytes()).sum())),
             ("fill images", mb(unique_images)),
+            ("thumbnails", mb(self.thumbs.vram_bytes())),
+            ("brush and fallback textures", mb(self.brush_alpha.bytes() + self.brush_grain.bytes() + self.dummy.bytes())),
+            ("stroke snapshots", mb(self.snap.iter().flatten().map(|t| t.bytes()).sum::<u64>() + self.snap_mask.as_ref().map_or(0, |t| t.bytes()))),
+            ("GPU buffers", mb(self.gpu_buffer_bytes())),
         ]
+    }
+}
+
+
+#[cfg(test)]
+mod composite_pass_tests {
+    use super::*;
+
+    fn layer(id: u64, parent: Option<u64>, visible: bool, opacity: f32, content: Content) -> Layer {
+        Layer {
+            id,
+            name: format!("Layer {id}"),
+            visible,
+            opacity,
+            blend: Blend::Normal,
+            content,
+            mask: None,
+            parent,
+            images: std::array::from_fn(|_| None),
+            thumb: None,
+        }
+    }
+
+    fn fill() -> Content {
+        Content::Fill(FillParams::default())
+    }
+
+    fn folder() -> Content {
+        Content::Folder(Folder { open: true, graph: None })
+    }
+
+    fn legacy_passes(layers: &[Layer]) -> (Vec<Pass>, usize) {
+        let ancestors = |idx: usize| {
+            std::iter::successors(layers[idx].parent.and_then(|id| layers.iter().position(|l| l.id == id)), |&i| {
+                layers[i].parent.and_then(|id| layers.iter().position(|l| l.id == id))
+            })
+        };
+        let shown = |idx: usize| layers[idx].visible && ancestors(idx).all(|a| layers[a].visible);
+        let isolates = |idx: usize| layers[idx].is_folder() && (layers[idx].opacity < 1.0 || layers[idx].mask.is_some());
+        let block_start = |idx: usize| {
+            let mut start = idx;
+            while start > 0 && ancestors(start - 1).any(|a| layers[a].id == layers[idx].id) {
+                start -= 1;
+            }
+            start
+        };
+
+        let n = layers.len();
+        let mut passes = Vec::new();
+        let (mut depth, mut max_depth) = (0usize, 0usize);
+        for i in 0..n {
+            let mut opening: Vec<usize> = (i..n).filter(|&f| isolates(f) && shown(f) && block_start(f) == i).collect();
+            opening.sort_by(|a, b| b.cmp(a));
+            for _ in opening {
+                passes.push(Pass::Begin);
+                depth += 1;
+                max_depth = max_depth.max(depth);
+            }
+            let has_content = match &layers[i].content {
+                Content::Paint(ch) => ch.iter().any(Option::is_some),
+                Content::Fill(fill) => fill.mat.enabled.iter().any(|&enabled| enabled),
+                Content::Folder(_) => false,
+            };
+            if has_content && layers[i].opacity > 0.0 && shown(i) {
+                passes.push(Pass::Layer(i));
+            }
+            if isolates(i) && shown(i) {
+                passes.push(Pass::End(i));
+                depth -= 1;
+            }
+        }
+        (passes, max_depth)
+    }
+
+    #[test]
+    fn linear_pass_builder_matches_nested_folder_order_and_visibility() {
+        let layers = vec![
+            layer(10, Some(12), true, 1.0, fill()),
+            layer(11, Some(12), true, 1.0, fill()),
+            layer(12, Some(14), true, 0.5, folder()),
+            layer(13, Some(14), true, 1.0, fill()),
+            layer(14, None, true, 0.5, folder()),
+            layer(15, None, true, 1.0, fill()),
+            layer(16, Some(17), true, 1.0, fill()),
+            layer(17, None, false, 0.5, folder()),
+            layer(18, Some(19), true, 1.0, fill()),
+            layer(19, None, true, 1.0, folder()),
+        ];
+
+        let expected = vec![
+            Pass::Begin,
+            Pass::Begin,
+            Pass::Layer(0),
+            Pass::Layer(1),
+            Pass::End(2),
+            Pass::Layer(3),
+            Pass::End(4),
+            Pass::Layer(5),
+            Pass::Layer(8),
+        ];
+        assert_eq!(composite_passes(&layers), (expected.clone(), 2));
+        assert_eq!(composite_passes(&layers), legacy_passes(&layers));
+    }
+
+    #[test]
+    fn empty_layer_stack_has_no_composite_passes() {
+        assert_eq!(composite_passes(&[]), (Vec::new(), 0));
+    }
+}
+
+#[cfg(test)]
+mod scissor_tests {
+    use super::*;
+
+    fn assert_covered(original: &[[u32; 4]], compacted: &[[u32; 4]]) {
+        for &[x0, y0, x1, y1] in original {
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    assert!(
+                        compacted.iter().any(|r| r[0] <= x && x < r[2] && r[1] <= y && y < r[3]),
+                        "original texel ({x}, {y}) was dropped"
+                    );
+                }
+            }
+        }
+    }
+
+    fn assert_disjoint(rects: &[[u32; 4]]) {
+        for i in 0..rects.len() {
+            for j in i + 1..rects.len() {
+                assert_eq!(scissor_overlap_area(rects[i], rects[j]), 0, "scissors overlap");
+            }
+        }
+    }
+
+    #[test]
+    fn warp_filter_scissors_wrap_across_uv_seams() {
+        let (x, nx) = expand_scissor_axis(2, 5, 4, 100, true);
+        assert_eq!(nx, 2);
+        assert_eq!(&x[..nx], &[(98, 100), (0, 9)]);
+
+        let (y, ny) = expand_scissor_axis(20, 30, 5, 100, true);
+        assert_eq!(ny, 1);
+        assert_eq!(y[0], (15, 35));
+
+        let (full, nf) = expand_scissor_axis(10, 20, 50, 100, true);
+        assert_eq!(nf, 1);
+        assert_eq!(full[0], (0, 100));
+
+        let mut rects = vec![[2, 20, 5, 24]];
+        expand_scissors(&mut rects, 4, 100, true);
+        assert_eq!(rects, vec![[0, 16, 9, 28], [98, 16, 100, 28]]);
+        assert_disjoint(&rects);
+
+        // A patch touching both UV seams becomes the four texture corners.
+        let mut corner = vec![[2, 3, 5, 6]];
+        expand_scissors(&mut corner, 4, 100, true);
+        assert_eq!(corner.len(), 4);
+        assert_disjoint(&corner);
+        for point in [[0, 0], [99, 0], [0, 99], [99, 99]] {
+            assert!(
+                corner.iter().any(|r| r[0] <= point[0] && point[0] < r[2] && r[1] <= point[1] && point[1] < r[3]),
+                "wrapped corner texel {:?} wasn't included",
+                point
+            );
+        }
+
+        // Blur/sharpen clamp at the texture edge and must not wrap.
+        let mut clamped = vec![[2, 20, 5, 24]];
+        expand_scissors(&mut clamped, 4, 100, false);
+        assert_eq!(clamped, vec![[0, 16, 9, 28]]);
+    }
+
+    #[test]
+    fn resumed_composite_finishes_in_previous_final_accum_set() {
+        let sequences: &[&[Pass]] = &[
+            &[Pass::Layer(0)],
+            &[Pass::Layer(0), Pass::Layer(1)],
+            &[Pass::Layer(0), Pass::Layer(1), Pass::Layer(2)],
+            &[Pass::Begin, Pass::Layer(0), Pass::Begin, Pass::Layer(1), Pass::End(1), Pass::End(0)],
+            &[Pass::Layer(0), Pass::Begin, Pass::Layer(1), Pass::End(1), Pass::Layer(2)],
+        ];
+        for final_idx in 0..2 {
+            for passes in sequences {
+                let mut src = resume_source_index(final_idx, passes);
+                for pass in *passes {
+                    if !matches!(pass, Pass::Begin) {
+                        src = 1 - src;
+                    }
+                }
+                assert_eq!(src, final_idx, "resumed pass sequence ended in the wrong accum set");
+            }
+        }
+    }
+
+    #[test]
+    fn normalized_scissors_reject_non_finite_bounds() {
+        assert!(normalized_scissors(&[[f32::NAN, 0.0, 1.0, 1.0]], 128).is_none());
+        assert!(normalized_scissors(&[[0.0, 0.0, f32::INFINITY, 1.0]], 128).is_none());
+    }
+
+    #[test]
+    fn normalized_scissors_round_outward_and_clip_to_texture() {
+        let margin = DILATE_PASSES + 2;
+        let rects = normalized_scissors(&[[-0.1, 0.2, 0.251, 1.2], [0.7, 0.7, 0.8, 0.8]], 100).expect("finite bounds");
+        assert_eq!(
+            rects,
+            vec![
+                [0, 20 - margin, 26 + margin, 100],
+                [70 - margin, 70 - margin, 80 + margin, 80 + margin],
+            ],
+        );
+    }
+
+    #[test]
+    fn compact_scissors_merges_overlaps_without_losing_coverage() {
+        let original = vec![[0, 0, 10, 10], [5, 5, 15, 15], [20, 0, 25, 5], [25, 0, 30, 5]];
+        let mut compacted = original.clone();
+        compact_scissors(&mut compacted);
+        assert_covered(&original, &compacted);
+        assert_disjoint(&compacted);
+        assert!(compacted.len() <= original.len());
+    }
+
+    #[test]
+    fn compact_scissors_caps_draw_count_without_losing_coverage() {
+        let original: Vec<[u32; 4]> = (0..65)
+            .map(|i| {
+                let x = (i % 13) * 4;
+                let y = (i / 13) * 4;
+                [x, y, x + 2, y + 2]
+            })
+            .collect();
+        let mut compacted = original.clone();
+        compact_scissors(&mut compacted);
+        assert!(compacted.len() <= MAX_COMPOSITE_SCISSORS);
+        assert_covered(&original, &compacted);
+        assert_disjoint(&compacted);
+    }
+}
+
+#[cfg(test)]
+mod mask_cache_invalidation_tests {
+    use super::{Blend, Engine, FilterKind, MaskFilter};
+    use crate::undo::{DocProps, LayerProps};
+
+    fn props() -> LayerProps {
+        LayerProps {
+            name: "Layer".into(),
+            visible: true,
+            opacity: 1.0,
+            blend: Blend::Normal,
+            fill: None,
+            generator: None,
+            mask_filters: Vec::new(),
+            mask_layers: Vec::new(),
+        }
+    }
+
+    fn doc() -> DocProps {
+        DocProps { layers: vec![(7, props())], levels: Vec::new() }
+    }
+
+    #[test]
+    fn material_visibility_and_opacity_keep_filtered_mask_cache() {
+        let before = doc();
+        let mut after = before.clone();
+        after.layers[0].1.opacity = 0.35;
+        after.layers[0].1.visible = false;
+        after.layers[0].1.blend = Blend::Screen;
+        assert_eq!(Engine::mask_cache_changes(&before, &after), (false, Vec::new()));
+    }
+
+    #[test]
+    fn filter_edit_invalidates_only_its_layer_mask() {
+        let before = doc();
+        let mut after = before.clone();
+        after.layers[0].1.mask_filters.push(MaskFilter::new(FilterKind::Blur));
+        assert_eq!(Engine::mask_cache_changes(&before, &after), (false, vec![7]));
+    }
+
+    #[test]
+    fn map_level_or_layer_identity_change_invalidates_all_masks() {
+        let before = doc();
+        let mut levels = before.clone();
+        levels.levels.push(Default::default());
+        assert_eq!(Engine::mask_cache_changes(&before, &levels), (true, Vec::new()));
+
+        let mut structure = before.clone();
+        structure.layers[0].0 = 8;
+        assert_eq!(Engine::mask_cache_changes(&before, &structure), (true, Vec::new()));
     }
 }

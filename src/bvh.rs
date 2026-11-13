@@ -33,6 +33,44 @@ pub struct Hit {
 const BINS: usize = 12;
 const MAX_LEAF: u32 = 4;
 
+/// Keeps normal BVH traversals allocation-free. The overflow vector is only
+/// used if an unusually unbalanced tree exceeds the inline traversal depth.
+const INLINE_TRAVERSAL_STACK: usize = 64;
+
+struct TraversalStack {
+    inline: [u32; INLINE_TRAVERSAL_STACK],
+    len: usize,
+    overflow: Vec<u32>,
+}
+
+impl TraversalStack {
+    fn root(root: u32) -> Self {
+        let mut inline = [0; INLINE_TRAVERSAL_STACK];
+        inline[0] = root;
+        Self { inline, len: 1, overflow: Vec::new() }
+    }
+
+    fn push(&mut self, node: u32) {
+        if self.overflow.is_empty() && self.len < INLINE_TRAVERSAL_STACK {
+            self.inline[self.len] = node;
+            self.len += 1;
+        } else {
+            self.overflow.push(node);
+        }
+    }
+
+    fn pop(&mut self) -> Option<u32> {
+        self.overflow.pop().or_else(|| {
+            if self.len == 0 {
+                None
+            } else {
+                self.len -= 1;
+                Some(self.inline[self.len])
+            }
+        })
+    }
+}
+
 fn area(min: Vec3, max: Vec3) -> f32 {
     let e = (max - min).max(Vec3::ZERO);
     2.0 * (e.x * e.y + e.y * e.z + e.z * e.x)
@@ -207,7 +245,7 @@ impl Bvh {
     /// Calls `each` with every triangle whose bounds pass `overlaps` (given
     /// min and max corners), skipping subtrees whose bounds fail it.
     pub fn query(&self, overlaps: impl Fn(Vec3, Vec3) -> bool, mut each: impl FnMut(u32)) {
-        let mut stack = vec![0u32];
+        let mut stack = TraversalStack::root(0);
         while let Some(ni) = stack.pop() {
             let node = &self.nodes[ni as usize];
             if !overlaps(node.min, node.max) {
@@ -231,7 +269,7 @@ impl Bvh {
         let inv = d.recip();
         let mut tmax = f32::MAX;
         let mut best = None;
-        let mut stack = vec![0u32];
+        let mut stack = TraversalStack::root(0);
         while let Some(ni) = stack.pop() {
             let node = &self.nodes[ni as usize];
             if !Self::slab(node.min, node.max, o, inv, tmax) {
@@ -258,7 +296,7 @@ impl Bvh {
     pub fn all_hits(&self, o: Vec3, d: Vec3, tmax: f32, out: &mut Vec<(f32, u32)>) {
         out.clear();
         let inv = d.recip();
-        let mut stack = vec![0u32];
+        let mut stack = TraversalStack::root(0);
         while let Some(ni) = stack.pop() {
             let node = &self.nodes[ni as usize];
             if !Self::slab(node.min, node.max, o, inv, tmax) {
@@ -283,6 +321,19 @@ impl Bvh {
 mod tests {
     use super::*;
     use crate::mesh::Primitive;
+
+    #[test]
+    fn traversal_stack_preserves_lifo_across_inline_overflow() {
+        let mut stack = TraversalStack::root(0);
+        for node in 1..(INLINE_TRAVERSAL_STACK as u32 + 20) {
+            stack.push(node);
+        }
+        for node in (1..(INLINE_TRAVERSAL_STACK as u32 + 20)).rev() {
+            assert_eq!(stack.pop(), Some(node));
+        }
+        assert_eq!(stack.pop(), Some(0));
+        assert_eq!(stack.pop(), None);
+    }
 
     #[test]
     fn subset_reports_mesh_triangles() {

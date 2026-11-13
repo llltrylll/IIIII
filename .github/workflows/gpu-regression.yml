@@ -1,0 +1,71 @@
+name: GPU brush and mask regression
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gpu-regression:
+    name: Vulkan software GPU parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      WGPU_BACKEND: vulkan
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@v5
+
+      - name: Install Vulkan software driver and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libvulkan1 mesa-vulkan-drivers vulkan-tools \
+            pkg-config libxkbcommon-dev libwayland-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libgtk-3-dev
+
+      - name: Select Mesa Lavapipe
+        shell: bash
+        run: |
+          icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -name 'lvp_icd*.json' -print -quit)"
+          if [[ -z "$icd" ]]; then
+            echo "Mesa Lavapipe ICD was not installed"
+            exit 1
+          fi
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+          vulkaninfo --summary
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@v2
+
+      # Keep the correctness gates focused on brush/mask GPU parity.
+      # The broader preview suite also contains unrelated interactive UI tests.
+      - name: GPU parity - brush projections
+        run: "cargo test --locked --bin material_painter preview_test::paint_projections -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU parity - scissored mask stroke
+        run: "cargo test --locked --bin material_painter preview_test::scissored_mask_stroke_matches_full_frame -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU parity - nested folders and masks
+        run: "cargo test --locked --bin material_painter preview_test::multi_scissor_nested_folder_matches_full -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU parity - multi-scissor composite
+        run: "cargo test --locked --bin material_painter preview_test::multi_scissor_matches_full_composite -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU parity - mask filters
+        run: "cargo test --locked --bin material_painter preview_test::mask_filters_apply -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: Upload GPU regression images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-brush-mask-regression-images
+          path: target/bake_test/
+          if-no-files-found: ignore
+          retention-days: 14

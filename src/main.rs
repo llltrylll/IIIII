@@ -32,6 +32,9 @@ mod theme;
 mod undo;
 mod viewport;
 
+#[cfg(test)]
+mod uvbake_invariants;
+
 use eframe::{egui_wgpu, wgpu};
 use std::sync::Arc;
 

@@ -261,10 +261,15 @@ fn paint_projections() {
     let bvh = crate::bvh::Bvh::from_mesh(&mesh);
     let rs = render_state();
     let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
-    let res = 512;
+    let res = 256;
     let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+    // A second engine receives the exact same stamps without scissoring. Its
+    // final channels are the pixel-exact reference for the optimized path.
+    let mut reference = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
     let mut undo = UndoStack::default();
+    let mut reference_undo = UndoStack::default();
     engine.add_paint_layer(0, None, None, &mut undo);
+    reference.add_paint_layer(0, None, None, &mut reference_undo);
 
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/bake_test/paint");
     std::fs::create_dir_all(&dir).unwrap();
@@ -293,14 +298,18 @@ fn paint_projections() {
         ("surface_grain", BrushProjection::Surface, true),
     ] {
         engine.clear_layer(0, &mut undo);
+        reference.clear_layer(0, &mut reference_undo);
         if grain {
             let px = crate::textures::TEXTURES[0].render(256);
             engine.set_brush_grain(Some((&px, 256)));
+            reference.set_brush_grain(Some((&px, 256)));
         }
         views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &settings, None);
-        assert!(engine.begin_stroke(0, StrokeTarget::Content, [true, false, false, false, false, false, false, false], false));
+        let channels = [true, false, false, false, false, false, false, false];
+        assert!(engine.begin_stroke(0, StrokeTarget::Content, channels, false));
+        assert!(reference.begin_stroke(0, StrokeTarget::Content, channels, false));
         let radius = 28.0;
-        let raw: Vec<([f32; 4], f32)> = (0..60).map(|i| ([180.0 + i as f32 * 5.0, 250.0, 1.0, 0.0], 1.0)).collect();
+        let raw: Vec<([f32; 4], f32)> = (0..24).map(|i| ([180.0 + i as f32 * 12.5, 250.0, 1.0, 0.0], 1.0)).collect();
         let fsize = Vec2::new(size[0] as f32, size[1] as f32);
         let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, projection, 1, radius, &raw);
         assert!(!stamps.is_empty(), "{name}: no stamps hit the mesh");
@@ -320,9 +329,91 @@ fn paint_projections() {
             erase: false,
             grain: if grain { [1.0, 3.0 / extent, 0.0, 0.0] } else { [0.0; 4] },
         };
-        engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, None);
+        let regions = crate::app::stroke_region(
+            &mesh, &bvh, engine.triangles(), &cam, fsize, projection, 1, radius, &stamps,
+        );
+        if projection != BrushProjection::Uv {
+            assert!(regions.is_some(), "{name}: expected a safe partial region");
+        }
+        if let Some(rects) = &regions {
+            assert!(!rects.is_empty(), "{name}: no conservative stroke region");
+        } else {
+            assert_eq!(projection, BrushProjection::Uv, "{name}: unexpected full-frame fallback");
+            println!("  {name}: UV bounds cross the safe tile; validating the conservative full-frame fallback");
+        }
+        engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, regions.clone());
+        reference.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, None);
         engine.end_stroke();
+        reference.end_stroke();
+        fn paint_texture(engine: &Engine) -> &crate::gpu::Tex {
+            match &engine.layers[0].content {
+                crate::engine::Content::Paint(ch) => ch[0].as_ref().expect("color channel was painted"),
+                _ => panic!("expected a paint layer"),
+            }
+        }
+        let optimized_paint = read_texture(&rs.device, &rs.queue, paint_texture(&engine));
+        let reference_paint = read_texture(&rs.device, &rs.queue, paint_texture(&reference));
+        // Texels the stroke never touched keep alpha 0; the full-frame
+        // reference also writes the brush color under that zero alpha, which
+        // no composite pass reads (the final channels below prove it).
+        let visible: Vec<(u8, u8)> = optimized_paint
+            .chunks_exact(4)
+            .zip(reference_paint.chunks_exact(4))
+            .filter(|(a, b)| !(a[3] == 0 && b[3] == 0))
+            .flat_map(|(a, b)| a.iter().copied().zip(b.iter().copied()))
+            .collect();
+        let visible_differs = visible.iter().filter(|(a, b)| a != b).count();
+        println!(
+            "  {name}: scissors {}; raw: {}; texels with coverage: {} bytes, differing {visible_differs}",
+            engine.last_paint_scissor_rects,
+            diff_report(&optimized_paint, &reference_paint, 4, engine.res),
+            visible.len()
+        );
+        if visible_differs > 0 {
+            let res = engine.res as usize;
+            let rects = regions.as_deref().unwrap_or_default();
+            let near: Vec<_> = rects.iter().filter(|r| r[0] < 0.70 && r[2] > 0.63 && r[1] < 0.72 && r[3] > 0.64).collect();
+            println!("    uv regions near the texel (u~0.664, v~0.68): {near:?}; total regions {}; full-frame fallback: {}", rects.len(), regions.is_none());
+            {
+                // The triangles whose UV box is nearest the first missed texel.
+                let uv = Vec2::new(170.5, 174.0) / res as f32;
+                let mut near: Vec<(f32, usize)> = (0..mesh.indices.len() / 3)
+                    .map(|t| {
+                        let (mut lo, mut hi) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
+                        for k in 0..3 {
+                            let v = Vec2::from(mesh.vertices[mesh.indices[t * 3 + k] as usize].uv);
+                            lo = lo.min(v);
+                            hi = hi.max(v);
+                        }
+                        let d = (lo - uv).max(uv - hi).max(Vec2::ZERO);
+                        (d.max_element() * res as f32, t)
+                    })
+                    .collect();
+                near.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let vp = cam.view_proj(fsize.x / fsize.y);
+                for &(d, t) in near.iter().take(4) {
+                    let scr: Vec<[f32; 2]> = (0..3).map(|k| {
+                        let v = &mesh.vertices[mesh.indices[t * 3 + k] as usize];
+                        let c = vp * Vec3::from(v.pos).extend(1.0);
+                        ((Vec2::new(c.x, -c.y) / c.w * 0.5 + 0.5) * fsize).to_array()
+                    }).collect();
+                    println!("    nearest tri {t}: {d:.1} texels from the texel, screen {scr:?}");
+                }
+            }
+            for (i, (a, b)) in optimized_paint.chunks_exact(4).zip(reference_paint.chunks_exact(4)).enumerate() {
+                if a != b && !(a[3] == 0 && b[3] == 0) {
+                    println!("    texel ({}, {}): scissored {a:?} full {b:?}", i % res, i / res);
+                }
+            }
+        }
+        assert_eq!(visible_differs, 0, "{name}: scissored paint target differs where the stroke has coverage");
         engine.composite();
+        reference.composite();
+        for channel in 0..7 {
+            let optimized = read_texture(&rs.device, &rs.queue, engine.final_tex(channel));
+            let full = read_texture(&rs.device, &rs.queue, reference.final_tex(channel));
+            assert_eq!(optimized, full, "{name}: scissored paint differs from full-frame channel {channel}");
+        }
         views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &settings, None);
         save(&views, name);
         let n = red_texels(&engine);
@@ -362,6 +453,144 @@ fn paint_projections() {
         engine.delete_layer(idx, &mut undo);
     }
     println!("  frames in {}", dir.display());
+}
+
+/// A filtered Vertex ID mask stroke must match full-frame painting exactly.
+#[test]
+#[ignore]
+fn scissored_mask_stroke_matches_full_frame() {
+    use crate::app::{BrushProjection, resolve_stamps, stroke_region};
+    use crate::engine::{BrushPaint, CHANNELS, FillParams, FilterKind, GenKind, MaskFilter, MatValues, StampUniform};
+    use crate::undo::{StrokeTarget, UndoStack};
+    use glam::Vec2;
+
+    let mesh = crate::mesh::Primitive::RoundedCube.build();
+    let bvh = crate::bvh::Bvh::from_mesh(&mesh);
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let res = 256;
+    let fill = FillParams {
+        mat: MatValues {
+            enabled: [true, true, true, false, false, false, false, false],
+            color: [0.65, 0.25, 0.08],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut optimized = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+    let mut reference = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+    let mut optimized_undo = UndoStack::default();
+    let mut reference_undo = UndoStack::default();
+
+    let configure = |engine: &mut Engine, undo: &mut UndoStack| {
+        let layer = engine.add_fill_layer(0, None, "ID-masked fill".into(), fill, undo);
+        engine.add_mask(layer, true, Some(GenKind::IdMask.default_generator()), undo);
+        let mask = engine.layers[layer].mask.as_mut().expect("mask was added");
+        mask.filters = vec![MaskFilter::new(FilterKind::Blur), MaskFilter::new(FilterKind::Warp)];
+        let paint_layer = engine.add_paint_layer(1, None, None, undo);
+        engine.mark_dirty();
+        engine.composite();
+        (layer, paint_layer)
+    };
+    let (target, paint_layer) = configure(&mut optimized, &mut optimized_undo);
+    let (reference_target, reference_paint_layer) = configure(&mut reference, &mut reference_undo);
+
+    let cam = OrbitCam { target: (mesh.bounds_min + mesh.bounds_max) * 0.5, ..Default::default() };
+    let size = [256u32, 256u32];
+    let fsize = Vec2::new(size[0] as f32, size[1] as f32);
+    let mut views = ViewRenderer::new(&rs);
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+    views.render_3d(&rs, size, &[&optimized], &env, &gpu_mesh, &cam, &ViewSettings::default(), None);
+
+    assert!(optimized.begin_stroke(target, StrokeTarget::Mask, [false; CHANNELS], false));
+    assert!(reference.begin_stroke(reference_target, StrokeTarget::Mask, [false; CHANNELS], false));
+    let radius = 34.0;
+    let raw: Vec<([f32; 4], f32)> = (0..16)
+        .map(|i| ([178.0 + i as f32 * 8.0, 128.0, 1.0, 0.0], 1.0))
+        .collect();
+    let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+    assert!(!stamps.is_empty(), "the test stroke must resolve stamps");
+    let regions = stroke_region(
+        &mesh, &bvh, optimized.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps,
+    ).expect("test mesh UVs fit the base tile");
+    assert!(!regions.is_empty(), "the mask stroke must have a conservative region");
+
+    let su = StampUniform {
+        view_proj: cam.view_proj(fsize.x / fsize.y).to_cols_array_2d(),
+        cam_pos: cam.eye().extend(1.0).to_array(),
+        view: [fsize.x, fsize.y, 0.0, 0.0],
+        view2d: [0.0; 4],
+        brush: [radius, 0.6, 1.0, 0.0],
+        clip: [crate::viewport::NEAR, crate::viewport::FAR, 0.0, 0.0],
+        proj: [BrushProjection::Screen as u32 as f32, 0.0, 85f32.to_radians().cos(), 0.0],
+    };
+    let paint = BrushPaint { mat: MatValues::default(), mask_value: 0.0, opacity: 1.0, erase: false, grain: [0.0; 4] };
+    optimized.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, Some(regions.clone()));
+    reference.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, None);
+    optimized.end_stroke();
+    reference.end_stroke();
+    optimized.composite();
+    reference.composite();
+
+    let optimized_mask = optimized.layers[target].mask.as_ref().unwrap().paint.as_ref().unwrap();
+    let reference_mask = reference.layers[reference_target].mask.as_ref().unwrap().paint.as_ref().unwrap();
+    assert_eq!(
+        read_texture(&rs.device, &rs.queue, optimized_mask),
+        read_texture(&rs.device, &rs.queue, reference_mask),
+        "scissored mask paint differs from full-frame mask paint",
+    );
+    for channel in 0..7 {
+        let partial = read_texture(&rs.device, &rs.queue, optimized.final_tex(channel));
+        let full = read_texture(&rs.device, &rs.queue, reference.final_tex(channel));
+        assert_eq!(partial, full, "filtered ID-mask composite differs in channel {channel}");
+    }
+    assert!(optimized.last_mask_cache_misses > 0, "editing a mask must rebuild its filtered result");
+
+    // Editing only another layer's paint must reuse the unchanged ID mask.
+    let channels = [true, false, false, false, false, false, false, false];
+    assert!(optimized.begin_stroke(paint_layer, StrokeTarget::Content, channels, false));
+    assert!(reference.begin_stroke(reference_paint_layer, StrokeTarget::Content, channels, false));
+    let content_paint = BrushPaint {
+        mat: MatValues {
+            enabled: channels,
+            color: [0.85, 0.08, 0.04],
+            ..Default::default()
+        },
+        mask_value: 1.0,
+        opacity: 1.0,
+        erase: false,
+        grain: [0.0; 4],
+    };
+    optimized.stroke_step(&stamps, su, views.view3d.depth_view(), &content_paint, Some(regions.clone()));
+    reference.stroke_step(&stamps, su, views.view3d.depth_view(), &content_paint, None);
+    optimized.end_stroke();
+    reference.end_stroke();
+    optimized.composite();
+    reference.composite();
+    assert!(optimized.last_mask_cache_hits > 0, "content painting should reuse the unchanged filtered mask");
+    assert_eq!(optimized.last_mask_cache_misses, 0, "content painting must not invalidate the ID mask");
+    for channel in 0..7 {
+        let partial = read_texture(&rs.device, &rs.queue, optimized.final_tex(channel));
+        let full = read_texture(&rs.device, &rs.queue, reference.final_tex(channel));
+        assert_eq!(partial, full, "cached mask composite differs in channel {channel}");
+    }
+
+    // A second mask stroke must invalidate just this mask's cached result.
+    assert!(optimized.begin_stroke(target, StrokeTarget::Mask, [false; CHANNELS], false));
+    assert!(reference.begin_stroke(reference_target, StrokeTarget::Mask, [false; CHANNELS], false));
+    optimized.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, Some(regions.clone()));
+    reference.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, None);
+    optimized.end_stroke();
+    reference.end_stroke();
+    optimized.composite();
+    reference.composite();
+    assert!(optimized.last_mask_cache_misses > 0, "a mask stroke must invalidate its cached filtered result");
+    for channel in 0..7 {
+        let partial = read_texture(&rs.device, &rs.queue, optimized.final_tex(channel));
+        let full = read_texture(&rs.device, &rs.queue, reference.final_tex(channel));
+        assert_eq!(partial, full, "repainted mask composite differs in channel {channel}");
+    }
 }
 
 /// GPU time of one painting frame at 4K: stamping + applying a stroke step,
@@ -432,7 +661,7 @@ fn perf_4k() {
         let raw: Vec<([f32; 4], f32)> = (0..6).map(|i| ([500.0 + (f * 6 + i) as f32 * 3.0, 500.0, 1.0, 0.0], 1.0)).collect();
         let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, 35.0, &raw);
         let t = Instant::now();
-        let region = crate::app::stroke_region(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, 35.0, &stamps);
+        let region = crate::app::stroke_region(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, 35.0, &stamps);
         engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, region);
         wait(&rs);
         t_stroke += t.elapsed().as_secs_f64();
@@ -462,6 +691,128 @@ fn perf_4k() {
         ms(t_view)
     );
     }
+}
+
+/// Multi-scissor GPU regression: two spatially separated mesh islands map to
+/// distant UV islands. Painting a filtered inner-folder mask through nested
+/// folders must produce the same pixels as a full recomposition.
+/// Run: cargo test --bin material_painter multi_scissor_nested_folder_matches_full -- --ignored --nocapture
+#[test]
+#[ignore]
+fn multi_scissor_nested_folder_matches_full() {
+    use crate::app::{BrushProjection, resolve_stamps, stroke_region};
+    use crate::engine::{BrushPaint, CHANNELS, FillParams, FilterKind, MaskFilter, MatValues, StampUniform};
+    use crate::mesh::Mesh;
+    use crate::undo::{StrokeTarget, UndoStack};
+    use glam::{Vec2, Vec3};
+
+    // Two disconnected quads in screen space, with UV islands in opposite corners.
+    let positions = vec![
+        Vec3::new(-1.0, 0.0, -0.55), Vec3::new(-0.1, 0.0, -0.55),
+        Vec3::new(-0.1, 0.0, 0.55), Vec3::new(-1.0, 0.0, 0.55),
+        Vec3::new(0.1, 0.0, -0.55), Vec3::new(1.0, 0.0, -0.55),
+        Vec3::new(1.0, 0.0, 0.55), Vec3::new(0.1, 0.0, 0.55),
+    ];
+    let normals = Some(vec![Vec3::Y; 8]);
+    let uvs = vec![
+        // Both islands approach opposite texture corners so Warp must sample
+        // across the repeating U and V seams while the composite is partial.
+        Vec2::new(0.005, 0.005), Vec2::new(0.25, 0.005),
+        Vec2::new(0.25, 0.25), Vec2::new(0.005, 0.25),
+        Vec2::new(0.75, 0.75), Vec2::new(0.995, 0.75),
+        Vec2::new(0.995, 0.995), Vec2::new(0.75, 0.995),
+    ];
+    let indices = vec![0, 3, 2, 0, 2, 1, 4, 7, 6, 4, 6, 5];
+    let mesh = Arc::new(Mesh::from_parts("Two UV islands".into(), positions, normals, uvs, indices));
+    let bvh = crate::bvh::Bvh::from_mesh(&mesh);
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let res = 256;
+    let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+    let mut undo = UndoStack::default();
+
+    let outer = engine.add_folder(0, None, "Outer".into(), &mut undo);
+    let outer_id = engine.layers[outer].id;
+    engine.layers[outer].opacity = 0.8;
+    engine.add_mask(outer, true, None, &mut undo);
+    engine.layers[outer].mask.as_mut().unwrap().filters = vec![MaskFilter::new(FilterKind::Warp)];
+
+    let inner = engine.add_folder(1, Some(outer_id), "Inner".into(), &mut undo);
+    let inner_id = engine.layers[inner].id;
+    engine.add_mask(inner, true, None, &mut undo);
+    engine.layers[inner].mask.as_mut().unwrap().filters = vec![
+        MaskFilter::new(FilterKind::Blur),
+        MaskFilter::new(FilterKind::Warp),
+    ];
+
+    let fill = FillParams {
+        mat: MatValues { enabled: [true, true, true, false, false, false, false, false], color: [0.65, 0.25, 0.08], ..Default::default() },
+        ..Default::default()
+    };
+    let target = engine.add_fill_layer(2, Some(inner_id), "Paint target".into(), fill, &mut undo);
+    engine.add_mask(target, true, None, &mut undo);
+    engine.layers[target].mask.as_mut().unwrap().filters = vec![
+        MaskFilter::new(FilterKind::Blur),
+        MaskFilter::new(FilterKind::Warp),
+    ];
+    engine.mark_dirty();
+    engine.composite();
+
+    let cam = OrbitCam { yaw: 0.0, pitch: 1.5, dist: 3.2, target: Vec3::ZERO, ..Default::default() };
+    let size = [512u32, 512u32];
+    let fsize = Vec2::new(size[0] as f32, size[1] as f32);
+    let mut views = ViewRenderer::new(&rs);
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+
+    assert!(engine.begin_stroke(target, StrokeTarget::Mask, [false; CHANNELS], false));
+    let radius = 30.0;
+    let su = StampUniform {
+        view_proj: cam.view_proj(fsize.x / fsize.y).to_cols_array_2d(),
+        cam_pos: cam.eye().extend(1.0).to_array(),
+        view: [fsize.x, fsize.y, 0.0, 0.0],
+        view2d: [0.0; 4],
+        brush: [radius, 0.6, 1.0, 0.0],
+        clip: [crate::viewport::NEAR, crate::viewport::FAR, 0.0, 0.0],
+        proj: [BrushProjection::Screen as u32 as f32, 0.0, 85f32.to_radians().cos(), 0.0],
+    };
+    let paint = BrushPaint { mat: MatValues::default(), mask_value: 0.0, opacity: 1.0, erase: false, grain: [0.0; 4] };
+
+    for frame in 0..4 {
+        views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &ViewSettings::default(), None);
+        let raw = [
+            ([132.0 + frame as f32 * 4.0, 256.0, 1.0, 0.0], 1.0),
+            ([380.0 - frame as f32 * 4.0, 256.0, 1.0, 0.0], 1.0),
+        ];
+        let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+        let regions = stroke_region(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps)
+            .expect("both UV islands must be included in the changed region");
+        assert!(regions.len() >= 2, "expected disjoint UV scissors, got {}", regions.len());
+
+        engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, Some(regions.clone()));
+        engine.composite();
+
+        if frame == 0 {
+            let mask_tex = engine.layers[target].mask.as_ref().unwrap().paint.as_ref().unwrap();
+            let mask = read_texture(&rs.device, &rs.queue, mask_tex);
+            let painted_in = |x0: u32, y0: u32, x1: u32, y1: u32| {
+                (y0..y1).any(|y| (x0..x1).any(|x| mask[(y * res + x) as usize] < 240))
+            };
+            assert!(painted_in(0, 0, 64, 64), "the upper-left UV island received no paint");
+            assert!(painted_in(192, 192, 256, 256), "the lower-right UV island received no paint");
+        }
+
+        // Compare after every incremental frame, not only after the final
+        // accumulated stroke. Rebuild the prefix before the next frame too.
+        let partial: Vec<Vec<u8>> = (0..7).map(|c| read_texture(&rs.device, &rs.queue, engine.final_tex(c))).collect();
+        engine.mark_dirty();
+        engine.composite();
+        for c in 0..7 {
+            let full = read_texture(&rs.device, &rs.queue, engine.final_tex(c));
+            assert_eq!(full, partial[c], "frame {frame}: final texture channel {c} differs after full recomposition");
+        }
+    }
+    engine.end_stroke();
 }
 
 /// Every built-in graph node compiles and renders, fed by noise where it has
@@ -1457,6 +1808,31 @@ fn layer_thumbnails() {
     engine.composite();
     let (_, _, blue) = stats(&engine, engine.thumb_textures(id).0.unwrap(), "fill_blue");
     assert!(blue[2] > blue[0] * 2.0, "the thumbnail follows the fill's color: {blue:?}");
+}
+
+/// Painting on a Paint layer does not invalidate thumbnails belonging to fills or masks.
+#[test]
+#[ignore]
+fn content_stroke_keeps_unrelated_thumbnails() {
+    use crate::engine::{CHANNELS, FillParams};
+    use crate::undo::{StrokeTarget, UndoStack};
+
+    let mesh = crate::mesh::Primitive::Plane.build();
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 256);
+    let mut undo = UndoStack::default();
+
+    let fill = engine.add_fill_layer(0, None, "Fill".into(), FillParams::default(), &mut undo);
+    engine.add_mask(fill, true, None, &mut undo);
+    let paint = engine.add_paint_layer(1, None, None, &mut undo);
+    engine.composite();
+
+    let settled = engine.thumb_renders();
+    assert_eq!(settled, 2, "the fill owns a content thumbnail and a mask thumbnail");
+    assert!(engine.begin_stroke(paint, StrokeTarget::Content, [true, false, false, false, false, false, false, false], false));
+    let _undo = engine.end_stroke().expect("content stroke produces an undo record");
+    assert_eq!(engine.thumb_renders(), settled, "painting a separate layer must not rebuild the fill's thumbnails");
 }
 
 /// Painting a fill's mask rebuilds no thumbnail while the stroke is held, and
@@ -2955,4 +3331,289 @@ fn spp_screenshot() {
     }
     harness.run_steps(1);
     harness.render().expect("renders").save(dir.join("shot_raytraced.png")).unwrap();
+}
+
+/// Where two RGBA-like texel buffers first differ and the box holding every
+/// difference, to locate an artifact without opening the images.
+fn diff_report(a: &[u8], b: &[u8], bpp: usize, res: u32) -> String {
+    let (mut n, mut first) = (0usize, None);
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    for (i, (p, q)) in a.iter().zip(b).enumerate() {
+        if p != q {
+            n += 1;
+            let t = (i / bpp) as u32;
+            let (x, y) = (t % res, t / res);
+            first.get_or_insert((x, y));
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+    }
+    match first {
+        None => "identical".to_string(),
+        Some((fx, fy)) => format!("{n} bytes differ, first at ({fx}, {fy}), box x {x0}..={x1} y {y0}..={y1}"),
+    }
+}
+
+/// Incremental stroke recompositions (a few scissors around the stamps) must
+/// match a full composite texel for texel: folders (nested, with opacity), the
+/// stack saved under them, masks with blur/warp filters that read around the
+/// change, and strokes painted on a filtered mask itself.
+/// `cargo test --bin material_painter multi_scissor_matches_full_composite -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn multi_scissor_matches_full_composite() {
+    use crate::app::{BrushProjection, resolve_stamps};
+    use crate::engine::{ACCUM, BrushPaint, CHANNELS, FillParams, FilterKind, GenKind, MaskBlend, MaskFilter, MaskLayer, MaskSource, MatValues, StampUniform};
+    use crate::undo::{StrokeTarget, UndoStack};
+    use glam::Vec2;
+
+    type Build = fn(&mut Engine, &mut UndoStack) -> (u64, StrokeTarget);
+    let fill = |rgb: [f32; 3]| FillParams {
+        mat: MatValues { enabled: [true, false, false, false, false, false, false, false], color: rgb, ..Default::default() },
+        ..Default::default()
+    };
+    let pos = |e: &Engine, id: u64| e.layers.iter().position(|l| l.id == id).expect("layer exists");
+    let _ = (&fill, &pos);
+
+    fn fill_of(rgb: [f32; 3]) -> FillParams {
+        FillParams { mat: MatValues { enabled: [true, false, false, false, false, false, false, false], color: rgb, ..Default::default() }, ..Default::default() }
+    }
+    fn set_opacity(e: &mut Engine, id: u64, opacity: f32) {
+        e.layers.iter_mut().find(|l| l.id == id).unwrap().opacity = opacity;
+    }
+    /// A mask with structure (clouds over black) and filters that read their neighbors.
+    fn filtered_mask(e: &mut Engine, id: u64, undo: &mut UndoStack) {
+        let idx = e.layers.iter().position(|l| l.id == id).unwrap();
+        e.add_mask(idx, true, None, undo);
+        let m = e.layers[idx].mask.as_mut().unwrap();
+        let ml = |source, blend| MaskLayer { source, blend, opacity: 1.0, enabled: true };
+        m.layers = vec![ml(MaskSource::Fill(0.0), MaskBlend::Normal), ml(MaskSource::Generator(GenKind::Clouds.default_generator()), MaskBlend::Add)];
+        m.filters = vec![MaskFilter::new(FilterKind::Blur), MaskFilter::new(FilterKind::Warp)];
+        if let Some(f) = m.filters.get_mut(0) {
+            f.a = 40.0;
+        }
+        e.mark_dirty();
+    }
+    /// A painted mask (white) with the same neighbor-reading filters.
+    fn painted_filtered_mask(e: &mut Engine, id: u64, undo: &mut UndoStack) {
+        let idx = e.layers.iter().position(|l| l.id == id).unwrap();
+        e.add_mask(idx, true, None, undo);
+        let m = e.layers[idx].mask.as_mut().unwrap();
+        m.filters = vec![MaskFilter::new(FilterKind::Blur), MaskFilter::new(FilterKind::Warp)];
+        m.filters[0].a = 40.0;
+        e.mark_dirty();
+    }
+    let content = StrokeTarget::Content;
+    let _ = content;
+
+    let scenarios: Vec<(&str, Build)> = vec![
+        ("flat stack", |e, u| {
+            e.add_fill_layer(0, None, "A".into(), fill_of([0.2, 0.4, 0.8]), u);
+            let p = e.add_paint_layer(1, None, None, u);
+            let pid = e.layers[p].id;
+            let b = e.add_fill_layer(2, None, "B".into(), fill_of([0.9, 0.7, 0.1]), u);
+            let bid = e.layers[b].id;
+            set_opacity(e, bid, 0.5);
+            (pid, StrokeTarget::Content)
+        }),
+        ("folder, painting inside it", |e, u| {
+            e.add_fill_layer(0, None, "A".into(), fill_of([0.2, 0.4, 0.8]), u);
+            let f = e.add_folder(1, None, "F".into(), u);
+            let fid = e.layers[f].id;
+            let p = e.add_paint_layer(1, Some(fid), None, u);
+            let pid = e.layers[p].id;
+            let b = e.add_fill_layer(2, Some(fid), "B".into(), fill_of([0.1, 0.8, 0.3]), u);
+            let bid = e.layers[b].id;
+            set_opacity(e, bid, 0.6);
+            set_opacity(e, fid, 0.7);
+            let c = e.add_fill_layer(4, None, "C".into(), fill_of([0.9, 0.2, 0.2]), u);
+            let cid = e.layers[c].id;
+            set_opacity(e, cid, 0.4);
+            (pid, StrokeTarget::Content)
+        }),
+        ("nested folders", |e, u| {
+            e.add_fill_layer(0, None, "A".into(), fill_of([0.2, 0.4, 0.8]), u);
+            let f1 = e.add_folder(1, None, "F1".into(), u);
+            let f1id = e.layers[f1].id;
+            let f2 = e.add_folder(1, Some(f1id), "F2".into(), u);
+            let f2id = e.layers[f2].id;
+            let p = e.add_paint_layer(1, Some(f2id), None, u);
+            let pid = e.layers[p].id;
+            let b = e.add_fill_layer(2, Some(f2id), "B".into(), fill_of([0.1, 0.8, 0.3]), u);
+            let bid = e.layers[b].id;
+            let f2 = e.layers.iter().position(|l| l.id == f2id).unwrap();
+            let c = e.add_fill_layer(f2 + 1, Some(f1id), "C".into(), fill_of([0.9, 0.5, 0.1]), u);
+            let cid = e.layers[c].id;
+            let d = e.add_fill_layer(e.layers.len(), None, "D".into(), fill_of([0.7, 0.1, 0.7]), u);
+            let did = e.layers[d].id;
+            set_opacity(e, bid, 0.6);
+            set_opacity(e, f2id, 0.8);
+            set_opacity(e, cid, 0.6);
+            set_opacity(e, f1id, 0.7);
+            set_opacity(e, did, 0.3);
+            (pid, StrokeTarget::Content)
+        }),
+        ("filtered mask above the painted layer", |e, u| {
+            let p = e.add_paint_layer(0, None, None, u);
+            let pid = e.layers[p].id;
+            let b = e.add_fill_layer(1, None, "B".into(), fill_of([0.1, 0.3, 0.9]), u);
+            let bid = e.layers[b].id;
+            filtered_mask(e, bid, u);
+            (pid, StrokeTarget::Content)
+        }),
+        ("filtered masks inside nested folders", |e, u| {
+            e.add_fill_layer(0, None, "A".into(), fill_of([0.3, 0.3, 0.3]), u);
+            let f1 = e.add_folder(1, None, "F1".into(), u);
+            let f1id = e.layers[f1].id;
+            let f2 = e.add_folder(1, Some(f1id), "F2".into(), u);
+            let f2id = e.layers[f2].id;
+            let p = e.add_paint_layer(1, Some(f2id), None, u);
+            let pid = e.layers[p].id;
+            let b = e.add_fill_layer(2, Some(f2id), "B".into(), fill_of([0.1, 0.8, 0.3]), u);
+            let bid = e.layers[b].id;
+            filtered_mask(e, bid, u);
+            let f2 = e.layers.iter().position(|l| l.id == f2id).unwrap();
+            let c = e.add_fill_layer(f2 + 1, Some(f1id), "C".into(), fill_of([0.9, 0.5, 0.1]), u);
+            let cid = e.layers[c].id;
+            filtered_mask(e, cid, u);
+            set_opacity(e, f2id, 0.8);
+            set_opacity(e, f1id, 0.7);
+            (pid, StrokeTarget::Content)
+        }),
+        ("painting a filtered mask", |e, u| {
+            e.add_fill_layer(0, None, "A".into(), fill_of([0.2, 0.4, 0.8]), u);
+            let b = e.add_fill_layer(1, None, "B".into(), fill_of([0.9, 0.7, 0.1]), u);
+            let bid = e.layers[b].id;
+            painted_filtered_mask(e, bid, u);
+            (bid, StrokeTarget::Mask)
+        }),
+        ("painting a blur-only mask", |e, u| {
+            e.add_fill_layer(0, None, "A".into(), fill_of([0.2, 0.4, 0.8]), u);
+            let b = e.add_fill_layer(1, None, "B".into(), fill_of([0.9, 0.7, 0.1]), u);
+            let bid = e.layers[b].id;
+            painted_filtered_mask(e, bid, u);
+            e.layers[b].mask.as_mut().unwrap().filters.truncate(1);
+            (bid, StrokeTarget::Mask)
+        }),
+        ("painting a warp-only mask", |e, u| {
+            e.add_fill_layer(0, None, "A".into(), fill_of([0.2, 0.4, 0.8]), u);
+            let b = e.add_fill_layer(1, None, "B".into(), fill_of([0.9, 0.7, 0.1]), u);
+            let bid = e.layers[b].id;
+            painted_filtered_mask(e, bid, u);
+            e.layers[b].mask.as_mut().unwrap().filters.remove(0);
+            (bid, StrokeTarget::Mask)
+        }),
+        ("painting a filtered mask inside a folder", |e, u| {
+            e.add_fill_layer(0, None, "A".into(), fill_of([0.2, 0.4, 0.8]), u);
+            let f = e.add_folder(1, None, "F".into(), u);
+            let fid = e.layers[f].id;
+            let b = e.add_fill_layer(1, Some(fid), "B".into(), fill_of([0.9, 0.7, 0.1]), u);
+            let bid = e.layers[b].id;
+            painted_filtered_mask(e, bid, u);
+            let g = e.add_fill_layer(2, Some(fid), "G".into(), fill_of([0.1, 0.9, 0.5]), u);
+            let gid = e.layers[g].id;
+            set_opacity(e, gid, 0.5);
+            set_opacity(e, fid, 0.8);
+            (bid, StrokeTarget::Mask)
+        }),
+    ];
+
+    let mesh = crate::mesh::Primitive::RoundedCube.build();
+    let bvh = crate::bvh::Bvh::from_mesh(&mesh);
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let res = 512u32;
+    let size = [800u32, 500u32];
+    let fsize = Vec2::new(size[0] as f32, size[1] as f32);
+    let cam = OrbitCam { target: (mesh.bounds_min + mesh.bounds_max) * 0.5, ..Default::default() };
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+    let bpp = [4usize, 1, 1, 2, 4, 4, 1];
+    let mut failures: Vec<String> = Vec::new();
+    let mut most_rects = 0u32;
+
+    for (name, build) in scenarios {
+        let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+        let mut undo = UndoStack::default();
+        let (layer_id, target) = build(&mut engine, &mut undo);
+        let layer = engine.layers.iter().position(|l| l.id == layer_id).expect("painted layer");
+        engine.composite();
+        let mut views = ViewRenderer::new(&rs);
+        views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &ViewSettings::default(), None);
+
+        let radius = 18.0;
+        let su = StampUniform {
+            view_proj: cam.view_proj(fsize.x / fsize.y).to_cols_array_2d(),
+            cam_pos: cam.eye().extend(1.0).to_array(),
+            view: [fsize.x, fsize.y, 0.0, 0.0],
+            view2d: [0.0; 4],
+            brush: [radius, 0.6, 1.0, 0.0],
+            clip: [crate::viewport::NEAR, crate::viewport::FAR, 0.0, 0.0],
+            proj: [BrushProjection::Screen as u32 as f32, 0.0, 85f32.to_radians().cos(), 0.0],
+        };
+        let (enabled, paint) = match target {
+            StrokeTarget::Mask => ([false; CHANNELS], BrushPaint { mat: MatValues::default(), mask_value: 0.0, opacity: 1.0, erase: false, grain: [0.0; 4] }),
+            _ => (
+                [true, true, true, false, false, false, false, false],
+                BrushPaint {
+                    mat: MatValues { enabled: [true, true, true, false, false, false, false, false], color: [0.95, 0.1, 0.05], ..Default::default() },
+                    mask_value: 1.0,
+                    opacity: 1.0,
+                    erase: false,
+                    grain: [0.0; 4],
+                },
+            ),
+        };
+        assert!(engine.begin_stroke(layer, target, enabled, false), "{name}: stroke begins");
+        let (mut rects_max, mut patch_min) = (0u32, f64::MAX);
+        for f in 0..9 {
+            let raw: Vec<([f32; 4], f32)> = (0..5)
+                .map(|i| {
+                    let k = (f * 5 + i) as f32;
+                    ([215.0 + k * 8.0, 250.0 + 85.0 * (k * 0.09).sin(), 1.0, 0.0], 1.0)
+                })
+                .collect();
+            let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+            let region = crate::app::stroke_region(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps);
+            engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, region);
+            engine.composite();
+            rects_max = rects_max.max(engine.last_scissor_rects);
+            patch_min = patch_min.min(engine.last_scissor_pixels as f64 * 100.0 / (res as f64 * res as f64));
+        }
+        most_rects = most_rects.max(rects_max);
+        let partial: Vec<Vec<u8>> = (0..ACCUM).map(|c| read_texture(&rs.device, &rs.queue, engine.final_tex(c))).collect();
+        engine.mark_dirty();
+        engine.composite();
+        let mut bad = Vec::new();
+        for c in 0..ACCUM {
+            let full = read_texture(&rs.device, &rs.queue, engine.final_tex(c));
+            if full == partial[c] {
+                continue;
+            }
+            let n = full.iter().zip(&partial[c]).filter(|(a, b)| a != b).count();
+            let first = full.iter().zip(&partial[c]).position(|(a, b)| a != b).unwrap();
+            let t = first / bpp[c];
+            let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+            for (i, (a, b)) in full.iter().zip(&partial[c]).enumerate() {
+                if a != b {
+                    let t = (i / bpp[c]) as u32;
+                    let (x, y) = (t % res, t / res);
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x);
+                    y1 = y1.max(y);
+                }
+            }
+            bad.push(format!("channel {c}: {n} bytes differ, first at texel ({}, {}), diff box x {x0}..={x1} y {y0}..={y1}", t as u32 % res, t as u32 / res));
+        }
+        println!("  {name}: up to {rects_max} scissors, smallest patch {patch_min:.1}% -> {}", if bad.is_empty() { "identical".to_string() } else { bad.join("; ") });
+        if !bad.is_empty() {
+            failures.push(format!("{name}: {}", bad.join("; ")));
+        }
+        engine.end_stroke();
+    }
+    assert!(most_rects >= 2, "no scenario exercised more than one scissor (max {most_rects})");
+    assert!(failures.is_empty(), "incremental != full:\n{}", failures.join("\n"));
 }

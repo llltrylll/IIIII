@@ -1,10 +1,16 @@
 // Rasterizes the mesh in UV space to produce per-texel world position,
-// normal and tangent maps, then grows them past island borders (dilation) so painting and
-// bilinear sampling never leave seams. The position's alpha says which is
-// which: 1 inside a UV island, GROWN in the padding around it, 0 elsewhere
-// (readers test > 0.5 for "on the surface").
-
-const GROWN: f32 = 0.75;
+// normal and tangent maps, then grows the nearest island texel into its padding.
+// This copies one source frame: averaging across nearby islands can invent
+// positions and normals that belong to no surface. Alpha decays per pass and
+// acts as a distance priority, so later passes prefer the nearest source.
+//
+// Original island texels stay at alpha 1.0. Dilated texels remain below 0.9
+// (polygon-fill coverage threshold) and above 0.5 after all eight passes
+// (brush surface threshold).
+const DILATE_ALPHA_MAX: f32 = 0.88;
+const DILATE_ALPHA_DECAY: f32 = 0.97;
+const_assert DILATE_ALPHA_MAX < 0.9;
+const_assert DILATE_ALPHA_MAX * DILATE_ALPHA_DECAY * DILATE_ALPHA_DECAY * DILATE_ALPHA_DECAY * DILATE_ALPHA_DECAY * DILATE_ALPHA_DECAY * DILATE_ALPHA_DECAY * DILATE_ALPHA_DECAY * DILATE_ALPHA_DECAY > 0.5;
 
 struct VIn {
     @location(0) pos: vec3<f32>,
@@ -63,33 +69,33 @@ fn fs_dilate(in: FsOut) -> MapsOut {
         return out;
     }
     let dims = vec2<i32>(textureDimensions(src_pos));
-    var acc_p = vec3<f32>(0.0);
-    var acc_n = vec3<f32>(0.0);
-    var acc_t = vec3<f32>(0.0);
-    var tsign = 1.0;
-    var cnt = 0.0;
+    var best_alpha = 0.0;
+    var best_pos = vec4<f32>(0.0);
+    var best_nrm = vec4<f32>(0.0);
+    var best_tan = vec4<f32>(0.0);
     for (var dy = -1; dy <= 1; dy++) {
         for (var dx = -1; dx <= 1; dx++) {
             let q = clamp(c + vec2<i32>(dx, dy), vec2<i32>(0), dims - 1);
             let s = textureLoad(src_pos, q, 0);
-            if (s.a > 0.5) {
-                acc_p += s.xyz;
-                acc_n += textureLoad(src_nrm, q, 0).xyz * 2.0 - 1.0;
-                let t = textureLoad(src_tan, q, 0);
-                acc_t += t.xyz * 2.0 - 1.0;
-                tsign = t.w;
-                cnt += 1.0;
+            // Original island texels have alpha 1; each padding step lowers
+            // it slightly. Selecting the strongest neighbor propagates the
+            // closest source without mixing two distinct UV islands.
+            if (s.a > best_alpha) {
+                best_alpha = s.a;
+                best_pos = s;
+                best_nrm = textureLoad(src_nrm, q, 0);
+                best_tan = textureLoad(src_tan, q, 0);
             }
         }
     }
-    if (cnt == 0.0) {
+    if (best_alpha <= 0.5) {
         out.pos = vec4<f32>(0.0);
         out.nrm = vec4<f32>(0.0);
         out.tan = vec4<f32>(0.0);
         return out;
     }
-    out.pos = vec4<f32>(acc_p / cnt, GROWN);
-    out.nrm = vec4<f32>(normalize(acc_n) * 0.5 + 0.5, 1.0);
-    out.tan = vec4<f32>(normalize(acc_t) * 0.5 + 0.5, tsign);
+    out.pos = vec4<f32>(best_pos.xyz, min(best_alpha * DILATE_ALPHA_DECAY, DILATE_ALPHA_MAX));
+    out.nrm = best_nrm;
+    out.tan = best_tan;
     return out;
 }

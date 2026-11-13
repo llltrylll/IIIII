@@ -1,6 +1,7 @@
 name: Portable Windows RAR
 
 on:
+  # Changes to this workflow intentionally trigger a fresh portable package build.
   push:
     paths:
       - ".github/workflows/portable-windows.yml"

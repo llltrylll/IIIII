@@ -89,6 +89,23 @@ impl ThumbGpu {
     }
 }
 
+impl Thumbs {
+    /// GPU texture memory owned by the thumbnail system.
+    pub(super) fn vram_bytes(&self) -> u64 {
+        let gpu = self.gpu.as_ref().map_or(0, |g| {
+            g.below.iter().chain(g.out.iter()).map(|t| t.bytes()).sum::<u64>() + g.mask_paint.bytes() + g.mask_value.bytes()
+        });
+        let small = self.small.as_ref().map_or(0, |(_, pos, nrm)| pos.bytes() + nrm.bytes());
+        let shown = self
+            .entries
+            .values()
+            .flat_map(|entry| entry.content.iter().chain(entry.mask.iter()))
+            .map(|shown| shown.tex.bytes())
+            .sum::<u64>();
+        gpu + small + shown
+    }
+}
+
 impl Engine {
     /// The Layers panel image of a fill layer's content.
     pub fn content_thumb(&self, layer_id: u64) -> Option<egui::TextureId> {
@@ -374,7 +391,7 @@ impl Engine {
         // Mask: the filtered result the composite made, shrunk, or else the
         // mask (painting times smart mask) rendered at thumbnail size.
         if let Some(shown) = entry.mask.as_ref() {
-            let filtered = self.mask_final.get(&layer_id).and_then(|&i| self.mask_out.get(&layer_id).map(|t| &t[i]));
+            let filtered = self.mask_final.contains(&layer_id).then(|| self.mask_out.get(&layer_id)).flatten();
             match filtered {
                 Some(full) => self.thumb_pass(encoder, &g.show, full, &shown.tex, [1.0, SHRINK_TAPS, THUMB as f32, 0.0]),
                 None => {

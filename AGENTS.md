@@ -1,14 +1,40 @@
 # Guide for AI coding agents
 
-Read this before changing code in this repository. Humans: see
-[CONTRIBUTING.md](CONTRIBUTING.md) too.
+Read [PROJECT_SCOPE.md](PROJECT_SCOPE.md) first. It is the source of truth for the production objective, defined production workload ceiling, mandatory phase order, engineering latitude, shared GPT/Claude coordination, and repository boundaries. All instructions here are subordinate to that scope. Humans: see [CONTRIBUTING.md](CONTRIBUTING.md) too.
+
+## Current priority — establish the production foundation
+
+**Phase 1: finish and validate the core painting and mask systems.** Focus on 3D brush latency and spikes, UV/2D painting correctness, Vertex ID and painted masks, smart-mask generators, mask layers/folders/filters, cache invalidation, incremental recomposition, and the CPU/GPU work directly involved. Validate realistic layer/mask/filter stacks and the representative production workload, not empty or nearly unpainted models.
+
+Phase 1 requires relevant unit and GPU tests, correct rendered output, and runtime validation on the owner's actual machine. F6/performance measurements must be comparable. CI compilation alone is not proof. A GPU test marked ignored is not validated unless it was actually run on a GPU-capable setup; state any remaining gap.
+
+**Phase 2: optimize the rest of the production foundation only after Phase 1 is validated.** Then audit memory, CPU allocations, GPU resource lifetime/reuse, viewport, baking, import, project I/O, export, background work, and architecture inside the defined production workload envelope.
+
+Do not jump to broad cleanup while core painting/masking remains unresolved. Do not let hypothetical huge projects or cosmetic HUD work displace the foundation.
+
+## Target workload
+
+Personal production fork for Roblox asset texturing on the owner's machine:
+- Normal production workload: 50,000–100,000 triangles, around 6 MeshParts and 6 UV maps.
+- Absolute ceiling: 200,000 triangles, around 6 MeshParts and up to 12 UV maps.
+- Air Fox is an example asset, not a mandatory benchmark or special target.
+- Realistic production layer stacks, masks, and filters within that envelope.
+
+Projects around 100 items are a very distant possibility, not a current target. A major HUD redesign is deferred for months or until the owner explicitly reprioritizes it. Do not optimize beyond the stated envelope without approval.
+
+The owner explicitly permits major, risky, or breaking internal refactors when they materially improve production reliability and performance. Do not avoid a needed rewrite just to keep a diff small. Protect user data, add tests, preserve project compatibility deliberately, inspect rendered results, and be explicit about unvalidated runtime behavior.
+
+## Shared work with GPT and Claude
+
+Both agents work in the same repository and must read [PROJECT_SCOPE.md](PROJECT_SCOPE.md) and this file. Claude must also read [CLAUDE.md](CLAUDE.md).
+
+At the start of each task, inspect current branch, HEAD SHA, open PRs, changed files/diff, CI, and the other agent's recent commits/comments. Re-fetch files and current SHAs before writing. Never assume previous chat context equals current repository state.
+
+Do not concurrently modify the same files/subsystem. Establish task ownership in the active PR or a concise handoff comment. Never overwrite the other agent's work. Commit coherent units and leave a handoff stating changes, invariants, tests, gaps, and next steps. Keep code understandable for the other agent; no agent-specific abstractions.
 
 ## What this is
 
-Material Painter is a PBR texture painter (in the spirit of Substance
-Painter) in **Rust**, with **eframe/egui 0.37** for the UI and **wgpu 30** for
-all GPU work. One binary crate, edition 2024. Goals: fast, low memory, and
-artist-first UI.
+Material Painter is a PBR texture painter (in the spirit of Substance Painter) in **Rust**, with **eframe/egui 0.37** for the UI and **wgpu 30** for all GPU work. One binary crate, edition 2024. Goals: fast, low memory, and artist-first UI.
 
 ## Commands
 
@@ -30,76 +56,47 @@ offscreen with egui_kittest into `target/bake_test/ui/`.
 |---|---|
 | `src/main.rs` | Entry point, window options, panic hook (`crash.rs`) |
 | `src/app.rs` + `src/app/` | The UI shell: workspaces (Material Paint, Material Designer, Shader Maker), docking (`dock.rs`), panels, input, actions (`Action` enum, processed once per frame), projects (`project_io.rs`), preferences, export window, welcome window |
-| `src/app/{properties_ui,layers_ui,shelf_ui,view_ui,windows_ui,mask_ui,bake_jobs,color_ui}.rs` | `impl PainterApp` split by area: Properties panel, Layers tab, Shelf, 3D/2D viewports, About/Crash/Help windows, mask Properties (generators, mask layers, filters, vertex-ID plumbing), bake jobs (`start_bake_*`, `poll_bake`; a "vertex colors only" bake keeps every other map via `Engine::replace_id_map`), and the colour pickers (`color_button`, the Color HUD, HSV helpers). Methods are `pub(super)`; private items of `app.rs` are visible to them |
-| `src/app/vertex_id.rs` | Vertex Color ID mask: palette of the mesh's vertex colors (`Mesh::tri_vertex_color`, per corner, saved in projects), up to `MAX_ID_COLORS` ID colors per smart mask, the model overlay of the mask (`OverlaySlot::VertexColors`) and re-importing colors from the FBX/OBJ for old projects |
-| `src/engine.rs` | One texture set: layer stack (paint, fill, folder), masks and mask filters, GPU painting and compositing, undo hooks. Eight paint channels (`CHANNELS`): opacity (`OPACITY`) composites into the final base color's alpha; normal (`NORMAL`) holds tangent-space detail that each layer adds to the stack below (fill normal-map images projected in world space go through the baked tangent map); specular (`SPECULAR`) is the specular level of non-metals (0.5: 4%) |
-| `src/app/texture_sets.rs` | Texture sets: one `Engine` per material of the mesh (`Mesh::sets`); the edited one is `PainterApp::engine`, the others are parked. Views, bakes, export and projects cover every set. Hiding a set rebuilds the picking BVH without it; highlights ride in the view globals (`SetLook`) |
-| `src/cage.rs`, `src/app/cage_paint.rs` | The bake cage: projection directions (averaged over split vertices), the probe behind the live cage preview, Auto-fix, and the cage brush (`BakeSettings::cage_paint`, a front/rear multiplier per vertex) |
-| `src/polyfill.rs` | Polygon fill selection: triangles, quads, face loops, flat areas, parts, objects, UV islands, texture sets; lasso test |
-| `src/bake.rs` | Mesh-map baking: CPU scene prep on a worker thread, then GPU passes pumped a few tiles per frame |
-| `src/bake_cache.rs` | On-disk cache of baked maps, keyed by mesh, settings and the bake code itself |
-| `src/viewport.rs`, `src/post.rs`, `src/raytrace.rs` | 3D and 2D view rendering, post-processing, path-traced preview |
-| `src/graph/` | Material graph: node definitions (`def.rs`, WGSL files with a comment header), GPU runtime, presets; built-in nodes live in `src/graph/nodes/*.wgsl` |
-| `src/shaders/*.wgsl` | Engine shaders (compositing, painting stamps, baking, views) |
-| `src/presets.rs` | Smart materials, materials and mask generators on the shelf |
-| `src/mesh.rs`, `src/import.rs` | Meshes, procedural primitives, OBJ/FBX import, MikkTSpace tangents |
-| `src/graph/shading.rs`, `src/graph/nodes/shading/`, `src/app/preview_shader.rs` | Preview shaders: shading graphs compiled into one `custom_shade(c: Shade)` for the 3D view (`Shade` and the hook are in `view.wgsl`); parameters are a uniform array |
-| `src/app/path_tool.rs` | Path tool: editable curves on the surface or UV map, stamped through the normal stroke pipeline |
-| `src/library.rs`, `src/app/library_ui.rs` | Asset library: Poly Haven / ambientCG catalogs and downloads, the community library (`alla2001/material-painter-community`), sharing graphs; network work on worker threads |
-| `src/export.rs` | Texture export templates (engine presets) and file writing |
-| `src/undo.rs` | Undo/redo of every document edit |
-| `src/mcp.rs`, `src/app/mcp_tools.rs` | Optional MCP server so AI agents can drive the app (off by default) |
-| `src/theme.rs`, `src/icons.rs` | UI theme (sharp corners, grey palette, blue accent) and Phosphor icon glyphs |
+| `src/app/{properties_ui,layers_ui,shelf_ui,view_ui,windows_ui,mask_ui,bake_jobs,color_ui}.rs` | UI implementation split by area: Properties, Layers, Shelf, 3D/2D viewports, windows, masks and Vertex ID plumbing, bake jobs, and colour pickers |
+| `src/app/vertex_id.rs` | Vertex Color ID mask: palette, per-corner vertex colors, overlay, and legacy FBX/OBJ re-import |
+| `src/engine.rs` | Texture-set engine: layer stack, masks/filters, painting, GPU compositing and undo hooks |
+| `src/app/texture_sets.rs` | One `Engine` per mesh material/texture set |
+| `src/cage.rs`, `src/app/cage_paint.rs` | Bake cage and cage painting |
+| `src/polyfill.rs` | Polygon-fill selection: triangles, quads, loops, flat areas, parts, objects, UV islands and texture sets |
+| `src/bake.rs`, `src/bake_cache.rs` | Mesh-map baking and on-disk bake cache |
+| `src/viewport.rs`, `src/post.rs`, `src/raytrace.rs` | 3D/2D viewport rendering, post-processing and path tracer |
+| `src/graph/` | Material graph: node definitions, WGSL, GPU runtime and presets |
+| `src/shaders/*.wgsl` | Engine shaders for compositing, stamps, baking and views |
+| `src/presets.rs` | Smart materials, materials and mask generators |
+| `src/mesh.rs`, `src/import.rs` | Mesh data, primitives, OBJ/FBX import, tangents |
+| `src/export.rs` | Texture export templates and file writing |
+| `src/undo.rs` | Undo/redo |
+| `src/mcp.rs`, `src/app/mcp_tools.rs` | Optional MCP server for app control (off by default) |
 
-## Conventions (follow these)
+## Conventions
 
-- **No timing hacks.** Never fix ordering problems with sleeps, frame
-  counting or timeouts. Use the existing patterns: worker threads that send
-  results over `mpsc` channels, `queue.on_submitted_work_done` callbacks,
-  `ctx.request_repaint()`, and the `Action` queue in `app.rs`.
-- **Never block the UI thread** on disk, decoding or GPU readback. Heavy work
-  goes to a worker thread; GPU work is split so a frame stays fast.
-- **Every document edit is undoable.** Go through the engine's existing edit
-  functions (they record undo entries) rather than mutating layers directly.
-- **Partial updates.** Painting and compositing redraw only dirty regions; use
-  `mark_dirty()` / stroke regions as the surrounding code does instead of
-  forcing full recomposites.
-- **Projects must stay loadable.** If you change what a project saves, keep
-  reading old files (see the version handling in `project_io.rs`).
-- **WGSL must compile on every backend** (DX12 via FXC/DXC, Vulkan, Metal).
-  FXC rejects some things Naga accepts, for example writing to a vector with
-  a dynamic index; use `select` or a local array. Test with the GPU tests.
-- **egui 0.37 API.** Many examples online are for older egui, and several
-  names changed (for example `ctx.global_style()` instead of `ctx.style()`,
-  and `egui::Panel` for side and top panels). When in doubt, copy the pattern
-  from this codebase and let the compiler's deprecation warnings guide you.
-- **UI text** is short, plain and specific: say what a control does, not how
-  it works. Tooltips explain the non-obvious.
-- **Comments explain why**, not what. Doc comments on modules and public
-  items, like the existing ones. No commented-out code.
-- **Warning-free** under `-D warnings`. No `#[allow(dead_code)]` to silence
-  unfinished work.
-- **No new dependencies** without a clear need; say why in the PR.
-- **Cross-platform:** Windows, Linux and macOS. Don't hardcode paths; data
-  lives in the settings folder (`crash::data_dir()`), assets are found with
-  `environment::asset_dir`.
+- No sleeps, frame-counting, or timeout-based timing hacks. Use existing worker/channel, GPU completion callback, repaint, and action-queue patterns.
+- Never block the UI thread on disk, decoding, expensive CPU work, or GPU readback. Use worker threads and incremental GPU work where appropriate.
+- Every document edit must go through undo-aware engine paths.
+- Preserve dirty-region updates; do not replace partial recomposition with full recomposition without measured justification.
+- Keep old projects loadable when changing project data formats; design and test migrations deliberately.
+- WGSL must compile on DX12, Vulkan, and Metal. A shader compiling under Naga is not enough; run GPU tests and inspect images.
+- Keep builds warning-free under `-D warnings`; do not silence unfinished code with `#[allow(dead_code)]`.
+- Avoid new dependencies without a clear, documented need.
+- Keep cross-platform paths and settings correct.
 
-## Common agent mistakes here
+## Common mistakes
 
-- Rewriting or reformatting unrelated code. Change only what the task needs.
-- Adding a new abstraction layer for a one-off. Prefer a small function next
-  to the code that uses it.
-- Re-implementing something that exists: check `gpu.rs` helpers, `theme.rs`
-  widgets (`theme::selectable`, `theme::pill`, `theme::card`), and the engine's
-  edit functions first.
-- Assuming a shader change works because it compiles: run the GPU tests and
-  look at the output images.
-- Forgetting the 2D (UV) view or the path tracer when changing how the 3D view
-  draws something.
+- Reformatting unrelated code or rejecting a justified subsystem rewrite just because the diff is large.
+- Adding abstractions for one-off operations without a real subsystem boundary.
+- Reimplementing existing GPU, theme, or engine edit helpers.
+- Treating shader compilation as visual validation.
+- Fixing 3D painting while breaking UV painting, path tracing, masks, undo/redo, or project persistence.
 
-## Before you finish
+## Before finishing
 
-1. `cargo build` with no warnings, and `cargo test` passes.
-2. GPU tests pass if you touched rendering, baking, painting, nodes or export.
-3. You tried the change in the running app.
-4. The diff contains only your change.
+1. Run `cargo build` with no warnings and `cargo test`.
+2. Run relevant GPU tests for rendering, baking, painting, graph, masks, and export changes.
+3. Inspect GPU test output images.
+4. Run the app when possible; state clearly when owner-machine testing is still required.
+5. Report measurements, test status, and unresolved risk. Never claim unperformed tests.
+6. Ensure the diff contains only task-related changes.

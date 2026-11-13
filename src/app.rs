@@ -9,7 +9,7 @@ use crate::environment::{self, EnvBaker, EnvImage, EnvSource, Environment};
 use crate::engine::{Drop, Folder, Layer, Projection};
 use crate::engine::{
     Blend, BrushPaint, Content, Engine, FillParams, GEN_INPUTS, GenKind, Levels, MAPS, MapKind, MatValues, Stamp,
-    StampUniform,
+    StampUniform, MAX_STAMPS,
 };
 use crate::gpu::GpuMesh;
 use crate::icons;
@@ -455,6 +455,10 @@ struct StrokeMeter {
     /// `stroke_step` calls since the last recomposition.
     steps_now: u32,
     steps_per_frame: Stat,
+    /// CPU time spent mapping cursor samples to surface stamps.
+    resolve_cpu: Stat,
+    /// CPU time spent calculating the changed UV region before GPU submission.
+    region_cpu: Stat,
     step_cpu: Stat,
     begin_cpu: Stat,
     composite_cpu: Stat,
@@ -470,15 +474,27 @@ struct StrokeMeter {
     /// went on, and the latest values.
     counters_base: Option<(u32, u32)>,
     counters: (u32, u32),
+    engine_context: Option<(u64, usize)>,
 }
 
 impl StrokeMeter {
     /// The recomposition ran: counts the frame's steps while painting, or
     /// times the first one after releasing. `counters` are the engine's
     /// full-recomposition and thumbnail-render totals.
-    fn composited(&mut self, painting: bool, cpu_ms: f64, counters: (u32, u32)) {
-        self.counters_base.get_or_insert(counters);
+    fn composited(&mut self, painting: bool, cpu_ms: f64, counters: (u32, u32), engine_epoch: u64, texture_set: usize) {
+        // The active Engine can be swapped for another one at the same address
+        // and texture-set index. Track explicit instance changes instead of
+        // relying only on counters moving backwards.
+        let engine_context = (engine_epoch, texture_set);
+        let counters_reset = self.counters_base.is_some()
+            && (self.engine_context != Some(engine_context) || counters.0 < self.counters.0 || counters.1 < self.counters.1);
+        if counters_reset {
+            self.counters_base = Some(counters);
+        } else {
+            self.counters_base.get_or_insert(counters);
+        }
         self.counters = counters;
+        self.engine_context = Some(engine_context);
         if painting {
             self.composite_cpu.add(cpu_ms);
             self.steps_per_frame.add(f64::from(std::mem::take(&mut self.steps_now)));
@@ -488,13 +504,30 @@ impl StrokeMeter {
     }
 
     /// Status-bar text: average/peak in ms (steps: calls per frame).
-    fn text(&self, res: u32, scissor_pixels: u64) -> String {
-        let (full, thumbs) = self.counters_base.map_or((0, 0), |b| (self.counters.0.wrapping_sub(b.0), self.counters.1.wrapping_sub(b.1)));
+    fn text(
+        &self,
+        res: u32,
+        paint_scissor_pixels: u64,
+        paint_scissor_rects: u32,
+        scissor_pixels: u64,
+        bbox_pixels: u64,
+        scissor_rects: u32,
+        layer_passes: u32,
+        folder_passes: u32,
+        mask_cache_hits: u32,
+        mask_cache_misses: u32,
+        mask_gpu_passes: u32,
+    ) -> String {
+        let (full, thumbs) = self.counters_base.map_or((0, 0), |b| (self.counters.0.saturating_sub(b.0), self.counters.1.saturating_sub(b.1)));
         let texture_pixels = u64::from(res) * u64::from(res);
+        let paint_percent = if texture_pixels == 0 { 0.0 } else { paint_scissor_pixels as f64 * 100.0 / texture_pixels as f64 };
         let patch_percent = if texture_pixels == 0 { 0.0 } else { scissor_pixels as f64 * 100.0 / texture_pixels as f64 };
+        let bbox_percent = if texture_pixels == 0 { 0.0 } else { bbox_pixels as f64 * 100.0 / texture_pixels as f64 };
         format!(
-            "F6 CPU avg/peak ms: steps/frame {}, stamp {}, begin {}, recomp {}, end {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {} | patch {:.1}% | since F6: full recomps {full}, thumbnails {thumbs}",
+            "F6 CPU avg/peak ms: steps/frame {}, resolve {}, region {}, stamp {}, begin {}, recomp {}, end {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {} | paint {:.1}%/{} scissors | composite {:.1}% (bbox {:.1}%, {} scissors) | stack {}L/{}F | masks {}h/{}m/{}p | since F6: full recomps {full}, thumbnails {thumbs}",
             self.steps_per_frame.text(),
+            self.resolve_cpu.text(),
+            self.region_cpu.text(),
             self.step_cpu.text(),
             self.begin_cpu.text(),
             self.composite_cpu.text(),
@@ -504,8 +537,51 @@ impl StrokeMeter {
             self.gpu_apply.text(),
             self.gpu_composite.text(),
             self.gpu_composite_total.text(),
-            patch_percent
+            paint_percent,
+            paint_scissor_rects,
+            patch_percent,
+            bbox_percent,
+            scissor_rects,
+            layer_passes,
+            folder_passes,
+            mask_cache_hits,
+            mask_cache_misses,
+            mask_gpu_passes
         )
+    }
+}
+
+#[cfg(test)]
+mod stroke_meter_tests {
+    use super::StrokeMeter;
+
+    #[test]
+    fn counter_baseline_resets_when_engine_epoch_changes_even_if_counters_increase() {
+        let mut meter = StrokeMeter::default();
+        meter.composited(false, 0.0, (3, 5), 0, 0);
+        meter.composited(false, 0.0, (6, 8), 0, 0);
+        assert_eq!(meter.counters_base, Some((3, 5)));
+
+        // A replacement engine on the same set can start with larger counters.
+        meter.composited(false, 0.0, (10, 10), 1, 0);
+        assert_eq!(meter.counters_base, Some((10, 10)));
+        meter.composited(false, 0.0, (12, 11), 1, 0);
+
+        let text = meter.text(2048, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        assert!(text.contains("since F6: full recomps 2, thumbnails 1"), "{text}");
+    }
+
+    #[test]
+    fn counter_baseline_resets_when_switching_to_a_busier_texture_set() {
+        let mut meter = StrokeMeter::default();
+        meter.composited(false, 0.0, (3, 2), 0, 0);
+        meter.composited(false, 0.0, (5, 4), 0, 0);
+        meter.composited(false, 0.0, (17, 11), 1, 1);
+        assert_eq!(meter.counters_base, Some((17, 11)));
+        meter.composited(false, 0.0, (19, 12), 1, 1);
+
+        let text = meter.text(2048, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        assert!(text.contains("since F6: full recomps 2, thumbnails 1"), "{text}");
     }
 }
 
@@ -540,6 +616,8 @@ pub struct PainterApp {
     time_composite: bool,
     /// F6: CPU time of the paint path.
     meter: StrokeMeter,
+    /// Changes whenever the active Engine instance is replaced or swapped.
+    engine_epoch: u64,
     /// The running bake only makes the ID map (from vertex colors).
     bake_id_only: bool,
     cam: OrbitCam,
@@ -778,41 +856,169 @@ fn grow(acc: Option<[f32; 4]>, lo: Vec2, hi: Vec2) -> [f32; 4] {
     }
 }
 
-/// UV bounds of what a frame's stamps can paint in the 3D view: the UV
-/// boxes of every triangle they can reach. Screen stamps reach whatever
-/// projects into their circles at any depth (and, with symmetry, whatever
-/// mirrors into them), surface stamps whatever lies near their discs, UV
-/// stamps their own squares. `None` when nothing is reachable.
+/// UV tile resolution for conservative multi-rectangle stroke bounds.
+const STROKE_REGION_GRID: usize = 64;
+/// Avoid turning a complex UV layout into hundreds of tiny GPU draws.
+const MAX_STROKE_REGION_RECTS: usize = 64;
+
+fn mark_uv_tiles(tiles: &mut [bool], lo: Vec2, hi: Vec2) {
+    const N: usize = STROKE_REGION_GRID;
+    if hi.x < 0.0 || hi.y < 0.0 || lo.x > 1.0 || lo.y > 1.0 {
+        return;
+    }
+    let cell = |v: f32| ((v.clamp(0.0, 1.0) * N as f32).floor() as usize).min(N - 1);
+    let (x0, x1) = (cell(lo.x), cell(hi.x));
+    let (y0, y1) = (cell(lo.y), cell(hi.y));
+    for y in y0.min(y1)..=y0.max(y1) {
+        for x in x0.min(x1)..=x0.max(x1) {
+            tiles[y * N + x] = true;
+        }
+    }
+}
+
+/// Compresses occupied UV tiles into disjoint rectangles. If a pathological
+/// layout creates too many runs, fall back to one conservative bounding box.
+fn uv_tile_rectangles(tiles: &[bool]) -> Option<Vec<[f32; 4]>> {
+    const N: usize = STROKE_REGION_GRID;
+    let mut rects: Vec<[usize; 4]> = Vec::new();
+    for y in 0..N {
+        let mut x = 0;
+        while x < N {
+            if !tiles[y * N + x] {
+                x += 1;
+                continue;
+            }
+            let x0 = x;
+            while x < N && tiles[y * N + x] {
+                x += 1;
+            }
+            if let Some(r) = rects.iter_mut().rev().find(|r| r[0] == x0 && r[2] == x && r[3] == y) {
+                r[3] = y + 1;
+            } else {
+                rects.push([x0, y, x, y + 1]);
+                if rects.len() > MAX_STROKE_REGION_RECTS {
+                    // The run count cannot shrink later; bound pathological
+                    // checkerboard layouts to one fixed 64x64 scan.
+                    let mut bounds = [N, N, 0, 0];
+                    for (i, &occupied) in tiles.iter().enumerate() {
+                        if occupied {
+                            let (tx, ty) = (i % N, i / N);
+                            bounds[0] = bounds[0].min(tx);
+                            bounds[1] = bounds[1].min(ty);
+                            bounds[2] = bounds[2].max(tx + 1);
+                            bounds[3] = bounds[3].max(ty + 1);
+                        }
+                    }
+                    return Some(vec![
+                        [
+                            bounds[0] as f32 / N as f32,
+                            bounds[1] as f32 / N as f32,
+                            bounds[2] as f32 / N as f32,
+                            bounds[3] as f32 / N as f32,
+                        ],
+                    ]);
+                }
+            }
+        }
+    }
+    if rects.is_empty() {
+        return None;
+    }
+    Some(
+        rects.into_iter()
+            .map(|r| [r[0] as f32 / N as f32, r[1] as f32 / N as f32, r[2] as f32 / N as f32, r[3] as f32 / N as f32])
+            .collect(),
+    )
+}
+
+/// An empty tile set is a known empty paint region, not an unknown one.
+fn uv_tile_rectangles_or_empty(tiles: &[bool]) -> Vec<[f32; 4]> {
+    uv_tile_rectangles(tiles).unwrap_or_default()
+}
+
+/// Conservative UV rectangles for a frame's 3D stamps. Candidate triangle
+/// UV bounds are rasterized into a coarse grid and compressed into disjoint
+/// rectangles, preserving coverage while avoiding one large bbox across islands.
+/// Screen stamps include all depths; the shader's depth test remains authoritative.
+fn uv_bounds_inside_tile(lo: Vec2, hi: Vec2) -> bool {
+    lo.x >= 0.0 && lo.y >= 0.0 && hi.x <= 1.0 && hi.y <= 1.0
+}
+
+fn mark_candidate_triangle_uv(
+    tiles: &mut [bool],
+    mesh: &Mesh,
+    triangle_indices: &std::ops::Range<u32>,
+    triangle: u32,
+) -> bool {
+    let first_index = triangle * 3;
+    if first_index < triangle_indices.start || first_index + 3 > triangle_indices.end {
+        return true;
+    }
+    let mut lo = Vec2::splat(f32::INFINITY);
+    let mut hi = Vec2::splat(f32::NEG_INFINITY);
+    for k in 0..3 {
+        let uv = Vec2::from(mesh.vertices[mesh.indices[triangle as usize * 3 + k] as usize].uv);
+        lo = lo.min(uv);
+        hi = hi.max(uv);
+    }
+    if !uv_bounds_inside_tile(lo, hi) {
+        return false;
+    }
+    mark_uv_tiles(tiles, lo, hi);
+    true
+}
+
+/// Conservative UV rectangles for a frame's 3D stamps. Candidate triangle
+/// UV bounds are rasterized into a coarse grid and compressed into disjoint
+/// rectangles, preserving coverage while avoiding one large bbox across islands.
+/// Screen stamps include all depths; the shader's depth test remains authoritative.
 pub(crate) fn stroke_region(
     mesh: &Mesh,
     bvh: &Bvh,
+    triangle_indices: std::ops::Range<u32>,
     cam: &OrbitCam,
     size: Vec2,
     projection: BrushProjection,
     symmetry: u8,
     radius: f32,
     stamps: &[Stamp],
-) -> Option<[f32; 4]> {
+) -> Option<Vec<[f32; 4]>> {
+    // Keep region calculation aligned with the GPU's actual stamp limit.
+    let stamps = &stamps[..stamps.len().min(MAX_STAMPS)];
     if projection == BrushProjection::Uv {
-        return stamps.iter().filter(|s| s[1][3] > 0.0).fold(None, |acc, s| {
+        let mut tiles = [false; STROKE_REGION_GRID * STROKE_REGION_GRID];
+        for s in stamps.iter().filter(|s| s[1][3] > 0.0) {
             let (uv, r) = (Vec2::new(s[4][0], s[4][1]), s[2][3]);
-            Some(grow(acc, uv - Vec2::splat(r), uv + Vec2::splat(r)))
-        });
+            let (lo, hi) = (uv - Vec2::splat(r), uv + Vec2::splat(r));
+            if !uv_bounds_inside_tile(lo, hi) {
+                return None;
+            }
+            mark_uv_tiles(&mut tiles, lo, hi);
+        }
+        return Some(uv_tile_rectangles_or_empty(&tiles));
     }
-    let mut flip = Vec3::ONE;
-    if symmetry > 0 {
-        flip[symmetry as usize - 1] = -1.0;
-    }
-    let overlaps: Box<dyn Fn(Vec3, Vec3) -> bool> = match projection {
+
+    let mut tiles = [false; STROKE_REGION_GRID * STROKE_REGION_GRID];
+    let mut needs_full_region = false;
+    match projection {
         BrushProjection::Surface => {
-            // Spheres around the discs (planar radius r, slab r).
-            let spheres: Vec<(Vec3, f32)> =
-                stamps.iter().filter(|s| s[1][3] > 0.0).map(|s| (Vec3::new(s[1][0], s[1][1], s[1][2]), s[1][3] * 1.5)).collect();
-            Box::new(move |lo: Vec3, hi: Vec3| spheres.iter().any(|&(c, r)| c.clamp(lo, hi).distance_squared(c) <= r * r))
+            // Resolve mirrored stamps before querying; no symmetry transform is
+            // needed here, and the sphere test stays conservative for each disc.
+            let mut spheres = [(Vec3::ZERO, 0.0); MAX_STAMPS];
+            let mut sphere_count = 0;
+            for s in stamps.iter().filter(|s| s[1][3] > 0.0) {
+                spheres[sphere_count] = (Vec3::new(s[1][0], s[1][1], s[1][2]), s[1][3] * 1.5);
+                sphere_count += 1;
+            }
+            let spheres = &spheres[..sphere_count];
+            bvh.query(
+                |lo, hi| spheres.iter().any(|&(c, r)| c.clamp(lo, hi).distance_squared(c) <= r * r),
+                |t| needs_full_region |= !mark_candidate_triangle_uv(&mut tiles, mesh, &triangle_indices, t),
+            );
         }
         _ => {
-            // Screen box of all the circles; boxes that reach behind the
-            // camera count as overlapping.
+            // Screen box of all circles; boxes crossing the eye plane are
+            // kept conservatively, while boxes wholly behind it are rejected.
             let (mut a, mut b) = (Vec2::MAX, Vec2::MIN);
             for s in stamps {
                 let r = radius * s[0][2];
@@ -820,10 +1026,9 @@ pub(crate) fn stroke_region(
                 b = b.max(Vec2::new(s[0][0] + r, s[0][1] + r));
             }
             let vp = cam.view_proj(size.x / size.y.max(1.0));
-            let on_screen = move |lo: Vec3, hi: Vec3| {
-                // Clip-space w is linear over the AABB, so its extrema
-                // occur at corners. Reject boxes wholly behind the eye;
-                // keep boxes crossing the eye plane conservatively.
+            let on_screen = |lo: Vec3, hi: Vec3| {
+                // Clip-space w is linear over the AABB, so its extrema occur
+                // at corners. Keep boxes crossing the eye plane conservatively.
                 let (mut w_min, mut w_max) = (f32::INFINITY, f32::NEG_INFINITY);
                 for k in 0..8 {
                     let p = Vec3::new(
@@ -835,7 +1040,7 @@ pub(crate) fn stroke_region(
                     w_min = w_min.min(w);
                     w_max = w_max.max(w);
                 }
-                if w_max <= 1e-4 {
+                if w_max <= 0.0 {
                     return false;
                 }
                 if w_min <= 1e-4 {
@@ -855,19 +1060,27 @@ pub(crate) fn stroke_region(
                 }
                 smin.x <= b.x && smax.x >= a.x && smin.y <= b.y && smax.y >= a.y
             };
-            Box::new(move |lo: Vec3, hi: Vec3| {
-                on_screen(lo, hi) || (symmetry > 0 && { let (m, n) = (lo * flip, hi * flip); on_screen(m.min(n), m.max(n)) })
-            })
+            let mut flip = Vec3::ONE;
+            if symmetry > 0 {
+                flip[symmetry as usize - 1] = -1.0;
+            }
+            bvh.query(
+                |lo, hi| {
+                    on_screen(lo, hi)
+                        || (symmetry > 0 && {
+                            let (m, n) = (lo * flip, hi * flip);
+                            on_screen(m.min(n), m.max(n))
+                        })
+                },
+                |t| needs_full_region |= !mark_candidate_triangle_uv(&mut tiles, mesh, &triangle_indices, t),
+            );
         }
-    };
-    let mut acc = None;
-    bvh.query(overlaps, |t| {
-        for k in 0..3 {
-            let uv = Vec2::from(mesh.vertices[mesh.indices[t as usize * 3 + k] as usize].uv);
-            acc = Some(grow(acc, uv, uv));
-        }
-    });
-    acc
+    }
+    if needs_full_region {
+        None
+    } else {
+        Some(uv_tile_rectangles_or_empty(&tiles))
+    }
 }
 
 /// The third-party license notices shipped next to the executable (or in
@@ -1546,6 +1759,7 @@ impl PainterApp {
             preview_update_at: None,
             time_composite: false,
             meter: StrokeMeter::default(),
+            engine_epoch: 0,
             bake_id_only: false,
             cam: OrbitCam::default(),
             cam2d: Cam2d::default(),
@@ -1648,6 +1862,7 @@ impl PainterApp {
         if self.stroke.is_some() {
             return;
         }
+        self.engine_epoch = self.engine_epoch.wrapping_add(1);
         // A bake of the old mesh can't land on the new one.
         self.bake_job = None;
         self.end_preview(false);
@@ -2720,11 +2935,23 @@ impl PainterApp {
                 let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
                 ui.label(
                     egui::RichText::new(format!(
-                        "{}{:.1} ms (peak {:.0})  │  VRAM {:.0} MB  │  Undo {:.1} MB RAM ({} steps)  │  {}²  │  {} tris",
-                        if self.meter.on { format!("{}  │  ", self.meter.text(self.engine.res, self.engine.last_scissor_pixels)) } else { String::new() },
+                        "{}{:.1} ms (peak {:.0})  │  GPU est. {:.0} MB  │  Undo {:.1} MB RAM ({} steps)  │  {}²  │  {} tris",
+                        if self.meter.on { format!("{}  │  ", self.meter.text(
+                            self.engine.res,
+                            self.engine.last_paint_scissor_pixels,
+                            self.engine.last_paint_scissor_rects,
+                            self.engine.last_scissor_pixels,
+                            self.engine.last_scissor_bbox_pixels,
+                            self.engine.last_scissor_rects,
+                            self.engine.last_composite_layer_passes,
+                            self.engine.last_composite_folder_passes,
+                            self.engine.last_mask_cache_hits,
+                            self.engine.last_mask_cache_misses,
+                            self.engine.last_mask_gpu_passes
+                        )) } else { String::new() },
                         self.frame_ms,
                         self.frame_peak_ms,
-                        mb(self.engine.vram_bytes()),
+                        mb(self.engine.vram_bytes() + self.sets.parked.iter().flatten().map(|p| p.engine.vram_bytes()).sum::<u64>()),
                         mb(self.undo.ram_bytes() as u64),
                         self.undo.undo.len(),
                         self.engine.res,
@@ -3850,6 +4077,7 @@ impl PainterApp {
 
     fn paint_stamps(&mut self, kind: ViewKind, raw: &[([f32; 4], f32)]) {
         let su = self.stamp_uniform(kind);
+        let resolve_started = self.meter.on.then(Instant::now);
         let stamps = match kind {
             ViewKind::V3d => {
                 let [w, h] = self.views.view3d.size;
@@ -3859,6 +4087,9 @@ impl PainterApp {
             // The 2D view is the texture: stamps land where they are drawn.
             ViewKind::V2d => resolve_stamps(&self.mesh, &self.bvh, &self.cam, Vec2::ONE, BrushProjection::Screen, 0, 0.0, raw),
         };
+        if let Some(started) = resolve_started {
+            self.meter.resolve_cpu.add(started.elapsed().as_secs_f64() * 1000.0);
+        }
         let mut mat = self.brush.mat;
         if let StrokeTarget::BakeFix(_) = self.target {
             mat.rough = self.brush.fix_value;
@@ -3870,12 +4101,13 @@ impl PainterApp {
             erase: self.tool == Tool::Eraser,
             grain: self.grain_params(),
         };
+        let region_started = self.meter.on.then(Instant::now);
         let region = match kind {
             ViewKind::V3d => {
                 let [w, h] = self.views.view3d.size;
                 let radius = self.brush.size * 0.5 * self.ppp;
                 let size = Vec2::new(w as f32, h as f32);
-                stroke_region(&self.mesh, &self.bvh, &self.cam, size, self.brush.projection, self.brush.symmetry, radius, &stamps)
+                stroke_region(&self.mesh, &self.bvh, self.engine.triangles(), &self.cam, size, self.brush.projection, self.brush.symmetry, radius, &stamps)
             }
             ViewKind::V2d => {
                 // The 2D view shows the texture: the stamps' own UV squares.
@@ -3883,13 +4115,19 @@ impl PainterApp {
                 let center = Vec2::new(w as f32, h as f32) * 0.5;
                 let zoom = self.cam2d.zoom.max(1.0);
                 let radius = self.brush.size * 0.5 * self.ppp;
-                stamps.iter().fold(None, |acc, s| {
-                    let uv = (Vec2::new(s[0][0], s[0][1]) - center - self.cam2d.pan) / zoom + Vec2::splat(0.5);
-                    let r = radius * s[0][2] / zoom;
-                    Some(grow(acc, uv - Vec2::splat(r), uv + Vec2::splat(r)))
-                })
+                stamps
+                    .iter()
+                    .fold(None, |acc, s| {
+                        let uv = (Vec2::new(s[0][0], s[0][1]) - center - self.cam2d.pan) / zoom + Vec2::splat(0.5);
+                        let r = radius * s[0][2] / zoom;
+                        Some(grow(acc, uv - Vec2::splat(r), uv + Vec2::splat(r)))
+                    })
+                    .map(|region| vec![region])
             }
         };
+        if let Some(started) = region_started {
+            self.meter.region_cpu.add(started.elapsed().as_secs_f64() * 1000.0);
+        }
         let stamp_started = Instant::now();
         if self.meter.on {
             self.engine.stroke_step_profiled(&stamps, su, self.views.view3d.depth_view(), &paint, region);
@@ -4077,3 +4315,74 @@ impl eframe::App for PainterApp {
     }
 }
 
+
+
+#[cfg(test)]
+mod stroke_region_tile_tests {
+    use super::*;
+
+    const CELLS: usize = STROKE_REGION_GRID * STROKE_REGION_GRID;
+
+    #[test]
+    fn tile_rectangles_cover_each_marked_cell_exactly_once() {
+        let mut tiles = [false; CELLS];
+        mark_uv_tiles(&mut tiles, Vec2::new(0.02, 0.03), Vec2::new(0.16, 0.12));
+        mark_uv_tiles(&mut tiles, Vec2::new(0.72, 0.68), Vec2::new(0.91, 0.87));
+        let rects = uv_tile_rectangles(&tiles).expect("occupied tiles produce rectangles");
+        let mut covered = [false; CELLS];
+
+        for [u0, v0, u1, v1] in rects {
+            let x0 = (u0 * STROKE_REGION_GRID as f32).round() as usize;
+            let y0 = (v0 * STROKE_REGION_GRID as f32).round() as usize;
+            let x1 = (u1 * STROKE_REGION_GRID as f32).round() as usize;
+            let y1 = (v1 * STROKE_REGION_GRID as f32).round() as usize;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = y * STROKE_REGION_GRID + x;
+                    assert!(!covered[i], "tile rectangles overlap at ({x}, {y})");
+                    covered[i] = true;
+                }
+            }
+        }
+        assert_eq!(covered, tiles);
+    }
+
+    #[test]
+    fn empty_tile_set_is_a_known_empty_region() {
+        assert!(uv_tile_rectangles_or_empty(&[false; CELLS]).is_empty());
+    }
+
+    #[test]
+    fn uv_bounds_outside_tile_require_full_region_fallback() {
+        assert!(uv_bounds_inside_tile(Vec2::ZERO, Vec2::ONE));
+        assert!(!uv_bounds_inside_tile(Vec2::new(-0.01, 0.2), Vec2::new(0.1, 0.3)));
+        assert!(!uv_bounds_inside_tile(Vec2::new(0.8, 0.2), Vec2::new(1.01, 0.3)));
+    }
+
+    #[test]
+    fn uv_bounds_at_zero_and_one_stay_inside_the_grid() {
+        let mut tiles = [false; CELLS];
+        mark_uv_tiles(&mut tiles, Vec2::ZERO, Vec2::ZERO);
+        mark_uv_tiles(&mut tiles, Vec2::ONE, Vec2::ONE);
+        assert!(tiles[0]);
+        assert!(tiles[CELLS - 1]);
+        let rects = uv_tile_rectangles(&tiles).expect("edge tiles are occupied");
+        assert!(rects.iter().all(|r| r.iter().all(|v| (0.0..=1.0).contains(v))));
+    }
+
+    #[test]
+    fn fragmented_grid_falls_back_to_one_conservative_rectangle() {
+        let mut tiles = [false; CELLS];
+        for y in (0..STROKE_REGION_GRID).step_by(2) {
+            for x in (0..STROKE_REGION_GRID).step_by(2) {
+                tiles[y * STROKE_REGION_GRID + x] = true;
+            }
+        }
+        let rects = uv_tile_rectangles(&tiles).expect("checkerboard has occupied tiles");
+        assert_eq!(rects.len(), 1);
+        let [x0, y0, x1, y1] = rects[0];
+        assert_eq!([x0, y0], [0.0, 0.0]);
+        assert!((x1 - 63.0 / STROKE_REGION_GRID as f32).abs() < f32::EPSILON);
+        assert!((y1 - 63.0 / STROKE_REGION_GRID as f32).abs() < f32::EPSILON);
+    }
+}
