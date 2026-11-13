@@ -2915,7 +2915,7 @@ impl PainterApp {
                 let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
                 ui.label(
                     egui::RichText::new(format!(
-                        "{}{:.1} ms (peak {:.0})  │  VRAM {:.0} MB  │  Undo {:.1} MB RAM ({} steps)  │  {}²  │  {} tris",
+                        "{}{:.1} ms (peak {:.0})  │  GPU est. {:.0} MB  │  Undo {:.1} MB RAM ({} steps)  │  {}²  │  {} tris",
                         if self.meter.on { format!("{}  │  ", self.meter.text(
                             self.engine.res,
                             self.engine.last_paint_scissor_pixels,
