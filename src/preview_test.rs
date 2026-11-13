@@ -1810,6 +1810,31 @@ fn layer_thumbnails() {
     assert!(blue[2] > blue[0] * 2.0, "the thumbnail follows the fill's color: {blue:?}");
 }
 
+/// Painting on a Paint layer does not invalidate thumbnails belonging to fills or masks.
+#[test]
+#[ignore]
+fn content_stroke_keeps_unrelated_thumbnails() {
+    use crate::engine::{CHANNELS, FillParams};
+    use crate::undo::{StrokeTarget, UndoStack};
+
+    let mesh = crate::mesh::Primitive::Plane.build();
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 256);
+    let mut undo = UndoStack::default();
+
+    let fill = engine.add_fill_layer(0, None, "Fill".into(), FillParams::default(), &mut undo);
+    engine.add_mask(fill, true, None, &mut undo);
+    let paint = engine.add_paint_layer(1, None, None, &mut undo);
+    engine.composite();
+
+    let settled = engine.thumb_renders();
+    assert_eq!(settled, 2, "the fill owns a content thumbnail and a mask thumbnail");
+    assert!(engine.begin_stroke(paint, StrokeTarget::Content, [true, false, false, false, false, false, false, false], false));
+    let _undo = engine.end_stroke().expect("content stroke produces an undo record");
+    assert_eq!(engine.thumb_renders(), settled, "painting a separate layer must not rebuild the fill's thumbnails");
+}
+
 /// Painting a fill's mask rebuilds no thumbnail while the stroke is held, and
 /// on release only the mask's: the fill's content thumbnail is a full 512²
 /// composite, which once stalled every paint frame by over 100 ms.
