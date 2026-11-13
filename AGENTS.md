@@ -1,25 +1,27 @@
 # Guide for AI coding agents
 
-Read [PROJECT_SCOPE.md](PROJECT_SCOPE.md) first. It is the source of truth for product intent, target workload, mandatory phase order, engineering latitude, shared GPT/Claude coordination, and repository boundaries. All instructions here are subordinate to that scope. Humans: see [CONTRIBUTING.md](CONTRIBUTING.md) too.
+Read [PROJECT_SCOPE.md](PROJECT_SCOPE.md) first. It is the source of truth for the production objective, Air Fox workload ceiling, mandatory phase order, engineering latitude, shared GPT/Claude coordination, and repository boundaries. All instructions here are subordinate to that scope. Humans: see [CONTRIBUTING.md](CONTRIBUTING.md) too.
 
-## Current priority — do not skip phases
+## Current priority — establish the production foundation
 
-**Phase 1: finish brush and mask systems.** Focus on 3D brush latency and spikes, UV/2D painting correctness, Vertex ID and painted masks, smart-mask generators, mask layers/folders/filters, cache invalidation, incremental recomposition, and the CPU/GPU work directly involved. Validate realistic layer/mask/filter stacks, not only empty or nearly unpainted models.
+**Phase 1: finish and validate the core painting and mask systems.** Focus on 3D brush latency and spikes, UV/2D painting correctness, Vertex ID and painted masks, smart-mask generators, mask layers/folders/filters, cache invalidation, incremental recomposition, and the CPU/GPU work directly involved. Validate realistic layer/mask/filter stacks and the Air Fox production workload, not empty or nearly unpainted models.
 
-Phase 1 requires passing relevant unit and GPU tests, correct rendered output, and runtime validation on the owner's machine using a representative project. F6/performance measurements must be comparable. CI compilation alone is not proof. A GPU test marked ignored is not validated unless it was actually run on a GPU-capable setup; state any remaining gap.
+Phase 1 requires relevant unit and GPU tests, correct rendered output, and runtime validation on the owner's actual machine. F6/performance measurements must be comparable. CI compilation alone is not proof. A GPU test marked ignored is not validated unless it was actually run on a GPU-capable setup; state any remaining gap.
 
-**Phase 2: general optimization begins only after Phase 1 is validated.** Then audit memory, CPU allocations, GPU resource lifetime/reuse, viewport, baking, import, project I/O, export, background work, and architecture inside the target workload.
+**Phase 2: optimize the rest of the production foundation only after Phase 1 is validated.** Then audit memory, CPU allocations, GPU resource lifetime/reuse, viewport, baking, import, project I/O, export, background work, and architecture inside the Air Fox workload envelope.
 
-Do not jump to general cleanup while brush/mask work remains unresolved. Do not let hypothetical huge projects or cosmetic HUD work displace these phases.
+Do not jump to broad cleanup while core painting/masking remains unresolved. Do not let hypothetical huge projects or cosmetic HUD work displace the foundation.
 
 ## Target workload
 
 Personal production fork for Roblox asset texturing on the owner's machine:
-- Representative target: 6 MeshParts, 6 UV maps, 50,000–100,000 triangles.
-- Maximum planned target: 12 UV maps, 200,000 triangles.
+- Air Fox normal target: 50,000–100,000 triangles, 6 MeshParts, 6 UV maps.
+- Absolute ceiling: 200,000 triangles, up to 6 MeshParts and 12 UV maps.
 - Realistic production layer stacks, masks, and filters within that envelope.
 
-The owner explicitly permits major, risky, or breaking internal refactors when they materially improve the program. Do not avoid a needed rewrite just to keep a diff small. Protect user data, add tests, preserve project compatibility, inspect rendered results, and be explicit about unvalidated runtime behavior.
+Projects around 100 items are a very distant possibility, not a current target. A major HUD redesign is deferred for months or until the owner explicitly reprioritizes it. Do not optimize beyond the stated envelope without approval.
+
+The owner explicitly permits major, risky, or breaking internal refactors when they materially improve production reliability and performance. Do not avoid a needed rewrite just to keep a diff small. Protect user data, add tests, preserve project compatibility deliberately, inspect rendered results, and be explicit about unvalidated runtime behavior.
 
 ## Shared work with GPT and Claude
 
@@ -27,7 +29,7 @@ Both agents work in the same repository and must read [PROJECT_SCOPE.md](PROJECT
 
 At the start of each task, inspect current branch, HEAD SHA, open PRs, changed files/diff, CI, and the other agent's recent commits/comments. Re-fetch files and current SHAs before writing. Never assume previous chat context equals current repository state.
 
-Do not concurrently modify the same files/subsystem. Establish task ownership in the active PR or a concise handoff comment. Never overwrite another agent's newer work. Commit coherent units and leave a handoff stating changes, invariants, tests, gaps, and next steps. Keep code understandable for the other agent; no agent-specific abstractions.
+Do not concurrently modify the same files/subsystem. Establish task ownership in the active PR or a concise handoff comment. Never overwrite the other agent's work. Commit coherent units and leave a handoff stating changes, invariants, tests, gaps, and next steps. Keep code understandable for the other agent; no agent-specific abstractions.
 
 ## What this is
 
