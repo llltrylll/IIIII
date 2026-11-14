@@ -242,7 +242,7 @@ struct Brush {
 /// How brush stamps are projected onto the mesh.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum BrushProjection {
-    /// From the camera: what you see under the brush gets paint.
+    /// From the camera: only faces whose imported normals point toward the camera receive paint.
     Screen,
     /// A disc lying on the surface under the cursor: no stretching on
     /// slopes, wraps around edges and onto hidden faces.
@@ -269,7 +269,7 @@ impl BrushProjection {
     }
     fn tip(self) -> &'static str {
         match self {
-            BrushProjection::Screen => "Paint from the camera, like a spray can: only what you see gets paint",
+            BrushProjection::Screen => "Paint from the camera: faces whose imported normals point away are skipped, so the brush can reach the correctly oriented surface behind them",
             BrushProjection::Surface => "The brush lies on the surface: even dots on slopes, wraps around edges",
             BrushProjection::Uv => "The brush is a circle in texture space around the cursor",
         }
