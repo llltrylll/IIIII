@@ -195,6 +195,13 @@ impl ShelfPreviews {
             Err(mpsc::TryRecvError::Empty) => {}
         }
 
+        // Never spend GPU time on shelf thumbnails while the user is
+        // painting, orbiting, panning or dragging in the editor.
+        if ctx.input(|i| i.pointer.any_down()) {
+            ctx.request_repaint_after(Duration::from_millis(120));
+            return true;
+        }
+
         // Run secondary GPU work at a modest cadence rather than once per
         // UI frame. The main editor stays responsive while shelf previews
         // continue to bake and render in the background.
