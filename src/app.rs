@@ -5071,7 +5071,7 @@ impl PainterApp {
                     indices,
                     &stamps,
                     su,
-                    self.views.view3d.depth_view(),
+                    self.views.view3d.paint_depth_view(),
                     &paint,
                     region,
                 );
@@ -5081,7 +5081,7 @@ impl PainterApp {
                     indices,
                     &stamps,
                     su,
-                    self.views.view3d.depth_view(),
+                    self.views.view3d.paint_depth_view(),
                     &paint,
                     region,
                 );
