@@ -332,18 +332,40 @@ struct Shade {
 fn mesh_shade_inputs(in: MeshOut, front: bool) -> Shade {
     var c: Shade;
     c.s = sample_surface(in.uv);
+
+    // Face-forward the true geometric normal toward the camera. The raster
+    // path previously called the interpolated shading normal "geometric",
+    // while the path tracer correctly derives it from triangle positions.
+    var gn = cross(dpdx(in.wpos), dpdy(in.wpos));
+    if (dot(gn, gn) > 1e-12) {
+        gn = normalize(gn);
+    } else {
+        gn = normalize(in.n);
+    }
+    c.v = normalize(g.cam_pos.xyz - in.wpos);
+    if (dot(gn, c.v) < 0.0) {
+        gn = -gn;
+    }
+
+    // Match the path tracer: preserve authored shading normals and normal-map
+    // tangent-space detail, but orient the shading frame consistently with
+    // the actual face. This prevents inverted imported normals from shading
+    // the raster viewport differently from the path-traced viewport.
     var rn = in.n;
     if (!front) {
         rn = -rn;
     }
-    c.gn = normalize(rn);
+    if (dot(rn, gn) < 0.0) {
+        rn = -rn;
+    }
+    c.gn = gn;
+
     // MikkTSpace decoding: the interpolated normal and tangent as they are
     // (not normalized or made orthogonal), the bitangent from their cross
     // product, normalized only after combining. The baker inverts exactly
     // this, and so do Unity, Unreal, Godot and Blender.
     let b_up = -cross(rn, in.t.xyz) * in.t.w;
     c.n = normalize(in.t.xyz * c.s.ts.x + b_up * c.s.ts.y + rn * c.s.ts.z);
-    c.v = normalize(g.cam_pos.xyz - in.wpos);
     c.l = normalize(g.sun.xyz);
     c.light = g.sun_c.rgb * g.sun.w * g.sun_c.w;
     c.shadow = 1.0;
