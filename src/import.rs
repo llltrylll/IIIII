@@ -73,8 +73,10 @@ fn load_obj(path: &Path) -> Result<RawMesh, String> {
     for m in &models {
         let mesh = &m.mesh;
         let count = mesh.positions.len() / 3;
-        let has_uv = !mesh.texcoords.is_empty() && mesh.texcoord_indices.len() >= mesh.indices.len();
-        let has_n = !mesh.normals.is_empty() && mesh.normal_indices.len() >= mesh.indices.len();
+        let uv_count = mesh.texcoords.len() / 2;
+        let has_uv = !mesh.texcoords.is_empty()
+            && mesh.texcoord_indices.len() >= mesh.indices.len()
+            && mesh.texcoord_indices.iter().take(mesh.indices.len()).all(|&i| (i as usize) < uv_count);
         if !has_uv {
             out.missing_uvs.push(m.name.clone());
         }
@@ -83,12 +85,20 @@ fn load_obj(path: &Path) -> Result<RawMesh, String> {
         out.begin_object(&m.name);
         for (corner_index, &position_index) in mesh.indices.iter().enumerate() {
             let position_index = position_index as usize;
-            let normal_index = has_n.then(|| mesh.normal_indices[corner_index] as usize);
-            let uv_index = has_uv.then(|| mesh.texcoord_indices[corner_index] as usize);
+            let normal = mesh.normal_indices.get(corner_index)
+                .and_then(|&i| {
+                    let i = i as usize;
+                    (i < mesh.normals.len() / 3)
+                        .then(|| Vec3::from_slice(&mesh.normals[i * 3..i * 3 + 3]))
+                });
+            let uv = has_uv.then(|| {
+                let i = mesh.texcoord_indices[corner_index] as usize;
+                Vec2::new(mesh.texcoords[i * 2], 1.0 - mesh.texcoords[i * 2 + 1])
+            });
             out.push_corner(Corner {
                 pos: Vec3::from_slice(&mesh.positions[position_index * 3..position_index * 3 + 3]),
-                normal: normal_index.map(|i| Vec3::from_slice(&mesh.normals[i * 3..i * 3 + 3])),
-                uv: uv_index.map(|i| Vec2::new(mesh.texcoords[i * 2], 1.0 - mesh.texcoords[i * 2 + 1])),
+                normal,
+                uv,
                 color: has_c.then(|| Vec3::from_slice(&mesh.vertex_color[position_index * 3..position_index * 3 + 3])),
                 source_vertex: position_index as u32,
             });
