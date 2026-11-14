@@ -1276,6 +1276,7 @@ pub struct Engine {
     /// Reusable compact index buffer for the triangles near a screen stroke.
     /// Avoids submitting the entire mesh for every brush stamp.
     screen_index_buffer: wgpu::Buffer,
+    screen_index_capacity: u32,
     pos: Tex,
     nrm: Tex,
     /// Tangent frame per texel: fill normal-map images projected in world
@@ -1596,9 +1597,10 @@ impl Engine {
         let stamp_sbuf = buffer("stamps", (MAX_STAMPS * size_of::<Stamp>()) as u64, wgpu::BufferUsages::STORAGE);
         let apply_ubuf = buffer("apply uniform", size_of::<ApplyUniform>() as u64, wgpu::BufferUsages::UNIFORM);
 
+        let screen_index_capacity = (tris.end - tris.start).max(3);
         let screen_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("screen stroke candidate indices"),
-            size: u64::from((tris.end - tris.start).max(3)) * std::mem::size_of::<u32>() as u64,
+            size: u64::from(screen_index_capacity) * std::mem::size_of::<u32>() as u64,
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1689,6 +1691,7 @@ impl Engine {
             res,
             tris,
             screen_index_buffer,
+            screen_index_capacity,
             p,
             device,
             queue,
@@ -2148,6 +2151,16 @@ impl Engine {
     /// Moves the texture set to another range of the (new) mesh and remakes
     /// its position and normal maps.
     pub fn set_triangles(&mut self, tris: std::ops::Range<u32>, mesh: &GpuMesh) {
+        let needed = (tris.end - tris.start).max(3);
+        if needed > self.screen_index_capacity {
+            self.screen_index_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("screen stroke candidate indices"),
+                size: u64::from(needed) * std::mem::size_of::<u32>() as u64,
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.screen_index_capacity = needed;
+        }
         self.tris = tris;
         self.bake_uv(mesh);
     }
@@ -3654,9 +3667,8 @@ impl Engine {
         su.view[3] = stamps.len() as f32;
         if let Some(indices) = candidate_indices {
             debug_assert!(
-                indices.len() as u64 * std::mem::size_of::<u32>() as u64
-                    <= u64::from(self.tris.end - self.tris.start) * std::mem::size_of::<u32>() as u64,
-                "candidate index list cannot exceed the active texture set",
+                indices.len() <= self.screen_index_capacity as usize,
+                "candidate index list cannot exceed the screen index buffer capacity",
             );
             self.queue.write_buffer(&self.screen_index_buffer, 0, bytemuck::cast_slice(indices));
         }
