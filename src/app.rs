@@ -2208,6 +2208,7 @@ impl PainterApp {
         self.bake_job = None;
         self.end_preview(false);
         self.gpu_mesh = GpuMesh::new(&self.rs.device, &mesh);
+        self.views.invalidate_shadow();
         self.bvh = Arc::new(Bvh::from_mesh(&mesh));
         if let Some(raytracer) = self.raytracer.as_mut() {
             raytracer.set_mesh(&self.rs.device, &mesh, &self.bvh);
