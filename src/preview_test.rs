@@ -2007,6 +2007,13 @@ fn screen_projection_paints_visible_face_of_overlapped_uvs() {
     visible.end_stroke();
     visible.composite();
     let visible_count = painted_texels(&visible);
+    let incremental: Vec<Vec<u8>> = (0..4).map(|channel| read_texture(&rs.device, &rs.queue, visible.final_tex(channel))).collect();
+    visible.mark_dirty();
+    visible.composite();
+    for channel in 0..4 {
+        let full = read_texture(&rs.device, &rs.queue, visible.final_tex(channel));
+        assert_eq!(incremental[channel], full, "screen UV pass: channel {channel} differs from a full composite");
+    }
 
     println!("  stacked UV screen stroke: legacy {legacy_count} painted texels, per-face {visible_count}");
     assert_eq!(legacy_count, 0, "the fixture must reproduce the old single-surface UV bake failure");
