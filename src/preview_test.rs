@@ -1814,7 +1814,7 @@ fn layer_thumbnails() {
 #[test]
 #[ignore]
 fn content_stroke_keeps_unrelated_thumbnails() {
-    use crate::engine::{CHANNELS, FillParams};
+    use crate::engine::FillParams;
     use crate::undo::{StrokeTarget, UndoStack};
 
     let mesh = crate::mesh::Primitive::Plane.build();
@@ -2180,10 +2180,10 @@ fn screen_projection_rejects_close_occluded_uv_surface() {
     let color = channels[0].as_ref().expect("base color channel was allocated");
     let rgba = read_texture(&rs.device, &rs.queue, color);
     let near_chart = rgba.chunks_exact(4).enumerate()
-        .filter(|(index, pixel)| *index % res as usize < res as usize / 2 && pixel[3] > 0)
+        .filter(|(index, pixel)| *index % (res as usize) < (res as usize / 2) && pixel[3] > 0)
         .count();
     let hidden_chart = rgba.chunks_exact(4).enumerate()
-        .filter(|(index, pixel)| *index % res as usize >= res as usize / 2 && pixel[3] > 0)
+        .filter(|(index, pixel)| *index % (res as usize) >= (res as usize / 2) && pixel[3] > 0)
         .count();
 
     println!("  close occlusion: visible UV chart {near_chart} texels, hidden UV chart {hidden_chart} texels");
