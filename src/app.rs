@@ -2855,11 +2855,13 @@ impl PainterApp {
                         .map(|vertex| Vec3::from_array(vertex.normal).normalize_or_zero().dot(face_n))
                         .sum::<f32>() / 3.0;
                     let facing = face_n.dot(-direction);
+                    let object = self.mesh.tri_object.get(tri).copied().unwrap_or(u32::MAX);
+                    let object_name = self.mesh.objects.get(object as usize).map(String::as_str).unwrap_or("(unknown)");
                     let set = self.mesh.set_of(hit.tri);
                     let set_name = self.mesh.sets.get(set).map(|s| s.name.as_str()).unwrap_or("(missing)");
                     format!(
-                        "tri={} set={}({}) t={:.6} bary={:?} uv={:?} geomN={:?} shadeN={:?} NdotGeom={:.4} geomNdotToCamera={:.4} uvScale={:.6}",
-                        hit.tri, set, set_name, (hit.pos - origin).length(), hit.bary, uv, face_n, shading_n, alignment, facing, uv_scale
+                        "tri={} object={}({}) set={}({}) t={:.6} bary={:?} uv={:?} geomN={:?} shadeN={:?} NdotGeom={:.4} geomNdotToCamera={:.4} uvScale={:.6}",
+                        hit.tri, object, object_name, set, set_name, (hit.pos - origin).length(), hit.bary, uv, face_n, shading_n, alignment, facing, uv_scale
                     )
                 }
                 None => "no hit".into(),
@@ -2899,11 +2901,13 @@ impl PainterApp {
                     + Vec3::from_array(v[2].normal) * bary.z).normalize_or_zero();
                 let n_dot_face = shading_n.dot(face_n);
                 let facing = face_n.dot(-direction);
+                let object = self.mesh.tri_object.get(*tri as usize).copied().unwrap_or(u32::MAX);
+                let object_name = self.mesh.objects.get(object as usize).map(String::as_str).unwrap_or("(unknown)");
                 let set = self.mesh.set_of(*tri);
                 let set_name = self.mesh.sets.get(set).map(|s| s.name.as_str()).unwrap_or("(missing)");
                 format!(
-                    "tri={} set={}({}) t={:.6} bary={:?} uv={:?} geomNdotToCamera={:.4} shadeNdotGeomN={:.4}",
-                    tri, set, set_name, distance, bary, exact_uv, facing, n_dot_face
+                    "tri={} object={}({}) set={}({}) t={:.6} bary={:?} uv={:?} geomNdotToCamera={:.4} shadeNdotGeomN={:.4}",
+                    tri, object, object_name, set, set_name, distance, bary, exact_uv, facing, n_dot_face
                 )
             }).collect::<Vec<_>>().join(" ; ");
 
