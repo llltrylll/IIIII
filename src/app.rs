@@ -652,7 +652,8 @@ pub struct PainterApp {
     stroke: Option<StrokeInput>,
     bake_settings: BakeSettings,
     bake_job: Option<BakeJob>,
-    baker: GpuBaker,
+    /// Compiled on demand when a mesh bake is actually requested.
+    baker: Option<GpuBaker>,
     show_bake: bool,
     shelf: Shelf,
     /// CPU-only material and generator previews arrive from a worker.
@@ -1878,7 +1879,7 @@ impl PainterApp {
         let _s_env = crate::startup_trace::span("new: env decode+upload");
         let env = env_baker.upload(&rs, &environment::decode(&EnvSource::Builtin(default_env))?);
         drop(_s_env);
-        let baker = { let _s = crate::startup_trace::span("new: GpuBaker::new"); GpuBaker::new(&rs.device) };
+
 
         let ctx = &cc.egui_ctx;
         let load = |name: &str, img: egui::ColorImage| ctx.load_texture(name, img, egui::TextureOptions::LINEAR);
@@ -1959,7 +1960,7 @@ impl PainterApp {
             stroke: None,
             bake_settings: BakeSettings::default(),
             bake_job: None,
-            baker,
+            baker: None,
             show_bake: false,
             shelf: Shelf { cat: ShelfCat::SmartMaterials, search: String::new(), kind: None, icon_size: 72.0, smart, materials, generators, brushes, textures },
             cpu_preview_rx: Some(cpu_preview_rx),
