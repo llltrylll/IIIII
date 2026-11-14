@@ -741,31 +741,41 @@ fn start_cpu_shelf_previews(ctx: &egui::Context) -> mpsc::Receiver<CpuShelfPrevi
     std::thread::Builder::new()
         .name("shelf-cpu-previews".into())
         .spawn(move || {
+            let _worker = crate::startup_trace::span("cpu worker: total");
             for (i, material) in presets::MATERIALS.iter().enumerate() {
-                let image = presets::render_preview(&[PreviewLayer {
-                    fill: material.fill(),
-                    opacity: 1.0,
-                    generator: None,
-                }]);
+                let image = {
+                    let _s = crate::startup_trace::span_d("cpu preview: material", material.name.to_string());
+                    presets::render_preview(&[PreviewLayer {
+                        fill: material.fill(),
+                        opacity: 1.0,
+                        generator: None,
+                    }])
+                };
                 if tx.send(CpuShelfPreview { target: CpuShelfPreviewTarget::Material(i), image }).is_err() {
                     return;
                 }
                 ctx.request_repaint();
             }
             for (i, smart) in presets::SMART_MATERIALS.iter().enumerate() {
-                let layers: Vec<PreviewLayer> = smart
-                    .layers
-                    .iter()
-                    .map(|layer| PreviewLayer { fill: layer.fill(), opacity: layer.opacity, generator: layer.generator() })
-                    .collect();
-                let image = presets::render_preview(&layers);
+                let image = {
+                    let _s = crate::startup_trace::span_d("cpu preview: smart", smart.name.to_string());
+                    let layers: Vec<PreviewLayer> = smart
+                        .layers
+                        .iter()
+                        .map(|layer| PreviewLayer { fill: layer.fill(), opacity: layer.opacity, generator: layer.generator() })
+                        .collect();
+                    presets::render_preview(&layers)
+                };
                 if tx.send(CpuShelfPreview { target: CpuShelfPreviewTarget::Smart(i), image }).is_err() {
                     return;
                 }
                 ctx.request_repaint();
             }
             for (i, generator) in GenKind::ALL.iter().enumerate() {
-                let image = presets::render_generator_preview(*generator);
+                let image = {
+                    let _s = crate::startup_trace::span_d("cpu preview: generator", generator.name().to_string());
+                    presets::render_generator_preview(*generator)
+                };
                 if tx.send(CpuShelfPreview { target: CpuShelfPreviewTarget::Generator(i), image }).is_err() {
                     return;
                 }
@@ -1821,15 +1831,18 @@ impl PainterApp {
         let rs = cc.wgpu_render_state.clone().ok_or("Material Painter requires the wgpu renderer")?;
         let gpu = rs.adapter.get_info();
         crate::crash::set_context(format!("{} ({:?}, driver {} {})", gpu.name, gpu.backend, gpu.driver, gpu.driver_info));
-        theme::apply(&cc.egui_ctx);
+        crate::startup_trace::event("PainterApp::new begin (window+device already created)");
+        { let _s = crate::startup_trace::span("new: theme::apply"); theme::apply(&cc.egui_ctx); }
 
         let prefs = Preferences::load();
         let mesh = Primitive::MaterialBall.build();
         let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
         let bvh = Bvh::from_mesh(&mesh);
+        let _s_engine = crate::startup_trace::span("new: Engine+ViewRenderer");
         let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), prefs.default_resolution);
         engine.add_paint_layer(0, None, None, &mut UndoStack::default());
         let views = ViewRenderer::new(&rs);
+        drop(_s_engine);
         let env_baker = EnvBaker::new(&rs.device);
         // A real studio HDRI (plus the key light) when installed, else the
         // procedural studio.
@@ -1839,18 +1852,24 @@ impl PainterApp {
             .or_else(|| environment::BUILTIN.iter().position(|b| b.0 == "Small Studio"))
             .filter(|i| environment::available_builtins().contains(i))
             .unwrap_or(0);
+        let _s_env = crate::startup_trace::span("new: env decode+upload");
         let env = env_baker.upload(&rs, &environment::decode(&EnvSource::Builtin(default_env))?);
+        drop(_s_env);
+        let _s_rt = crate::startup_trace::span("new: RayTracer::new+set_mesh");
         let mut raytracer = RayTracer::new(&rs);
         raytracer.set_mesh(&rs.device, &mesh, &bvh);
+        drop(_s_rt);
         let baker = GpuBaker::new(&rs.device);
 
         let ctx = &cc.egui_ctx;
         let load = |name: &str, img: egui::ColorImage| ctx.load_texture(name, img, egui::TextureOptions::LINEAR);
+        let _s_cpu = crate::startup_trace::span("new: start CPU preview worker + placeholder textures");
         let cpu_preview_rx = start_cpu_shelf_previews(ctx);
         let placeholder = || egui::ColorImage::new([72, 72], vec![Color32::from_gray(28); 72 * 72]);
         let materials = presets::MATERIALS.iter().map(|m| load(m.name, placeholder())).collect();
         let smart = presets::SMART_MATERIALS.iter().map(|s| load(s.name, placeholder())).collect();
         let generators = GenKind::ALL.iter().map(|g| load(g.name(), placeholder())).collect();
+        drop(_s_cpu);
         // Brush tips show as white shapes; textures as their grayscale tile.
         const THUMB: u32 = 96;
         let brushes = crate::brushes::BRUSH_ALPHAS
@@ -1868,7 +1887,9 @@ impl PainterApp {
             })
             .collect();
 
+        let _s_sp = crate::startup_trace::span("new: ShelfPreviews::start");
         let shelf_previews = shelf_previews::ShelfPreviews::start(&rs, ctx, &env_baker);
+        drop(_s_sp);
 
         let mut app = PainterApp {
             rs,
@@ -1982,6 +2003,7 @@ impl PainterApp {
         if app.prefs.bake_on_load {
             app.start_bake(ctx);
         }
+        crate::startup_trace::event("PainterApp::new end");
         Ok(app)
     }
 
@@ -4346,11 +4368,16 @@ impl PainterApp {
                         CpuShelfPreviewTarget::Material(i) => &mut self.shelf.materials[i],
                         CpuShelfPreviewTarget::Generator(i) => &mut self.shelf.generators[i],
                     };
-                    handle.set(update.image, egui::TextureOptions::LINEAR);
+                    {
+                        let _s = crate::startup_trace::span("cpu preview: TextureHandle::set (UI thread)");
+                        handle.set(update.image, egui::TextureOptions::LINEAR);
+                    }
+                    crate::startup_trace::event("cpu preview applied");
                     ctx.request_repaint();
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
+                    crate::startup_trace::event("all cpu previews applied (worker finished)");
                     finished = true;
                     break;
                 }
@@ -4364,6 +4391,7 @@ impl PainterApp {
 
 impl eframe::App for PainterApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let _trace_frame = crate::startup_trace::frame();
         let start = Instant::now();
         let ctx = ui.ctx().clone();
         self.ppp = ctx.pixels_per_point();
@@ -4397,10 +4425,14 @@ impl eframe::App for PainterApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.window_title = title;
         }
-        if let Some(p) = &mut self.shelf_previews
-            && !p.pump(&self.rs, &ctx, &mut self.shelf)
-        {
+        let pumped = self.shelf_previews.is_some();
+        let keep = {
+            let _s = crate::startup_trace::span("frame: shelf pump (UI thread)");
+            self.shelf_previews.as_mut().is_none_or(|p| p.pump(&self.rs, &ctx, &mut self.shelf))
+        };
+        if pumped && !keep {
             self.shelf_previews = None;
+            crate::startup_trace::shelf_done();
         }
         self.path_keys(&ctx);
         self.shortcuts(&ctx);

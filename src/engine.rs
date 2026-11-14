@@ -2469,19 +2469,43 @@ impl Engine {
     pub(crate) fn prepare_fill_image_file(path: &std::path::Path) -> Result<PreparedFillImage, String> {
         let dir = path.parent().and_then(|d| d.file_name()).map_or(String::new(), |d| format!("{}/", d.to_string_lossy()));
         let name = format!("{dir}{}", path.file_name().map_or("image".into(), |n| n.to_string_lossy()));
-        let encoded = Arc::new(std::fs::read(path).map_err(|e| format!("can't read {}: {e}", path.display()))?);
+        let _detail = crate::startup_trace::detail(name.clone());
+        crate::startup_trace::note_decode(&name);
+        let encoded = {
+            let _s = crate::startup_trace::span("scan: read file");
+            Arc::new(std::fs::read(path).map_err(|e| format!("can't read {}: {e}", path.display()))?)
+        };
         Self::prepare_fill_image(name, encoded)
     }
 
     /// Decodes an image and builds all mip levels using CPU-only operations.
     pub(crate) fn prepare_fill_image(name: String, encoded: Arc<Vec<u8>>) -> Result<PreparedFillImage, String> {
-        let img = image::load_from_memory(&encoded).map_err(|e| format!("can't read {name}: {e}"))?;
+        let img = {
+            let _s = crate::startup_trace::span("scan: decode");
+            image::load_from_memory(&encoded).map_err(|e| format!("can't read {name}: {e}"))?
+        };
         let gray = matches!(img.color(), image::ColorType::L8 | image::ColorType::L16);
         let mips = if gray {
-            let img = fit_fill_image(img.into_luma8());
+            let img = {
+                let _s = crate::startup_trace::span("scan: convert");
+                img.into_luma8()
+            };
+            let img = {
+                let _s = crate::startup_trace::span("scan: resize");
+                fit_fill_image(img)
+            };
+            let _s = crate::startup_trace::span("scan: mips");
             gpu::prepare_mips(img, F::R8Unorm)
         } else {
-            let img = fit_fill_image(img.into_rgba8());
+            let img = {
+                let _s = crate::startup_trace::span("scan: convert");
+                img.into_rgba8()
+            };
+            let img = {
+                let _s = crate::startup_trace::span("scan: resize");
+                fit_fill_image(img)
+            };
+            let _s = crate::startup_trace::span("scan: mips");
             gpu::prepare_mips(img, F::Rgba8Unorm)
         };
         Ok(PreparedFillImage { name, encoded, mips })
@@ -2490,6 +2514,7 @@ impl Engine {
     /// Creates the GPU texture for CPU-prepared image data. Call on the thread
     /// that owns this engine's device and queue.
     pub(crate) fn upload_prepared_fill_image(&self, prepared: PreparedFillImage) -> FillImage {
+        let _detail = crate::startup_trace::detail(prepared.name.clone());
         let tex = gpu::upload_prepared_mips(&self.device, &self.queue, prepared.mips, "fill image");
         FillImage { tex: Arc::new(tex), name: prepared.name, encoded: prepared.encoded }
     }

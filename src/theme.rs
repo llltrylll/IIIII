@@ -84,7 +84,10 @@ fn system_font(index: &std::collections::HashMap<String, std::path::PathBuf>, na
 pub fn apply(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert("phosphor".into(), egui::FontData::from_static(icons::FONT).into());
-    let index = font_index();
+    let index = {
+        let _s = crate::startup_trace::span("theme: font_index (disk walk)");
+        font_index()
+    };
     let body = system_font(&index, &["segoeui.ttf", "NotoSans-Regular.ttf", "Inter-Regular.ttf", "Ubuntu-R.ttf", "DejaVuSans.ttf", "LiberationSans-Regular.ttf"]);
     let semibold = system_font(
         &index,

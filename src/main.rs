@@ -27,6 +27,7 @@ mod raytrace;
 mod select;
 mod spp;
 mod spp_import;
+mod startup_trace;
 mod textures;
 mod theme;
 mod undo;
@@ -39,6 +40,7 @@ use eframe::{egui_wgpu, wgpu};
 use std::sync::Arc;
 
 fn main() -> eframe::Result {
+    startup_trace::init();
     crash::install();
     let mut options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()

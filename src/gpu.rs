@@ -235,6 +235,7 @@ pub(crate) fn upload_prepared_mips(
     chain: PreparedMipChain,
     label: &str,
 ) -> Tex {
+    let _create = crate::startup_trace::span("scan: gpu create_texture");
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d { width: chain.width, height: chain.height, depth_or_array_layers: 1 },
@@ -245,6 +246,10 @@ pub(crate) fn upload_prepared_mips(
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
+    drop(_create);
+    let _write = crate::startup_trace::span("scan: gpu write_texture");
+    crate::startup_trace::count("scan: files uploaded to GPU", 1);
+    crate::startup_trace::count("scan: mip levels written (queue.write_texture)", chain.levels.len() as u64);
     for (mip, level) in chain.levels.iter().enumerate() {
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
@@ -262,6 +267,7 @@ pub(crate) fn upload_prepared_mips(
             wgpu::Extent3d { width: level.width, height: level.height, depth_or_array_layers: 1 },
         );
     }
+    drop(_write);
     let view = texture.create_view(&Default::default());
     Tex {
         texture,

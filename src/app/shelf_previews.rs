@@ -65,7 +65,11 @@ impl ShelfPreviews {
         let bake_ctx = ctx.clone();
         std::thread::spawn(move || {
             let settings = BakeSettings { quality: Quality::Draft, ..Default::default() };
-            let _ = tx.send(bake::prepare(&mesh, &settings, 0));
+            let prepared = {
+                let _s = crate::startup_trace::span("shelf: CPU bake::prepare (worker)");
+                bake::prepare(&mesh, &settings, 0)
+            };
+            let _ = tx.send(prepared);
             bake_ctx.request_repaint();
         });
 
@@ -76,6 +80,7 @@ impl ShelfPreviews {
             .name("shelf-scan-decode".into())
             .spawn(move || {
                 while let Ok(paths) = scan_request_rx.recv() {
+                    let _batch = crate::startup_trace::span_d("scan: worker batch (read+decode+mips, all files)", crate::startup_trace::scan_label(&paths));
                     let mut decoded = HashMap::with_capacity(paths.len());
                     for path in paths {
                         let result = if path.is_file() {
@@ -115,6 +120,8 @@ impl ShelfPreviews {
     pub fn pump(&mut self, rs: &egui_wgpu::RenderState, ctx: &egui::Context, shelf: &mut Shelf) -> bool {
         match self.scan_rx.try_recv() {
             Ok(images) => {
+                let received: Vec<&PathBuf> = images.keys().collect();
+                crate::startup_trace::scan_received(&received[..]);
                 self.pending_scans = None;
                 for (path, result) in images {
                     match result {
@@ -155,9 +162,12 @@ impl ShelfPreviews {
             Stage::Baking(run) => {
                 if let Some(maps) = self.baker.pump(run, &rs.device, &rs.queue, ctx) {
                     let report = run.report.clone();
+                    crate::startup_trace::event("shelf: GPU bake done");
+                    let _s = crate::startup_trace::span("shelf: Engine::new (UI thread)");
                     let mut engine = Engine::new(rs, &self.mesh, self.bounds, RES);
                     engine.set_maps(maps, report);
                     self.engine = Some(engine);
+                    drop(_s);
                     let mut items: Vec<Item> = (0..presets::SMART_MATERIALS.len()).map(Item::Smart).collect();
                     items.extend((0..presets::MATERIALS.len()).map(Item::Material));
                     items.extend((0..GenKind::ALL.len()).map(Item::Generator));
@@ -171,6 +181,10 @@ impl ShelfPreviews {
                 let Some(item) = items.last().copied() else { return false };
                 if let Item::Smart(i) = item {
                     let required = smart_scan_paths(&presets::SMART_MATERIALS[i]);
+                    if crate::startup_trace::enabled() {
+                        let keys: Vec<String> = required.iter().map(|p| crate::startup_trace::file_key(p)).collect();
+                        crate::startup_trace::smart_files(presets::SMART_MATERIALS[i].name, keys);
+                    }
                     let missing: Vec<PathBuf> = required
                         .iter()
                         .filter(|path| {
@@ -181,8 +195,10 @@ impl ShelfPreviews {
                         .cloned()
                         .collect();
                     if !missing.is_empty() {
+                        crate::startup_trace::count("scan: pump frames that waited on the worker (no thumbnail rendered)", 1);
                         if self.pending_scans.is_none() {
                             let pending: HashSet<PathBuf> = missing.iter().cloned().collect();
+                            crate::startup_trace::scan_request(presets::SMART_MATERIALS[i].name, &missing);
                             if self.scan_tx.send(missing).is_ok() {
                                 self.pending_scans = Some(pending);
                             } else {
@@ -193,7 +209,11 @@ impl ShelfPreviews {
                     }
 
                     let engine = self.engine.as_ref().expect("engine exists while rendering");
+                    let _upload = crate::startup_trace::span_d("scan: upload batch (UI thread)", presets::SMART_MATERIALS[i].name.to_string());
                     for path in required {
+                        if self.scan_images.contains_key(&path) {
+                            crate::startup_trace::count("scan: files reused (already a GPU texture in scan_images)", 1);
+                        }
                         if !self.scan_images.contains_key(&path)
                             && let Some(prepared) = self.prepared_scans.remove(&path)
                         {
@@ -201,6 +221,7 @@ impl ShelfPreviews {
                             self.scan_images.insert(path, image);
                         }
                     }
+                    drop(_upload);
 
                     // Decode the next smart material while this one is being rendered.
                     if self.pending_scans.is_none()
@@ -218,6 +239,7 @@ impl ShelfPreviews {
                             .collect();
                         if !missing_next.is_empty() {
                             let pending: HashSet<PathBuf> = missing_next.iter().cloned().collect();
+                            crate::startup_trace::scan_request(presets::SMART_MATERIALS[next].name, &missing_next);
                             if self.scan_tx.send(missing_next).is_ok() {
                                 self.pending_scans = Some(pending);
                             } else {
@@ -234,7 +256,11 @@ impl ShelfPreviews {
                     Item::Material(i) => &mut shelf.materials[i],
                     Item::Generator(i) => &mut shelf.generators[i],
                 };
-                handle.set(image, egui::TextureOptions::LINEAR);
+                {
+                    let _s = crate::startup_trace::span("shelf: TextureHandle::set (UI thread)");
+                    handle.set(image, egui::TextureOptions::LINEAR);
+                }
+                crate::startup_trace::event("thumbnail ready");
 
                 // Keep a scan texture only when a later smart material will reuse it.
                 let future_paths: HashSet<PathBuf> = items
@@ -279,6 +305,12 @@ fn render(
     item: Item,
     scan_images: &HashMap<PathBuf, FillImage>,
 ) -> egui::ColorImage {
+    let trace_start = std::time::Instant::now();
+    let (trace_kind, trace_label) = match item {
+        Item::Smart(i) => ("smart", presets::SMART_MATERIALS[i].name.to_string()),
+        Item::Material(i) => ("material", presets::MATERIALS[i].name.to_string()),
+        Item::Generator(i) => ("generator", GenKind::ALL[i].name().to_string()),
+    };
     let mut undo = UndoStack::default();
     while !engine.layers.is_empty() {
         engine.delete_layer(0, &mut undo);
@@ -302,15 +334,42 @@ fn render(
             engine.add_mask(top, true, Some(GenKind::ALL[i].default_generator()), &mut undo);
         }
     }
+    let t_layers = trace_start.elapsed();
     engine.composite();
+    let t_composite = trace_start.elapsed();
     let cam = OrbitCam { yaw: 0.5, pitch: 0.32, dist: 4.05, target: glam::Vec3::new(0.0, -0.2, 0.0), ..OrbitCam::default() };
     let mut settings = ViewSettings { show_wire: false, background: Background::Transparent, ..ViewSettings::default() };
     settings.post.vignette = 0.0;
     settings.post.bloom = 0.0;
     views.render_3d(rs, [THUMB, THUMB], &[engine], env, mesh, &cam, &settings, None);
+    let t_render = trace_start.elapsed();
     let img = views.view3d.image();
+    // Only when tracing: wait for the queue first so GPU execution of this
+    // thumbnail is timed apart from the copy + map read_texture then does. The
+    // result is the same; read_texture waits for the same work itself.
+    let t_wait_start = trace_start.elapsed();
+    if crate::startup_trace::enabled() {
+        let _ = rs.device.poll(eframe::wgpu::PollType::wait_indefinitely());
+    }
+    let t_wait_end = trace_start.elapsed();
     let rgba = crate::gpu::read_texture(&rs.device, &rs.queue, img);
+    let t_read = trace_start.elapsed();
     // MSAA resolve averages edge samples with the transparent clear, so the
     // silhouette comes out premultiplied.
-    egui::ColorImage::from_rgba_premultiplied([img.width as usize, img.height as usize], &rgba)
+    let image = egui::ColorImage::from_rgba_premultiplied([img.width as usize, img.height as usize], &rgba);
+    if crate::startup_trace::enabled() {
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+        crate::startup_trace::thumb(crate::startup_trace::Thumb {
+            label: trace_label,
+            kind: trace_kind,
+            at: crate::startup_trace::now_ms(),
+            layers: ms(t_layers),
+            composite: ms(t_composite - t_layers),
+            render: ms(t_render - t_composite),
+            gpu_wait: ms(t_wait_end - t_wait_start),
+            copy_map: ms(t_read - t_wait_end),
+            total: ms(trace_start.elapsed()),
+        });
+    }
+    image
 }
