@@ -373,6 +373,8 @@ struct Targets {
     color: Tex,
     resolve: Option<Tex>,
     depth: Option<Tex>,
+    /// Cached depth for screen painting; only front-facing imported normals occlude.
+    paint_depth: Option<Tex>,
     display: Option<Tex>,
 }
 
@@ -380,6 +382,7 @@ pub struct ViewTarget {
     color: Tex,
     resolve: Option<Tex>,
     depth: Option<Tex>,
+    paint_depth: Option<Tex>,
     display: Option<Tex>,
     pub egui_id: egui::TextureId,
     pub size: [u32; 2],
@@ -395,10 +398,14 @@ impl ViewTarget {
                 color: Tex::new_ms(device, "view msaa", w, h, HDR_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT, MSAA),
                 resolve: Some(Tex::new(device, "view hdr", w, h, HDR_FORMAT, display)),
                 depth: Some(Tex::new_ms(device, "view depth", w, h, DEPTH_FORMAT, display, MSAA)),
+                paint_depth: Some(Tex::new_ms(
+                    device, "screen paint depth", w, h, DEPTH_FORMAT,
+                    wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING, MSAA
+                )),
                 display: Some(Tex::new(device, "view", w, h, COLOR_FORMAT, display)),
             }
         } else {
-            Targets { color: Tex::new(device, "view 2d", w, h, COLOR_FORMAT, display), resolve: None, depth: None, display: None }
+            Targets { color: Tex::new(device, "view 2d", w, h, COLOR_FORMAT, display), resolve: None, depth: None, paint_depth: None, display: None }
         }
     }
 
@@ -410,7 +417,7 @@ impl ViewTarget {
         let size = [64, 64];
         let t = Self::create(&rs.device, size, hdr);
         let egui_id = rs.renderer.write().register_native_texture(&rs.device, &Self::shown(&t).view, wgpu::FilterMode::Linear);
-        ViewTarget { color: t.color, resolve: t.resolve, depth: t.depth, display: t.display, egui_id, size }
+        ViewTarget { color: t.color, resolve: t.resolve, depth: t.depth, paint_depth: t.paint_depth, display: t.display, egui_id, size }
     }
 
     fn ensure_size(&mut self, rs: &egui_wgpu::RenderState, size: [u32; 2]) {
@@ -428,6 +435,7 @@ impl ViewTarget {
         self.color = t.color;
         self.resolve = t.resolve;
         self.depth = t.depth;
+        self.paint_depth = t.paint_depth;
         self.display = t.display;
         self.size = size;
     }
@@ -439,6 +447,11 @@ impl ViewTarget {
 
     pub fn depth_view(&self) -> &wgpu::TextureView {
         &self.depth.as_ref().expect("3D view has depth").view
+    }
+
+    /// The MSAA depth buffer used by screen painting (front-facing normals only).
+    pub fn paint_depth_view(&self) -> &wgpu::TextureView {
+        &self.paint_depth.as_ref().expect("3D view has screen paint depth").view
     }
 }
 
@@ -465,6 +478,8 @@ pub struct ViewRenderer {
     env_sampler: wgpu::Sampler,
     sky: wgpu::RenderPipeline,
     mesh: wgpu::RenderPipeline,
+    /// Depth-only pass that lets correctly oriented surfaces occlude screen paint.
+    paint_depth: wgpu::RenderPipeline,
     /// The mesh's see-through texels, blended after the opaque ones.
     mesh_t: wgpu::RenderPipeline,
     quad: wgpu::RenderPipeline,
@@ -481,6 +496,8 @@ pub struct ViewRenderer {
     /// Key-light shadows depend on the mesh, visible texture sets and light transform,
     /// not on the camera or material textures. Reuse the map until one of those changes.
     shadow_key: Option<Vec<u32>>,
+    /// Cached inputs for the normal-aware screen-paint depth pass.
+    paint_depth_key: Option<Vec<u32>>,
     bgl: wgpu::BindGroupLayout,
     /// Per-draw uniforms: the 2D view's, then one per texture set in the 3D
     /// view (each set has its own resolution, bake and custom maps).
@@ -602,6 +619,27 @@ impl ViewRenderer {
         let vb = [Some(gpu::vertex_layout())];
         let sky = pipeline("sky", "vs_fullscreen", "fs_sky", &[], tri, depth(false, wgpu::CompareFunction::Always), MSAA, &hdr);
         let mesh = pipeline("mesh", "vs_mesh", "fs_mesh", &vb, tri, depth(true, wgpu::CompareFunction::Less), MSAA, &hdr);
+        let paint_depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("screen paint depth (front-facing normals)"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_mesh"),
+                compilation_options: Default::default(),
+                buffers: &vb,
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: depth(true, wgpu::CompareFunction::Less),
+            multisample: ms(MSAA),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_paint_depth"),
+                compilation_options: Default::default(),
+                targets: &[],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         let hdr_over = Some(wgpu::ColorTargetState {
             format: HDR_FORMAT,
             blend: Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -693,6 +731,7 @@ impl ViewRenderer {
             env_sampler: env_sampler(device),
             sky,
             mesh,
+            paint_depth,
             mesh_t,
             quad,
             wire,
@@ -706,6 +745,7 @@ impl ViewRenderer {
             shadow_map,
             shadow_sampler,
             shadow_key: None,
+            paint_depth_key: None,
             bgl,
             globals,
             sampler: gpu::linear_sampler(device, wgpu::AddressMode::ClampToEdge),
@@ -873,6 +913,17 @@ impl ViewRenderer {
     /// Invalidates the cached key-light shadow map after replacing the mesh buffers.
     pub fn invalidate_shadow(&mut self) {
         self.shadow_key = None;
+        self.paint_depth_key = None;
+    }
+
+    fn screen_paint_depth_key(vp: Mat4, size: [u32; 2], mesh: &GpuMesh, shown: &[usize]) -> Vec<u32> {
+        let mut key: Vec<u32> = vp.to_cols_array().into_iter().map(f32::to_bits).collect();
+        key.extend([size[0], size[1], mesh.index_count, mesh.sets.len() as u32, shown.len() as u32]);
+        for &set in shown {
+            let range = mesh.sets[set].index_range();
+            key.extend([set as u32, range.start, range.end]);
+        }
+        key
     }
 
     /// Stable key for the shadow map. The light view-projection includes its
@@ -918,6 +969,37 @@ impl ViewRenderer {
 
         let t = &self.view3d;
         let mut encoder = rs.device.create_command_encoder(&Default::default());
+
+        // This buffer is separate from viewport depth: a surface whose imported
+        // normal points away from the camera must not block screen painting.
+        // Camera, mesh and visibility changes invalidate it; material edits do not.
+        let paint_depth_key = Self::screen_paint_depth_key(vp, size, mesh, &shown);
+        if self.paint_depth_key.as_ref() != Some(&paint_depth_key) {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("screen paint depth"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: t.paint_depth_view(),
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.paint_depth);
+            pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+            pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+            for &k in &shown {
+                if let Some(bg) = bgs.get(k) {
+                    pass.set_bind_group(0, bg, &[]);
+                    pass.draw_indexed(mesh.sets[k].index_range(), 0, 0..1);
+                }
+            }
+            drop(pass);
+            self.paint_depth_key = Some(paint_depth_key);
+        }
+
         if settings.key.on {
             let shadow_key = Self::shadow_cache_key(engines[0], mesh, &shown, settings);
             if self.shadow_key.as_ref() != Some(&shadow_key) {
