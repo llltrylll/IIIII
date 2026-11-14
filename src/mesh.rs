@@ -239,6 +239,7 @@ impl Mesh {
             objects: Vec::new(),
             object_ufbx_generated_normals: Vec::new(),
             object_reversed_winding: Vec::new(),
+            object_negative_transform_determinant: Vec::new(),
             object_fallback_normals_generated: Vec::new(),
             tri_color: None,
             tri_vertex_color: None,
