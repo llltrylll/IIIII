@@ -282,11 +282,18 @@ impl PainterApp {
                 // Path tracing replaces the 3D view while it's idle. Painting and
                 // the map display modes use the raster view, which reacts instantly.
                 if self.rt.enabled && self.stroke.is_none() && self.view.mode == ViewMode::Material && self.preview_update_at.is_none() {
+                    if self.raytracer.is_none() {
+                        let _s = crate::startup_trace::span("raytraced preview: lazy RayTracer::new + set_mesh");
+                        let mut raytracer = RayTracer::new(&self.rs);
+                        raytracer.set_mesh(&self.rs.device, &self.mesh, &self.bvh);
+                        self.raytracer = Some(raytracer);
+                    }
                     let engines = texture_sets::engines(&self.engine, &self.sets, self.mesh.sets.len());
-                    if self.raytracer.render(&self.rs, size, &engines, &self.env, &self.cam, &self.view, &self.rt) {
+                    let raytracer = self.raytracer.as_mut().expect("ray tracer was initialized above");
+                    if raytracer.render(&self.rs, size, &engines, &self.env, &self.cam, &self.view, &self.rt) {
                         ui.ctx().request_repaint();
                     }
-                    rt_view = self.raytracer.egui_id;
+                    rt_view = raytracer.egui_id;
                 }
             }
             ViewKind::V2d => {
@@ -322,8 +329,9 @@ impl PainterApp {
         }
         let label = match kind {
             ViewKind::V3d if rt_view.is_some() => {
-                let state = if self.raytracer.converged(&self.rt) { "done" } else { "refining" };
-                format!("Ray traced · {}/{} spp ({state})", self.raytracer.samples, self.rt.max_samples)
+                let raytracer = self.raytracer.as_ref().expect("ray-traced view requires an initialized tracer");
+                let state = if raytracer.converged(&self.rt) { "done" } else { "refining" };
+                format!("Ray traced · {}/{} spp ({state})", raytracer.samples, self.rt.max_samples)
             }
             ViewKind::V3d => self.mode_name(self.view.mode),
             ViewKind::V2d => self.mode_name(self.view.uv_mode),
