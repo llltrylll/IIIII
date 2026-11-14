@@ -1896,7 +1896,7 @@ fn mask_stroke_redoes_only_the_mask_thumbnail() {
 #[test]
 #[ignore]
 fn raster_view_is_stable_with_inverted_shading_normals() {
-    use crate::viewport::{OrbitCam, NEAR, FAR};
+    use crate::viewport::OrbitCam;
     use glam::Vec2;
 
     let rs = render_state();
