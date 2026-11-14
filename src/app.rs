@@ -1125,7 +1125,7 @@ fn mark_candidate_triangle_uv(
 /// UV bounds are rasterized into a coarse grid and compressed into disjoint
 /// rectangles, preserving coverage while avoiding one large bbox across islands.
 /// Screen stamps include all depths; the shader's depth test remains authoritative.
-pub(crate) fn stroke_region(
+fn stroke_region_impl(
     mesh: &Mesh,
     bvh: &Bvh,
     triangle_indices: std::ops::Range<u32>,
@@ -1135,6 +1135,7 @@ pub(crate) fn stroke_region(
     symmetry: u8,
     radius: f32,
     stamps: &[Stamp],
+    mut candidate_indices: Option<&mut Vec<u32>>,
 ) -> Option<Vec<[f32; 4]>> {
     // Keep region calculation aligned with the GPU's actual stamp limit.
     let stamps = &stamps[..stamps.len().min(MAX_STAMPS)];
@@ -1166,7 +1167,17 @@ pub(crate) fn stroke_region(
             let spheres = &spheres[..sphere_count];
             bvh.query(
                 |lo, hi| spheres.iter().any(|&(c, r)| c.clamp(lo, hi).distance_squared(c) <= r * r),
-                |t| needs_full_region |= !mark_candidate_triangle_uv(&mut tiles, mesh, &triangle_indices, t),
+                |t| {
+                    let first_index = t * 3;
+                    if let Some(indices) = candidate_indices.as_deref_mut()
+                        && first_index >= triangle_indices.start
+                        && first_index + 3 <= triangle_indices.end
+                    {
+                        let first = first_index as usize;
+                        indices.extend_from_slice(&mesh.indices[first..first + 3]);
+                    }
+                    needs_full_region |= !mark_candidate_triangle_uv(&mut tiles, mesh, &triangle_indices, t);
+                },
             );
         }
         _ => {
@@ -1234,6 +1245,49 @@ pub(crate) fn stroke_region(
     } else {
         Some(uv_tile_rectangles_or_empty(&tiles))
     }
+}
+
+/// Conservative paint bounds plus only the mesh index entries whose triangles
+/// can intersect the screen-space stamps. The compact index list lets the GPU
+/// skip unrelated mesh triangles during every brush step.
+pub(crate) fn screen_stroke_plan(
+    mesh: &Mesh,
+    bvh: &Bvh,
+    triangle_indices: std::ops::Range<u32>,
+    cam: &OrbitCam,
+    size: Vec2,
+    symmetry: u8,
+    radius: f32,
+    stamps: &[Stamp],
+) -> (Option<Vec<[f32; 4]>>, Vec<u32>) {
+    let mut indices = Vec::new();
+    let regions = stroke_region_impl(
+        mesh,
+        bvh,
+        triangle_indices,
+        cam,
+        size,
+        BrushProjection::Screen,
+        symmetry,
+        radius,
+        stamps,
+        Some(&mut indices),
+    );
+    (regions, indices)
+}
+
+pub(crate) fn stroke_region(
+    mesh: &Mesh,
+    bvh: &Bvh,
+    triangle_indices: std::ops::Range<u32>,
+    cam: &OrbitCam,
+    size: Vec2,
+    projection: BrushProjection,
+    symmetry: u8,
+    radius: f32,
+    stamps: &[Stamp],
+) -> Option<Vec<[f32; 4]>> {
+    stroke_region_impl(mesh, bvh, triangle_indices, cam, size, projection, symmetry, radius, stamps, None)
 }
 
 /// The third-party license notices shipped next to the executable (or in
