@@ -224,13 +224,35 @@ fn fs_stamp_pad(in: FsOut) -> @location(0) vec4<f32> {
     return stamp_fullscreen(in, true);
 }
 
+// Orient a geometric face normal toward the camera. This is deliberately
+// independent of the imported shading normal: screen visibility is already
+// decided by the viewport depth buffer, and malformed vertex normals must not
+// make a visible face unpaintable.
+fn screen_face_normal(p: vec3<f32>, shading_normal: vec3<f32>, geometric_normal: vec3<f32>) -> vec3<f32> {
+    var n = shading_normal;
+    if (dot(geometric_normal, geometric_normal) > 1e-16) {
+        n = normalize(geometric_normal);
+    } else {
+        n = normalize(n);
+    }
+    if (dot(n, u.cam_pos.xyz - p) < 0.0) {
+        n = -n;
+    }
+    return n;
+}
+
 // Screen projection evaluates every triangle at its own UV coordinates. The
 // viewport depth test selects the visible world-space surface, rather than
 // depending on whichever overlapping face won the UV bake.
 @fragment
 fn fs_stamp_uv(in: StampUvOut) -> @location(0) vec4<f32> {
+    let dpdx_world = dpdx(in.world_pos);
+    let dpdy_world = dpdy(in.world_pos);
+    let geometric_normal = cross(dpdx_world, dpdy_world);
+    let n = screen_face_normal(in.world_pos, in.normal, geometric_normal);
+
     var a = 0.0;
-    let s = project(in.world_pos, normalize(in.normal));
+    let s = project(in.world_pos, n);
     if (s.z > 0.0) {
         a = coverage_screen(s.xy) * s.z;
     }
@@ -238,7 +260,9 @@ fn fs_stamp_uv(in: StampUvOut) -> @location(0) vec4<f32> {
     let axis = i32(u.brush.w);
     if (axis > 0) {
         let flip = select(vec3<f32>(1.0), vec3<f32>(-1.0), vec3<i32>(1, 2, 3) == vec3<i32>(axis));
-        let mirrored = project(in.world_pos * flip, normalize(in.normal) * flip);
+        let mirrored_pos = in.world_pos * flip;
+        let mirrored_normal = screen_face_normal(mirrored_pos, n * flip, geometric_normal * flip);
+        let mirrored = project(mirrored_pos, mirrored_normal);
         if (mirrored.z > 0.0) {
             a = max(a, coverage_screen(mirrored.xy) * mirrored.z);
         }
