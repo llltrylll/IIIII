@@ -56,6 +56,9 @@ jobs:
       - name: GPU parity - close stacked UV occlusion
         run: "cargo test --locked --bin material_painter preview_test::screen_projection_rejects_close_occluded_uv_surface -- --ignored --exact --nocapture --test-threads 1"
 
+      - name: GPU parity - raster face-forward shading normals
+        run: "cargo test --locked --bin material_painter preview_test::raster_view_is_stable_with_inverted_shading_normals -- --ignored --exact --nocapture --test-threads 1"
+
       - name: GPU parity - inverted normals and winding
         run: "cargo test --locked --bin material_painter preview_test::screen_projection_uses_geometric_face_normals -- --ignored --exact --nocapture --test-threads 1"
 
