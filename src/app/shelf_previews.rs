@@ -58,53 +58,62 @@ pub(super) struct ShelfPreviews {
 
 impl ShelfPreviews {
     pub fn start(rs: &egui_wgpu::RenderState, ctx: &egui::Context, env_baker: &EnvBaker) -> ShelfPreviews {
-        let mesh = Primitive::MaterialBall.build();
-        let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+        let mesh = { let _s = crate::startup_trace::span("shelf: MaterialBall.build"); Primitive::MaterialBall.build() };
+        let gpu_mesh = { let _s = crate::startup_trace::span("shelf: GpuMesh::new"); GpuMesh::new(&rs.device, &mesh) };
         let bounds = (mesh.bounds_min, mesh.bounds_max);
         let (tx, rx) = mpsc::channel();
         let bake_ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let settings = BakeSettings { quality: Quality::Draft, ..Default::default() };
-            let prepared = {
-                let _s = crate::startup_trace::span("shelf: CPU bake::prepare (worker)");
-                bake::prepare(&mesh, &settings, 0)
-            };
-            let _ = tx.send(prepared);
-            bake_ctx.request_repaint();
-        });
+        {
+            let _s = crate::startup_trace::span("shelf: spawn bake preparation worker");
+            std::thread::spawn(move || {
+                let settings = BakeSettings { quality: Quality::Draft, ..Default::default() };
+                let prepared = {
+                    let _s = crate::startup_trace::span("shelf: CPU bake::prepare (worker)");
+                    bake::prepare(&mesh, &settings, 0)
+                };
+                let _ = tx.send(prepared);
+                bake_ctx.request_repaint();
+            });
+        }
 
         let (scan_request_tx, scan_request_rx) = mpsc::channel::<Vec<PathBuf>>();
         let (scan_result_tx, scan_result_rx) = mpsc::channel::<HashMap<PathBuf, Result<PreparedFillImage, String>>>();
         let scan_ctx = ctx.clone();
-        std::thread::Builder::new()
-            .name("shelf-scan-decode".into())
-            .spawn(move || {
-                while let Ok(paths) = scan_request_rx.recv() {
-                    let _batch = crate::startup_trace::span_d("scan: worker batch (read+decode+mips, all files)", crate::startup_trace::scan_label(&paths));
-                    let mut decoded = HashMap::with_capacity(paths.len());
-                    for path in paths {
-                        let result = if path.is_file() {
-                            Engine::prepare_fill_image_file(&path)
-                        } else {
-                            Err(format!("scan image is missing: {}", path.display()))
-                        };
-                        decoded.insert(path, result);
+        {
+            let _s = crate::startup_trace::span("shelf: spawn scan decoder worker");
+            std::thread::Builder::new()
+                .name("shelf-scan-decode".into())
+                .spawn(move || {
+                    while let Ok(paths) = scan_request_rx.recv() {
+                        let _batch = crate::startup_trace::span_d("scan: worker batch (read+decode+mips, all files)", crate::startup_trace::scan_label(&paths));
+                        let mut decoded = HashMap::with_capacity(paths.len());
+                        for path in paths {
+                            let result = if path.is_file() {
+                                Engine::prepare_fill_image_file(&path)
+                            } else {
+                                Err(format!("scan image is missing: {}", path.display()))
+                            };
+                            decoded.insert(path, result);
+                        }
+                        if scan_result_tx.send(decoded).is_err() {
+                            break;
+                        }
+                        scan_ctx.request_repaint();
                     }
-                    if scan_result_tx.send(decoded).is_err() {
-                        break;
-                    }
-                    scan_ctx.request_repaint();
-                }
-            })
-            .expect("could not start shelf scan decoder");
+                })
+                .expect("could not start shelf scan decoder");
+        }
 
         ShelfPreviews {
             mesh: gpu_mesh,
             bounds,
-            baker: GpuBaker::new(&rs.device),
+            baker: { let _s = crate::startup_trace::span("shelf: GpuBaker::new"); GpuBaker::new(&rs.device) },
             engine: None,
-            views: ViewRenderer::new(rs),
-            env: env_baker.upload(rs, &environment::decode(&EnvSource::Builtin(0)).expect("the procedural studio always decodes")),
+            views: { let _s = crate::startup_trace::span("shelf: ViewRenderer::new"); ViewRenderer::new(rs) },
+            env: {
+                let _s = crate::startup_trace::span("shelf: environment decode+upload");
+                env_baker.upload(rs, &environment::decode(&EnvSource::Builtin(0)).expect("the procedural studio always decodes"))
+            },
             scan_tx: scan_request_tx,
             scan_rx: scan_result_rx,
             pending_scans: None,
