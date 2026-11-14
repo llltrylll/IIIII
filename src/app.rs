@@ -1227,17 +1227,7 @@ fn stroke_region_impl(
             let spheres = &spheres[..sphere_count];
             bvh.query(
                 |lo, hi| spheres.iter().any(|&(c, r)| c.clamp(lo, hi).distance_squared(c) <= r * r),
-                |t| {
-                    let first_index = t * 3;
-                    if let Some(indices) = candidate_indices.as_deref_mut()
-                        && first_index >= triangle_indices.start
-                        && first_index + 3 <= triangle_indices.end
-                    {
-                        let first = first_index as usize;
-                        indices.extend_from_slice(&mesh.indices[first..first + 3]);
-                    }
-                    needs_full_region |= !mark_candidate_triangle_uv(&mut tiles, mesh, &triangle_indices, t);
-                },
+                |t| needs_full_region |= !mark_candidate_triangle_uv(&mut tiles, mesh, &triangle_indices, t),
             );
         }
         _ => {
@@ -1296,7 +1286,17 @@ fn stroke_region_impl(
                             on_screen(m.min(n), m.max(n))
                         })
                 },
-                |t| needs_full_region |= !mark_candidate_triangle_uv(&mut tiles, mesh, &triangle_indices, t),
+                |t| {
+                    let first_index = t * 3;
+                    if let Some(indices) = candidate_indices.as_deref_mut()
+                        && first_index >= triangle_indices.start
+                        && first_index + 3 <= triangle_indices.end
+                    {
+                        let first = first_index as usize;
+                        indices.extend_from_slice(&mesh.indices[first..first + 3]);
+                    }
+                    needs_full_region |= !mark_candidate_triangle_uv(&mut tiles, mesh, &triangle_indices, t);
+                },
             );
         }
     }
