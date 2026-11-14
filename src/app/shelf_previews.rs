@@ -123,7 +123,15 @@ impl ShelfPreviews {
 
     /// Advances the bake or renders the next thumbnail. Returns false once
     /// every thumbnail is in place (or the bake failed) and this can be dropped.
-    pub fn pump(&mut self, rs: &egui_wgpu::RenderState, ctx: &egui::Context, shelf: &mut Shelf, env_baker: &EnvBaker, mesh: &GpuMesh) -> bool {
+    pub fn pump(
+        &mut self,
+        rs: &egui_wgpu::RenderState,
+        ctx: &egui::Context,
+        shelf: &mut Shelf,
+        env_baker: &EnvBaker,
+        mesh: &GpuMesh,
+        engine_template: &Engine,
+    ) -> bool {
         // Let eframe submit one complete editor frame before constructing the
         // secondary GPU renderer used only for shelf thumbnails.
         if !self.gpu_init_warmup_pending {
@@ -200,8 +208,8 @@ impl ShelfPreviews {
                     .pump(run, &rs.device, &rs.queue, ctx) {
                     let report = run.report.clone();
                     crate::startup_trace::event("shelf: GPU bake done");
-                    let _s = crate::startup_trace::span("shelf: Engine::new (UI thread)");
-                    let mut engine = Engine::new(rs, mesh, self.bounds, RES);
+                    let _s = crate::startup_trace::span("shelf: Engine::sibling_with_bounds (shared pipelines)");
+                    let mut engine = engine_template.sibling_with_bounds(mesh, 0..mesh.index_count, self.bounds, RES);
                     engine.set_maps(maps, report);
                     self.engine = Some(engine);
                     drop(_s);
