@@ -229,7 +229,9 @@ impl PainterApp {
         } else {
             Bvh::from_mesh_where(&mesh, |t| shown.iter().any(|r| r.contains(&(t as u32))))
         });
-        self.raytracer.set_mesh(&self.rs.device, &mesh, &self.bvh);
+        if let Some(raytracer) = self.raytracer.as_mut() {
+            raytracer.set_mesh(&self.rs.device, &mesh, &self.bvh);
+        }
         self.poly.shown = None;
         self.status = format!("{} {}.", if hidden { "Hid" } else { "Showed" }, mesh.sets[k].name);
     }
