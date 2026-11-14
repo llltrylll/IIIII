@@ -2650,6 +2650,7 @@ impl PainterApp {
         let mut uv_positive_triangles = 0u32;
         let mut uv_negative_triangles = 0u32;
         let mut geometry_degenerate_triangles = 0u32;
+        let mut zero_vertex_normal_corners = 0u32;
         let mut normals_aligned = 0u32;
         let mut normals_opposed = 0u32;
         let mut normals_mixed = 0u32;
@@ -2688,15 +2689,22 @@ impl PainterApp {
                 geometry_degenerate_triangles += 1;
             }
             let face_n = face.normalize_or_zero();
-            let normal_alignment = v.iter()
-                .map(|vertex| Vec3::from_array(vertex.normal).normalize_or_zero().dot(face_n))
-                .sum::<f32>() / 3.0;
-            if normal_alignment < -0.25 {
-                normals_opposed += 1;
-            } else if normal_alignment > 0.25 {
-                normals_aligned += 1;
-            } else {
+            let alignments = v.map(|vertex| {
+                let normal = Vec3::from_array(vertex.normal);
+                if normal.length_squared() <= 1.0e-12 {
+                    zero_vertex_normal_corners += 1;
+                }
+                normal.normalize_or_zero().dot(face_n)
+            });
+            let normal_alignment = alignments.iter().sum::<f32>() / 3.0;
+            let mixed_or_opposed = alignments.iter().any(|&n| n < -0.25)
+                && alignments.iter().any(|&n| n > 0.25);
+            if mixed_or_opposed || normal_alignment.abs() <= 0.25 {
                 normals_mixed += 1;
+            } else if normal_alignment < -0.25 {
+                normals_opposed += 1;
+            } else {
+                normals_aligned += 1;
             }
 
             // Exact UV triangle identity (quantized to 1e-6), independent of vertex order.
@@ -2727,6 +2735,7 @@ impl PainterApp {
              uv_positive_winding_triangles: {}\n\
              uv_negative_winding_triangles: {}\n\
              geometric_degenerate_triangles: {}\n\
+             zero_vertex_normal_corners: {}\n\
              triangle_normals_aligned_with_vertex_normals: {}\n\
              triangle_normals_opposed_to_vertex_normals: {}\n\
              triangle_normals_mixed_or_uncertain: {}\n\
@@ -2748,6 +2757,7 @@ impl PainterApp {
             uv_positive_triangles,
             uv_negative_triangles,
             geometry_degenerate_triangles,
+            zero_vertex_normal_corners,
             normals_aligned,
             normals_opposed,
             normals_mixed,
