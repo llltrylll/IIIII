@@ -355,7 +355,11 @@ impl Builder {
         }
         self.corners += 1;
         let object = self.objects.len().saturating_sub(1) as u32;
-        if c.normal.is_none()
+        let imported_normal = c.normal.unwrap_or(Vec3::ZERO);
+        let has_normal = c.normal.is_some_and(|normal| {
+            normal.is_finite() && normal.length_squared() > 1.0e-12
+        });
+        if !has_normal
             && let Some(missing) = self.object_missing_normals.get_mut(object as usize)
         {
             *missing = true;
@@ -377,8 +381,7 @@ impl Builder {
             self.color_corners = [[0; 3]; 3];
             self.color_acc = Vec3::ZERO;
         }
-        let has_normal = c.normal.is_some();
-        let n = c.normal.unwrap_or(Vec3::ZERO);
+        let n = if has_normal { imported_normal } else { Vec3::ZERO };
         let uv = c.uv.unwrap_or(Vec2::ZERO);
         // Objects never share vertices, even where they touch exactly.
         let key = [c.pos.x, c.pos.y, c.pos.z, n.x, n.y, n.z, uv.x, uv.y].map(f32::to_bits);
@@ -748,6 +751,38 @@ mod tests {
         assert!(raw.uvs.is_none(), "the whole object must not be treated as UV-complete");
         assert!(raw.missing_uvs.iter().any(|name| name == "incomplete_uvs"),
             "the object with the missing per-corner UV must be identified: {:?}", raw.missing_uvs);
+    }
+
+    #[test]
+    fn zero_authored_normals_trigger_object_local_fallback() {
+        let mut builder = super::Builder::default();
+        builder.begin_object("zero normals");
+        let positions = [
+            glam::Vec3::new(0.0, 0.0, 0.0),
+            glam::Vec3::new(1.0, 0.0, 0.0),
+            glam::Vec3::new(0.0, 1.0, 0.0),
+        ];
+        let uvs = [
+            glam::Vec2::new(0.0, 0.0),
+            glam::Vec2::new(1.0, 0.0),
+            glam::Vec2::new(0.0, 1.0),
+        ];
+        for i in 0..3 {
+            builder.push_corner(super::Corner {
+                pos: positions[i],
+                normal: Some(glam::Vec3::ZERO),
+                uv: Some(uvs[i]),
+                color: None,
+                source_vertex: i as u32,
+            });
+        }
+        builder.push_materials(1, 0);
+
+        let raw = builder.finish();
+        assert_eq!(raw.object_fallback_normals_generated.as_slice(), &[true]);
+        let normals = raw.normals.expect("zero authored normals should be replaced");
+        assert!(normals.iter().all(|n| n.distance(glam::Vec3::Z) < 1e-5),
+            "degenerate authored normals should fall back to the geometric +Z normal: {normals:?}");
     }
 
     #[test]
