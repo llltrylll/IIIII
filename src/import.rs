@@ -514,6 +514,49 @@ mod tests {
     }
 
     #[test]
+    fn obj_position_indices_preserve_coincident_shells_with_missing_normals() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "material-painter-coincident-shells-{}-{id}.obj",
+            std::process::id()
+        ));
+        let obj = concat!(
+            "o two_coincident_shells\n",
+            "v -1 -1 0\n",
+            "v 1 -1 0\n",
+            "v -1 1 0\n",
+            "v -1 -1 0\n",
+            "v 1 -1 0\n",
+            "v -1 1 0\n",
+            "vt 0 0\n",
+            "vt 1 0\n",
+            "vt 0 1\n",
+            "vt 0 0\n",
+            "vt 1 0\n",
+            "vt 0 1\n",
+            "f 1/1 2/2 3/3\n",
+            "f 4/4 6/6 5/5\n",
+        );
+        std::fs::write(&path, obj).expect("write temporary OBJ fixture");
+        let loaded = super::load_obj(&path);
+        let _ = std::fs::remove_file(&path);
+        let raw = loaded.expect("load OBJ with separate position/UV indices");
+        let normals = raw.normals.expect("fallback normals should be generated");
+
+        assert_eq!(raw.positions.len(), 6, "distinct OBJ position indices must remain distinct even at equal coordinates");
+        assert_eq!(raw.uvs.as_ref().map(Vec::len), Some(6));
+        for (i, normal) in normals[..3].iter().enumerate() {
+            assert!(normal.distance(glam::Vec3::Z) < 1e-5, "first shell normal {i} should be +Z, got {normal:?}");
+        }
+        for (i, normal) in normals[3..].iter().enumerate() {
+            assert!(normal.distance(-glam::Vec3::Z) < 1e-5, "second shell normal {i} should be -Z, got {normal:?}");
+        }
+    }
+
+    #[test]
     fn coincident_shells_inside_one_object_keep_independent_fallback_normals() {
         let mut builder = super::Builder::default();
         let positions = [
