@@ -6,7 +6,7 @@ use crate::bake_cache;
 use crate::bvh::Bvh;
 use crate::cage::{CageProbe, CageStats, ProbeKey};
 use crate::environment::{self, EnvBaker, EnvImage, EnvSource, Environment};
-use crate::engine::{Drop, Folder, Layer, Projection};
+use crate::engine::{Drop, FillImage, Folder, Layer, Projection};
 use crate::engine::{
     Blend, BrushPaint, Content, Engine, FillParams, GEN_INPUTS, GenKind, Levels, MAPS, MapKind, MatValues, Stamp,
     StampUniform, MAX_STAMPS,
@@ -643,6 +643,8 @@ pub struct PainterApp {
     baker: GpuBaker,
     show_bake: bool,
     shelf: Shelf,
+    /// CPU-only material and generator previews arrive from a worker.
+    cpu_preview_rx: Option<mpsc::Receiver<CpuShelfPreview>>,
     /// Renders the shelf thumbnails on a baked material ball; gone once done.
     shelf_previews: Option<shelf_previews::ShelfPreviews>,
     export: ExportDialog,
@@ -719,8 +721,122 @@ const RESOLUTIONS: [u32; 4] = [512, 1024, 2048, 4096];
 pub(crate) const REPO_URL: &str = "https://github.com/alla2001/material-painter";
 /// `selected` when no layer is selected.
 const NO_LAYER: usize = usize::MAX;
+/// Which CPU-generated shelf preview a worker result updates.
+enum CpuShelfPreviewTarget {
+    Smart(usize),
+    Material(usize),
+    Generator(usize),
+}
+
+struct CpuShelfPreview {
+    target: CpuShelfPreviewTarget,
+    image: egui::ColorImage,
+}
+
+/// CPU-only previews are generated away from PainterApp::new. The egui
+/// texture handles are created and updated only on the UI thread.
+fn start_cpu_shelf_previews(ctx: &egui::Context) -> mpsc::Receiver<CpuShelfPreview> {
+    let (tx, rx) = mpsc::channel();
+    let ctx = ctx.clone();
+    std::thread::Builder::new()
+        .name("shelf-cpu-previews".into())
+        .spawn(move || {
+            for (i, material) in presets::MATERIALS.iter().enumerate() {
+                let image = presets::render_preview(&[PreviewLayer {
+                    fill: material.fill(),
+                    opacity: 1.0,
+                    generator: None,
+                }]);
+                if tx.send(CpuShelfPreview { target: CpuShelfPreviewTarget::Material(i), image }).is_err() {
+                    return;
+                }
+                ctx.request_repaint();
+            }
+            for (i, smart) in presets::SMART_MATERIALS.iter().enumerate() {
+                let layers: Vec<PreviewLayer> = smart
+                    .layers
+                    .iter()
+                    .map(|layer| PreviewLayer { fill: layer.fill(), opacity: layer.opacity, generator: layer.generator() })
+                    .collect();
+                let image = presets::render_preview(&layers);
+                if tx.send(CpuShelfPreview { target: CpuShelfPreviewTarget::Smart(i), image }).is_err() {
+                    return;
+                }
+                ctx.request_repaint();
+            }
+            for (i, generator) in GenKind::ALL.iter().enumerate() {
+                let image = presets::render_generator_preview(*generator);
+                if tx.send(CpuShelfPreview { target: CpuShelfPreviewTarget::Generator(i), image }).is_err() {
+                    return;
+                }
+                ctx.request_repaint();
+            }
+        })
+        .expect("could not start CPU shelf preview worker");
+    rx
+}
+
+#[cfg(test)]
+mod cpu_shelf_preview_tests {
+    use super::*;
+
+    fn assert_same_pixels(actual: &egui::ColorImage, expected: &egui::ColorImage, label: &str) {
+        assert_eq!(actual.size, expected.size, "{label}: dimensions");
+        assert_eq!(actual.pixels, expected.pixels, "{label}: pixel bytes");
+    }
+
+    #[test]
+    fn background_cpu_previews_match_the_synchronous_reference() {
+        let ctx = egui::Context::default();
+        let updates: Vec<CpuShelfPreview> = start_cpu_shelf_previews(&ctx).into_iter().collect();
+        assert_eq!(
+            updates.len(),
+            presets::MATERIALS.len() + presets::SMART_MATERIALS.len() + GenKind::ALL.len(),
+            "worker must return every shelf preview"
+        );
+
+        let mut materials = std::collections::HashSet::new();
+        let mut smart_materials = std::collections::HashSet::new();
+        let mut generators = std::collections::HashSet::new();
+
+        for update in updates {
+            match update.target {
+                CpuShelfPreviewTarget::Material(i) => {
+                    assert!(materials.insert(i), "duplicate material preview {i}");
+                    let material = &presets::MATERIALS[i];
+                    let expected = presets::render_preview(&[PreviewLayer {
+                        fill: material.fill(),
+                        opacity: 1.0,
+                        generator: None,
+                    }]);
+                    assert_same_pixels(&update.image, &expected, material.name);
+                }
+                CpuShelfPreviewTarget::Smart(i) => {
+                    assert!(smart_materials.insert(i), "duplicate smart material preview {i}");
+                    let smart = &presets::SMART_MATERIALS[i];
+                    let layers: Vec<PreviewLayer> = smart
+                        .layers
+                        .iter()
+                        .map(|layer| PreviewLayer { fill: layer.fill(), opacity: layer.opacity, generator: layer.generator() })
+                        .collect();
+                    let expected = presets::render_preview(&layers);
+                    assert_same_pixels(&update.image, &expected, smart.name);
+                }
+                CpuShelfPreviewTarget::Generator(i) => {
+                    assert!(generators.insert(i), "duplicate generator preview {i}");
+                    let expected = presets::render_generator_preview(GenKind::ALL[i]);
+                    assert_same_pixels(&update.image, &expected, GenKind::ALL[i].name());
+                }
+            }
+        }
+
+        assert_eq!(materials.len(), presets::MATERIALS.len());
+        assert_eq!(smart_materials.len(), presets::SMART_MATERIALS.len());
+        assert_eq!(generators.len(), GenKind::ALL.len());
+    }
+}
+
 /// Wait until material controls have been idle before rebuilding the preview.
-/// Wait after the last settings change (and while a slider is held) before the preview is rebuilt.
 const MATERIAL_PREVIEW_DELAY: Duration = Duration::from_millis(650);
 
 fn srgb_u8(c: [f32; 3]) -> Color32 {
@@ -1397,6 +1513,31 @@ pub(crate) fn add_smart_material(
     at: usize,
     parent: Option<u64>,
 ) -> usize {
+    add_smart_material_inner(engine, undo, smart, at, parent, None)
+}
+
+/// Adds a smart material using a caller-owned scan image cache. This is used
+/// by shelf previews so deleting one thumbnail's layers does not expire the
+/// GPU textures needed by the next thumbnail.
+pub(crate) fn add_smart_material_with_images(
+    engine: &mut Engine,
+    undo: &mut UndoStack,
+    smart: &presets::SmartMaterial,
+    at: usize,
+    parent: Option<u64>,
+    images: &std::collections::HashMap<std::path::PathBuf, FillImage>,
+) -> usize {
+    add_smart_material_inner(engine, undo, smart, at, parent, Some(images))
+}
+
+fn add_smart_material_inner(
+    engine: &mut Engine,
+    undo: &mut UndoStack,
+    smart: &presets::SmartMaterial,
+    at: usize,
+    parent: Option<u64>,
+    cached_images: Option<&std::collections::HashMap<std::path::PathBuf, FillImage>>,
+) -> usize {
     undo.begin_group(format!("Add {}", smart.name));
     let mut folder = engine.add_folder(at, parent, smart.name.to_string(), undo);
     let folder_id = engine.layers[folder].id;
@@ -1410,7 +1551,11 @@ pub(crate) fn add_smart_material(
             if let Some(dir) = crate::environment::asset_dir("pbr").map(|d| d.join(scan.id)) {
                 for (ch, file) in presets::Scan::FILES {
                     let path = dir.join(file);
-                    if path.is_file()
+                    if let Some(images) = cached_images {
+                        if let Some(img) = images.get(&path) {
+                            engine.set_fill_image(idx, ch, Some(img.clone()), undo);
+                        }
+                    } else if path.is_file()
                         && let Ok(img) = engine.shared_fill_image(&path)
                     {
                         engine.set_fill_image(idx, ch, Some(img), undo);
@@ -1701,22 +1846,11 @@ impl PainterApp {
 
         let ctx = &cc.egui_ctx;
         let load = |name: &str, img: egui::ColorImage| ctx.load_texture(name, img, egui::TextureOptions::LINEAR);
-        let materials = presets::MATERIALS
-            .iter()
-            .map(|m| load(m.name, presets::render_preview(&[PreviewLayer { fill: m.fill(), opacity: 1.0, generator: None }])))
-            .collect();
-        let smart = presets::SMART_MATERIALS
-            .iter()
-            .map(|s| {
-                let layers: Vec<PreviewLayer> = s
-                    .layers
-                    .iter()
-                    .map(|l| PreviewLayer { fill: l.fill(), opacity: l.opacity, generator: l.generator() })
-                    .collect();
-                load(s.name, presets::render_preview(&layers))
-            })
-            .collect();
-        let generators = GenKind::ALL.iter().map(|g| load(g.name(), presets::render_generator_preview(*g))).collect();
+        let cpu_preview_rx = start_cpu_shelf_previews(ctx);
+        let placeholder = || egui::ColorImage::new([72, 72], vec![Color32::from_gray(28); 72 * 72]);
+        let materials = presets::MATERIALS.iter().map(|m| load(m.name, placeholder())).collect();
+        let smart = presets::SMART_MATERIALS.iter().map(|s| load(s.name, placeholder())).collect();
+        let generators = GenKind::ALL.iter().map(|g| load(g.name(), placeholder())).collect();
         // Brush tips show as white shapes; textures as their grayscale tile.
         const THUMB: u32 = 96;
         let brushes = crate::brushes::BRUSH_ALPHAS
@@ -1778,6 +1912,7 @@ impl PainterApp {
             baker,
             show_bake: false,
             shelf: Shelf { cat: ShelfCat::SmartMaterials, search: String::new(), kind: None, icon_size: 72.0, smart, materials, generators, brushes, textures },
+            cpu_preview_rx: Some(cpu_preview_rx),
             shelf_previews: Some(shelf_previews),
             export: ExportDialog::new("MaterialBall".into()),
             prefs_applied: prefs.clone(),
@@ -4199,6 +4334,34 @@ impl PainterApp {
 
 }
 
+impl PainterApp {
+    fn poll_cpu_shelf_previews(&mut self, ctx: &egui::Context) {
+        let Some(rx) = self.cpu_preview_rx.as_ref() else { return };
+        let mut finished = false;
+        loop {
+            match rx.try_recv() {
+                Ok(update) => {
+                    let handle = match update.target {
+                        CpuShelfPreviewTarget::Smart(i) => &mut self.shelf.smart[i],
+                        CpuShelfPreviewTarget::Material(i) => &mut self.shelf.materials[i],
+                        CpuShelfPreviewTarget::Generator(i) => &mut self.shelf.generators[i],
+                    };
+                    handle.set(update.image, egui::TextureOptions::LINEAR);
+                    ctx.request_repaint();
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    finished = true;
+                    break;
+                }
+            }
+        }
+        if finished {
+            self.cpu_preview_rx = None;
+        }
+    }
+}
+
 impl eframe::App for PainterApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let start = Instant::now();
@@ -4212,6 +4375,7 @@ impl eframe::App for PainterApp {
         self.poll_env();
         self.poll_hdri_thumbs(&ctx);
         self.poll_library(&ctx);
+        self.poll_cpu_shelf_previews(&ctx);
         // Closing the window with unsaved changes asks first.
         if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close {
             if self.is_modified() {

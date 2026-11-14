@@ -183,6 +183,97 @@ pub fn shader(device: &wgpu::Device, label: &str, src: &str) -> wgpu::ShaderModu
     })
 }
 
+/// One CPU-generated mip level ready for a main-thread GPU upload.
+struct PreparedMipLevel {
+    width: u32,
+    height: u32,
+    bytes: Vec<u8>,
+}
+
+/// A complete mip pyramid. Constructing it is CPU-only and is safe on a worker;
+/// creating the texture and submitting its levels remains on the GPU-owning thread.
+pub(crate) struct PreparedMipChain {
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+    channels: u32,
+    levels: Vec<PreparedMipLevel>,
+}
+
+/// Builds the exact box-filtered mip chain used by fill images without touching
+/// a device or queue. Call this from a worker when decoding large scanned sets.
+pub(crate) fn prepare_mips<P: image::Pixel<Subpixel = u8> + 'static>(
+    img: image::ImageBuffer<P, Vec<u8>>,
+    format: wgpu::TextureFormat,
+) -> PreparedMipChain {
+    use image::imageops::FilterType;
+    let (width, height) = img.dimensions();
+    let channels = P::CHANNEL_COUNT as u32;
+    let mut level = img;
+    let mut levels = Vec::with_capacity(width.max(height).max(1).ilog2() as usize + 1);
+    loop {
+        let (lw, lh) = level.dimensions();
+        let next = if lw == 1 && lh == 1 {
+            None
+        } else {
+            Some(image::imageops::resize(&level, (lw / 2).max(1), (lh / 2).max(1), FilterType::Triangle))
+        };
+        levels.push(PreparedMipLevel { width: lw, height: lh, bytes: level.into_raw() });
+        match next {
+            Some(next) => level = next,
+            None => break,
+        }
+    }
+    PreparedMipChain { width, height, format, channels, levels }
+}
+
+/// Uploads a CPU-prepared mip pyramid. This function must run on the thread
+/// that owns the wgpu device and queue.
+pub(crate) fn upload_prepared_mips(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    chain: PreparedMipChain,
+    label: &str,
+) -> Tex {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d { width: chain.width, height: chain.height, depth_or_array_layers: 1 },
+        mip_level_count: chain.levels.len() as u32,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: chain.format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    for (mip, level) in chain.levels.iter().enumerate() {
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: mip as u32,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &level.bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(level.width * chain.channels),
+                rows_per_image: None,
+            },
+            wgpu::Extent3d { width: level.width, height: level.height, depth_or_array_layers: 1 },
+        );
+    }
+    let view = texture.create_view(&Default::default());
+    Tex {
+        texture,
+        view,
+        srgb_view: None,
+        format: chain.format,
+        width: chain.width,
+        height: chain.height,
+        samples: 1,
+    }
+}
+
 /// An image as a sampled texture with a full mip chain (each level a
 /// box-filtered half of the one above), for tiling images seen from afar.
 pub fn upload_mips<P: image::Pixel<Subpixel = u8> + 'static>(
@@ -447,5 +538,64 @@ mod shader_tests {
         validate("mask filter", include_str!("shaders/mask_filter.wgsl"));
         validate("apply", include_str!("shaders/apply.wgsl"));
         validate("maps resolve", include_str!("shaders/maps_resolve.wgsl"));
+    }
+}
+
+
+#[cfg(test)]
+mod mip_preparation_tests {
+    use super::prepare_mips;
+    use eframe::wgpu::TextureFormat;
+
+    #[test]
+    fn prepared_mips_match_the_triangle_filtered_reference_chain() {
+        let source = image::RgbaImage::from_fn(17, 9, |x, y| {
+            image::Rgba([(x * 13) as u8, (y * 21) as u8, ((x + y) * 7) as u8, 255])
+        });
+        let chain = prepare_mips(source.clone(), TextureFormat::Rgba8Unorm);
+        let mut reference = source;
+
+        assert_eq!((chain.width, chain.height), (17, 9));
+        for (index, mip) in chain.levels.iter().enumerate() {
+            assert_eq!((mip.width, mip.height), reference.dimensions(), "mip {index}");
+            assert_eq!(mip.bytes.as_slice(), reference.as_raw().as_slice(), "mip {index} pixel bytes");
+            if reference.dimensions() == (1, 1) {
+                assert_eq!(index + 1, chain.levels.len());
+                break;
+            }
+            let (width, height) = reference.dimensions();
+            reference = image::imageops::resize(
+                &reference,
+                (width / 2).max(1),
+                (height / 2).max(1),
+                image::imageops::FilterType::Triangle,
+            );
+        }
+        assert_eq!(chain.levels.last().map(|m| (m.width, m.height)), Some((1, 1)));
+    }
+
+    #[test]
+    fn prepared_grayscale_mips_keep_single_channel_bytes() {
+        let source = image::GrayImage::from_fn(13, 7, |x, y| image::Luma([(x * 11 + y * 17) as u8]));
+        let chain = prepare_mips(source.clone(), TextureFormat::R8Unorm);
+        let mut reference = source;
+
+        assert_eq!(chain.format, TextureFormat::R8Unorm);
+        for (index, mip) in chain.levels.iter().enumerate() {
+            assert_eq!((mip.width, mip.height), reference.dimensions(), "mip {index}");
+            assert_eq!(mip.bytes.as_slice(), reference.as_raw().as_slice(), "mip {index} pixel bytes");
+            if reference.dimensions() == (1, 1) {
+                assert_eq!(index + 1, chain.levels.len());
+                break;
+            }
+            let (width, height) = reference.dimensions();
+            reference = image::imageops::resize(
+                &reference,
+                (width / 2).max(1),
+                (height / 2).max(1),
+                image::imageops::FilterType::Triangle,
+            );
+        }
+        assert_eq!(chain.levels.last().map(|m| (m.width, m.height)), Some((1, 1)));
     }
 }

@@ -652,6 +652,13 @@ pub struct FillImage {
     pub encoded: Arc<Vec<u8>>,
 }
 
+/// CPU-side image data prepared for a later upload on the wgpu thread.
+pub(crate) struct PreparedFillImage {
+    name: String,
+    encoded: Arc<Vec<u8>>,
+    mips: gpu::PreparedMipChain,
+}
+
 /// Largest image edge kept on the GPU; bigger files are scaled down.
 const MAX_IMAGE: u32 = 4096;
 
@@ -1509,6 +1516,17 @@ fn compact_scissors(rects: &mut Vec<[u32; 4]>) {
         rects.swap_remove(best.2);
     }
     rects.sort_unstable_by_key(|r| (r[1], r[0], r[3], r[2]));
+}
+
+fn fit_fill_image<P: image::Pixel<Subpixel = u8> + 'static>(
+    mut img: image::ImageBuffer<P, Vec<u8>>,
+) -> image::ImageBuffer<P, Vec<u8>> {
+    if img.width().max(img.height()) > MAX_IMAGE {
+        let k = MAX_IMAGE as f32 / img.width().max(img.height()) as f32;
+        let (w, h) = (((img.width() as f32 * k) as u32).max(1), ((img.height() as f32 * k) as u32).max(1));
+        img = image::imageops::resize(&img, w, h, image::imageops::FilterType::Triangle);
+    }
+    img
 }
 
 impl Engine {
@@ -2446,7 +2464,36 @@ impl Engine {
         result
     }
 
-    /// Decodes an image file into a mipmapped texture for a fill layer.
+    /// Reads and prepares a fill image without accessing the GPU. The returned
+    /// mip pyramid can be built on a worker and uploaded later on the UI thread.
+    pub(crate) fn prepare_fill_image_file(path: &std::path::Path) -> Result<PreparedFillImage, String> {
+        let dir = path.parent().and_then(|d| d.file_name()).map_or(String::new(), |d| format!("{}/", d.to_string_lossy()));
+        let name = format!("{dir}{}", path.file_name().map_or("image".into(), |n| n.to_string_lossy()));
+        let encoded = Arc::new(std::fs::read(path).map_err(|e| format!("can't read {}: {e}", path.display()))?);
+        Self::prepare_fill_image(name, encoded)
+    }
+
+    /// Decodes an image and builds all mip levels using CPU-only operations.
+    pub(crate) fn prepare_fill_image(name: String, encoded: Arc<Vec<u8>>) -> Result<PreparedFillImage, String> {
+        let img = image::load_from_memory(&encoded).map_err(|e| format!("can't read {name}: {e}"))?;
+        let gray = matches!(img.color(), image::ColorType::L8 | image::ColorType::L16);
+        let mips = if gray {
+            let img = fit_fill_image(img.into_luma8());
+            gpu::prepare_mips(img, F::R8Unorm)
+        } else {
+            let img = fit_fill_image(img.into_rgba8());
+            gpu::prepare_mips(img, F::Rgba8Unorm)
+        };
+        Ok(PreparedFillImage { name, encoded, mips })
+    }
+
+    /// Creates the GPU texture for CPU-prepared image data. Call on the thread
+    /// that owns this engine's device and queue.
+    pub(crate) fn upload_prepared_fill_image(&self, prepared: PreparedFillImage) -> FillImage {
+        let tex = gpu::upload_prepared_mips(&self.device, &self.queue, prepared.mips, "fill image");
+        FillImage { tex: Arc::new(tex), name: prepared.name, encoded: prepared.encoded }
+    }
+
     /// A fill image from a file, sharing the GPU texture with other layers
     /// that use the same file.
     pub fn shared_fill_image(&mut self, path: &std::path::Path) -> Result<FillImage, String> {
