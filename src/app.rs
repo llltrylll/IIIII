@@ -2769,6 +2769,25 @@ impl PainterApp {
                 index, set.name, set.tris.start, set.tris.end, set.tris.end - set.tris.start, state
             ));
         }
+
+        out.push_str("normal_provenance_by_object:\n");
+        for (index, name) in self.mesh.objects.iter().enumerate() {
+            let ufbx_generated = self.mesh.object_ufbx_generated_normals.get(index).copied();
+            let reversed = self.mesh.object_reversed_winding.get(index).copied();
+            let fallback = self.mesh.object_fallback_normals_generated.get(index).copied();
+            let fmt = |value: Option<bool>| match value {
+                Some(true) => "yes",
+                Some(false) => "no",
+                None => "unknown",
+            };
+            out.push_str(&format!(
+                "  [{}] {} | ufbx_generated_normals={} | ufbx_reversed_winding={} | importer_fallback_normals={}\n",
+                index, name, fmt(ufbx_generated), fmt(reversed), fmt(fallback)
+            ));
+        }
+        if self.mesh.objects.is_empty() {
+            out.push_str("  (no imported object metadata; primitive or saved mesh)\n");
+        }
         out
     }
 
