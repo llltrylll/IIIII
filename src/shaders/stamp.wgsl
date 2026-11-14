@@ -3,7 +3,8 @@
 // mask with dst = dst + src * (1 - dst), i.e. flow build-up. How a stamp
 // reaches a texel depends on the brush projection:
 // - Screen: every texel projects its world position to the screen and tests
-//   visibility against the viewport depth buffer (paint from the camera).
+//   visibility against a cached depth buffer that only includes surfaces
+//   whose imported normals face the camera (paint from the camera).
 // - Surface: the stamp is a disc lying on the surface under the cursor, sized
 //   in world units, so it doesn't stretch at grazing angles and wraps around
 //   edges the camera can't see.
