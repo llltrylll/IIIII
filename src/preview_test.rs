@@ -2098,7 +2098,7 @@ fn raster_view_is_stable_with_inverted_shading_normals() {
 #[test]
 #[ignore]
 fn screen_projection_paints_visible_face_of_overlapped_uvs() {
-    use crate::app::{BrushProjection, resolve_stamps, stroke_region};
+    use crate::app::{BrushProjection, resolve_stamps, screen_stroke_plan, stroke_region};
     use crate::engine::{BrushPaint, Content, MatValues, StampUniform};
     use crate::mesh::Mesh;
     use crate::undo::{StrokeTarget, UndoStack};
@@ -2202,9 +2202,10 @@ fn screen_projection_paints_visible_face_of_overlapped_uvs() {
     visible.composite();
     views.render_3d(&rs, size, &[&visible], &env, &gpu_mesh, &cam, &ViewSettings::default(), None);
     assert!(visible.begin_stroke(0, StrokeTarget::Content, paint.mat.enabled, false));
-    let visible_region = stroke_region(&mesh, &bvh, visible.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps);
+    let (visible_region, candidate_indices) = screen_stroke_plan(&mesh, &bvh, visible.triangles(), &cam, fsize, 0, radius, &stamps);
     assert!(visible_region.is_some(), "fixture must produce conservative UV scissors");
-    visible.stroke_step_screen(&gpu_mesh, &stamps, su, views.view3d.depth_view(), &paint, visible_region);
+    assert!(!candidate_indices.is_empty(), "screen BVH must return visible triangle indices");
+    visible.stroke_step_screen_culled(&gpu_mesh, &candidate_indices, &stamps, su, views.view3d.depth_view(), &paint, visible_region);
     visible.end_stroke();
     visible.composite();
     let visible_count = painted_texels(&visible);
@@ -2227,7 +2228,7 @@ fn screen_projection_paints_visible_face_of_overlapped_uvs() {
 #[test]
 #[ignore]
 fn screen_projection_rejects_close_occluded_uv_surface() {
-    use crate::app::{BrushProjection, resolve_stamps, stroke_region};
+    use crate::app::{BrushProjection, resolve_stamps, screen_stroke_plan, stroke_region};
     use crate::engine::{BrushPaint, Content, Engine, MatValues, StampUniform};
     use crate::mesh::Mesh;
     use crate::undo::{StrokeTarget, UndoStack};
@@ -2301,9 +2302,10 @@ fn screen_projection_rejects_close_occluded_uv_surface() {
     engine.composite();
     views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &ViewSettings::default(), None);
     assert!(engine.begin_stroke(0, StrokeTarget::Content, paint.mat.enabled, false));
-    let region = stroke_region(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps);
+    let (region, candidate_indices) = screen_stroke_plan(&mesh, &bvh, engine.triangles(), &cam, fsize, 0, radius, &stamps);
+    assert!(!candidate_indices.is_empty(), "screen BVH must return candidate triangles");
     assert!(region.is_some(), "fixture must produce conservative UV scissors");
-    engine.stroke_step_screen(&gpu_mesh, &stamps, su, views.view3d.depth_view(), &paint, region);
+    engine.stroke_step_screen_culled(&gpu_mesh, &candidate_indices, &stamps, su, views.view3d.depth_view(), &paint, region);
     engine.end_stroke();
     engine.composite();
 
@@ -2328,7 +2330,7 @@ fn screen_projection_rejects_close_occluded_uv_surface() {
 #[test]
 #[ignore]
 fn screen_projection_rejects_back_surface_behind_thin_occluder() {
-    use crate::app::{BrushProjection, resolve_stamps, stroke_region};
+    use crate::app::{BrushProjection, resolve_stamps, screen_stroke_plan, stroke_region};
     use crate::engine::{BrushPaint, Content, Engine, MatValues, StampUniform};
     use crate::mesh::Mesh;
     use crate::undo::{StrokeTarget, UndoStack};
@@ -2401,9 +2403,10 @@ fn screen_projection_rejects_back_surface_behind_thin_occluder() {
     engine.composite();
     views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &ViewSettings::default(), None);
     assert!(engine.begin_stroke(0, StrokeTarget::Content, paint.mat.enabled, false));
-    let region = stroke_region(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps);
+    let (region, candidate_indices) = screen_stroke_plan(&mesh, &bvh, engine.triangles(), &cam, fsize, 0, radius, &stamps);
+    assert!(!candidate_indices.is_empty(), "screen BVH must return candidate triangles");
     assert!(region.is_some());
-    engine.stroke_step_screen(&gpu_mesh, &stamps, su, views.view3d.depth_view(), &paint, region);
+    engine.stroke_step_screen_culled(&gpu_mesh, &candidate_indices, &stamps, su, views.view3d.depth_view(), &paint, region);
     engine.end_stroke();
     engine.composite();
 
@@ -2436,7 +2439,7 @@ fn screen_projection_rejects_back_surface_behind_thin_occluder() {
 #[test]
 #[ignore]
 fn screen_projection_paints_visible_sloped_surface() {
-    use crate::app::{BrushProjection, resolve_stamps, stroke_region};
+    use crate::app::{BrushProjection, resolve_stamps, screen_stroke_plan, stroke_region};
     use crate::engine::{BrushPaint, Content, Engine, MatValues, StampUniform};
     use crate::mesh::Mesh;
     use crate::undo::{StrokeTarget, UndoStack};
@@ -2504,9 +2507,10 @@ fn screen_projection_paints_visible_sloped_surface() {
     engine.composite();
     views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &ViewSettings::default(), None);
     assert!(engine.begin_stroke(0, StrokeTarget::Content, paint.mat.enabled, false));
-    let region = stroke_region(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps);
+    let (region, candidate_indices) = screen_stroke_plan(&mesh, &bvh, engine.triangles(), &cam, fsize, 0, radius, &stamps);
+    assert!(!candidate_indices.is_empty(), "screen BVH must return candidate triangles");
     assert!(region.is_some(), "fixture must produce conservative UV scissors");
-    engine.stroke_step_screen(&gpu_mesh, &stamps, su, views.view3d.depth_view(), &paint, region);
+    engine.stroke_step_screen_culled(&gpu_mesh, &candidate_indices, &stamps, su, views.view3d.depth_view(), &paint, region);
     engine.end_stroke();
     engine.composite();
 
