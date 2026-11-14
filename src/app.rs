@@ -2656,6 +2656,8 @@ impl PainterApp {
         let mut normals_mixed = 0u32;
         let mut exact_uv_keys: HashMap<[i64; 6], u32> = HashMap::new();
         let mut exact_uv_keys_by_set: HashMap<(usize, [i64; 6]), u32> = HashMap::new();
+        // [triangles, zero normal corners, aligned, opposed, mixed]
+        let mut object_normal_stats = vec![[0u32; 5]; self.mesh.objects.len()];
 
         for tri in 0..self.mesh.triangle_count() {
             let base = tri * 3;
@@ -2689,22 +2691,34 @@ impl PainterApp {
                 geometry_degenerate_triangles += 1;
             }
             let face_n = face.normalize_or_zero();
+            let mut triangle_zero_normals = 0u32;
             let alignments = v.map(|vertex| {
                 let normal = Vec3::from_array(vertex.normal);
                 if normal.length_squared() <= 1.0e-12 {
                     zero_vertex_normal_corners += 1;
+                    triangle_zero_normals += 1;
                 }
                 normal.normalize_or_zero().dot(face_n)
             });
             let normal_alignment = alignments.iter().sum::<f32>() / 3.0;
             let mixed_or_opposed = alignments.iter().any(|&n| n < -0.25)
                 && alignments.iter().any(|&n| n > 0.25);
-            if mixed_or_opposed || normal_alignment.abs() <= 0.25 {
+            let normal_class = if mixed_or_opposed || normal_alignment.abs() <= 0.25 {
                 normals_mixed += 1;
+                4
             } else if normal_alignment < -0.25 {
                 normals_opposed += 1;
+                3
             } else {
                 normals_aligned += 1;
+                2
+            };
+            if let Some(&object) = self.mesh.tri_object.get(tri)
+                && let Some(stats) = object_normal_stats.get_mut(object as usize)
+            {
+                stats[0] += 1;
+                stats[1] += triangle_zero_normals;
+                stats[normal_class] += 1;
             }
 
             // Exact UV triangle identity (quantized to 1e-6), independent of vertex order.
@@ -2794,9 +2808,11 @@ impl PainterApp {
                 Some(false) => "no",
                 None => "unknown",
             };
+            let stats = object_normal_stats.get(index).copied().unwrap_or([0; 5]);
             out.push_str(&format!(
-                "  [{}] {} | ufbx_generated_normals={} | ufbx_reversed_winding={} | negative_transform_determinant={} | importer_fallback_normals={}\n",
-                index, name, fmt(ufbx_generated), fmt(reversed), fmt(negative_transform), fmt(fallback)
+                "  [{}] {} | triangles={} aligned={} opposed={} mixed={} zero_normal_corners={} | ufbx_generated_normals={} | ufbx_reversed_winding={} | negative_transform_determinant={} | importer_fallback_normals={}\n",
+                index, name, stats[0], stats[2], stats[3], stats[4], stats[1],
+                fmt(ufbx_generated), fmt(reversed), fmt(negative_transform), fmt(fallback)
             ));
         }
         if self.mesh.objects.is_empty() {
