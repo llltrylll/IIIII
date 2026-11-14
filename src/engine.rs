@@ -3605,32 +3605,6 @@ impl Engine {
         self.stroke_step_inner(stamps, su, depth, paint, regions, true, Some(mesh), Some(candidate_indices));
     }
 
-    /// Compatibility entry point that submits all triangles in this texture set.
-    pub fn stroke_step_screen(
-        &mut self,
-        mesh: &GpuMesh,
-        stamps: &[Stamp],
-        su: StampUniform,
-        depth: &wgpu::TextureView,
-        paint: &BrushPaint,
-        regions: Option<Vec<[f32; 4]>>,
-    ) {
-        self.stroke_step_inner(stamps, su, depth, paint, regions, false, Some(mesh), None);
-    }
-
-    /// Profiled compatibility path that submits all triangles in this texture set.
-    pub fn stroke_step_screen_profiled(
-        &mut self,
-        mesh: &GpuMesh,
-        stamps: &[Stamp],
-        su: StampUniform,
-        depth: &wgpu::TextureView,
-        paint: &BrushPaint,
-        regions: Option<Vec<[f32; 4]>>,
-    ) {
-        self.stroke_step_inner(stamps, su, depth, paint, regions, true, Some(mesh), None);
-    }
-
     fn stroke_step_inner(
         &mut self,
         stamps: &[Stamp],
