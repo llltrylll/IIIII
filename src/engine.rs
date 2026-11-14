@@ -3435,7 +3435,7 @@ impl Engine {
         paint: &BrushPaint,
         regions: Option<Vec<[f32; 4]>>,
     ) {
-        self.stroke_step_inner(stamps, su, depth, paint, regions, false);
+        self.stroke_step_inner(stamps, su, depth, paint, regions, false, None);
     }
 
     /// Same paint path, with optional GPU timestamps for F6.
@@ -3447,7 +3447,34 @@ impl Engine {
         paint: &BrushPaint,
         regions: Option<Vec<[f32; 4]>>,
     ) {
-        self.stroke_step_inner(stamps, su, depth, paint, regions, true);
+        self.stroke_step_inner(stamps, su, depth, paint, regions, true, None);
+    }
+
+    /// Screen projection using the actual mesh triangles as UV fragments.
+    /// The viewport depth test decides which overlapping UV face is visible.
+    pub fn stroke_step_screen(
+        &mut self,
+        mesh: &GpuMesh,
+        stamps: &[Stamp],
+        su: StampUniform,
+        depth: &wgpu::TextureView,
+        paint: &BrushPaint,
+        regions: Option<Vec<[f32; 4]>>,
+    ) {
+        self.stroke_step_inner(stamps, su, depth, paint, regions, false, Some(mesh));
+    }
+
+    /// Profiled version of per-triangle screen projection.
+    pub fn stroke_step_screen_profiled(
+        &mut self,
+        mesh: &GpuMesh,
+        stamps: &[Stamp],
+        su: StampUniform,
+        depth: &wgpu::TextureView,
+        paint: &BrushPaint,
+        regions: Option<Vec<[f32; 4]>>,
+    ) {
+        self.stroke_step_inner(stamps, su, depth, paint, regions, true, Some(mesh));
     }
 
     fn stroke_step_inner(
@@ -3458,6 +3485,7 @@ impl Engine {
         paint: &BrushPaint,
         regions: Option<Vec<[f32; 4]>>,
         profile_gpu: bool,
+        screen_mesh: Option<&GpuMesh>,
     ) {
         if self.active.is_none() || stamps.is_empty() {
             return;
@@ -3506,7 +3534,60 @@ impl Engine {
         }
         let stamp_attachments = [gpu::color_attachment(&self.stroke.view, wgpu::LoadOp::Load)];
         let mut encoder = device.create_command_encoder(&Default::default());
-        {
+        if let Some(mesh) = screen_mesh {
+            // Rasterize every face of this texture set at its own UV. Overlapping
+            // UVs now produce separate fragments, and project() rejects hidden faces.
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("screen stamp UV geometry"),
+                    color_attachments: &stamp_attachments,
+                    depth_stencil_attachment: None,
+                    timestamp_writes: profile.as_ref().map(|p| wgpu::RenderPassTimestampWrites {
+                        query_set: &p.query_set,
+                        beginning_of_pass_write_index: Some(0),
+                        end_of_pass_write_index: None,
+                    }),
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                }).forget_lifetime();
+                pass.set_pipeline(&self.p.stamp_uv);
+                pass.set_bind_group(0, &stamp_bg, &[]);
+                pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                if let Some(rects) = &frame_scissors {
+                    for &[x0, y0, x1, y1] in rects {
+                        pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                        pass.draw_indexed(self.tris.clone(), 0, 0..1);
+                    }
+                } else {
+                    pass.draw_indexed(self.tris.clone(), 0, 0..1);
+                }
+            }
+            // Original UV islands were handled per face above. Retain the
+            // existing single-surface map only for dilated padding texels.
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("screen stamp UV padding"),
+                color_attachments: &stamp_attachments,
+                depth_stencil_attachment: None,
+                timestamp_writes: profile.as_ref().map(|p| wgpu::RenderPassTimestampWrites {
+                    query_set: &p.query_set,
+                    beginning_of_pass_write_index: None,
+                    end_of_pass_write_index: Some(1),
+                }),
+                occlusion_query_set: None,
+                multiview_mask: None,
+            }).forget_lifetime();
+            pass.set_pipeline(&self.p.stamp_pad);
+            pass.set_bind_group(0, &stamp_bg, &[]);
+            if let Some(rects) = &frame_scissors {
+                for &[x0, y0, x1, y1] in rects {
+                    pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                    pass.draw(0..3, 0..1);
+                }
+            } else {
+                pass.draw(0..3, 0..1);
+            }
+        } else {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("stamp"),
                 color_attachments: &stamp_attachments,
