@@ -2020,6 +2020,107 @@ fn screen_projection_paints_visible_face_of_overlapped_uvs() {
     assert!(visible_count > 500, "the visible overlapping face should receive paint, got {visible_count}");
 }
 
+/// Screen projection must not leak through a nearby foreground surface.
+/// The quads occupy the same screen-space footprint but use separate UV charts,
+/// so hidden-face paint is observable instead of being merged into shared texels.
+#[test]
+#[ignore]
+fn screen_projection_rejects_close_occluded_uv_surface() {
+    use crate::app::{BrushProjection, resolve_stamps, stroke_region};
+    use crate::engine::{BrushPaint, Content, Engine, MatValues, StampUniform};
+    use crate::mesh::Mesh;
+    use crate::undo::{StrokeTarget, UndoStack};
+    use crate::viewport::{OrbitCam, ViewSettings, FAR, NEAR};
+    use glam::{Vec2, Vec3};
+
+    let positions = vec![
+        Vec3::new(-0.8, -0.8, 0.02),
+        Vec3::new(0.8, -0.8, 0.02),
+        Vec3::new(0.8, 0.8, 0.02),
+        Vec3::new(-0.8, 0.8, 0.02),
+        Vec3::new(-0.8, -0.8, 0.0),
+        Vec3::new(0.8, -0.8, 0.0),
+        Vec3::new(0.8, 0.8, 0.0),
+        Vec3::new(-0.8, 0.8, 0.0),
+    ];
+    let uvs = vec![
+        Vec2::new(0.1, 0.1),
+        Vec2::new(0.45, 0.1),
+        Vec2::new(0.45, 0.9),
+        Vec2::new(0.1, 0.9),
+        Vec2::new(0.55, 0.1),
+        Vec2::new(0.9, 0.1),
+        Vec2::new(0.9, 0.9),
+        Vec2::new(0.55, 0.9),
+    ];
+    let normals = Some(vec![Vec3::Z; 8]);
+    let indices = vec![
+        0, 1, 2, 0, 2, 3,
+        4, 5, 6, 4, 6, 7,
+    ];
+    let mesh = Arc::new(Mesh::from_parts("Close occluded UV fixture".into(), positions, normals, uvs, indices));
+    let bvh = crate::bvh::Bvh::from_mesh(&mesh);
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let res = 256;
+    let cam = OrbitCam { yaw: 0.0, pitch: 0.0, dist: 4.0, target: Vec3::ZERO, fov_y: 38f32.to_radians() };
+    let size = [512u32, 512u32];
+    let fsize = Vec2::new(size[0] as f32, size[1] as f32);
+    let mut views = ViewRenderer::new(&rs);
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+    let paint = BrushPaint {
+        mat: MatValues {
+            enabled: [true, false, false, false, false, false, false, false],
+            color: [1.0, 0.02, 0.01],
+            ..Default::default()
+        },
+        mask_value: 1.0,
+        opacity: 1.0,
+        erase: false,
+        grain: [0.0; 4],
+    };
+    let radius = 88.0;
+    let raw = [([256.0, 256.0, 1.0, 0.0], 1.0)];
+    let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+    assert_eq!(stamps.len(), 1);
+    let su = StampUniform {
+        view_proj: cam.view_proj(fsize.x / fsize.y).to_cols_array_2d(),
+        cam_pos: cam.eye().extend(1.0).to_array(),
+        view: [fsize.x, fsize.y, 0.0, 0.0],
+        view2d: [0.0; 4],
+        brush: [radius, 0.6, 1.0, 0.0],
+        clip: [NEAR, FAR, 0.0, 0.0],
+        proj: [BrushProjection::Screen as u32 as f32, 0.0, 85f32.to_radians().cos(), 0.0],
+    };
+
+    let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+    let mut undo = UndoStack::default();
+    engine.add_paint_layer(0, None, None, &mut undo);
+    engine.composite();
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &ViewSettings::default(), None);
+    assert!(engine.begin_stroke(0, StrokeTarget::Content, paint.mat.enabled, false));
+    let region = stroke_region(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps);
+    assert!(region.is_some(), "fixture must produce conservative UV scissors");
+    engine.stroke_step_screen(&gpu_mesh, &stamps, su, views.view3d.depth_view(), &paint, region);
+    engine.end_stroke();
+    engine.composite();
+
+    let Content::Paint(channels) = &engine.layers[0].content else { panic!("expected paint layer") };
+    let color = channels[0].as_ref().expect("base color channel was allocated");
+    let rgba = read_texture(&rs.device, &rs.queue, color);
+    let near_chart = rgba.chunks_exact(4).enumerate()
+        .filter(|(index, pixel)| index % res as usize < res as usize / 2 && pixel[3] > 0)
+        .count();
+    let hidden_chart = rgba.chunks_exact(4).enumerate()
+        .filter(|(index, pixel)| index % res as usize >= res as usize / 2 && pixel[3] > 0)
+        .count();
+
+    println!("  close occlusion: visible UV chart {near_chart} texels, hidden UV chart {hidden_chart} texels");
+    assert!(near_chart > 500, "the visible front chart must be painted, got {near_chart}");
+    assert_eq!(hidden_chart, 0, "the nearby hidden chart must remain untouched, got {hidden_chart}");
+}
+
 /// Screen projection must remain paintable when imported vertex normals or
 /// triangle winding disagree with the camera-facing geometric surface.
 #[test]
