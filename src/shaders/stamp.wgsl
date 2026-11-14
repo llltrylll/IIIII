@@ -27,6 +27,28 @@ struct Stamp {
     uv: vec4<f32>,      // uv under the stamp, flow scale (pen pressure), unused
 };
 
+struct StampUvVertex {
+    @location(0) pos: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) tangent: vec4<f32>,
+};
+
+struct StampUvOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) world_pos: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+};
+
+@vertex
+fn vs_stamp_uv(v: StampUvVertex) -> StampUvOut {
+    var out: StampUvOut;
+    out.pos = vec4<f32>(v.uv.x * 2.0 - 1.0, 1.0 - v.uv.y * 2.0, 0.5, 1.0);
+    out.world_pos = v.pos;
+    out.normal = v.normal;
+    return out;
+}
+
 @group(0) @binding(0) var<uniform> u: StampU;
 @group(0) @binding(1) var<storage, read> stamps: array<Stamp>;
 @group(0) @binding(2) var pos_map: texture_2d<f32>;
@@ -149,11 +171,14 @@ fn coverage_uv(uv: vec2<f32>) -> f32 {
     return 1.0 - keep;
 }
 
-@fragment
-fn fs_stamp(in: FsOut) -> @location(0) vec4<f32> {
+// Shared fullscreen path for surface/UV/2D projection. The screen-only
+// padding pass deliberately excludes original island texels: those are now
+// rasterized per triangle by fs_stamp_uv, so overlapping UV faces don't
+// compete for one baked world-position record.
+fn stamp_fullscreen(in: FsOut, padding_only: bool) -> vec4<f32> {
     let c = vec2<i32>(in.pos.xy);
     let p = textureLoad(pos_map, c, 0);
-    if (p.a < 0.5) {
+    if (p.a < 0.5 || (padding_only && p.a >= 0.9)) {
         discard;
     }
     let dims = vec2<f32>(textureDimensions(pos_map));
@@ -173,19 +198,49 @@ fn fs_stamp(in: FsOut) -> @location(0) vec4<f32> {
             if (s.z > 0.0) {
                 a = coverage_screen(s.xy) * s.z;
             }
-            // Symmetry: a texel also takes paint where its mirror image, across
-            // the mesh's center plane, is painted on screen. (The other
-            // projections get mirrored stamps instead.)
             let axis = i32(u.brush.w);
             if (axis > 0) {
-                // (Built with select: writing a vector element by a runtime index
-                // doesn't compile on every backend.)
                 let flip = select(vec3<f32>(1.0), vec3<f32>(-1.0), vec3<i32>(1, 2, 3) == vec3<i32>(axis));
                 let m = project(p.xyz * flip, n * flip);
                 if (m.z > 0.0) {
                     a = max(a, coverage_screen(m.xy) * m.z);
                 }
             }
+        }
+    }
+    if (a <= 0.0) {
+        discard;
+    }
+    return vec4<f32>(a, 0.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs_stamp(in: FsOut) -> @location(0) vec4<f32> {
+    return stamp_fullscreen(in, false);
+}
+
+@fragment
+fn fs_stamp_pad(in: FsOut) -> @location(0) vec4<f32> {
+    return stamp_fullscreen(in, true);
+}
+
+// Screen projection evaluates every triangle at its own UV coordinates. The
+// viewport depth test selects the visible world-space surface, rather than
+// depending on whichever overlapping face won the UV bake.
+@fragment
+fn fs_stamp_uv(in: StampUvOut) -> @location(0) vec4<f32> {
+    var a = 0.0;
+    let s = project(in.world_pos, normalize(in.normal));
+    if (s.z > 0.0) {
+        a = coverage_screen(s.xy) * s.z;
+    }
+
+    let axis = i32(u.brush.w);
+    if (axis > 0) {
+        let flip = select(vec3<f32>(1.0), vec3<f32>(-1.0), vec3<i32>(1, 2, 3) == vec3<i32>(axis));
+        let mirrored = project(in.world_pos * flip, normalize(in.normal) * flip);
+        if (mirrored.z > 0.0) {
+            a = max(a, coverage_screen(mirrored.xy) * mirrored.z);
         }
     }
     if (a <= 0.0) {
