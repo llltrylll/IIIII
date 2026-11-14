@@ -1967,6 +1967,60 @@ fn uv_base_color_is_independent_and_composites_alpha() {
     assert!(opaque_a[0] > opaque_a[1].saturating_add(40), "opaque red Base Color was not shown: {opaque_a:?}");
 }
 
+/// UV Material mode uses a fixed studio preview rather than the selected HDRI.
+/// A fully metallic fill must remain readable in the dark built-in Night environment.
+#[test]
+#[ignore]
+fn uv_material_preview_is_neutral_and_metal_readable() {
+    use crate::engine::{FillParams, MatValues};
+    use crate::mesh::Primitive;
+    use crate::viewport::{Cam2d, ViewMode};
+
+    let rs = render_state();
+    let mesh = Primitive::Plane.build();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 256);
+    let fill = FillParams {
+        mat: MatValues {
+            enabled: [true, true, true, false, true, false, false, false],
+            color: [0.9, 0.12, 0.035],
+            rough: 0.82,
+            metal: 1.0,
+            opacity: 1.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    engine.add_fill_layer(0, None, "Metal UV preview regression".into(), fill, &mut crate::undo::UndoStack::default());
+    engine.composite();
+
+    let studio = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+    let night = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(10)).unwrap());
+    let size = [256u32, 256u32];
+    let cam = Cam2d { zoom: 256.0, pan: Vec2::ZERO };
+    let settings = ViewSettings {
+        mode: ViewMode::Material,
+        uv_mode: ViewMode::Material,
+        ..Default::default()
+    };
+    let mut views = ViewRenderer::new(&rs);
+
+    views.render_2d(&rs, size, &engine, &studio, &gpu_mesh, 0, &cam, &settings);
+    let studio_pixels = read_texture(&rs.device, &rs.queue, views.view2d.image());
+    views.render_2d(&rs, size, &engine, &night, &gpu_mesh, 0, &cam, &settings);
+    let night_pixels = read_texture(&rs.device, &rs.queue, views.view2d.image());
+
+    assert_eq!(studio_pixels, night_pixels,
+        "the UV Material preview must not inherit the selected 3D HDRI");
+    let center = (128usize * size[0] as usize + 128) * 4;
+    let pixel = &studio_pixels[center..center + 4];
+    println!("  UV metallic material preview center pixel: {:?}", pixel);
+    assert!(pixel[0] > pixel[1].saturating_add(30) && pixel[0] > 40,
+        "fully metallic base color should remain visible over the UV canvas: {pixel:?}");
+}
+
 /// The raster viewport should shade the same geometric face the same way
 /// even when imported vertex shading normals point in the opposite direction.
 #[test]
