@@ -59,6 +59,10 @@ pub struct Mesh {
     /// pairs low- and high-poly parts by name when baking.
     pub tri_object: Vec<u32>,
     pub objects: Vec<String>,
+    /// Per-object normal/winding provenance captured at import time.
+    pub object_ufbx_generated_normals: Vec<bool>,
+    pub object_reversed_winding: Vec<bool>,
+    pub object_fallback_normals_generated: Vec<bool>,
     /// Vertex colors per triangle (sRGB), for color ID maps.
     pub tri_color: Option<Vec<[u8; 3]>>,
     /// Original vertex colors for each triangle corner, in triangle order.
@@ -201,6 +205,9 @@ impl Mesh {
             scale,
             tri_object: Vec::new(),
             objects: Vec::new(),
+            object_ufbx_generated_normals: Vec::new(),
+            object_reversed_winding: Vec::new(),
+            object_fallback_normals_generated: Vec::new(),
             tri_color: None,
             tri_vertex_color: None,
             sets: Vec::new(),
@@ -325,6 +332,9 @@ impl Mesh {
         // Triangle order survives tangent generation, so per-triangle data still lines up.
         mesh.tri_object = raw.tri_object;
         mesh.objects = raw.objects;
+        mesh.object_ufbx_generated_normals = raw.object_ufbx_generated_normals;
+        mesh.object_reversed_winding = raw.object_reversed_winding;
+        mesh.object_fallback_normals_generated = raw.object_fallback_normals_generated;
         mesh.tri_color = raw.tri_color;
         mesh.tri_vertex_color = raw.tri_vertex_color;
         mesh.split_by_material(&raw.tri_material, &raw.material_names);
