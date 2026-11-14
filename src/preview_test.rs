@@ -2423,6 +2423,15 @@ fn screen_projection_skips_inward_front_surface_and_paints_background_chart() {
     assert!(correctly_oriented_background > 100, "the correctly oriented background surface must receive paint");
 }
 
+/// The path-tracing shader must compile after adding the same grazing-angle
+/// normal correction used by the raster material viewport.
+#[test]
+#[ignore]
+fn path_trace_pipeline_compiles_with_grazing_normal_correction() {
+    let rs = render_state();
+    let _raytracer = crate::raytrace::RayTracer::new(&rs);
+}
+
 /// Raster shading must clamp a tangent-space normal that points behind
 /// the viewer, using the same geometric correction as the path tracer.
 /// The second material uses the analytically clamped tangent-space vector;
