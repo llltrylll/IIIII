@@ -451,6 +451,15 @@ fn mesh_shade_inputs(in: MeshOut, front: bool) -> Shade {
     // this, and so do Unity, Unreal, Godot and Blender.
     let b_up = -cross(rn, tangent) * handedness;
     c.n = normalize(tangent * c.s.ts.x + b_up * c.s.ts.y + rn * c.s.ts.z);
+    // Keep the mapped shading normal in the viewer-facing hemisphere. The
+    // path tracer applies the same correction; without it, steep normal maps
+    // can make the raster viewport reflect the environment from behind the
+    // surface when the camera sees the mesh at a grazing angle.
+    let normal_view_dot = dot(c.n, c.v);
+    if (normal_view_dot <= 0.0) {
+        let geometric_view_dot = max(dot(c.gn, c.v), 1e-4);
+        c.n = normalize(c.n + c.gn * ((0.01 - normal_view_dot) / geometric_view_dot));
+    }
     c.l = normalize(g.sun.xyz);
     c.light = g.sun_c.rgb * g.sun.w * g.sun_c.w;
     c.shadow = 1.0;
