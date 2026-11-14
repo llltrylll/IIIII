@@ -656,6 +656,50 @@ mod tests {
     }
 
     #[test]
+    fn obj_corner_presence_stays_aligned_across_material_model_splits() {
+        let path = write_temp_obj("material-split-presence", concat!(
+            "mtllib material-split-presence.mtl\n",
+            "o shared_object_name\n",
+            "v 0 0 0\n",
+            "v 1 0 0\n",
+            "v 1 1 0\n",
+            "v 0 0 1\n",
+            "v 1 0 1\n",
+            "v 1 1 1\n",
+            "vt 0 0\n",
+            "vt 1 0\n",
+            "vt 1 1\n",
+            "vt 0 0\n",
+            "vt 1 0\n",
+            "vt 1 1\n",
+            "vn 1 0 0\n",
+            "vn 0 1 0\n",
+            "usemtl MaterialA\n",
+            "f 1/1/1 2/2 3/3/1\n",
+            "usemtl MaterialB\n",
+            "f 4/4/2 5/5/2 6/6/2\n",
+        ));
+        let mtl_path = path.with_file_name("material-split-presence.mtl");
+        std::fs::write(&mtl_path, "newmtl MaterialA\nnewmtl MaterialB\n")
+            .expect("write temporary MTL fixture");
+        let loaded = super::load_obj(&path);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&mtl_path);
+        let raw = loaded.expect("OBJ with material split should load");
+
+        assert_eq!(raw.tri_material.as_slice(), &[0, 1]);
+        assert_eq!(raw.object_fallback_normals_generated.as_slice(), &[true, false],
+            "the first material model has a missing corner normal; the second does not");
+        let normals = raw.normals.expect("normal output");
+        assert!(normals[0].distance(glam::Vec3::X) < 1e-5);
+        assert!(normals[1].distance(glam::Vec3::Z) < 1e-5,
+            "missing normal in the first model should be generated, not copied from its previous corner");
+        assert!(normals[2].distance(glam::Vec3::X) < 1e-5);
+        assert!(normals[3..].iter().all(|n| n.distance(glam::Vec3::Y) < 1e-5),
+            "the second model's authored normals must survive");
+    }
+
+    #[test]
     fn obj_missing_corner_normals_are_not_filled_from_previous_corner() {
         let path = write_temp_obj("partial-corner-normals", concat!(
             "o partial_normals\n",
