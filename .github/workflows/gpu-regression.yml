@@ -53,6 +53,9 @@ jobs:
       - name: GPU parity - stacked UV screen paint
         run: "cargo test --locked --bin material_painter preview_test::screen_projection_paints_visible_face_of_overlapped_uvs -- --ignored --exact --nocapture --test-threads 1"
 
+      - name: GPU parity - visible UV chart selection
+        run: "cargo test --locked --bin material_painter preview_test::screen_projection_paints_only_visible_face_uv_region -- --ignored --exact --nocapture --test-threads 1"
+
       - name: GPU parity - thin foreground occluder
         run: "cargo test --locked --bin material_painter preview_test::screen_projection_rejects_back_surface_behind_thin_occluder -- --ignored --exact --nocapture --test-threads 1"
 
