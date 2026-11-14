@@ -15,12 +15,15 @@ use eframe::{egui, egui_wgpu};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
+use std::time::Duration;
 
 /// Texture resolution of the ball; thumbnails are small.
 const RES: u32 = 512;
 /// Rendered thumbnail size in pixels: sharp up to the largest shelf size,
 /// and for the 2x hover preview at the default size.
 const THUMB: u32 = 192;
+/// Keep background shelf work from competing with interactive viewport frames.
+const GPU_PUMP_INTERVAL: f64 = 0.08;
 
 #[derive(Clone, Copy)]
 enum Item {
@@ -56,6 +59,7 @@ pub(super) struct ShelfPreviews {
     scan_images: HashMap<PathBuf, FillImage>,
     stage: Stage,
     gpu_init_warmup_pending: bool,
+    next_gpu_pump_at: f64,
 }
 
 impl ShelfPreviews {
@@ -121,6 +125,7 @@ impl ShelfPreviews {
             scan_images: HashMap::new(),
             stage: Stage::Preparing(rx),
             gpu_init_warmup_pending: false,
+            next_gpu_pump_at: 0.0,
         }
     }
 
@@ -189,6 +194,17 @@ impl ShelfPreviews {
             }
             Err(mpsc::TryRecvError::Empty) => {}
         }
+
+        // Run secondary GPU work at a modest cadence rather than once per
+        // UI frame. The main editor stays responsive while shelf previews
+        // continue to bake and render in the background.
+        let now = ctx.input(|i| i.time);
+        if now < self.next_gpu_pump_at {
+            ctx.request_repaint_after(Duration::from_secs_f64(self.next_gpu_pump_at - now));
+            return true;
+        }
+        self.next_gpu_pump_at = now + GPU_PUMP_INTERVAL;
+
         match &mut self.stage {
             Stage::Preparing(rx) => match rx.try_recv() {
                 Ok(Ok(scene)) => {
