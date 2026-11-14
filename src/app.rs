@@ -3217,10 +3217,38 @@ impl PainterApp {
                         }
                     })
                     .response
-                    .on_hover_text("What the views show (M: material, C: next channel)");
+                    .on_hover_text("What the 3D viewport shows (M: material, C: next channel)");
+                if matches!(self.layout, Layout::Split | Layout::View2d) {
+                    ui.separator();
+                    egui::ComboBox::from_id_salt("uvviewmode")
+                        .selected_text(self.mode_name(self.view.uv_mode))
+                        .width(130.0)
+                        .height(600.0)
+                        .show_ui(ui, |ui| {
+                            ui.label(egui::RichText::new("MATERIAL").small().color(theme::TEXT_DIM));
+                            for m in ViewMode::CHANNELS {
+                                ui.selectable_value(&mut self.view.uv_mode, m, m.name());
+                            }
+                            ui.separator();
+                            ui.label(egui::RichText::new("MESH MAPS").small().color(theme::TEXT_DIM));
+                            for m in ViewMode::all().into_iter().skip(ViewMode::CHANNELS.len()) {
+                                ui.selectable_value(&mut self.view.uv_mode, m, m.name());
+                            }
+                            if !self.bake_settings.custom.is_empty() {
+                                ui.separator();
+                                ui.label(egui::RichText::new("CUSTOM MAPS").small().color(theme::TEXT_DIM));
+                            }
+                            for map in &self.bake_settings.custom {
+                                ui.selectable_value(&mut self.view.uv_mode, ViewMode::Custom(map.id), &map.name);
+                            }
+                        })
+                        .response
+                        .on_hover_text("What the UV viewport shows");
+                    ui.label(egui::RichText::new("UV display").color(theme::TEXT_DIM));
+                }
                 // Color selection is consolidated in the Color popup at the right end
                 // of this toolbar; do not show a second, competing color chip here.
-                ui.label(egui::RichText::new("Display").color(theme::TEXT_DIM));
+                ui.label(egui::RichText::new("3D display").color(theme::TEXT_DIM));
                 ui.separator();
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
