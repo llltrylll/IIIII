@@ -336,6 +336,32 @@ fn render(t: &Trace) -> String {
         let _ = writeln!(o, "  {n:<46} [{th:<22}] x{c:<4} total {tot:>9.1}  avg {:>8.2}  max {max:>8.1}", tot / *c as f64);
     }
 
+    // 2b. Spans with per-item detail (pipeline labels, named resources, etc.).
+    // Scan phases and CPU shelf previews have their own tables below.
+    let _ = writeln!(o, "\n-- 2b. detailed spans: count, total, avg, max (ms), top 80 by total --");
+    let mut detailed: Vec<(String, String, String, usize, f64, f64)> = Vec::new();
+    for r in t.recs.iter().filter(|r| {
+        !r.detail.is_empty()
+            && !r.name.starts_with("scan:")
+            && !r.name.starts_with("cpu preview:")
+    }) {
+        if let Some(a) = detailed.iter_mut().find(|a| a.0 == r.name && a.1 == r.detail && a.2 == r.thread) {
+            a.3 += 1;
+            a.4 += r.dur;
+            a.5 = a.5.max(r.dur);
+        } else {
+            detailed.push((r.name.to_string(), r.detail.clone(), r.thread.clone(), 1, r.dur, r.dur));
+        }
+    }
+    detailed.sort_by(|a, b| b.4.total_cmp(&a.4));
+    for (name, detail, thread, count, total, max) in detailed.iter().take(80) {
+        let _ = writeln!(
+            o,
+            "  {name:<34} [{thread:<18}] x{count:<3} total {total:>9.1} avg {:>8.2} max {max:>8.1} | {detail}",
+            total / *count as f64
+        );
+    }
+
     // 3. CPU previews.
     let _ = writeln!(o, "\n-- 3. CPU previews (worker `shelf-cpu-previews`) --");
     for (name, cat) in [("cpu preview: material", "materials"), ("cpu preview: smart", "smart materials"), ("cpu preview: generator", "generators")] {
