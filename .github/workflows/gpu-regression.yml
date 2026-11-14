@@ -67,6 +67,9 @@ jobs:
       - name: GPU parity - UV view alpha and independent mode
         run: "cargo test --locked --bin material_painter preview_test::uv_base_color_is_independent_and_composites_alpha -- --ignored --exact --nocapture --test-threads 1"
 
+      - name: GPU parity - neutral UV material preview
+        run: "cargo test --locked --bin material_painter preview_test::uv_material_preview_is_neutral_and_metal_readable -- --ignored --exact --nocapture --test-threads 1"
+
       - name: GPU parity - raster face-forward shading normals
         run: "cargo test --locked --bin material_painter preview_test::raster_view_is_stable_with_inverted_shading_normals -- --ignored --exact --nocapture --test-threads 1"
 
