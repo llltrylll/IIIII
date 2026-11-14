@@ -938,6 +938,66 @@ fn tangent_at(mesh: &Mesh, tri: u32, bary: Vec3) -> (Vec3, f32) {
     (tangent, handedness)
 }
 
+/// Lists other triangles in the same texture set that contain a hit's UV point.
+/// This reveals physical surfaces that alias the same paint texel.
+fn uv_aliases_at(mesh: &Mesh, source_tri: u32, source_pos: Vec3, uv_point: Vec2, max_entries: usize) -> String {
+    let source_set = mesh.set_of(source_tri);
+    let mut matches = 0usize;
+    let mut entries = Vec::new();
+    for tri in 0..mesh.triangle_count() {
+        if tri as u32 == source_tri || mesh.set_of(tri as u32) != source_set {
+            continue;
+        }
+        let base = tri * 3;
+        let v = [
+            &mesh.vertices[mesh.indices[base] as usize],
+            &mesh.vertices[mesh.indices[base + 1] as usize],
+            &mesh.vertices[mesh.indices[base + 2] as usize],
+        ];
+        let uv = v.map(|vertex| Vec2::from_array(vertex.uv));
+        let e0 = uv[1] - uv[0];
+        let e1 = uv[2] - uv[0];
+        let determinant = e0.perp_dot(e1);
+        if determinant.abs() <= 1.0e-10 {
+            continue;
+        }
+        let relative = uv_point - uv[0];
+        let b = relative.perp_dot(e1) / determinant;
+        let c = e0.perp_dot(relative) / determinant;
+        let a = 1.0 - b - c;
+        const EDGE_EPSILON: f32 = 1.0e-5;
+        if a < -EDGE_EPSILON || b < -EDGE_EPSILON || c < -EDGE_EPSILON
+            || a > 1.0 + EDGE_EPSILON || b > 1.0 + EDGE_EPSILON || c > 1.0 + EDGE_EPSILON
+        {
+            continue;
+        }
+        matches += 1;
+        if entries.len() < max_entries {
+            let p0 = Vec3::from_array(v[0].pos);
+            let p1 = Vec3::from_array(v[1].pos);
+            let p2 = Vec3::from_array(v[2].pos);
+            let world = p0 * a + p1 * b + p2 * c;
+            let face = (p1 - p0).cross(p2 - p0).normalize_or_zero();
+            let object = mesh.tri_object.get(tri).copied().unwrap_or(u32::MAX);
+            let object_name = mesh.objects.get(object as usize).map(String::as_str).unwrap_or("(unknown)");
+            entries.push(format!(
+                "tri={} object={}({}) world={:?} delta_from_hit={:.4} geomN={:?}",
+                tri, object, object_name, world, world.distance(source_pos), face
+            ));
+        }
+    }
+    if matches == 0 {
+        "other_same_set_triangles=0".into()
+    } else {
+        format!(
+            "other_same_set_triangles={} first=[{}]{}",
+            matches,
+            entries.join(" ; "),
+            if matches > entries.len() { " ; ..." } else { "" }
+        )
+    }
+}
+
 /// Turns screen stamps (with their flow) into what the stamp shader
 /// reads. The surface and UV projections find the surface under each
 /// stamp, sized so it covers what the brush circle covers on screen, plus
@@ -2905,7 +2965,8 @@ impl PainterApp {
         let size = Vec2::new(width as f32, height as f32);
 
         for (stamp, _) in raw {
-            if self.diagnostics.samples.len() >= 256 {
+            let diagnostic_sample_index = self.diagnostics.samples.len();
+            if diagnostic_sample_index >= 256 {
                 self.diagnostics.dropped_samples = self.diagnostics.dropped_samples.saturating_add(1);
                 continue;
             }
@@ -2937,13 +2998,18 @@ impl PainterApp {
                     let tangent_geom_dot = tangent.dot(face_n);
                     let bitangent_geom_dot = bitangent.normalize_or_zero().dot(face_n);
                     let facing = face_n.dot(-direction);
+                    let uv_aliases = if diagnostic_sample_index < 32 {
+                        uv_aliases_at(&self.mesh, hit.tri, hit.pos, uv, 8)
+                    } else {
+                        "scan_skipped_after_first_32_samples".into()
+                    };
                     let object = self.mesh.tri_object.get(tri).copied().unwrap_or(u32::MAX);
                     let object_name = self.mesh.objects.get(object as usize).map(String::as_str).unwrap_or("(unknown)");
                     let set = self.mesh.set_of(hit.tri);
                     let set_name = self.mesh.sets.get(set).map(|s| s.name.as_str()).unwrap_or("(missing)");
                     format!(
-                        "tri={} object={}({}) set={}({}) t={:.6} bary={:?} uv={:?} geomN={:?} shadeN={:?} NdotGeom={:.4} geomNdotToCamera={:.4} tangentRaw={:?} tangentLen={:.4} tangentW={:.4} TdotShadeN={:.4} TdotGeomN={:.4} BdotGeomN={:.4} uvScale={:.6}",
-                        hit.tri, object, object_name, set, set_name, (hit.pos - origin).length(), hit.bary, uv, face_n, shading_n, alignment, facing, tangent_raw, tangent_raw.length(), tangent_w, tangent_normal_dot, tangent_geom_dot, bitangent_geom_dot, uv_scale
+                        "tri={} object={}({}) set={}({}) t={:.6} bary={:?} uv={:?} geomN={:?} shadeN={:?} NdotGeom={:.4} geomNdotToCamera={:.4} tangentRaw={:?} tangentLen={:.4} tangentW={:.4} TdotShadeN={:.4} TdotGeomN={:.4} BdotGeomN={:.4} uvScale={:.6} uvAliases={}",
+                        hit.tri, object, object_name, set, set_name, (hit.pos - origin).length(), hit.bary, uv, face_n, shading_n, alignment, facing, tangent_raw, tangent_raw.length(), tangent_w, tangent_normal_dot, tangent_geom_dot, bitangent_geom_dot, uv_scale, uv_aliases
                     )
                 }
                 None => "no hit".into(),
