@@ -74,6 +74,7 @@ impl ShelfPreviews {
         match &mut self.stage {
             Stage::Preparing(rx) => match rx.try_recv() {
                 Ok(Ok(scene)) => {
+                    drop(crate::startup_trace::span("shelf: CPU bake::prepare done (marker)"));
                     let settings = BakeSettings { quality: Quality::Draft, ..Default::default() };
                     let run = self.baker.start(&rs.device, &rs.queue, &self.mesh, &scene, &settings, RES);
                     self.stage = Stage::Baking(run);
@@ -88,8 +89,13 @@ impl ShelfPreviews {
                 Err(mpsc::TryRecvError::Disconnected) => false,
             },
             Stage::Baking(run) => {
-                if let Some(maps) = self.baker.pump(run, &rs.device, &rs.queue, ctx) {
+                let _s = crate::startup_trace::span("shelf: baker.pump (per frame)");
+                let done = self.baker.pump(run, &rs.device, &rs.queue, ctx);
+                drop(_s);
+                if let Some(maps) = done {
+                    drop(crate::startup_trace::span("shelf: GPU bake done (marker)"));
                     let report = run.report.clone();
+                    let _s = crate::startup_trace::span("shelf: Engine::new (duplicate)");
                     let mut engine = Engine::new(rs, &self.mesh, self.bounds, RES);
                     engine.set_maps(maps, report);
                     self.engine = Some(engine);
@@ -127,6 +133,8 @@ fn render(
     mesh: &GpuMesh,
     item: Item,
 ) -> egui::ColorImage {
+    let _total = crate::startup_trace::span("shelf thumb: total");
+    let _s = crate::startup_trace::span("shelf thumb: build layers");
     let mut undo = UndoStack::default();
     while !engine.layers.is_empty() {
         engine.delete_layer(0, &mut undo);
@@ -150,14 +158,21 @@ fn render(
             engine.add_mask(top, true, Some(GenKind::ALL[i].default_generator()), &mut undo);
         }
     }
+    drop(_s);
+    let _s = crate::startup_trace::span("shelf thumb: composite (submit)");
     engine.composite();
+    drop(_s);
+    let _s = crate::startup_trace::span("shelf thumb: render_3d (submit)");
     let cam = OrbitCam { yaw: 0.5, pitch: 0.32, dist: 4.05, target: glam::Vec3::new(0.0, -0.2, 0.0), ..OrbitCam::default() };
     let mut settings = ViewSettings { show_wire: false, background: Background::Transparent, ..ViewSettings::default() };
     settings.post.vignette = 0.0;
     settings.post.bloom = 0.0;
     views.render_3d(rs, [THUMB, THUMB], &[engine], env, mesh, &cam, &settings, None);
+    drop(_s);
     let img = views.view3d.image();
+    let _s = crate::startup_trace::span("shelf thumb: read_texture (blocking)");
     let rgba = crate::gpu::read_texture(&rs.device, &rs.queue, img);
+    drop(_s);
     // MSAA resolve averages edge samples with the transparent clear, so the
     // silhouette comes out premultiplied.
     egui::ColorImage::from_rgba_premultiplied([img.width as usize, img.height as usize], &rgba)

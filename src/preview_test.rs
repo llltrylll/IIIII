@@ -3617,3 +3617,43 @@ fn multi_scissor_matches_full_composite() {
     assert!(most_rects >= 2, "no scenario exercised more than one scissor (max {most_rects})");
     assert!(failures.is_empty(), "incremental != full:\n{}", failures.join("\n"));
 }
+
+/// Startup measurement harness (not an assertion): builds the real app headless
+/// and steps the first 300 frames. Run with `MP_STARTUP_TRACE=<file>` set; the
+/// report lists app construction phases, per-thumbnail costs and frame times.
+/// Frames here are stepped back to back (no vsync), so they show CPU+GPU work only.
+#[test]
+#[ignore]
+fn startup_trace_first_300_frames() {
+    use crate::app::PainterApp;
+    assert!(std::env::var("MP_STARTUP_TRACE").is_ok(), "set MP_STARTUP_TRACE=<file>");
+    crate::startup_trace::init();
+    let mut setup = egui_wgpu::WgpuSetupCreateNew::without_display_handle();
+    setup.device_descriptor = Arc::new(|adapter| wgpu::DeviceDescriptor {
+        label: Some("ui test device"),
+        required_limits: adapter.limits(),
+        ..Default::default()
+    });
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size([1600.0, 960.0])
+        .with_pixels_per_point(1.0)
+        .with_accessibility_check(false)
+        .wgpu_setup(egui_wgpu::WgpuSetup::CreateNew(setup))
+        .build_eframe(|cc| {
+            let _s = crate::startup_trace::span("PainterApp::new (total)");
+            PainterApp::new(cc).expect("app starts")
+        });
+    // The thumbnails render after a background bake, so give it wall time and
+    // keep stepping until the requested number of frames has been recorded.
+    let frames: usize = std::env::var("MP_STARTUP_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
+    let secs: u64 = std::env::var("MP_STARTUP_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(240);
+    let start = std::time::Instant::now();
+    for _ in 0..frames + 5 {
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        if start.elapsed().as_secs() > secs {
+            break;
+        }
+    }
+    crate::startup_trace::flush();
+}

@@ -1676,15 +1676,18 @@ impl PainterApp {
         let rs = cc.wgpu_render_state.clone().ok_or("Material Painter requires the wgpu renderer")?;
         let gpu = rs.adapter.get_info();
         crate::crash::set_context(format!("{} ({:?}, driver {} {})", gpu.name, gpu.backend, gpu.driver, gpu.driver_info));
-        theme::apply(&cc.egui_ctx);
+        { let _s = crate::startup_trace::span("theme::apply"); theme::apply(&cc.egui_ctx); }
 
         let prefs = Preferences::load();
         let mesh = Primitive::MaterialBall.build();
         let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
         let bvh = Bvh::from_mesh(&mesh);
+        let _s_engine = crate::startup_trace::span("new: Engine+ViewRenderer");
         let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), prefs.default_resolution);
         engine.add_paint_layer(0, None, None, &mut UndoStack::default());
         let views = ViewRenderer::new(&rs);
+        drop(_s_engine);
+        let _s_env = crate::startup_trace::span("new: env decode+upload");
         let env_baker = EnvBaker::new(&rs.device);
         // A real studio HDRI (plus the key light) when installed, else the
         // procedural studio.
@@ -1695,12 +1698,16 @@ impl PainterApp {
             .filter(|i| environment::available_builtins().contains(i))
             .unwrap_or(0);
         let env = env_baker.upload(&rs, &environment::decode(&EnvSource::Builtin(default_env))?);
+        drop(_s_env);
+        let _s_rt = crate::startup_trace::span("new: RayTracer::new+set_mesh");
         let mut raytracer = RayTracer::new(&rs);
         raytracer.set_mesh(&rs.device, &mesh, &bvh);
+        drop(_s_rt);
         let baker = GpuBaker::new(&rs.device);
 
         let ctx = &cc.egui_ctx;
         let load = |name: &str, img: egui::ColorImage| ctx.load_texture(name, img, egui::TextureOptions::LINEAR);
+        let _s_cpu = crate::startup_trace::span("new: CPU shelf previews");
         let materials = presets::MATERIALS
             .iter()
             .map(|m| load(m.name, presets::render_preview(&[PreviewLayer { fill: m.fill(), opacity: 1.0, generator: None }])))
@@ -1734,7 +1741,10 @@ impl PainterApp {
             })
             .collect();
 
+        drop(_s_cpu);
+        let _s_sp = crate::startup_trace::span("new: ShelfPreviews::start");
         let shelf_previews = shelf_previews::ShelfPreviews::start(&rs, ctx, &env_baker);
+        drop(_s_sp);
 
         let mut app = PainterApp {
             rs,
@@ -4201,6 +4211,7 @@ impl PainterApp {
 
 impl eframe::App for PainterApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        crate::startup_trace::frame();
         let start = Instant::now();
         let ctx = ui.ctx().clone();
         self.ppp = ctx.pixels_per_point();
@@ -4233,9 +4244,12 @@ impl eframe::App for PainterApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.window_title = title;
         }
-        if let Some(p) = &mut self.shelf_previews
-            && !p.pump(&self.rs, &ctx, &mut self.shelf)
-        {
+        let pumped = self.shelf_previews.is_some();
+        let keep = {
+            let _s = crate::startup_trace::span("frame: shelf pump");
+            self.shelf_previews.as_mut().is_none_or(|p| p.pump(&self.rs, &ctx, &mut self.shelf))
+        };
+        if pumped && !keep {
             self.shelf_previews = None;
         }
         self.path_keys(&ctx);
