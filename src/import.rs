@@ -335,6 +335,56 @@ mod tests {
         }
     }
 
+    #[test]
+    fn partial_normals_preserve_authored_vertices_and_generate_missing_ones() {
+        let mut builder = super::Builder::default();
+        let positions = [
+            glam::Vec3::new(-1.0, -1.0, 0.0),
+            glam::Vec3::new(1.0, -1.0, 0.0),
+            glam::Vec3::new(1.0, 1.0, 0.0),
+            glam::Vec3::new(-1.0, 1.0, 0.0),
+        ];
+        let uvs = [
+            glam::Vec2::new(0.0, 0.0),
+            glam::Vec2::new(1.0, 0.0),
+            glam::Vec2::new(1.0, 1.0),
+            glam::Vec2::new(0.0, 1.0),
+        ];
+        builder.begin_object("partially authored normals");
+
+        for i in [0usize, 1, 2] {
+            builder.push_corner(super::Corner {
+                pos: positions[i],
+                normal: Some(glam::Vec3::X),
+                uv: Some(uvs[i]),
+                color: None,
+            });
+        }
+        builder.push_materials(1, 0);
+
+        // The second triangle shares an edge but has missing authored normals.
+        // Position welding during fallback must still smooth across that edge.
+        for i in [0usize, 2, 3] {
+            builder.push_corner(super::Corner {
+                pos: positions[i],
+                normal: None,
+                uv: Some(uvs[i]),
+                color: None,
+            });
+        }
+        builder.push_materials(1, 0);
+
+        let raw = builder.finish();
+        let normals = raw.normals.expect("partial normals should be repaired");
+        assert_eq!(&normals[..3], &[glam::Vec3::X; 3], "authored normals must not be replaced");
+        for (i, normal) in normals[3..].iter().enumerate() {
+            assert!(
+                normal.distance(glam::Vec3::Z) < 1e-5,
+                "missing normal {i} should be generated as +Z, got {normal:?}"
+            );
+        }
+    }
+
     /// Opt-in smoke test: `MP_IMPORT_TEST="a.fbx;b.obj" cargo test -- --ignored`.
     #[test]
     #[ignore]
