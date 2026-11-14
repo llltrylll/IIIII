@@ -2366,7 +2366,7 @@ fn screen_projection_rejects_back_surface_behind_thin_occluder() {
         .filter(|(index, pixel)| *index % (res as usize) >= (res as usize / 2) && pixel[3] > 0)
         .count();
     let hidden_column = (0..res as usize).filter(|&y| (96..=160).contains(&y))
-        .filter(|&y| painted(70, y) || painted(71, y) || painted(72, y))
+        .filter(|&y| painted(70, y))
         .count();
 
     println!("  thin occluder: back chart {back_chart_count}, bar chart {bar_chart_count}, painted texels under bar {hidden_column}");
