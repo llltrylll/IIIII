@@ -924,6 +924,20 @@ fn surface_at(mesh: &Mesh, tri: u32, bary: Vec3) -> (Vec3, Vec2, f32) {
     (n, uv, scale)
 }
 
+/// Interpolated MikkTSpace tangent and handedness at a triangle hit.
+/// This is diagnostic-only: brush stamp resolution continues to use surface_at().
+fn tangent_at(mesh: &Mesh, tri: u32, bary: Vec3) -> (Vec3, f32) {
+    let vertex = |k: usize| &mesh.vertices[mesh.indices[tri as usize * 3 + k] as usize];
+    let v = [vertex(0), vertex(1), vertex(2)];
+    let tangent = v.iter().enumerate().fold(Vec3::ZERO, |sum, (i, vertex)| {
+        sum + Vec3::new(vertex.tangent[0], vertex.tangent[1], vertex.tangent[2]) * bary[i]
+    });
+    let handedness = v[0].tangent[3] * bary.x
+        + v[1].tangent[3] * bary.y
+        + v[2].tangent[3] * bary.z;
+    (tangent, handedness)
+}
+
 /// Turns screen stamps (with their flow) into what the stamp shader
 /// reads. The surface and UV projections find the surface under each
 /// stamp, sized so it covers what the brush circle covers on screen, plus
@@ -2859,17 +2873,23 @@ impl PainterApp {
                     let p = v.map(|v| Vec3::from_array(v.pos));
                     let face_n = (p[1] - p[0]).cross(p[2] - p[0]).normalize_or_zero();
                     let (shading_n, uv, uv_scale) = surface_at(&self.mesh, hit.tri, hit.bary);
+                    let (tangent_raw, tangent_w) = tangent_at(&self.mesh, hit.tri, hit.bary);
+                    let tangent = tangent_raw.normalize_or_zero();
+                    let bitangent = -shading_n.cross(tangent) * tangent_w;
                     let alignment = v.iter()
                         .map(|vertex| Vec3::from_array(vertex.normal).normalize_or_zero().dot(face_n))
                         .sum::<f32>() / 3.0;
+                    let tangent_normal_dot = tangent.dot(shading_n);
+                    let tangent_geom_dot = tangent.dot(face_n);
+                    let bitangent_geom_dot = bitangent.normalize_or_zero().dot(face_n);
                     let facing = face_n.dot(-direction);
                     let object = self.mesh.tri_object.get(tri).copied().unwrap_or(u32::MAX);
                     let object_name = self.mesh.objects.get(object as usize).map(String::as_str).unwrap_or("(unknown)");
                     let set = self.mesh.set_of(hit.tri);
                     let set_name = self.mesh.sets.get(set).map(|s| s.name.as_str()).unwrap_or("(missing)");
                     format!(
-                        "tri={} object={}({}) set={}({}) t={:.6} bary={:?} uv={:?} geomN={:?} shadeN={:?} NdotGeom={:.4} geomNdotToCamera={:.4} uvScale={:.6}",
-                        hit.tri, object, object_name, set, set_name, (hit.pos - origin).length(), hit.bary, uv, face_n, shading_n, alignment, facing, uv_scale
+                        "tri={} object={}({}) set={}({}) t={:.6} bary={:?} uv={:?} geomN={:?} shadeN={:?} NdotGeom={:.4} geomNdotToCamera={:.4} tangentRaw={:?} tangentLen={:.4} tangentW={:.4} TdotShadeN={:.4} TdotGeomN={:.4} BdotGeomN={:.4} uvScale={:.6}",
+                        hit.tri, object, object_name, set, set_name, (hit.pos - origin).length(), hit.bary, uv, face_n, shading_n, alignment, facing, tangent_raw, tangent_raw.length(), tangent_w, tangent_normal_dot, tangent_geom_dot, bitangent_geom_dot, uv_scale
                     )
                 }
                 None => "no hit".into(),
@@ -2908,14 +2928,20 @@ impl PainterApp {
                     + Vec3::from_array(v[1].normal) * bary.y
                     + Vec3::from_array(v[2].normal) * bary.z).normalize_or_zero();
                 let n_dot_face = shading_n.dot(face_n);
+                let (tangent_raw, tangent_w) = tangent_at(&self.mesh, *tri, bary);
+                let tangent = tangent_raw.normalize_or_zero();
+                let bitangent = -shading_n.cross(tangent) * tangent_w;
+                let tangent_normal_dot = tangent.dot(shading_n);
+                let tangent_geom_dot = tangent.dot(face_n);
+                let bitangent_geom_dot = bitangent.normalize_or_zero().dot(face_n);
                 let facing = face_n.dot(-direction);
                 let object = self.mesh.tri_object.get(*tri as usize).copied().unwrap_or(u32::MAX);
                 let object_name = self.mesh.objects.get(object as usize).map(String::as_str).unwrap_or("(unknown)");
                 let set = self.mesh.set_of(*tri);
                 let set_name = self.mesh.sets.get(set).map(|s| s.name.as_str()).unwrap_or("(missing)");
                 format!(
-                    "tri={} object={}({}) set={}({}) t={:.6} bary={:?} uv={:?} geomNdotToCamera={:.4} shadeNdotGeomN={:.4}",
-                    tri, object, object_name, set, set_name, distance, bary, exact_uv, facing, n_dot_face
+                    "tri={} object={}({}) set={}({}) t={:.6} bary={:?} uv={:?} geomNdotToCamera={:.4} shadeNdotGeomN={:.4} tangentRaw={:?} tangentW={:.3} TdotShadeN={:.3} TdotGeomN={:.3} BdotGeomN={:.3}",
+                    tri, object, object_name, set, set_name, distance, bary, exact_uv, facing, n_dot_face, tangent_raw, tangent_w, tangent_normal_dot, tangent_geom_dot, bitangent_geom_dot
                 )
             }).collect::<Vec<_>>().join(" ; ");
 
