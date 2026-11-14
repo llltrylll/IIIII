@@ -628,6 +628,8 @@ pub struct PainterApp {
     meter: StrokeMeter,
     /// Temporary ray-hit trace used only by the diagnostic hotkey.
     diagnostics: DiagnosticCapture,
+    /// Reused candidate index storage for consecutive screen-projection brush steps.
+    screen_candidate_indices: Vec<u32>,
     /// Changes whenever the active Engine instance is replaced or swapped.
     engine_epoch: u64,
     /// The running bake only makes the ID map (from vertex colors).
@@ -1307,6 +1309,33 @@ fn stroke_region_impl(
 /// Conservative paint bounds plus only the mesh index entries whose triangles
 /// can intersect the screen-space stamps. The compact index list lets the GPU
 /// skip unrelated mesh triangles during every brush step.
+pub(crate) fn screen_stroke_plan_into(
+    mesh: &Mesh,
+    bvh: &Bvh,
+    triangle_indices: std::ops::Range<u32>,
+    cam: &OrbitCam,
+    size: Vec2,
+    symmetry: u8,
+    radius: f32,
+    stamps: &[Stamp],
+    candidate_indices: &mut Vec<u32>,
+) -> Option<Vec<[f32; 4]>> {
+    candidate_indices.clear();
+    stroke_region_impl(
+        mesh,
+        bvh,
+        triangle_indices,
+        cam,
+        size,
+        BrushProjection::Screen,
+        symmetry,
+        radius,
+        stamps,
+        Some(candidate_indices),
+    )
+}
+
+#[cfg(test)]
 pub(crate) fn screen_stroke_plan(
     mesh: &Mesh,
     bvh: &Bvh,
@@ -1318,18 +1347,7 @@ pub(crate) fn screen_stroke_plan(
     stamps: &[Stamp],
 ) -> (Option<Vec<[f32; 4]>>, Vec<u32>) {
     let mut indices = Vec::new();
-    let regions = stroke_region_impl(
-        mesh,
-        bvh,
-        triangle_indices,
-        cam,
-        size,
-        BrushProjection::Screen,
-        symmetry,
-        radius,
-        stamps,
-        Some(&mut indices),
-    );
+    let regions = screen_stroke_plan_into(mesh, bvh, triangle_indices, cam, size, symmetry, radius, stamps, &mut indices);
     (regions, indices)
 }
 
@@ -2066,6 +2084,7 @@ impl PainterApp {
             time_composite: false,
             meter: StrokeMeter::default(),
             diagnostics: DiagnosticCapture::default(),
+            screen_candidate_indices: Vec::new(),
             engine_epoch: 0,
             bake_id_only: false,
             cam: OrbitCam::default(),
@@ -4972,14 +4991,13 @@ impl PainterApp {
             grain: self.grain_params(),
         };
         let region_started = self.meter.on.then(Instant::now);
-        let mut screen_candidate_indices = None;
         let region = match kind {
             ViewKind::V3d => {
                 let [w, h] = self.views.view3d.size;
                 let radius = self.brush.size * 0.5 * self.ppp;
                 let size = Vec2::new(w as f32, h as f32);
                 if self.brush.projection == BrushProjection::Screen {
-                    let (regions, indices) = screen_stroke_plan(
+                    screen_stroke_plan_into(
                         &self.mesh,
                         &self.bvh,
                         self.engine.triangles(),
@@ -4988,9 +5006,8 @@ impl PainterApp {
                         self.brush.symmetry,
                         radius,
                         &stamps,
-                    );
-                    screen_candidate_indices = Some(indices);
-                    regions
+                        &mut self.screen_candidate_indices,
+                    )
                 } else {
                     stroke_region(&self.mesh, &self.bvh, self.engine.triangles(), &self.cam, size, self.brush.projection, self.brush.symmetry, radius, &stamps)
                 }
@@ -5016,7 +5033,7 @@ impl PainterApp {
         }
         let stamp_started = Instant::now();
         if kind == ViewKind::V3d && self.brush.projection == BrushProjection::Screen {
-            let indices = screen_candidate_indices.as_deref().unwrap_or(&[]);
+            let indices = &self.screen_candidate_indices;
             if self.meter.on {
                 self.engine.stroke_step_screen_culled_profiled(
                     &self.gpu_mesh,
