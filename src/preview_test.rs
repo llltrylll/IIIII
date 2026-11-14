@@ -3505,6 +3505,13 @@ fn multi_scissor_matches_full_composite() {
             e.layers[b].mask.as_mut().unwrap().filters.remove(0);
             (bid, StrokeTarget::Mask)
         }),
+        ("painting a layered, filtered mask", |e, u| {
+            e.add_fill_layer(0, None, "A".into(), fill_of([0.2, 0.4, 0.8]), u);
+            let b = e.add_fill_layer(1, None, "B".into(), fill_of([0.9, 0.7, 0.1]), u);
+            let bid = e.layers[b].id;
+            filtered_mask(e, bid, u);
+            (bid, StrokeTarget::Mask)
+        }),
         ("painting a filtered mask inside a folder", |e, u| {
             e.add_fill_layer(0, None, "A".into(), fill_of([0.2, 0.4, 0.8]), u);
             let f = e.add_folder(1, None, "F".into(), u);
@@ -3582,6 +3589,16 @@ fn multi_scissor_matches_full_composite() {
             rects_max = rects_max.max(engine.last_scissor_rects);
             patch_min = patch_min.min(engine.last_scissor_pixels as f64 * 100.0 / (res as f64 * res as f64));
         }
+        // The last step may be released before any composite saw it: the
+        // composite after the release has no active stroke to learn from.
+        {
+            let raw: Vec<([f32; 4], f32)> = (0..5).map(|i| ([300.0 + i as f32 * 8.0, 300.0, 1.0, 0.0], 1.0)).collect();
+            let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+            let region = crate::app::stroke_region(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps);
+            engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, region);
+            engine.end_stroke();
+            engine.composite();
+        }
         most_rects = most_rects.max(rects_max);
         let partial: Vec<Vec<u8>> = (0..ACCUM).map(|c| read_texture(&rs.device, &rs.queue, engine.final_tex(c))).collect();
         engine.mark_dirty();
@@ -3612,8 +3629,97 @@ fn multi_scissor_matches_full_composite() {
         if !bad.is_empty() {
             failures.push(format!("{name}: {}", bad.join("; ")));
         }
-        engine.end_stroke();
     }
     assert!(most_rects >= 2, "no scenario exercised more than one scissor (max {most_rects})");
     assert!(failures.is_empty(), "incremental != full:\n{}", failures.join("\n"));
+}
+
+/// A content stroke under a filtered mask whose result is current changes only
+/// where the stroke is: the mask doesn't depend on the stroke and the composite
+/// reads it at the texel it writes, so the filters' reach must not widen the patch.
+#[test]
+#[ignore]
+fn content_stroke_patch_ignores_current_filtered_masks() {
+    use crate::app::{BrushProjection, resolve_stamps};
+    use crate::engine::{BrushPaint, FillParams, FilterKind, MaskFilter, MatValues, StampUniform};
+    use crate::undo::{StrokeTarget, UndoStack};
+    use glam::Vec2;
+
+    fn fill_of(rgb: [f32; 3]) -> FillParams {
+        FillParams { mat: MatValues { enabled: [true, false, false, false, false, false, false, false], color: rgb, ..Default::default() }, ..Default::default() }
+    }
+    let mesh = crate::mesh::Primitive::RoundedCube.build();
+    let bvh = crate::bvh::Bvh::from_mesh(&mesh);
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let res = 512u32;
+    let size = [800u32, 500u32];
+    let fsize = Vec2::new(size[0] as f32, size[1] as f32);
+    let cam = OrbitCam { target: (mesh.bounds_min + mesh.bounds_max) * 0.5, ..Default::default() };
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+    let radius = 18.0;
+    let su = StampUniform {
+        view_proj: cam.view_proj(fsize.x / fsize.y).to_cols_array_2d(),
+        cam_pos: cam.eye().extend(1.0).to_array(),
+        view: [fsize.x, fsize.y, 0.0, 0.0],
+        view2d: [0.0; 4],
+        brush: [radius, 0.6, 1.0, 0.0],
+        clip: [crate::viewport::NEAR, crate::viewport::FAR, 0.0, 0.0],
+        proj: [BrushProjection::Screen as u32 as f32, 0.0, 85f32.to_radians().cos(), 0.0],
+    };
+    let paint = BrushPaint {
+        mat: MatValues { enabled: [true, true, true, false, false, false, false, false], color: [0.95, 0.1, 0.05], ..Default::default() },
+        mask_value: 1.0,
+        opacity: 1.0,
+        erase: false,
+        grain: [0.0; 4],
+    };
+
+    // The same stack and strokes, once with a strongly filtered mask above the
+    // painted layer and once without any mask: (patch pixels per step, full recomps).
+    let run = |filtered: bool| -> (Vec<u64>, u32) {
+        let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+        let mut undo = UndoStack::default();
+        let p = engine.add_paint_layer(0, None, None, &mut undo);
+        let pid = engine.layers[p].id;
+        let b = engine.add_fill_layer(1, None, "B".into(), fill_of([0.9, 0.7, 0.1]), &mut undo);
+        if filtered {
+            engine.add_mask(b, true, None, &mut undo);
+            let m = engine.layers[b].mask.as_mut().unwrap();
+            m.filters = vec![MaskFilter::new(FilterKind::Blur), MaskFilter::new(FilterKind::Warp)];
+            m.filters[0].a = 40.0;
+            engine.mark_dirty();
+        }
+        engine.composite();
+        let mut views = ViewRenderer::new(&rs);
+        views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &ViewSettings::default(), None);
+        let layer = engine.layers.iter().position(|l| l.id == pid).unwrap();
+        assert!(engine.begin_stroke(layer, StrokeTarget::Content, [true, true, true, false, false, false, false, false], false));
+        let recomps_before = engine.full_recomps;
+        let mut patches = Vec::new();
+        for f in 0..6 {
+            let raw: Vec<([f32; 4], f32)> = (0..5)
+                .map(|i| {
+                    let k = (f * 5 + i) as f32;
+                    ([215.0 + k * 8.0, 250.0 + 85.0 * (k * 0.09).sin(), 1.0, 0.0], 1.0)
+                })
+                .collect();
+            let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+            let region = crate::app::stroke_region(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps);
+            engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, region);
+            engine.composite();
+            patches.push(engine.last_scissor_pixels);
+        }
+        let recomps = engine.full_recomps - recomps_before;
+        engine.end_stroke();
+        (patches, recomps)
+    };
+    let (plain, plain_recomps) = run(false);
+    let (filtered, filtered_recomps) = run(true);
+    println!("  patch pixels per step: no mask {plain:?}, filtered mask {filtered:?}; full recomps {plain_recomps} vs {filtered_recomps}");
+    // The first step builds the prefix cache with a full composite.
+    assert!(plain[1..].iter().all(|&p| p < u64::from(res) * u64::from(res)), "the plain stroke must stay a patch");
+    assert_eq!(plain, filtered, "a current filtered mask must not widen a content stroke's patch");
+    assert_eq!(plain_recomps, filtered_recomps);
 }
