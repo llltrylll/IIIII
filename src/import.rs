@@ -431,6 +431,7 @@ mod tests {
                 normal: Some(glam::Vec3::X),
                 uv: Some(uvs[i]),
                 color: None,
+                source_vertex: i as u32,
             });
         }
         builder.push_materials(1, 0);
@@ -444,6 +445,7 @@ mod tests {
                 normal: None,
                 uv: Some(uvs[i]),
                 color: None,
+                source_vertex: i as u32,
             });
         }
         builder.push_materials(1, 0);
@@ -507,6 +509,112 @@ mod tests {
                 "missing normal {i} should be generated as +Z, got {normal:?}"
             );
         }
+    }
+
+    #[test]
+    fn coincident_shells_inside_one_object_keep_independent_fallback_normals() {
+        let mut builder = super::Builder::default();
+        let positions = [
+            glam::Vec3::new(-1.0, -1.0, 0.0),
+            glam::Vec3::new(1.0, -1.0, 0.0),
+            glam::Vec3::new(-1.0, 1.0, 0.0),
+        ];
+        let uvs = [
+            glam::Vec2::new(0.0, 0.0),
+            glam::Vec2::new(1.0, 0.0),
+            glam::Vec2::new(0.0, 1.0),
+        ];
+        builder.begin_object("two coincident shells");
+
+        // Shell A: +Z winding and source control points 0..2.
+        for i in 0..3 {
+            builder.push_corner(super::Corner {
+                pos: positions[i],
+                normal: None,
+                uv: Some(uvs[i]),
+                color: None,
+                source_vertex: i as u32,
+            });
+        }
+        builder.push_materials(1, 0);
+
+        // Shell B: exact same positions/UVs, but distinct source control points
+        // and reversed winding. Position-only welding would cancel the normals.
+        for i in [0usize, 2, 1] {
+            builder.push_corner(super::Corner {
+                pos: positions[i],
+                normal: None,
+                uv: Some(uvs[i]),
+                color: None,
+                source_vertex: (i + 3) as u32,
+            });
+        }
+        builder.push_materials(1, 0);
+
+        let raw = builder.finish();
+        let normals = raw.normals.expect("both shells should receive generated normals");
+        assert_eq!(raw.positions.len(), 6, "distinct source vertices must not collapse together");
+        for (i, normal) in normals[..3].iter().enumerate() {
+            assert!(normal.distance(glam::Vec3::Z) < 1e-5, "shell A normal {i} should be +Z, got {normal:?}");
+        }
+        for (i, normal) in normals[3..].iter().enumerate() {
+            assert!(normal.distance(-glam::Vec3::Z) < 1e-5, "shell B normal {i} should be -Z, got {normal:?}");
+        }
+    }
+
+    #[test]
+    fn uv_split_corners_with_same_source_vertex_still_smooth_together() {
+        let mut builder = super::Builder::default();
+        builder.begin_object("uv seam fallback");
+        let positions = [
+            glam::Vec3::new(0.0, 0.0, 0.0),
+            glam::Vec3::new(1.0, 0.0, 0.0),
+            glam::Vec3::new(1.0, 1.0, 0.0),
+            glam::Vec3::new(0.0, 1.0, 0.0),
+        ];
+        let uv_a = [
+            glam::Vec2::new(0.0, 0.0),
+            glam::Vec2::new(1.0, 0.0),
+            glam::Vec2::new(1.0, 1.0),
+        ];
+        let uv_b = [
+            glam::Vec2::new(0.5, 0.5), // same source point, different UV island
+            glam::Vec2::new(0.0, 1.0),
+            glam::Vec2::new(0.0, 0.0),
+        ];
+
+        for i in [0usize, 1, 2] {
+            builder.push_corner(super::Corner {
+                pos: positions[i],
+                normal: None,
+                uv: Some(uv_a[i]),
+                color: None,
+                source_vertex: i as u32,
+            });
+        }
+        builder.push_materials(1, 0);
+
+        for (corner, i) in [0usize, 2, 3].into_iter().enumerate() {
+            builder.push_corner(super::Corner {
+                pos: positions[i],
+                normal: None,
+                uv: Some(uv_b[corner]),
+                color: None,
+                source_vertex: i as u32,
+            });
+        }
+        builder.push_materials(1, 0);
+
+        let raw = builder.finish();
+        let normals = raw.normals.expect("UV seam should receive generated normals");
+        // The duplicated corner for source vertex 0 has a different UV and
+        // therefore a separate output index, but both copies share +Z.
+        let duplicates: Vec<glam::Vec3> = raw.positions.iter().enumerate()
+            .filter_map(|(index, p)| (p.distance(positions[0]) < 1e-6).then_some(normals[index]))
+            .collect();
+        assert_eq!(duplicates.len(), 2, "the UV seam must keep its two output vertices");
+        assert!(duplicates.iter().all(|n| n.distance(glam::Vec3::Z) < 1e-5),
+            "both UV-split copies of one source vertex should smooth to +Z: {duplicates:?}");
     }
 
     /// Opt-in smoke test: `MP_IMPORT_TEST="a.fbx;b.obj" cargo test -- --ignored`.
