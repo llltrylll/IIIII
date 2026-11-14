@@ -2092,6 +2092,104 @@ fn raster_view_is_stable_with_inverted_shading_normals() {
     assert_eq!(outward, zero, "zero shading normals must fall back to the geometric face normal");
 }
 
+/// MikkTSpace handedness must follow a shading-normal flip. This catches
+/// normal maps whose green channel reverses when the imported vertex normals
+/// point opposite to the actual triangle winding.
+#[test]
+#[ignore]
+fn raster_normal_map_is_stable_with_inverted_imported_normals() {
+    use crate::engine::{FillParams, MatValues, NORMAL};
+    use crate::mesh::Mesh;
+    use crate::undo::UndoStack;
+    use crate::viewport::{OrbitCam, ViewMode};
+    use glam::{Vec2, Vec3};
+
+    let rs = render_state();
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+    let camera = OrbitCam { yaw: 0.0, pitch: 0.0, dist: 4.0, target: Vec3::ZERO, fov_y: 38f32.to_radians() };
+    let size = [256u32, 256u32];
+    let positions = vec![
+        Vec3::new(-0.8, -0.8, 0.0),
+        Vec3::new(0.8, -0.8, 0.0),
+        Vec3::new(0.8, 0.8, 0.0),
+        Vec3::new(-0.8, 0.8, 0.0),
+    ];
+    let uvs = vec![
+        Vec2::new(0.1, 0.1),
+        Vec2::new(0.9, 0.1),
+        Vec2::new(0.9, 0.9),
+        Vec2::new(0.1, 0.9),
+    ];
+    let indices = vec![0, 1, 2, 0, 2, 3];
+
+    let mut encoded = Vec::new();
+    let normal = Vec3::new(0.0, 0.6, 0.8);
+    let color = ((normal * 0.5 + Vec3::splat(0.5)) * 255.0).round();
+    let image = image::RgbImage::from_pixel(16, 16, image::Rgb([color.x as u8, color.y as u8, color.z as u8]));
+    image.write_to(&mut std::io::Cursor::new(&mut encoded), image::ImageFormat::Png).unwrap();
+    let encoded = Arc::new(encoded);
+
+    let render = |vertex_normal: Vec3| {
+        let mesh = Mesh::from_parts(
+            "Normal map handedness fixture".into(),
+            positions.clone(),
+            Some(vec![vertex_normal; 4]),
+            uvs.clone(),
+            indices.clone(),
+        );
+        let tangent_w = mesh.vertices[0].tangent[3];
+        let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+        let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 256);
+        let mut undo = UndoStack::default();
+        engine.add_fill_layer(
+            0,
+            None,
+            "Neutral base".into(),
+            FillParams {
+                mat: MatValues { color: [0.65, 0.65, 0.65], rough: 0.55, ..Default::default() },
+                ..Default::default()
+            },
+            &mut undo,
+        );
+        let mut normal_mat = MatValues { enabled: [false; crate::engine::CHANNELS], ..Default::default() };
+        normal_mat.enabled[NORMAL] = true;
+        let idx = engine.add_fill_layer(
+            1,
+            None,
+            "Tilted normal".into(),
+            FillParams { mat: normal_mat, ..Default::default() },
+            &mut undo,
+        );
+        let img = engine.decode_channel_image(NORMAL, "tilted.png".into(), encoded.clone()).unwrap();
+        engine.set_fill_image(idx, NORMAL, Some(img), &mut undo);
+        engine.composite();
+        let mut views = ViewRenderer::new(&rs);
+        views.render_3d(
+            &rs,
+            size,
+            &[&engine],
+            &env,
+            &gpu_mesh,
+            &camera,
+            &ViewSettings { mode: ViewMode::Material, ..Default::default() },
+            None,
+        );
+        (read_texture(&rs.device, &rs.queue, views.view3d.image()), tangent_w)
+    };
+
+    let (outward, outward_w) = render(Vec3::Z);
+    let (inverted, inverted_w) = render(-Vec3::Z);
+    let differing = outward.iter().zip(&inverted).filter(|(a, b)| a != b).count();
+    println!(
+        "  normal map with inverted imported normal: tangent_w {outward_w:.1} vs {inverted_w:.1}; {differing} differing bytes / {}",
+        outward.len()
+    );
+    assert_eq!(outward_w, -inverted_w, "MikkTSpace should expose the handedness change for inverted shading normals");
+    assert_eq!(outward, inverted,
+        "the same tangent-space normal map must shade identically after face-forwarding imported normals");
+}
+
 /// Screen painting must use the visible face when multiple faces occupy
 /// the same UV coordinates. The far quad is deliberately last in index order,
 /// so the legacy UV bake stores its world position over the near quad.
