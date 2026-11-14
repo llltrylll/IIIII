@@ -1121,6 +1121,10 @@ struct Pipelines {
     dilate: wgpu::RenderPipeline,
     dilate_bgl: wgpu::BindGroupLayout,
     stamp: wgpu::RenderPipeline,
+    /// Fullscreen stamp pass restricted to dilated UV padding texels.
+    stamp_pad: wgpu::RenderPipeline,
+    /// Screen projection rasterized per mesh triangle in UV space.
+    stamp_uv: wgpu::RenderPipeline,
     stamp_bgl: wgpu::BindGroupLayout,
     poly: wgpu::RenderPipeline,
     /// Polygon fill padding: only where no UV island is (reads the position map).
@@ -1727,18 +1731,53 @@ impl Engine {
             dst_factor: wgpu::BlendFactor::One,
             operation: wgpu::BlendOperation::Add,
         };
+        let stamp_layout = gpu::layout(device, &stamp_bgl);
+        let stamp_target = Some(wgpu::ColorTargetState {
+            format: STROKE_FORMAT,
+            blend: Some(wgpu::BlendState { color: flow_blend, alpha: flow_blend }),
+            write_mask: wgpu::ColorWrites::ALL,
+        });
         let stamp = gpu::fullscreen_pipeline(
             device,
             "stamp",
             &stamp_module,
             "fs_stamp",
-            &gpu::layout(device, &stamp_bgl),
-            &[Some(wgpu::ColorTargetState {
-                format: STROKE_FORMAT,
-                blend: Some(wgpu::BlendState { color: flow_blend, alpha: flow_blend }),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            &stamp_layout,
+            &[stamp_target.clone()],
         );
+        let stamp_pad = gpu::fullscreen_pipeline(
+            device,
+            "stamp padding",
+            &stamp_module,
+            "fs_stamp_pad",
+            &stamp_layout,
+            &[stamp_target.clone()],
+        );
+        let stamp_uv = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("screen stamp per UV triangle"),
+            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("screen stamp per UV triangle layout"),
+                bind_group_layouts: &[Some(&stamp_bgl)],
+                immediate_size: 0,
+            })),
+            vertex: wgpu::VertexState {
+                module: &stamp_module,
+                entry_point: Some("vs_stamp_uv"),
+                compilation_options: Default::default(),
+                buffers: &[Some(gpu::vertex_layout())],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &stamp_module,
+                entry_point: Some("fs_stamp_uv"),
+                compilation_options: Default::default(),
+                targets: &[stamp_target],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
 
         // Polygon fill: selected triangles rasterized at their UVs into the stroke mask.
         let poly_module = gpu::shader(device, "poly fill", include_str!("shaders/poly.wgsl"));
@@ -1947,6 +1986,8 @@ impl Engine {
             dilate,
             dilate_bgl,
             stamp,
+            stamp_pad,
+            stamp_uv,
             stamp_bgl,
             poly,
             poly_pad,
