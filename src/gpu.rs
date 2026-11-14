@@ -176,6 +176,7 @@ pub fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 }
 
 pub fn shader(device: &wgpu::Device, label: &str, src: &str) -> wgpu::ShaderModule {
+    let _trace = crate::startup_trace::span_d("GPU shader module", label.to_string());
     let full = format!("{}\n{}", include_str!("shaders/common.wgsl"), src);
     device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(label),
@@ -337,6 +338,7 @@ pub fn fullscreen_pipeline(
     layout: &wgpu::PipelineLayout,
     targets: &[Option<wgpu::ColorTargetState>],
 ) -> wgpu::RenderPipeline {
+    let _trace = crate::startup_trace::span_d("GPU fullscreen pipeline", format!("{label} | fs={fs_entry}"));
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(layout),
