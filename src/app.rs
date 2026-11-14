@@ -2687,6 +2687,7 @@ impl PainterApp {
              tool: {tool}\n\
              brush_projection: {}\n\
              brush_paint_through: {}\n\
+             brush_symmetry_axis: {} (0 off, 1 X, 2 Y, 3 Z)\n\
              brush_angle_limit_degrees: {:.2}\n\
              brush_size_points: {:.2}\n\
              camera_eye: {:?}\n\
@@ -2734,6 +2735,7 @@ impl PainterApp {
             self.selected,
             self.brush.projection.name(),
             self.brush.paint_through,
+            self.brush.symmetry,
             self.brush.angle_limit,
             self.brush.size,
             eye,
@@ -3099,8 +3101,8 @@ impl PainterApp {
         context.push_str(&self.diagnostic_mesh_report());
         context.push_str("\nRAY-HIT CAPTURE\nRecord only 3D brush stamp positions. Maximum retained samples: 256.\n");
         context.push_str(&format!(
-            "brush_projection_at_start: {}\npaint_through_at_start: {}\nangle_limit_at_start: {:.3}\n",
-            self.brush.projection.name(), self.brush.paint_through, self.brush.angle_limit
+            "brush_projection_at_start: {}\npaint_through_at_start: {}\nsymmetry_axis_at_start: {}\nangle_limit_at_start: {:.3}\n",
+            self.brush.projection.name(), self.brush.paint_through, self.brush.symmetry, self.brush.angle_limit
         ));
         self.diagnostics = DiagnosticCapture {
             active: true,
