@@ -285,6 +285,56 @@ impl Builder {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn missing_normals_are_generated_per_object_without_replacing_authored_normals() {
+        let mut builder = super::Builder::default();
+        let positions = [
+            glam::Vec3::new(-1.0, -1.0, 0.0),
+            glam::Vec3::new(1.0, -1.0, 0.0),
+            glam::Vec3::new(-1.0, 1.0, 0.0),
+        ];
+        let uvs = [
+            glam::Vec2::new(0.0, 0.0),
+            glam::Vec2::new(1.0, 0.0),
+            glam::Vec2::new(0.0, 1.0),
+        ];
+
+        // Object 0 has valid authored normals and faces +Z.
+        builder.begin_object("authored normals");
+        for i in 0..3 {
+            builder.push_corner(super::Corner {
+                pos: positions[i],
+                normal: Some(glam::Vec3::X),
+                uv: Some(uvs[i]),
+                color: None,
+            });
+        }
+        builder.push_materials(1, 0);
+
+        // Object 1 occupies the exact same positions but has no normals and
+        // reversed winding. Its fallback must be -Z, not zero from cancellation.
+        builder.begin_object("missing normals");
+        for i in [0usize, 2, 1] {
+            builder.push_corner(super::Corner {
+                pos: positions[i],
+                normal: None,
+                uv: Some(uvs[i]),
+                color: None,
+            });
+        }
+        builder.push_materials(1, 0);
+
+        let raw = builder.finish();
+        let normals = raw.normals.expect("mixed scene should have usable normals");
+        assert_eq!(&normals[..3], &[glam::Vec3::X; 3], "authored normals must be preserved");
+        for (i, normal) in normals[3..].iter().enumerate() {
+            assert!(
+                normal.distance(-glam::Vec3::Z) < 1e-5,
+                "generated normal {i} should be -Z, got {normal:?}"
+            );
+        }
+    }
+
     /// Opt-in smoke test: `MP_IMPORT_TEST="a.fbx;b.obj" cargo test -- --ignored`.
     #[test]
     #[ignore]
