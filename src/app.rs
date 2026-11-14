@@ -4994,7 +4994,7 @@ impl eframe::App for PainterApp {
         let pumped = self.shelf_previews.is_some();
         let keep = {
             let _s = crate::startup_trace::span("frame: shelf pump (UI thread)");
-            self.shelf_previews.as_mut().is_none_or(|p| p.pump(&self.rs, &ctx, &mut self.shelf, &self.env_baker, &self.gpu_mesh))
+            self.shelf_previews.as_mut().is_none_or(|p| p.pump(&self.rs, &ctx, &mut self.shelf, &self.env_baker, &self.gpu_mesh, &self.engine))
         };
         if pumped && !keep {
             self.shelf_previews = None;
