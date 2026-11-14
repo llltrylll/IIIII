@@ -212,6 +212,10 @@ fn load_fbx(path: &Path) -> Result<RawMesh, String> {
         let to_world = node.geometry_to_world;
         let normal_m = ufbx::matrix_for_normals(&to_world);
         let negative_transform_determinant = ufbx::matrix_determinant(&to_world) < 0.0;
+        // A negative node transform mirrors positions but does not change the
+        // FBX corner order. Reverse each triangle so its geometric normal agrees
+        // with the transformed vertex normals consumed by the viewport.
+        let mirrored = negative_transform_determinant;
         let has_uv = mesh.vertex_uv.exists;
         let has_n = mesh.vertex_normal.exists;
         if !has_uv {
@@ -229,6 +233,11 @@ fn load_fbx(path: &Path) -> Result<RawMesh, String> {
         tri.resize(mesh.max_face_triangles * 3, 0u32);
         for (face_index, &face) in mesh.faces.iter().enumerate() {
             let n = mesh.triangulate_face(&mut tri, face) as usize;
+            if mirrored {
+                for corners in tri[..n * 3].chunks_exact_mut(3) {
+                    corners.swap(1, 2);
+                }
+            }
             let material = mesh
                 .face_material
                 .get(face_index)
@@ -480,6 +489,151 @@ impl Builder {
 
 #[cfg(test)]
 mod tests {
+    use glam::{Vec2, Vec3};
+
+    /// A flat quad on the XZ plane facing +Y (counter-clockwise seen from +Y),
+    /// planar UVs (u along +X, v along +Z), as an ASCII FBX whose node carries
+    /// the given Lcl Scaling. A negative component mirrors the object.
+    fn quad_fbx(scale: [f32; 3], with_normals: bool) -> std::path::PathBuf {
+        let normals = if with_normals {
+            "LayerElementNormal: 0 {\n Version: 101\n Name: \"\"\n MappingInformationType: \"ByPolygonVertex\"\n ReferenceInformationType: \"Direct\"\n Normals: *12 { a: 0,1,0, 0,1,0, 0,1,0, 0,1,0 }\n }\n"
+        } else {
+            ""
+        };
+        let normal_layer = if with_normals { "LayerElement: { Type: \"LayerElementNormal\" TypedIndex: 0 }" } else { "" };
+        let text = format!(
+            "; FBX 7.4.0 project file\nFBXHeaderExtension: {{\n FBXHeaderVersion: 1003\n FBXVersion: 7400\n}}\n\
+GlobalSettings: {{\n Version: 1000\n Properties70: {{\n\
+ P: \"UpAxis\", \"int\", \"Integer\", \"\",1\n P: \"UpAxisSign\", \"int\", \"Integer\", \"\",1\n\
+ P: \"FrontAxis\", \"int\", \"Integer\", \"\",2\n P: \"FrontAxisSign\", \"int\", \"Integer\", \"\",1\n\
+ P: \"CoordAxis\", \"int\", \"Integer\", \"\",0\n P: \"CoordAxisSign\", \"int\", \"Integer\", \"\",1\n\
+ P: \"UnitScaleFactor\", \"double\", \"Number\", \"\",100\n }}\n}}\n\
+Objects: {{\n Geometry: 1000, \"Geometry::Quad\", \"Mesh\" {{\n\
+ Vertices: *12 {{ a: -1,0,-1, 1,0,-1, 1,0,1, -1,0,1 }}\n\
+ PolygonVertexIndex: *4 {{ a: 0,3,2,-2 }}\n\
+ {normals}\
+ LayerElementUV: 0 {{\n Version: 101\n Name: \"UVMap\"\n MappingInformationType: \"ByPolygonVertex\"\n ReferenceInformationType: \"IndexToDirect\"\n\
+ UV: *8 {{ a: 0,0, 1,0, 1,1, 0,1 }}\n UVIndex: *4 {{ a: 0,3,2,1 }}\n }}\n\
+ Layer: 0 {{\n Version: 100\n {normal_layer}\n LayerElement: {{ Type: \"LayerElementUV\" TypedIndex: 0 }}\n }}\n }}\n\
+ Model: 2000, \"Model::Quad\", \"Mesh\" {{\n Version: 232\n Properties70: {{\n\
+ P: \"Lcl Scaling\", \"Lcl Scaling\", \"\", \"A\",{},{},{}\n }}\n }}\n}}\n\
+Connections: {{\n C: \"OO\",2000,0\n C: \"OO\",1000,2000\n}}\n",
+            scale[0], scale[1], scale[2]
+        );
+        let name = format!("mp_mirror_{}_{}_{}_{}_{:?}.fbx", scale[0], scale[1], scale[2], with_normals, std::thread::current().id());
+        let path = std::env::temp_dir().join(name);
+        std::fs::write(&path, text).expect("write test fbx");
+        path
+    }
+
+    /// One shaded corner: its UV, geometric front flag and the shading normal
+    /// `view.wgsl` (`mesh_shade_inputs`) builds for tangent-space normal `ts`,
+    /// for a viewer on the outside of the object (outside = the file's normal).
+    struct Corner {
+        uv: Vec2,
+        pos: Vec3,
+        front: bool,
+        geometric: Vec3,
+        shaded: Vec3,
+    }
+
+    fn corners(mesh: &crate::mesh::Mesh, ts: Vec3) -> Vec<Corner> {
+        let mut out = Vec::new();
+        for tri in mesh.indices.chunks_exact(3) {
+            let v = [tri[0], tri[1], tri[2]].map(|i| &mesh.vertices[i as usize]);
+            let p = v.map(|v| Vec3::from_array(v.pos));
+            let face = (p[1] - p[0]).cross(p[2] - p[0]);
+            for c in v {
+                let n = Vec3::from_array(c.normal);
+                let t = Vec3::from_array([c.tangent[0], c.tangent[1], c.tangent[2]]);
+                // Same as the WGSL: `front` comes from the winding, the normal
+                // is negated on a back face, the bitangent from the (flipped) normal.
+                let front = face.dot(n) > 0.0;
+                let rn = if front { n } else { -n };
+                let b_up = -rn.cross(t) * c.tangent[3];
+                out.push(Corner {
+                    uv: Vec2::from_array(c.uv),
+                    pos: Vec3::from_array(c.pos),
+                    front,
+                    geometric: rn.normalize(),
+                    shaded: (t * ts.x + b_up * ts.y + rn * ts.z).normalize(),
+                });
+            }
+        }
+        out
+    }
+
+    fn near(a: Vec3, b: Vec3) -> bool {
+        (a - b).length() < 1e-3
+    }
+
+    /// A mirrored FBX node (negative determinant) must shade as the mirror image
+    /// of the unmirrored object: bumps stay bumps and a normal map tilted toward
+    /// +U stays tilted toward +U along the surface. Geometry, normals and
+    /// tangents have to agree on one orientation for that to hold.
+    #[test]
+    fn mirrored_fbx_node_shades_as_the_mirror_image() {
+        let load = |scale, with_normals| {
+            let path = quad_fbx(scale, with_normals);
+            let mesh = crate::mesh::Mesh::load_file(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let _ = std::fs::remove_file(&path);
+            mesh
+        };
+        let plain = load([1.0, 1.0, 1.0], true);
+        let mirrored = load([-1.0, 1.0, 1.0], true);
+        // Both quads are symmetric about X = 0, so the mirror is x -> -x.
+        let mirror = |v: Vec3| Vec3::new(-v.x, v.y, v.z);
+        for ts in [Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.5, 0.0, 0.866), Vec3::new(0.0, 0.5, 0.866), Vec3::new(-0.4, 0.3, 0.866)] {
+            let want = corners(&plain, ts);
+            let got = corners(&mirrored, ts);
+            assert_eq!(want.len(), got.len());
+            for g in &got {
+                let w = want.iter().find(|w| (w.uv - g.uv).length() < 1e-4).expect("same uv in both");
+                assert!(near(mirror(w.pos), g.pos), "corner position is not the mirror image");
+                assert!(near(mirror(w.geometric), g.geometric), "geometric normal differs from the mirror image");
+                assert!(
+                    near(mirror(w.shaded), g.shaded),
+                    "ts {ts:?} at uv {:?}: shading normal {:?}, the mirror image of the plain mesh is {:?}",
+                    g.uv,
+                    g.shaded,
+                    mirror(w.shaded)
+                );
+                assert!(g.front, "mirrored node: corner at uv {:?} is seen as a back face", g.uv);
+            }
+        }
+    }
+
+    /// For every scale (rotations keep the winding, mirrors reverse it) and with
+    /// or without file normals (ufbx generates them), each triangle's winding
+    /// must give a geometric normal that agrees with its vertex normals, and
+    /// those must be the transformed outward normal (n / scale for a diagonal
+    /// scale).
+    #[test]
+    fn imported_winding_agrees_with_vertex_normals_for_any_node_scale() {
+        for with_normals in [true, false] {
+            for scale in [[1.0, 1.0, 1.0], [-1.0, 1.0, 1.0], [-1.0, -1.0, 1.0], [1.0, 1.0, -1.0], [1.0, -1.0, 1.0]] {
+                let path = quad_fbx(scale, with_normals);
+                let raw = super::load(&path).expect("import");
+                let _ = std::fs::remove_file(&path);
+                let want = Vec3::new(0.0, 1.0 / scale[1], 0.0).normalize();
+                let normals = raw.normals.as_ref().expect("normals (file or generated)");
+                for tri in raw.indices.chunks_exact(3) {
+                    let p = [tri[0], tri[1], tri[2]].map(|i| raw.positions[i as usize]);
+                    let face = (p[1] - p[0]).cross(p[2] - p[0]);
+                    for &i in tri {
+                        let n = normals[i as usize];
+                        assert!(near(n, want), "scale {scale:?} normals {with_normals}: vertex normal {n:?}, expected {want:?}");
+                        assert!(
+                            face.dot(n) > 0.0,
+                            "scale {scale:?} normals {with_normals}: winding gives geometric normal {face:?} against vertex normal {n:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+
     fn write_temp_obj(label: &str, source: &str) -> std::path::PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
