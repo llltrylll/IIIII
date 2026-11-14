@@ -308,9 +308,9 @@ Verify:
 
 Create separate 2D display state, fix Base Color alpha preview, and make the flat UV view independent of 3D PBR/key-light state. Keep this as a separate commit.
 
-## Phase C — correct normal visibility semantics
+## Phase C — Screen brush visibility follows imported normal orientation
 
-Use geometric orientation for brush visibility/facing decisions while retaining authored shading normals for shading. Add import diagnostics and narrow fallback-normal changes only after fixtures show the failure.
+For Screen projection, the paint-only depth pass includes only surfaces whose imported vertex normals face the camera. An inward-facing foreground shell therefore does not block the brush, allowing a correctly oriented surface behind it to receive paint. The viewport's shading normal remains a separate concern: raster shading still face-forwards the geometric normal while preserving tangent-space details. Surface and UV projection are not changed by this Screen-only rule.
 
 ## Phase D — repair stacked UV painting
 
@@ -333,25 +333,21 @@ Choose between screen-to-UV mapping, layered surface records, or a hybrid after 
 
 These findings refine the three investigations and should be included in the implementation review.
 
-## A. Imported normal completeness is global, not per object
+## A. Imported normal completeness is now tracked per object
 
-**Confirmed in source; important expansion of Bug 3.**
+**Resolved in the integrated branch and covered by importer tests.**
 
-The FBX/OBJ builder tracks a single `all_normals` boolean for the entire imported scene. Each corner updates it with `all_normals &= c.normal.is_some()`. At finish, the complete normals vector is retained only when that global flag remains true.
+The FBX/OBJ builder records missing or invalid normals per object. Fallback generation is limited to the affected object and uses logical source-vertex identity, preserving authored normals on other objects and across UV splits. Zero-length and non-finite imported normals are treated as missing.
 
-Implication: if one object or one corner in a multi-object import has no normal, the importer returns no normals for the entire combined mesh. `Mesh::from_parts()` then regenerates normals for all vertices, including objects that did contain valid authored normals.
+Regression coverage includes `missing_normals_are_generated_per_object_without_replacing_authored_normals`, `partial_normals_preserve_authored_vertices_and_generate_missing_ones`, and the coincident-shell OBJ fixture. The earlier global-`all_normals` concern is no longer the current implementation.
 
-This makes the position-weld fallback a wider risk than only the individual object that lacked normals. Tests must include a multi-object file where one object has authored normals and another does not.
+## B. Raster and path-traced viewport geometric normals now use geometry
 
-## B. Raster viewport's `gn` is not a geometric face normal
+**Corrected in the integrated branch and covered by GPU regression tests.**
 
-**Confirmed in source; shader contract inconsistency.**
+In `mesh_shade_inputs()`, the raster path derives the geometric normal from `cross(dpdx(world_position), dpdy(world_position))`, with a safe fallback for degenerate derivatives. The path tracer derives it from triangle edges. Both face-forward this geometric normal toward the camera/ray and keep imported shading normals separate for tangent-space shading.
 
-In `mesh_shade_inputs()`, the variable assigned to `c.gn` is the interpolated vertex normal `in.n`, optionally negated for a back-facing fragment. It is not derived from the triangle's edge cross product. Despite the field/comment describing a geometric normal, the raster path is carrying a face-forwarded shading/interpolated normal.
-
-The path tracer separately calculates a true geometric normal from triangle positions. Thus the raster and path-traced paths do not have the same geometric-normal semantics.
-
-This is relevant to Bug 3 because shadow bias, custom preview inputs and any logic relying on `gn` may react to authored shading normals rather than actual triangle winding. Do not silently rename or reuse this as a true geometric normal; introduce a real geometric normal only with a deliberate shader interface update and regression tests.
+Do not use this face-forwarded display normal as the Screen brush's culling rule: Screen painting now uses the original imported normal direction in its separate paint-depth pass.
 
 ## C. Surface and UV stamp resolution are not scoped to the active texture set
 
@@ -377,3 +373,32 @@ This is distinct from the one-surface-per-texel UV bake limitation. Add a fixtur
 2. Coincident opposite shells with no imported normals: inspect the generated vectors at their shared positions and report zero/near-zero results.
 3. Same world-space overlap, two different texture sets, distinct UV coordinates: run Screen, Surface and UV projections while changing the active set.
 4. Raster vs path tracer: use deliberately inverted shading normals with unchanged winding, then reversed winding with unchanged normals. Compare actual geometric orientation, displayed shading and brush acceptance.
+
+---
+
+# 2026-11-14 implementation update
+
+## Screen painting through inward-facing foreground geometry
+
+The normal-facing depth pass was added as a separate MSAA depth target. It is independent of the viewport's ordinary depth buffer, which continues to render all geometry. The pass writes depth only when the imported interpolated normal faces the camera:
+
+`dot(imported_normal, camera_position - world_position) > 0`.
+
+The cache key includes camera view-projection, viewport dimensions, mesh index count, and visible texture-set ranges. Mesh reload explicitly invalidates it. Material edits do not rebuild it.
+
+The Screen stamp shader still projects each triangle into its own UVs and compares against this depth target. As a result, an inward-facing foreground shell is skipped and the nearest correctly oriented surface behind it becomes the paint target. This does not change the displayed material shading or the Surface/UV brush projections. Paint Through continues to bypass depth testing.
+
+GPU regression results on Mesa Lavapipe:
+- Inward-facing front chart: 0 painted texels.
+- Correctly oriented background chart: 1,976 painted texels.
+- Partially overlapped normal-facing foreground chart: 942 painted texels; hidden counterpart: 0.
+- Thin foreground occluder: 0 background texels under the bar.
+- Existing stacked-UV, sloped-surface, brush projection, mask and composite parity tests passed in the same workflow.
+
+The user screenshots' remaining red speckling has not been conclusively identified as a separate tangent/normal-map defect. The new test confirms the wrong-surface selection path, not every possible visual artifact.
+
+## Performance and startup follow-up
+
+- The 2048² key-light shadow map is cached until light transform, mesh/visible-set inputs, or explicit mesh invalidation changes.
+- Secondary shelf GPU work is throttled to one step every 80 ms and pauses while a mouse button is held. CPU scan-result polling continues.
+- This reduces background contention after the main window appears. It does not prove that synchronous work inside `PainterApp::new` is no longer a startup bottleneck. The existing `MP_STARTUP_TRACE=1` report records `ViewRenderer::new`, `GraphStore::new`, `smart_io::list`, environment decode/upload, and shelf stages separately.
