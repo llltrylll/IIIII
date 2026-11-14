@@ -1899,6 +1899,7 @@ fn uv_base_color_is_independent_and_composites_alpha() {
     use crate::engine::{FillParams, MatValues};
     use crate::mesh::Primitive;
     use crate::viewport::{Cam2d, ViewMode};
+    use glam::Vec2;
 
     let rs = render_state();
     let mesh = Primitive::Plane.build();
