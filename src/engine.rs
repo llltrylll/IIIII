@@ -1700,7 +1700,9 @@ impl Engine {
             bind_group_layouts: &[],
             immediate_size: 0,
         });
-        let uvbake = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let uvbake = {
+            let _trace = crate::startup_trace::span("engine render pipeline: uv bake");
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("uv bake"),
             layout: Some(&empty_layout),
             vertex: wgpu::VertexState {
@@ -1720,7 +1722,8 @@ impl Engine {
             }),
             multiview_mask: None,
             cache: None,
-        });
+            })
+        };
         let dilate_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("dilate"),
             entries: &[gpu::tex_entry(0, false), gpu::tex_entry(1, false), gpu::tex_entry(2, false)],
@@ -1793,7 +1796,9 @@ impl Engine {
             &stamp_layout,
             &[stamp_target.clone()],
         );
-        let stamp_uv = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let stamp_uv = {
+            let _trace = crate::startup_trace::span("engine render pipeline: screen stamp per UV triangle");
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("screen stamp per UV triangle"),
             layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("screen stamp per UV triangle layout"),
@@ -1817,7 +1822,8 @@ impl Engine {
             }),
             multiview_mask: None,
             cache: None,
-        });
+            })
+        };
 
         // Polygon fill: selected triangles rasterized at their UVs into the stroke mask.
         let poly_module = gpu::shader(device, "poly fill", include_str!("shaders/poly.wgsl"));
@@ -1825,7 +1831,9 @@ impl Engine {
             label: Some("poly padding"),
             entries: &[gpu::tex_entry(0, false)],
         });
-        let poly_pipeline = |label: &str, fs: &str, bgls: &[Option<&wgpu::BindGroupLayout>]| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let poly_pipeline = |label: &str, fs: &str, bgls: &[Option<&wgpu::BindGroupLayout>]| {
+            let _trace = crate::startup_trace::span_d("engine render pipeline", format!("{label} | fs={fs}"));
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
             layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: None,
@@ -1853,7 +1861,8 @@ impl Engine {
             }),
             multiview_mask: None,
             cache: None,
-        });
+            })
+        };
         let poly = poly_pipeline("poly fill", "fs_poly", &[]);
         let poly_pad = poly_pipeline("poly padding", "fs_poly_pad", &[Some(&poly_pad_bgl)]);
 
