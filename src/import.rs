@@ -62,7 +62,10 @@ pub fn load(path: &Path) -> Result<RawMesh, String> {
 }
 
 fn load_obj(path: &Path) -> Result<RawMesh, String> {
-    let (models, materials) = tobj::load_obj(path, &tobj::LoadOptions { single_index: true, triangulate: true, ..Default::default() })
+    // Keep OBJ position indices separate from UV/normal indices. The position
+    // index is the logical vertex identity used to generate normals across UV
+    // seams without welding distinct coincident shells together.
+    let (models, materials) = tobj::load_obj(path, &tobj::LoadOptions { single_index: false, triangulate: true, ..Default::default() })
         .map_err(|e| format!("Failed to read OBJ: {e}"))?;
     let mut out = Builder::default();
     // A missing .mtl leaves the indices (and default names).
@@ -70,21 +73,24 @@ fn load_obj(path: &Path) -> Result<RawMesh, String> {
     for m in &models {
         let mesh = &m.mesh;
         let count = mesh.positions.len() / 3;
-        let has_uv = mesh.texcoords.len() >= count * 2;
-        let has_n = mesh.normals.len() >= count * 3;
+        let has_uv = !mesh.texcoords.is_empty() && mesh.texcoord_indices.len() >= mesh.indices.len();
+        let has_n = !mesh.normals.is_empty() && mesh.normal_indices.len() >= mesh.indices.len();
         if !has_uv {
             out.missing_uvs.push(m.name.clone());
         }
         let material = mesh.material_id.unwrap_or(0) as u32;
         let has_c = mesh.vertex_color.len() >= count * 3;
         out.begin_object(&m.name);
-        for &i in &mesh.indices {
-            let i = i as usize;
+        for (corner_index, &position_index) in mesh.indices.iter().enumerate() {
+            let position_index = position_index as usize;
+            let normal_index = has_n.then(|| mesh.normal_indices[corner_index] as usize);
+            let uv_index = has_uv.then(|| mesh.texcoord_indices[corner_index] as usize);
             out.push_corner(Corner {
-                pos: Vec3::from_slice(&mesh.positions[i * 3..i * 3 + 3]),
-                normal: has_n.then(|| Vec3::from_slice(&mesh.normals[i * 3..i * 3 + 3])),
-                uv: has_uv.then(|| Vec2::new(mesh.texcoords[i * 2], 1.0 - mesh.texcoords[i * 2 + 1])),
-                color: has_c.then(|| Vec3::from_slice(&mesh.vertex_color[i * 3..i * 3 + 3])),
+                pos: Vec3::from_slice(&mesh.positions[position_index * 3..position_index * 3 + 3]),
+                normal: normal_index.map(|i| Vec3::from_slice(&mesh.normals[i * 3..i * 3 + 3])),
+                uv: uv_index.map(|i| Vec2::new(mesh.texcoords[i * 2], 1.0 - mesh.texcoords[i * 2 + 1])),
+                color: has_c.then(|| Vec3::from_slice(&mesh.vertex_color[position_index * 3..position_index * 3 + 3])),
+                source_vertex: position_index as u32,
             });
         }
         out.push_materials(mesh.indices.len() / 3, material);
@@ -156,7 +162,13 @@ fn load_fbx(path: &Path) -> Result<RawMesh, String> {
                     let c = mesh.vertex_color[ix];
                     Vec3::new(c.x as f32, c.y as f32, c.z as f32)
                 });
-                out.push_corner(Corner { pos: Vec3::new(p.x as f32, p.y as f32, p.z as f32), normal, uv, color });
+                out.push_corner(Corner {
+                    pos: Vec3::new(p.x as f32, p.y as f32, p.z as f32),
+                    normal,
+                    uv,
+                    color,
+                    source_vertex: mesh.vertex_indices[ix],
+                });
             }
             out.push_materials(n, material);
         }
@@ -172,6 +184,8 @@ struct Corner {
     uv: Option<Vec2>,
     /// 0-1 vertex color as stored in the file.
     color: Option<Vec3>,
+    /// Logical source vertex identity (OBJ position index / FBX control point).
+    source_vertex: u32,
 }
 
 /// Collects triangle corners and welds identical ones into shared vertices.
@@ -184,7 +198,7 @@ struct Builder {
     tri_material: Vec<u32>,
     all_uvs: bool,
     corners: usize,
-    weld: HashMap<[u32; 9], u32>,
+    weld: HashMap<[u32; 10], u32>,
     /// Whether each object needs generated normals for at least one corner.
     object_missing_normals: Vec<bool>,
     /// ufbx reports whether it generated normals rather than evaluating source data.
@@ -200,6 +214,8 @@ struct Builder {
     /// Per-vertex provenance, so authored normals survive a partial fallback.
     vertex_has_normal: Vec<bool>,
     vertex_object: Vec<u32>,
+    /// Logical source vertex identity per output vertex, retained across UV splits.
+    vertex_source: Vec<u32>,
     missing_uvs: Vec<String>,
     max_material: u32,
     material_names: Vec<String>,
@@ -279,7 +295,10 @@ impl Builder {
         let uv = c.uv.unwrap_or(Vec2::ZERO);
         // Objects never share vertices, even where they touch exactly.
         let key = [c.pos.x, c.pos.y, c.pos.z, n.x, n.y, n.z, uv.x, uv.y].map(f32::to_bits);
-        let key = [key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7], object];
+        let key = [
+            key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7],
+            object, c.source_vertex,
+        ];
         let next = self.positions.len() as u32;
         let index = *self.weld.entry(key).or_insert(next);
         if index == next {
@@ -288,6 +307,7 @@ impl Builder {
             self.uvs.push(uv);
             self.vertex_has_normal.push(has_normal);
             self.vertex_object.push(object);
+            self.vertex_source.push(c.source_vertex);
         }
         self.indices.push(index);
     }
@@ -307,16 +327,37 @@ impl Builder {
             if !missing {
                 continue;
             }
-            let mut object_indices = Vec::new();
+            // Accumulate by logical source vertex rather than rounded position.
+            // UV-split corners with the same source identity still smooth
+            // together, while distinct coincident shells in one object remain
+            // independent and cannot cancel each other's normals.
+            let mut generated: HashMap<u32, Vec3> = HashMap::new();
             for (triangle, &owner) in self.tri_object.iter().enumerate() {
-                if owner == object as u32 {
-                    object_indices.extend_from_slice(&self.indices[triangle * 3..triangle * 3 + 3]);
+                if owner != object as u32 {
+                    continue;
+                }
+                let base = triangle * 3;
+                let [a, b, c] = [
+                    self.indices[base] as usize,
+                    self.indices[base + 1] as usize,
+                    self.indices[base + 2] as usize,
+                ];
+                let face = (self.positions[b] - self.positions[a])
+                    .cross(self.positions[c] - self.positions[a]);
+                if face.length_squared() <= 1e-20 {
+                    continue;
+                }
+                for vertex in [a, b, c] {
+                    *generated.entry(self.vertex_source[vertex]).or_insert(Vec3::ZERO) += face;
                 }
             }
-            let generated = crate::mesh::smooth_normals(&self.positions, &object_indices);
             for vertex in 0..self.normals.len() {
                 if self.vertex_object[vertex] == object as u32 && !self.vertex_has_normal[vertex] {
-                    self.normals[vertex] = generated[vertex];
+                    self.normals[vertex] = generated
+                        .get(&self.vertex_source[vertex])
+                        .copied()
+                        .unwrap_or(Vec3::ZERO)
+                        .normalize_or_zero();
                 }
             }
         }
