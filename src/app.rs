@@ -603,7 +603,8 @@ pub struct PainterApp {
     engine: Engine,
     sets: texture_sets::TextureSets,
     views: ViewRenderer,
-    raytracer: RayTracer,
+    /// Created only when the user first enables ray-traced preview.
+    raytracer: Option<RayTracer>,
     rt: RtSettings,
     undo: UndoStack,
     selected: usize,
@@ -1877,10 +1878,6 @@ impl PainterApp {
         let _s_env = crate::startup_trace::span("new: env decode+upload");
         let env = env_baker.upload(&rs, &environment::decode(&EnvSource::Builtin(default_env))?);
         drop(_s_env);
-        let _s_rt = crate::startup_trace::span("new: RayTracer::new+set_mesh");
-        let mut raytracer = RayTracer::new(&rs);
-        raytracer.set_mesh(&rs.device, &mesh, &bvh);
-        drop(_s_rt);
         let baker = { let _s = crate::startup_trace::span("new: GpuBaker::new"); GpuBaker::new(&rs.device) };
 
         let ctx = &cc.egui_ctx;
@@ -1926,7 +1923,7 @@ impl PainterApp {
             gpu_mesh,
             engine,
             views,
-            raytracer,
+            raytracer: None,
             rt: RtSettings::default(),
             undo: UndoStack::default(),
             selected: 0,
@@ -2061,7 +2058,9 @@ impl PainterApp {
         self.end_preview(false);
         self.gpu_mesh = GpuMesh::new(&self.rs.device, &mesh);
         self.bvh = Arc::new(Bvh::from_mesh(&mesh));
-        self.raytracer.set_mesh(&self.rs.device, &mesh, &self.bvh);
+        if let Some(raytracer) = self.raytracer.as_mut() {
+            raytracer.set_mesh(&self.rs.device, &mesh, &self.bvh);
+        }
         self.export.mesh_name = mesh.name.replace(' ', "");
         self.status = match mesh.sets.len() {
             1 => format!("Loaded '{}' ({} triangles).", mesh.name, mesh.triangle_count()),
