@@ -7,7 +7,7 @@ use crate::bake::{self, BakeRun, BakeSettings, GpuBaker, PreparedScene, Quality}
 use crate::engine::{Engine, FillImage, FillParams, GenKind, MatValues, PreparedFillImage};
 use crate::environment::{self, EnvBaker, EnvSource, Environment};
 use crate::gpu::GpuMesh;
-use crate::mesh::Primitive;
+use crate::mesh::Mesh;
 use crate::presets;
 use crate::undo::UndoStack;
 use crate::viewport::{Background, OrbitCam, ViewRenderer, ViewSettings};
@@ -37,7 +37,6 @@ enum Stage {
 }
 
 pub(super) struct ShelfPreviews {
-    mesh: GpuMesh,
     bounds: (glam::Vec3, glam::Vec3),
     /// Heavy GPU helpers are initialized after the editor has presented its first frame.
     baker: Option<GpuBaker>,
@@ -60,9 +59,7 @@ pub(super) struct ShelfPreviews {
 }
 
 impl ShelfPreviews {
-    pub fn start(rs: &egui_wgpu::RenderState, ctx: &egui::Context) -> ShelfPreviews {
-        let mesh = { let _s = crate::startup_trace::span("shelf: MaterialBall.build"); Primitive::MaterialBall.build() };
-        let gpu_mesh = { let _s = crate::startup_trace::span("shelf: GpuMesh::new"); GpuMesh::new(&rs.device, &mesh) };
+    pub fn start(ctx: &egui::Context, mesh: Arc<Mesh>) -> ShelfPreviews {
         let bounds = (mesh.bounds_min, mesh.bounds_max);
         let (tx, rx) = mpsc::channel();
         let bake_ctx = ctx.clone();
@@ -108,7 +105,6 @@ impl ShelfPreviews {
         }
 
         ShelfPreviews {
-            mesh: gpu_mesh,
             bounds,
             baker: None,
             engine: None,
@@ -127,7 +123,7 @@ impl ShelfPreviews {
 
     /// Advances the bake or renders the next thumbnail. Returns false once
     /// every thumbnail is in place (or the bake failed) and this can be dropped.
-    pub fn pump(&mut self, rs: &egui_wgpu::RenderState, ctx: &egui::Context, shelf: &mut Shelf, env_baker: &EnvBaker) -> bool {
+    pub fn pump(&mut self, rs: &egui_wgpu::RenderState, ctx: &egui::Context, shelf: &mut Shelf, env_baker: &EnvBaker, mesh: &GpuMesh) -> bool {
         // Let eframe submit one complete editor frame before constructing the
         // secondary GPU renderer used only for shelf thumbnails.
         if !self.gpu_init_warmup_pending {
@@ -187,7 +183,7 @@ impl ShelfPreviews {
                 Ok(Ok(scene)) => {
                     let settings = BakeSettings { quality: Quality::Draft, ..Default::default() };
                     let run = self.baker.as_ref().expect("shelf GPU baker initialized")
-                        .start(&rs.device, &rs.queue, &self.mesh, &scene, &settings, RES);
+                        .start(&rs.device, &rs.queue, mesh, &scene, &settings, RES);
                     self.stage = Stage::Baking(run);
                     ctx.request_repaint();
                     true
@@ -205,7 +201,7 @@ impl ShelfPreviews {
                     let report = run.report.clone();
                     crate::startup_trace::event("shelf: GPU bake done");
                     let _s = crate::startup_trace::span("shelf: Engine::new (UI thread)");
-                    let mut engine = Engine::new(rs, &self.mesh, self.bounds, RES);
+                    let mut engine = Engine::new(rs, mesh, self.bounds, RES);
                     engine.set_maps(maps, report);
                     self.engine = Some(engine);
                     drop(_s);
@@ -296,7 +292,7 @@ impl ShelfPreviews {
                     engine,
                     self.env.as_ref().expect("shelf environment initialized"),
                     self.views.as_mut().expect("shelf view renderer initialized"),
-                    &self.mesh,
+                    mesh,
                     item,
                     &self.scan_images,
                 );
