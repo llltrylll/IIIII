@@ -225,7 +225,8 @@ impl PainterApp {
             self.bake_preview.run = None;
         }
         if let Some((rkey, rres, run)) = &mut self.bake_preview.run {
-            let Some(maps) = self.baker.pump(run, &self.rs.device, &self.rs.queue, ctx) else { return };
+            let Some(maps) = self.baker.as_ref().expect("a running live preview owns an initialized GPU baker")
+                .pump(run, &self.rs.device, &self.rs.queue, ctx) else { return };
             let (shown, report) = ((rkey.clone(), *rres), run.report.clone());
             if self.bake_preview.saved.is_none() {
                 self.bake_preview.saved = Some(self.engine.current_maps());
@@ -248,9 +249,13 @@ impl PainterApp {
         }
         self.bake_preview.failed = None;
         let pkey = self.bake_key(true);
+        if self.bake_preview.scene.as_ref().is_some_and(|(k, _)| *k == pkey) {
+            self.ensure_baker();
+        }
         match &self.bake_preview.scene {
             Some((k, scene)) if *k == pkey => {
-                let run = self.baker.start(&self.rs.device, &self.rs.queue, &self.gpu_mesh, scene, &self.bake_settings.preview(), res);
+                let run = self.baker.as_ref().expect("live preview initializes the GPU baker above")
+                    .start(&self.rs.device, &self.rs.queue, &self.gpu_mesh, scene, &self.bake_settings.preview(), res);
                 self.bake_preview.run = Some((key, res, run));
                 self.bake_preview.starts += 1;
                 ctx.request_repaint();
