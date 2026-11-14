@@ -2,6 +2,9 @@ name: GPU brush and mask regression
 
 on:
   pull_request:
+  push:
+    branches:
+      - gpt/stacked-uv-visible-pass
   workflow_dispatch:
 
 permissions:
@@ -46,6 +49,12 @@ jobs:
 
       # Keep the correctness gates focused on brush/mask GPU parity.
       # The broader preview suite also contains unrelated interactive UI tests.
+      - name: GPU parity - stacked UV screen paint
+        run: "cargo test --locked --bin material_painter preview_test::screen_projection_paints_visible_face_of_overlapped_uvs -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU parity - inverted normals and winding
+        run: "cargo test --locked --bin material_painter preview_test::screen_projection_uses_geometric_face_normals -- --ignored --exact --nocapture --test-threads 1"
+
       - name: GPU parity - brush projections
         run: "cargo test --locked --bin material_painter preview_test::paint_projections -- --ignored --exact --nocapture --test-threads 1"
 

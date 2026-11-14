@@ -544,6 +544,7 @@ mod shader_tests {
         validate("mask filter", include_str!("shaders/mask_filter.wgsl"));
         validate("apply", include_str!("shaders/apply.wgsl"));
         validate("maps resolve", include_str!("shaders/maps_resolve.wgsl"));
+        validate("stamp", include_str!("shaders/stamp.wgsl"));
     }
 }
 

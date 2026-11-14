@@ -4286,7 +4286,27 @@ impl PainterApp {
             self.meter.region_cpu.add(started.elapsed().as_secs_f64() * 1000.0);
         }
         let stamp_started = Instant::now();
-        if self.meter.on {
+        if kind == ViewKind::V3d && self.brush.projection == BrushProjection::Screen {
+            if self.meter.on {
+                self.engine.stroke_step_screen_profiled(
+                    &self.gpu_mesh,
+                    &stamps,
+                    su,
+                    self.views.view3d.depth_view(),
+                    &paint,
+                    region,
+                );
+            } else {
+                self.engine.stroke_step_screen(
+                    &self.gpu_mesh,
+                    &stamps,
+                    su,
+                    self.views.view3d.depth_view(),
+                    &paint,
+                    region,
+                );
+            }
+        } else if self.meter.on {
             self.engine.stroke_step_profiled(&stamps, su, self.views.view3d.depth_view(), &paint, region);
         } else {
             self.engine.stroke_step(&stamps, su, self.views.view3d.depth_view(), &paint, region);

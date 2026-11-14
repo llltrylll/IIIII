@@ -1891,6 +1891,228 @@ fn mask_stroke_redoes_only_the_mask_thumbnail() {
     assert_eq!(engine.thumb_renders(), settled + 1, "and the next recomposition doesn't redo it");
 }
 
+/// Screen painting must use the visible face when multiple faces occupy
+/// the same UV coordinates. The far quad is deliberately last in index order,
+/// so the legacy UV bake stores its world position over the near quad.
+#[test]
+#[ignore]
+fn screen_projection_paints_visible_face_of_overlapped_uvs() {
+    use crate::app::{BrushProjection, resolve_stamps, stroke_region};
+    use crate::engine::{BrushPaint, Content, MatValues, StampUniform};
+    use crate::mesh::Mesh;
+    use crate::undo::{StrokeTarget, UndoStack};
+    use crate::viewport::{OrbitCam, ViewSettings, NEAR, FAR};
+    use glam::{Vec2, Vec3};
+
+    let uv = [
+        Vec2::new(0.1, 0.1),
+        Vec2::new(0.9, 0.1),
+        Vec2::new(0.9, 0.9),
+        Vec2::new(0.1, 0.9),
+    ];
+    let near = [
+        Vec3::new(-0.8, -0.8, 0.8),
+        Vec3::new(0.8, -0.8, 0.8),
+        Vec3::new(0.8, 0.8, 0.8),
+        Vec3::new(-0.8, 0.8, 0.8),
+    ];
+    let far = [
+        Vec3::new(-0.8, -0.8, -0.8),
+        Vec3::new(0.8, -0.8, -0.8),
+        Vec3::new(0.8, 0.8, -0.8),
+        Vec3::new(-0.8, 0.8, -0.8),
+    ];
+    let mut positions = near.to_vec();
+    positions.extend(far);
+    let mut uvs = uv.to_vec();
+    uvs.extend(uv);
+    let normals = Some(vec![Vec3::Z; 8]);
+    // The near quad is first and the far quad is last. Both have identical UVs.
+    let indices = vec![
+        0, 1, 2, 0, 2, 3,
+        4, 5, 6, 4, 6, 7,
+    ];
+    let mesh = Arc::new(Mesh::from_parts("Stacked UV visibility fixture".into(), positions, normals, uvs, indices));
+    let bvh = crate::bvh::Bvh::from_mesh(&mesh);
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let res = 256;
+    let cam = OrbitCam { yaw: 0.0, pitch: 0.0, dist: 4.0, target: Vec3::ZERO, fov_y: 38f32.to_radians() };
+    let size = [512u32, 512u32];
+    let fsize = Vec2::new(size[0] as f32, size[1] as f32);
+    let mut views = ViewRenderer::new(&rs);
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+
+    let paint = BrushPaint {
+        mat: MatValues {
+            enabled: [true, false, false, false, false, false, false, false],
+            color: [1.0, 0.02, 0.01],
+            ..Default::default()
+        },
+        mask_value: 1.0,
+        opacity: 1.0,
+        erase: false,
+        grain: [0.0; 4],
+    };
+    let raw = [([256.0, 256.0, 1.0, 0.0], 1.0)];
+    let radius = 88.0;
+    let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+    assert_eq!(stamps.len(), 1);
+
+    let su = StampUniform {
+        view_proj: cam.view_proj(fsize.x / fsize.y).to_cols_array_2d(),
+        cam_pos: cam.eye().extend(1.0).to_array(),
+        view: [fsize.x, fsize.y, 0.0, 0.0],
+        view2d: [0.0; 4],
+        brush: [radius, 0.6, 1.0, 0.0],
+        clip: [NEAR, FAR, 0.0, 0.0],
+        proj: [BrushProjection::Screen as u32 as f32, 0.0, 85f32.to_radians().cos(), 0.0],
+    };
+
+    let painted_texels = |engine: &Engine| {
+        let Content::Paint(channels) = &engine.layers[0].content else { panic!("expected paint layer") };
+        let color = channels[0].as_ref().expect("base color channel was allocated");
+        read_texture(&rs.device, &rs.queue, color)
+            .chunks_exact(4)
+            .filter(|pixel| pixel[3] > 0)
+            .count()
+    };
+
+    // Baseline: the last face wins the UV bake, but it is behind the camera depth.
+    let mut legacy = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+    let mut legacy_undo = UndoStack::default();
+    legacy.add_paint_layer(0, None, None, &mut legacy_undo);
+    legacy.composite();
+    views.render_3d(&rs, size, &[&legacy], &env, &gpu_mesh, &cam, &ViewSettings::default(), None);
+    assert!(legacy.begin_stroke(0, StrokeTarget::Content, paint.mat.enabled, false));
+    let legacy_region = stroke_region(&mesh, &bvh, legacy.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps);
+    legacy.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, legacy_region);
+    legacy.end_stroke();
+    legacy.composite();
+    let legacy_count = painted_texels(&legacy);
+
+    // New path: each triangle is rasterized separately in UV space, and the
+    // viewport depth chooses the visible near quad even though the far quad
+    // overwrote the same position-map texels during the ordinary UV bake.
+    let mut visible = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+    let mut visible_undo = UndoStack::default();
+    visible.add_paint_layer(0, None, None, &mut visible_undo);
+    visible.composite();
+    views.render_3d(&rs, size, &[&visible], &env, &gpu_mesh, &cam, &ViewSettings::default(), None);
+    assert!(visible.begin_stroke(0, StrokeTarget::Content, paint.mat.enabled, false));
+    let visible_region = stroke_region(&mesh, &bvh, visible.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps);
+    assert!(visible_region.is_some(), "fixture must produce conservative UV scissors");
+    visible.stroke_step_screen(&gpu_mesh, &stamps, su, views.view3d.depth_view(), &paint, visible_region);
+    visible.end_stroke();
+    visible.composite();
+    let visible_count = painted_texels(&visible);
+    let incremental: Vec<Vec<u8>> = (0..4).map(|channel| read_texture(&rs.device, &rs.queue, visible.final_tex(channel))).collect();
+    visible.mark_dirty();
+    visible.composite();
+    for channel in 0..4 {
+        let full = read_texture(&rs.device, &rs.queue, visible.final_tex(channel));
+        assert_eq!(incremental[channel], full, "screen UV pass: channel {channel} differs from a full composite");
+    }
+
+    println!("  stacked UV screen stroke: legacy {legacy_count} painted texels, per-face {visible_count}");
+    assert_eq!(legacy_count, 0, "the fixture must reproduce the old single-surface UV bake failure");
+    assert!(visible_count > 500, "the visible overlapping face should receive paint, got {visible_count}");
+}
+
+/// Screen projection must remain paintable when imported vertex normals or
+/// triangle winding disagree with the camera-facing geometric surface.
+#[test]
+#[ignore]
+fn screen_projection_uses_geometric_face_normals() {
+    use crate::app::{BrushProjection, resolve_stamps, stroke_region};
+    use crate::engine::{BrushPaint, Content, Engine, MatValues, StampUniform};
+    use crate::mesh::Mesh;
+    use crate::undo::{StrokeTarget, UndoStack};
+    use crate::viewport::{OrbitCam, ViewSettings, FAR, NEAR};
+    use glam::{Vec2, Vec3};
+
+    let size = [512u32, 512u32];
+    let fsize = Vec2::new(size[0] as f32, size[1] as f32);
+    let cam = OrbitCam { yaw: 0.0, pitch: 0.0, dist: 4.0, target: Vec3::ZERO, fov_y: 38f32.to_radians() };
+    let raw = [([256.0, 256.0, 1.0, 0.0], 1.0)];
+    let radius = 88.0;
+    let paint = BrushPaint {
+        mat: MatValues { enabled: [true, false, false, false, false, false, false, false], color: [1.0, 0.02, 0.01], ..Default::default() },
+        mask_value: 1.0,
+        opacity: 1.0,
+        erase: false,
+        grain: [0.0; 4],
+    };
+    let su = StampUniform {
+        view_proj: cam.view_proj(fsize.x / fsize.y).to_cols_array_2d(),
+        cam_pos: cam.eye().extend(1.0).to_array(),
+        view: [fsize.x, fsize.y, 0.0, 0.0],
+        view2d: [0.0; 4],
+        brush: [radius, 0.6, 1.0, 0.0],
+        clip: [NEAR, FAR, 0.0, 0.0],
+        proj: [BrushProjection::Screen as u32 as f32, 0.0, 85f32.to_radians().cos(), 0.0],
+    };
+
+    let run = |reverse_winding: bool, inverted_shading: bool| {
+        let positions = vec![
+            Vec3::new(-0.8, -0.8, 0.0),
+            Vec3::new(0.8, -0.8, 0.0),
+            Vec3::new(0.8, 0.8, 0.0),
+            Vec3::new(-0.8, 0.8, 0.0),
+        ];
+        let uvs = vec![
+            Vec2::new(0.1, 0.1),
+            Vec2::new(0.9, 0.1),
+            Vec2::new(0.9, 0.9),
+            Vec2::new(0.1, 0.9),
+        ];
+        let geometric = if reverse_winding { -Vec3::Z } else { Vec3::Z };
+        let shading = if inverted_shading { -geometric } else { geometric };
+        let normals = Some(vec![shading; 4]);
+        let indices = if reverse_winding {
+            vec![0, 2, 1, 0, 3, 2]
+        } else {
+            vec![0, 1, 2, 0, 2, 3]
+        };
+        let mesh = Arc::new(Mesh::from_parts("Geometric normal paint fixture".into(), positions, normals, uvs, indices));
+        let bvh = crate::bvh::Bvh::from_mesh(&mesh);
+        let rs = render_state();
+        let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+        let env = crate::environment::EnvBaker::new(&rs.device)
+            .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+        let mut views = ViewRenderer::new(&rs);
+        let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 256);
+        let mut undo = UndoStack::default();
+        engine.add_paint_layer(0, None, None, &mut undo);
+        engine.composite();
+        views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &ViewSettings::default(), None);
+        assert!(engine.begin_stroke(0, StrokeTarget::Content, paint.mat.enabled, false));
+
+        let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+        assert_eq!(stamps.len(), 1);
+        let region = stroke_region(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps);
+        engine.stroke_step_screen(&gpu_mesh, &stamps, su, views.view3d.depth_view(), &paint, region);
+        engine.end_stroke();
+        engine.composite();
+
+        let Content::Paint(channels) = &engine.layers[0].content else { panic!("expected paint layer") };
+        let color = channels[0].as_ref().expect("base color layer must exist");
+        read_texture(&rs.device, &rs.queue, color)
+            .chunks_exact(4)
+            .filter(|pixel| pixel[3] > 0)
+            .count()
+    };
+
+    for (reverse_winding, inverted_shading) in [(false, false), (false, true), (true, false), (true, true)] {
+        let painted = run(reverse_winding, inverted_shading);
+        println!(
+            "  geometric normal paint: reverse_winding={reverse_winding}, inverted_shading={inverted_shading}, painted={painted}"
+        );
+        assert!(painted > 500, "visible face was rejected: reverse_winding={reverse_winding}, inverted_shading={inverted_shading}, painted={painted}");
+    }
+}
+
 /// What darkens crevices in the 3D view: the same gray material ball with
 /// the baked AO at full and at the default view strength, without AO, and
 /// without the key light.
