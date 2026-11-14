@@ -39,11 +39,13 @@ enum Stage {
 pub(super) struct ShelfPreviews {
     mesh: GpuMesh,
     bounds: (glam::Vec3, glam::Vec3),
-    baker: GpuBaker,
+    /// Heavy GPU helpers are initialized after the editor has presented its first frame.
+    baker: Option<GpuBaker>,
     engine: Option<Engine>,
-    views: ViewRenderer,
+    views: Option<ViewRenderer>,
     /// Fixed studio lighting, so thumbnails don't change with the viewport HDRI.
-    env: Environment,
+    env: Option<Environment>,
+    /// First pump yields once so the main editor can present before shelf setup.
     /// Requests one smart material's scan images from the CPU worker.
     scan_tx: mpsc::Sender<Vec<PathBuf>>,
     /// Completed CPU decode/mipmap batches; at most one request is in flight.
@@ -54,10 +56,11 @@ pub(super) struct ShelfPreviews {
     /// Strong references only for scans reused by a later shelf thumbnail.
     scan_images: HashMap<PathBuf, FillImage>,
     stage: Stage,
+    gpu_init_warmup_pending: bool,
 }
 
 impl ShelfPreviews {
-    pub fn start(rs: &egui_wgpu::RenderState, ctx: &egui::Context, env_baker: &EnvBaker) -> ShelfPreviews {
+    pub fn start(rs: &egui_wgpu::RenderState, ctx: &egui::Context) -> ShelfPreviews {
         let mesh = { let _s = crate::startup_trace::span("shelf: MaterialBall.build"); Primitive::MaterialBall.build() };
         let gpu_mesh = { let _s = crate::startup_trace::span("shelf: GpuMesh::new"); GpuMesh::new(&rs.device, &mesh) };
         let bounds = (mesh.bounds_min, mesh.bounds_max);
@@ -107,13 +110,10 @@ impl ShelfPreviews {
         ShelfPreviews {
             mesh: gpu_mesh,
             bounds,
-            baker: { let _s = crate::startup_trace::span("shelf: GpuBaker::new"); GpuBaker::new(&rs.device) },
+            baker: None,
             engine: None,
-            views: { let _s = crate::startup_trace::span("shelf: ViewRenderer::new"); ViewRenderer::new(rs) },
-            env: {
-                let _s = crate::startup_trace::span("shelf: environment decode+upload");
-                env_baker.upload(rs, &environment::decode(&EnvSource::Builtin(0)).expect("the procedural studio always decodes"))
-            },
+            views: None,
+            env: None,
             scan_tx: scan_request_tx,
             scan_rx: scan_result_rx,
             pending_scans: None,
@@ -121,12 +121,42 @@ impl ShelfPreviews {
             scan_failures: HashSet::new(),
             scan_images: HashMap::new(),
             stage: Stage::Preparing(rx),
+            gpu_init_warmup_pending: false,
         }
     }
 
     /// Advances the bake or renders the next thumbnail. Returns false once
     /// every thumbnail is in place (or the bake failed) and this can be dropped.
-    pub fn pump(&mut self, rs: &egui_wgpu::RenderState, ctx: &egui::Context, shelf: &mut Shelf) -> bool {
+    pub fn pump(&mut self, rs: &egui_wgpu::RenderState, ctx: &egui::Context, shelf: &mut Shelf, env_baker: &EnvBaker) -> bool {
+        // Let eframe submit one complete editor frame before constructing the
+        // secondary GPU renderer used only for shelf thumbnails.
+        if !self.gpu_init_warmup_pending {
+            self.gpu_init_warmup_pending = true;
+            ctx.request_repaint();
+            return true;
+        }
+        if self.baker.is_none() {
+            let _s = crate::startup_trace::span("shelf deferred init: GpuBaker::new");
+            self.baker = Some(GpuBaker::new(&rs.device));
+            ctx.request_repaint();
+            return true;
+        }
+        if self.views.is_none() {
+            let _s = crate::startup_trace::span("shelf deferred init: ViewRenderer::new");
+            self.views = Some(ViewRenderer::new(rs));
+            ctx.request_repaint();
+            return true;
+        }
+        if self.env.is_none() {
+            let _s = crate::startup_trace::span("shelf deferred init: environment decode+upload");
+            self.env = Some(env_baker.upload(
+                rs,
+                &environment::decode(&EnvSource::Builtin(0)).expect("the procedural studio always decodes")
+            ));
+            ctx.request_repaint();
+            return true;
+        }
+
         match self.scan_rx.try_recv() {
             Ok(images) => {
                 let received: Vec<&PathBuf> = images.keys().collect();
@@ -156,7 +186,8 @@ impl ShelfPreviews {
             Stage::Preparing(rx) => match rx.try_recv() {
                 Ok(Ok(scene)) => {
                     let settings = BakeSettings { quality: Quality::Draft, ..Default::default() };
-                    let run = self.baker.start(&rs.device, &rs.queue, &self.mesh, &scene, &settings, RES);
+                    let run = self.baker.as_ref().expect("shelf GPU baker initialized")
+                        .start(&rs.device, &rs.queue, &self.mesh, &scene, &settings, RES);
                     self.stage = Stage::Baking(run);
                     ctx.request_repaint();
                     true
@@ -169,7 +200,8 @@ impl ShelfPreviews {
                 Err(mpsc::TryRecvError::Disconnected) => false,
             },
             Stage::Baking(run) => {
-                if let Some(maps) = self.baker.pump(run, &rs.device, &rs.queue, ctx) {
+                if let Some(maps) = self.baker.as_mut().expect("shelf GPU baker initialized")
+                    .pump(run, &rs.device, &rs.queue, ctx) {
                     let report = run.report.clone();
                     crate::startup_trace::event("shelf: GPU bake done");
                     let _s = crate::startup_trace::span("shelf: Engine::new (UI thread)");
@@ -259,7 +291,15 @@ impl ShelfPreviews {
                 }
                 let item = items.pop().expect("item was checked above");
                 let engine = self.engine.as_mut().expect("engine exists while rendering");
-                let image = render(rs, engine, &self.env, &mut self.views, &self.mesh, item, &self.scan_images);
+                let image = render(
+                    rs,
+                    engine,
+                    self.env.as_ref().expect("shelf environment initialized"),
+                    self.views.as_mut().expect("shelf view renderer initialized"),
+                    &self.mesh,
+                    item,
+                    &self.scan_images,
+                );
                 let handle = match item {
                     Item::Smart(i) => &mut shelf.smart[i],
                     Item::Material(i) => &mut shelf.materials[i],
