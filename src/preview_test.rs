@@ -1928,7 +1928,13 @@ fn raster_view_is_stable_with_inverted_shading_normals() {
         );
         let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
         let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 256);
-        engine.add_paint_layer(0, None, None, &mut crate::undo::UndoStack::default());
+        engine.add_fill_layer(
+            0,
+            None,
+            "Normal orientation test".into(),
+            presets::MATERIALS[0].fill(),
+            &mut crate::undo::UndoStack::default(),
+        );
         engine.composite();
         let mut views = ViewRenderer::new(&rs);
         views.render_3d(
