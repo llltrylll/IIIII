@@ -160,14 +160,21 @@ fn project_uv(
         // for the face's subpixel depth slope.
         let surface_linear = lin_depth(ndc.z);
         var closest_depth_difference = 1e30;
+        var nearest_scene_depth = 1e30;
         let sample_count = textureNumSamples(depth_map);
         for (var sample = 0u; sample < sample_count; sample++) {
             let sample_depth = lin_depth(textureLoad(depth_map, sp, i32(sample)));
             closest_depth_difference = min(closest_depth_difference, abs(surface_linear - sample_depth));
+            nearest_scene_depth = min(nearest_scene_depth, sample_depth);
         }
         let slope_slack = subpixel_depth_slack(clip, ndc, world_dx, world_dy);
         let epsilon = max(max(0.0005, surface_linear * 0.0001), slope_slack);
-        if (closest_depth_difference > epsilon) {
+        // A partially covered MSAA pixel may contain both samples from this
+        // surface and samples from a thin foreground occluder. Matching any
+        // sample alone would accept the hidden surface because the uncovered
+        // samples still contain its depth. Require both a matching sample and
+        // that no sample reveals a closer surface beyond the slope allowance.
+        if (closest_depth_difference > epsilon || surface_linear - nearest_scene_depth > epsilon) {
             return vec3<f32>(0.0);
         }
     }
