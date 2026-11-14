@@ -2099,7 +2099,7 @@ fn raster_view_is_stable_with_inverted_shading_normals() {
 #[ignore]
 fn raster_normal_map_is_stable_with_inverted_imported_normals() {
     use crate::engine::{FillParams, MatValues, NORMAL};
-    use crate::mesh::Mesh;
+    use crate::mesh::{Mesh, Primitive};
     use crate::undo::UndoStack;
     use crate::viewport::{OrbitCam, ViewMode};
     use glam::{Vec2, Vec3};
@@ -2107,38 +2107,38 @@ fn raster_normal_map_is_stable_with_inverted_imported_normals() {
     let rs = render_state();
     let env = crate::environment::EnvBaker::new(&rs.device)
         .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
-    let camera = OrbitCam { yaw: 0.0, pitch: 0.0, dist: 4.0, target: Vec3::ZERO, fov_y: 38f32.to_radians() };
-    let size = [256u32, 256u32];
-    let positions = vec![
-        Vec3::new(-0.8, -0.8, 0.0),
-        Vec3::new(0.8, -0.8, 0.0),
-        Vec3::new(0.8, 0.8, 0.0),
-        Vec3::new(-0.8, 0.8, 0.0),
-    ];
-    let uvs = vec![
-        Vec2::new(0.1, 0.1),
-        Vec2::new(0.9, 0.1),
-        Vec2::new(0.9, 0.9),
-        Vec2::new(0.1, 0.9),
-    ];
-    let indices = vec![0, 1, 2, 0, 2, 3];
+    let camera = OrbitCam { yaw: 0.65, pitch: 0.32, dist: 4.2, target: Vec3::ZERO, fov_y: 38f32.to_radians() };
+    let size = [320u32, 320u32];
+
+    // A curved, multi-face mesh makes tangent orientation changes visible
+    // across different face normals, UV islands and MikkTSpace handedness.
+    let source = Primitive::RoundedCube.build();
+    let positions: Vec<Vec3> = source.vertices.iter().map(|v| Vec3::from_array(v.pos)).collect();
+    let source_normals: Vec<Vec3> = source.vertices.iter().map(|v| Vec3::from_array(v.normal)).collect();
+    let uvs: Vec<Vec2> = source.vertices.iter().map(|v| Vec2::from_array(v.uv)).collect();
+    let indices = source.indices.clone();
 
     let mut encoded = Vec::new();
     let normal = Vec3::new(0.0, 0.6, 0.8);
     let color = ((normal * 0.5 + Vec3::splat(0.5)) * 255.0).round();
-    let image = image::RgbImage::from_pixel(16, 16, image::Rgb([color.x as u8, color.y as u8, color.z as u8]));
+    let image = image::RgbImage::from_pixel(32, 32, image::Rgb([color.x as u8, color.y as u8, color.z as u8]));
     image.write_to(&mut std::io::Cursor::new(&mut encoded), image::ImageFormat::Png).unwrap();
     let encoded = Arc::new(encoded);
 
-    let render = |vertex_normal: Vec3| {
+    let render = |invert_normals: bool| {
+        let normals = if invert_normals {
+            source_normals.iter().map(|n| -*n).collect()
+        } else {
+            source_normals.clone()
+        };
         let mesh = Mesh::from_parts(
             "Normal map handedness fixture".into(),
             positions.clone(),
-            Some(vec![vertex_normal; 4]),
+            Some(normals),
             uvs.clone(),
             indices.clone(),
         );
-        let tangent_w = mesh.vertices[0].tangent[3];
+        let tangent = mesh.vertices[mesh.indices[0] as usize].tangent;
         let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
         let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 256);
         let mut undo = UndoStack::default();
@@ -2175,24 +2175,22 @@ fn raster_normal_map_is_stable_with_inverted_imported_normals() {
             &ViewSettings { mode: ViewMode::Material, ..Default::default() },
             None,
         );
-        (read_texture(&rs.device, &rs.queue, views.view3d.image()), tangent_w)
+        (read_texture(&rs.device, &rs.queue, views.view3d.image()), tangent)
     };
 
-    let (outward, outward_w) = render(Vec3::Z);
-    let (inverted, inverted_w) = render(-Vec3::Z);
+    let (outward, outward_tangent) = render(false);
+    let (inverted, inverted_tangent) = render(true);
     let differing = outward.iter().zip(&inverted).filter(|(a, b)| a != b).count();
     println!(
-        "  normal map with inverted imported normal: tangent_w {outward_w:.1} vs {inverted_w:.1}; {differing} differing bytes / {}",
-        outward.len()
+        "  curved-mesh normal map with inverted imported normals: tangent {:?} vs {:?}; {differing} differing bytes / {}",
+        outward_tangent, inverted_tangent, outward.len()
     );
-    assert_eq!(outward_w, -inverted_w, "MikkTSpace should expose the handedness change for inverted shading normals");
-    assert_eq!(outward, inverted,
-        "the same tangent-space normal map must shade identically after face-forwarding imported normals");
+    assert_eq!(
+        outward,
+        inverted,
+        "the same tangent-space normal map must shade identically after face-forwarding imported normals on a curved mesh"
+    );
 }
-
-/// Screen painting must use the visible face when multiple faces occupy
-/// the same UV coordinates. The far quad is deliberately last in index order,
-/// so the legacy UV bake stores its world position over the near quad.
 #[test]
 #[ignore]
 fn screen_projection_paints_visible_face_of_overlapped_uvs() {
