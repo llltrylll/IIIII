@@ -3674,56 +3674,45 @@ impl Engine {
         let stamp_attachments = [gpu::color_attachment(&self.stroke.view, wgpu::LoadOp::Load)];
         let mut encoder = device.create_command_encoder(&Default::default());
         if let Some(mesh) = screen_mesh {
-            // Rasterize every face of this texture set at its own UV. Overlapping
-            // UVs now produce separate fragments, and project() rejects hidden faces.
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("screen stamp UV geometry"),
-                    color_attachments: &stamp_attachments,
-                    depth_stencil_attachment: None,
-                    timestamp_writes: profile.as_ref().map(|p| wgpu::RenderPassTimestampWrites {
-                        query_set: &p.query_set,
-                        beginning_of_pass_write_index: Some(0),
-                        end_of_pass_write_index: None,
-                    }),
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                }).forget_lifetime();
-                pass.set_pipeline(&self.p.stamp_uv);
-                pass.set_bind_group(0, &stamp_bg, &[]);
-                pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-                let draw_range = if let Some(indices) = candidate_indices {
-                    pass.set_index_buffer(self.screen_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    0..indices.len() as u32
-                } else {
-                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    self.tris.clone()
-                };
-                if let Some(rects) = &frame_scissors {
-                    for &[x0, y0, x1, y1] in rects {
-                        pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
-                        pass.draw_indexed(draw_range.clone(), 0, 0..1);
-                    }
-                } else {
-                    pass.draw_indexed(draw_range, 0, 0..1);
-                }
-            }
-            // Original UV islands were handled per face above. Retain the
-            // existing single-surface map only for dilated padding texels.
+            // Keep UV geometry and padding in one render pass. Both write the
+            // same stroke target and padding excludes original island texels,
+            // so switching pipelines avoids a second pass setup without changing
+            // the order or overlap semantics.
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("screen stamp UV padding"),
+                label: Some("screen stamp UV geometry and padding"),
                 color_attachments: &stamp_attachments,
                 depth_stencil_attachment: None,
                 timestamp_writes: profile.as_ref().map(|p| wgpu::RenderPassTimestampWrites {
                     query_set: &p.query_set,
-                    beginning_of_pass_write_index: None,
+                    beginning_of_pass_write_index: Some(0),
                     end_of_pass_write_index: Some(1),
                 }),
                 occlusion_query_set: None,
                 multiview_mask: None,
             }).forget_lifetime();
-            pass.set_pipeline(&self.p.stamp_pad);
+
+            // First rasterize every face at its own UV coordinates.
+            pass.set_pipeline(&self.p.stamp_uv);
             pass.set_bind_group(0, &stamp_bg, &[]);
+            pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+            let draw_range = if let Some(indices) = candidate_indices {
+                pass.set_index_buffer(self.screen_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                0..indices.len() as u32
+            } else {
+                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                self.tris.clone()
+            };
+            if let Some(rects) = &frame_scissors {
+                for &[x0, y0, x1, y1] in rects {
+                    pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                    pass.draw_indexed(draw_range.clone(), 0, 0..1);
+                }
+            } else {
+                pass.draw_indexed(draw_range, 0, 0..1);
+            }
+
+            // Then fill only dilated padding texels, without touching island pixels.
+            pass.set_pipeline(&self.p.stamp_pad);
             if let Some(rects) = &frame_scissors {
                 for &[x0, y0, x1, y1] in rects {
                     pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
@@ -3732,7 +3721,7 @@ impl Engine {
             } else {
                 pass.draw(0..3, 0..1);
             }
-        } else {
+        }        } else {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("stamp"),
                 color_attachments: &stamp_attachments,
