@@ -1850,11 +1850,18 @@ impl PainterApp {
         let mesh = { let _s = crate::startup_trace::span("new: MaterialBall.build"); Primitive::MaterialBall.build() };
         let gpu_mesh = { let _s = crate::startup_trace::span("new: GpuMesh::new"); GpuMesh::new(&rs.device, &mesh) };
         let bvh = { let _s = crate::startup_trace::span("new: Bvh::from_mesh"); Bvh::from_mesh(&mesh) };
-        let _s_engine = crate::startup_trace::span("new: Engine+ViewRenderer");
-        let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), prefs.default_resolution);
-        engine.add_paint_layer(0, None, None, &mut UndoStack::default());
-        let views = ViewRenderer::new(&rs);
-        drop(_s_engine);
+        let mut engine = {
+            let _s = crate::startup_trace::span("new: Engine::new (main editor)");
+            Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), prefs.default_resolution)
+        };
+        {
+            let _s = crate::startup_trace::span("new: Engine::add_paint_layer (initial layer)");
+            engine.add_paint_layer(0, None, None, &mut UndoStack::default());
+        }
+        let views = {
+            let _s = crate::startup_trace::span("new: ViewRenderer::new (main editor)");
+            ViewRenderer::new(&rs)
+        };
         let env_baker = { let _s = crate::startup_trace::span("new: EnvBaker::new"); EnvBaker::new(&rs.device) };
         // A real studio HDRI (plus the key light) when installed, else the
         // procedural studio.
