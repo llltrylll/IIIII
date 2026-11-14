@@ -232,8 +232,10 @@ fn screen_face_normal(p: vec3<f32>, shading_normal: vec3<f32>, geometric_normal:
     var n = shading_normal;
     if (dot(geometric_normal, geometric_normal) > 1e-16) {
         n = normalize(geometric_normal);
-    } else {
+    } else if (dot(n, n) > 1e-16) {
         n = normalize(n);
+    } else {
+        return vec3<f32>(0.0);
     }
     if (dot(n, u.cam_pos.xyz - p) < 0.0) {
         n = -n;
