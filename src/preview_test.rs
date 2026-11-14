@@ -2337,7 +2337,7 @@ fn screen_projection_rejects_back_surface_behind_thin_occluder() {
     use crate::viewport::{OrbitCam, ViewSettings, FAR, NEAR};
     use glam::{Vec2, Vec3};
 
-    let positions = vec![
+    let mut positions = vec![
         // Back plane: its UV chart occupies the left half.
         Vec3::new(-0.8, -0.8, 0.0),
         Vec3::new(0.8, -0.8, 0.0),
@@ -2349,7 +2349,7 @@ fn screen_projection_rejects_back_surface_behind_thin_occluder() {
         Vec3::new(0.003, 0.8, 0.02),
         Vec3::new(-0.003, 0.8, 0.02),
     ];
-    let uvs = vec![
+    let mut uvs = vec![
         Vec2::new(0.1, 0.1),
         Vec2::new(0.45, 0.1),
         Vec2::new(0.45, 0.9),
@@ -2359,8 +2359,32 @@ fn screen_projection_rejects_back_surface_behind_thin_occluder() {
         Vec2::new(0.9, 0.9),
         Vec2::new(0.55, 0.9),
     ];
-    let normals = Some(vec![Vec3::Z; 8]);
-    let indices = vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7];
+    let mut indices = vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7];
+
+    // Off-screen triangles make this a culling test as well: a small brush
+    // must not submit unrelated parts of a larger production mesh.
+    for k in 0..24u32 {
+        let base = positions.len() as u32;
+        let x = 3.0 + k as f32 * 0.3;
+        positions.extend([
+            Vec3::new(x, -0.1, 0.02),
+            Vec3::new(x + 0.15, -0.1, 0.02),
+            Vec3::new(x + 0.15, 0.1, 0.02),
+            Vec3::new(x, 0.1, 0.02),
+        ]);
+        let col = (k % 8) as f32;
+        let row = (k / 8) as f32;
+        let u = 0.455 + col * 0.0105;
+        let v = 0.02 + row * 0.24;
+        uvs.extend([
+            Vec2::new(u, v),
+            Vec2::new(u + 0.008, v),
+            Vec2::new(u + 0.008, v + 0.18),
+            Vec2::new(u, v + 0.18),
+        ]);
+        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    let normals = Some(vec![Vec3::Z; positions.len()]);
     let mesh = Arc::new(Mesh::from_parts("Thin occluder UV fixture".into(), positions, normals, uvs, indices));
     let bvh = crate::bvh::Bvh::from_mesh(&mesh);
     let rs = render_state();
@@ -2404,7 +2428,8 @@ fn screen_projection_rejects_back_surface_behind_thin_occluder() {
     views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &ViewSettings::default(), None);
     assert!(engine.begin_stroke(0, StrokeTarget::Content, paint.mat.enabled, false));
     let (region, candidate_indices) = screen_stroke_plan(&mesh, &bvh, engine.triangles(), &cam, fsize, 0, radius, &stamps);
-    assert!(!candidate_indices.is_empty(), "screen BVH must return candidate triangles");
+    assert_eq!(candidate_indices.len(), 12, "only the back plane and thin bar should reach the screen-space stamp bounds");
+    assert!(candidate_indices.len() < mesh.indices.len() / 4, "the GPU draw should exclude off-screen triangles");
     assert!(region.is_some());
     engine.stroke_step_screen_culled(&gpu_mesh, &candidate_indices, &stamps, su, views.view3d.depth_view(), &paint, region);
     engine.end_stroke();
