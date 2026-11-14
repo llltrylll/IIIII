@@ -212,10 +212,11 @@ fn load_fbx(path: &Path) -> Result<RawMesh, String> {
         let to_world = node.geometry_to_world;
         let normal_m = ufbx::matrix_for_normals(&to_world);
         let negative_transform_determinant = ufbx::matrix_determinant(&to_world) < 0.0;
-        // A negative node transform mirrors positions but does not change the
-        // FBX corner order. Reverse each triangle so its geometric normal agrees
-        // with the transformed vertex normals consumed by the viewport.
-        let mirrored = negative_transform_determinant;
+        // The node transform and ufbx's own winding conversion are independent
+        // orientation changes. Apply one swap only when their combined parity is odd.
+        // This avoids both an uncorrected negative node scale and a double reversal
+        // when ufbx has already changed the mesh winding during space conversion.
+        let reverse_winding = negative_transform_determinant ^ mesh.reversed_winding;
         let has_uv = mesh.vertex_uv.exists;
         let has_n = mesh.vertex_normal.exists;
         if !has_uv {
@@ -233,7 +234,7 @@ fn load_fbx(path: &Path) -> Result<RawMesh, String> {
         tri.resize(mesh.max_face_triangles * 3, 0u32);
         for (face_index, &face) in mesh.faces.iter().enumerate() {
             let n = mesh.triangulate_face(&mut tri, face) as usize;
-            if mirrored {
+            if reverse_winding {
                 for corners in tri[..n * 3].chunks_exact_mut(3) {
                     corners.swap(1, 2);
                 }
