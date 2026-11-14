@@ -572,6 +572,7 @@ impl ViewRenderer {
                         depth_stencil,
                         samples,
                         target: &Option<wgpu::ColorTargetState>| {
+            let _trace = crate::startup_trace::span_d("viewport render pipeline", format!("{label} | vs={vs} fs={fs}"));
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&layout),
@@ -632,7 +633,9 @@ impl ViewRenderer {
             label: Some("key shadow"),
             entries: &[gpu::uniform_entry(0, false)],
         });
-        let shadow = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let shadow = {
+            let _trace = crate::startup_trace::span("viewport render pipeline: key shadow");
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("key shadow"),
             layout: Some(&gpu::layout(device, &shadow_bgl)),
             vertex: wgpu::VertexState {
@@ -653,7 +656,8 @@ impl ViewRenderer {
             fragment: None,
             multiview_mask: None,
             cache: None,
-        });
+            })
+        };
         let shadow_map = Tex::new(
             device,
             "key shadow map",
