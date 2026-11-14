@@ -195,7 +195,10 @@ impl Background {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct ViewSettings {
+    /// Display mode for the 3D material viewport.
     pub mode: ViewMode,
+    /// Independent display mode for the 2D UV viewport.
+    pub uv_mode: ViewMode,
     pub exposure: f32,
     pub env_rotation: f32,
     /// Strength of the environment lighting.
@@ -259,6 +262,7 @@ impl Default for ViewSettings {
     fn default() -> Self {
         Self {
             mode: ViewMode::Material,
+            uv_mode: ViewMode::BaseColor,
             exposure: 1.0,
             env_rotation: 0.0,
             env_intensity: 1.0,
@@ -807,21 +811,21 @@ impl ViewRenderer {
         })
     }
 
-    fn base_globals(engine: &Engine, s: &ViewSettings, size: [u32; 2]) -> Globals {
+    fn base_globals(engine: &Engine, s: &ViewSettings, size: [u32; 2], mode: ViewMode) -> Globals {
         let res = engine.res as f32;
         Globals {
             view_proj: Mat4::IDENTITY.to_cols_array_2d(),
             inv_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
             cam_pos: [0.0; 4],
             light: [s.env_rotation, s.exposure, s.env_intensity, (RADIANCE_MIPS - 1) as f32],
-            params: [s.mode.index() as f32, s.height_strength, 1.0 / res, res],
+            params: [mode.index() as f32, s.height_strength, 1.0 / res, res],
             view2d: [0.0; 4],
             size: [size[0] as f32, size[1] as f32, s.ao_strength, 0.0],
             extra: [
                 if s.use_baked_normal && engine.has_bake { 1.0 } else { 0.0 },
                 if engine.has_bake { 1.0 } else { 0.0 },
                 // The custom map shown, by index among the baked ones.
-                match s.mode {
+                match mode {
                     ViewMode::Custom(id) => engine.custom_index(id).map_or(-1.0, |i| i as f32),
                     _ => 0.0,
                 },
@@ -880,7 +884,7 @@ impl ViewRenderer {
             .iter()
             .enumerate()
             .map(|(k, engine)| {
-                let mut g = Self::base_globals(engine, settings, size);
+                let mut g = Self::base_globals(engine, settings, size, settings.mode);
                 g.size[3] = self.set_looks.get(k).map_or(0.0, |l| l.highlight);
                 g.view_proj = vp.to_cols_array_2d();
                 g.inv_view_proj = vp.inverse().to_cols_array_2d();
@@ -1019,7 +1023,7 @@ impl ViewRenderer {
     ) {
         self.view2d.ensure_size(rs, size);
         let size = self.view2d.size;
-        let mut g = Self::base_globals(engine, settings, size);
+        let mut g = Self::base_globals(engine, settings, size, settings.uv_mode);
         g.view2d = [cam.zoom, cam.pan.x, cam.pan.y, 0.0];
         g.extra[3] = settings.uv_wire_opacity;
         rs.queue.write_buffer(&self.globals[0], 0, bytemuck::bytes_of(&g));
