@@ -136,7 +136,7 @@ fn project(
         var closest_depth_difference = 1e30;
         let sample_count = textureNumSamples(depth_map);
         for (var sample = 0u; sample < sample_count; sample++) {
-            let sample_depth = lin_depth(textureLoad(depth_map, sp, sample));
+            let sample_depth = lin_depth(textureLoad(depth_map, sp, i32(sample)));
             closest_depth_difference = min(closest_depth_difference, abs(surface_linear - sample_depth));
         }
         let slope_slack = subpixel_depth_slack(clip, ndc, world_dx, world_dy);
