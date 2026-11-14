@@ -14,7 +14,7 @@ use crate::viewport::{Background, OrbitCam, ViewRenderer, ViewSettings};
 use eframe::{egui, egui_wgpu};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 
 /// Texture resolution of the ball; thumbnails are small.
 const RES: u32 = 512;
