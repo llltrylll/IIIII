@@ -3641,7 +3641,7 @@ fn multi_scissor_matches_full_composite() {
 #[ignore]
 fn content_stroke_patch_ignores_current_filtered_masks() {
     use crate::app::{BrushProjection, resolve_stamps};
-    use crate::engine::{BrushPaint, FillParams, FilterKind, MaskFilter, MatValues, StampUniform};
+    use crate::engine::{ACCUM, BrushPaint, FillParams, FilterKind, MaskFilter, MatValues, StampUniform};
     use crate::undo::{StrokeTarget, UndoStack};
     use glam::Vec2;
 
@@ -3678,7 +3678,7 @@ fn content_stroke_patch_ignores_current_filtered_masks() {
 
     // The same stack and strokes, once with a strongly filtered mask above the
     // painted layer and once without any mask: (patch pixels per step, full recomps).
-    let run = |filtered: bool| -> (Vec<u64>, u32) {
+    let run = |filtered: bool| -> (Vec<u64>, u32, Vec<String>) {
         let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
         let mut undo = UndoStack::default();
         let p = engine.add_paint_layer(0, None, None, &mut undo);
@@ -3713,13 +3713,30 @@ fn content_stroke_patch_ignores_current_filtered_masks() {
         }
         let recomps = engine.full_recomps - recomps_before;
         engine.end_stroke();
-        (patches, recomps)
+        engine.composite();
+        // Final textures after the incremental patches vs a from-scratch composite.
+        let partial: Vec<Vec<u8>> = (0..ACCUM).map(|c| read_texture(&rs.device, &rs.queue, engine.final_tex(c))).collect();
+        engine.mark_dirty();
+        engine.composite();
+        let mut diffs = Vec::new();
+        for c in 0..ACCUM {
+            let full = read_texture(&rs.device, &rs.queue, engine.final_tex(c));
+            let n = full.iter().zip(&partial[c]).filter(|(a, b)| a != b).count();
+            if n > 0 {
+                diffs.push(format!("channel {c}: {n} bytes differ"));
+            }
+        }
+        (patches, recomps, diffs)
     };
-    let (plain, plain_recomps) = run(false);
-    let (filtered, filtered_recomps) = run(true);
+    let (plain, plain_recomps, plain_diffs) = run(false);
+    let (filtered, filtered_recomps, filtered_diffs) = run(true);
     println!("  patch pixels per step: no mask {plain:?}, filtered mask {filtered:?}; full recomps {plain_recomps} vs {filtered_recomps}");
     // The first step builds the prefix cache with a full composite.
     assert!(plain[1..].iter().all(|&p| p < u64::from(res) * u64::from(res)), "the plain stroke must stay a patch");
     assert_eq!(plain, filtered, "a current filtered mask must not widen a content stroke's patch");
     assert_eq!(plain_recomps, filtered_recomps);
+    // The patch size alone proves nothing about the pixels: compare the textures.
+    println!("  final textures incremental vs full: no mask {plain_diffs:?}, filtered mask {filtered_diffs:?}");
+    assert!(plain_diffs.is_empty(), "no mask: incremental != full: {plain_diffs:?}");
+    assert!(filtered_diffs.is_empty(), "filtered mask: incremental != full: {filtered_diffs:?}");
 }
