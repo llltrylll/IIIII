@@ -1273,6 +1273,9 @@ pub struct Engine {
     /// The texture set's range in the mesh's index buffer: only these
     /// triangles get position and normal maps, so only they take paint.
     tris: std::ops::Range<u32>,
+    /// Reusable compact index buffer for the triangles near a screen stroke.
+    /// Avoids submitting the entire mesh for every brush stamp.
+    screen_index_buffer: wgpu::Buffer,
     pos: Tex,
     nrm: Tex,
     /// Tangent frame per texel: fill normal-map images projected in world
@@ -1593,6 +1596,12 @@ impl Engine {
         let stamp_sbuf = buffer("stamps", (MAX_STAMPS * size_of::<Stamp>()) as u64, wgpu::BufferUsages::STORAGE);
         let apply_ubuf = buffer("apply uniform", size_of::<ApplyUniform>() as u64, wgpu::BufferUsages::UNIFORM);
 
+        let screen_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("screen stroke candidate indices"),
+            size: u64::from((tris.end - tris.start).max(3)) * std::mem::size_of::<u32>() as u64,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let mut engine = {
             let _textures = crate::startup_trace::span("Engine::with_pipelines texture/buffer allocation");
             Engine {
@@ -1679,6 +1688,7 @@ impl Engine {
             generation: 0,
             res,
             tris,
+            screen_index_buffer,
             p,
             device,
             queue,
@@ -3538,7 +3548,7 @@ impl Engine {
         paint: &BrushPaint,
         regions: Option<Vec<[f32; 4]>>,
     ) {
-        self.stroke_step_inner(stamps, su, depth, paint, regions, false, None);
+        self.stroke_step_inner(stamps, su, depth, paint, regions, false, None, None);
     }
 
     /// Same paint path, with optional GPU timestamps for F6.
@@ -3550,11 +3560,39 @@ impl Engine {
         paint: &BrushPaint,
         regions: Option<Vec<[f32; 4]>>,
     ) {
-        self.stroke_step_inner(stamps, su, depth, paint, regions, true, None);
+        self.stroke_step_inner(stamps, su, depth, paint, regions, true, None, None);
     }
 
-    /// Screen projection using the actual mesh triangles as UV fragments.
-    /// The viewport depth test decides which overlapping UV face is visible.
+    /// Screen projection using only triangles that can overlap the stamp's
+    /// screen-space bounds. Their vertex indices were collected from the mesh BVH.
+    pub fn stroke_step_screen_culled(
+        &mut self,
+        mesh: &GpuMesh,
+        candidate_indices: &[u32],
+        stamps: &[Stamp],
+        su: StampUniform,
+        depth: &wgpu::TextureView,
+        paint: &BrushPaint,
+        regions: Option<Vec<[f32; 4]>>,
+    ) {
+        self.stroke_step_inner(stamps, su, depth, paint, regions, false, Some(mesh), Some(candidate_indices));
+    }
+
+    /// Profiled version of culling-aware per-triangle screen projection.
+    pub fn stroke_step_screen_culled_profiled(
+        &mut self,
+        mesh: &GpuMesh,
+        candidate_indices: &[u32],
+        stamps: &[Stamp],
+        su: StampUniform,
+        depth: &wgpu::TextureView,
+        paint: &BrushPaint,
+        regions: Option<Vec<[f32; 4]>>,
+    ) {
+        self.stroke_step_inner(stamps, su, depth, paint, regions, true, Some(mesh), Some(candidate_indices));
+    }
+
+    /// Compatibility entry point that submits all triangles in this texture set.
     pub fn stroke_step_screen(
         &mut self,
         mesh: &GpuMesh,
@@ -3564,10 +3602,10 @@ impl Engine {
         paint: &BrushPaint,
         regions: Option<Vec<[f32; 4]>>,
     ) {
-        self.stroke_step_inner(stamps, su, depth, paint, regions, false, Some(mesh));
+        self.stroke_step_inner(stamps, su, depth, paint, regions, false, Some(mesh), None);
     }
 
-    /// Profiled version of per-triangle screen projection.
+    /// Profiled compatibility path that submits all triangles in this texture set.
     pub fn stroke_step_screen_profiled(
         &mut self,
         mesh: &GpuMesh,
@@ -3577,7 +3615,7 @@ impl Engine {
         paint: &BrushPaint,
         regions: Option<Vec<[f32; 4]>>,
     ) {
-        self.stroke_step_inner(stamps, su, depth, paint, regions, true, Some(mesh));
+        self.stroke_step_inner(stamps, su, depth, paint, regions, true, Some(mesh), None);
     }
 
     fn stroke_step_inner(
@@ -3589,8 +3627,12 @@ impl Engine {
         regions: Option<Vec<[f32; 4]>>,
         profile_gpu: bool,
         screen_mesh: Option<&GpuMesh>,
+        candidate_indices: Option<&[u32]>,
     ) {
         if self.active.is_none() || stamps.is_empty() {
+            return;
+        }
+        if candidate_indices.is_some_and(|indices| indices.is_empty()) {
             return;
         }
         // The per-frame bounds are conservative paint raster bounds. Keep
@@ -3610,6 +3652,14 @@ impl Engine {
         self.add_regions(regions);
         let stamps = &stamps[..stamps.len().min(MAX_STAMPS)];
         su.view[3] = stamps.len() as f32;
+        if let Some(indices) = candidate_indices {
+            debug_assert!(
+                indices.len() as u64 * std::mem::size_of::<u32>() as u64
+                    <= u64::from(self.tris.end - self.tris.start) * std::mem::size_of::<u32>() as u64,
+                "candidate index list cannot exceed the active texture set",
+            );
+            self.queue.write_buffer(&self.screen_index_buffer, 0, bytemuck::cast_slice(indices));
+        }
         self.queue.write_buffer(&self.stamp_ubuf, 0, bytemuck::bytes_of(&su));
         self.queue.write_buffer(&self.stamp_sbuf, 0, bytemuck::cast_slice(stamps));
 
@@ -3656,14 +3706,20 @@ impl Engine {
                 pass.set_pipeline(&self.p.stamp_uv);
                 pass.set_bind_group(0, &stamp_bg, &[]);
                 pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                let draw_range = if let Some(indices) = candidate_indices {
+                    pass.set_index_buffer(self.screen_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    0..indices.len() as u32
+                } else {
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    self.tris.clone()
+                };
                 if let Some(rects) = &frame_scissors {
                     for &[x0, y0, x1, y1] in rects {
                         pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
-                        pass.draw_indexed(self.tris.clone(), 0, 0..1);
+                        pass.draw_indexed(draw_range.clone(), 0, 0..1);
                     }
                 } else {
-                    pass.draw_indexed(self.tris.clone(), 0, 0..1);
+                    pass.draw_indexed(draw_range, 0, 0..1);
                 }
             }
             // Original UV islands were handled per face above. Retain the
