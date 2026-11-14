@@ -1847,7 +1847,10 @@ impl PainterApp {
         { let _s = crate::startup_trace::span("new: theme::apply"); theme::apply(&cc.egui_ctx); }
 
         let prefs = { let _s = crate::startup_trace::span("new: Preferences::load"); Preferences::load() };
-        let mesh = { let _s = crate::startup_trace::span("new: MaterialBall.build"); Primitive::MaterialBall.build() };
+        let mesh = Arc::new({
+            let _s = crate::startup_trace::span("new: MaterialBall.build");
+            Primitive::MaterialBall.build()
+        });
         let gpu_mesh = { let _s = crate::startup_trace::span("new: GpuMesh::new"); GpuMesh::new(&rs.device, &mesh) };
         let bvh = { let _s = crate::startup_trace::span("new: Bvh::from_mesh"); Bvh::from_mesh(&mesh) };
         let mut engine = {
@@ -1913,12 +1916,12 @@ impl PainterApp {
         };
 
         let _s_sp = crate::startup_trace::span("new: ShelfPreviews::start");
-        let shelf_previews = shelf_previews::ShelfPreviews::start(&rs, ctx);
+        let shelf_previews = shelf_previews::ShelfPreviews::start(ctx, mesh.clone());
         drop(_s_sp);
 
         let mut app = PainterApp {
             rs,
-            mesh: Arc::new(mesh),
+            mesh,
             bvh: Arc::new(bvh),
             gpu_mesh,
             engine,
@@ -4980,7 +4983,7 @@ impl eframe::App for PainterApp {
         let pumped = self.shelf_previews.is_some();
         let keep = {
             let _s = crate::startup_trace::span("frame: shelf pump (UI thread)");
-            self.shelf_previews.as_mut().is_none_or(|p| p.pump(&self.rs, &ctx, &mut self.shelf, &self.env_baker))
+            self.shelf_previews.as_mut().is_none_or(|p| p.pump(&self.rs, &ctx, &mut self.shelf, &self.env_baker, &self.gpu_mesh))
         };
         if pumped && !keep {
             self.shelf_previews = None;
