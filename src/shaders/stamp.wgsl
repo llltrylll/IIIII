@@ -88,8 +88,21 @@ fn project(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     }
     if (u.proj.y < 0.5) {
         let sp = clamp(vec2<i32>(screen), vec2<i32>(0), vec2<i32>(u.view.xy) - 1);
-        let scene = textureLoad(depth_map, sp, 0);
-        if (lin_depth(ndc.z) > lin_depth(scene) * 1.01 + 0.005) {
+        // The viewport depth target is multisampled. Use the nearest covered
+        // sample so a thin foreground feature cannot disappear merely because
+        // it missed sample zero.
+        var scene = 1.0;
+        let sample_count = textureNumSamples(depth_map);
+        for (var sample = 0u; sample < sample_count; sample++) {
+            scene = min(scene, textureLoad(depth_map, sp, sample));
+        }
+        let scene_linear = lin_depth(scene);
+        let surface_linear = lin_depth(ndc.z);
+        // Compare in world-space depth with a small precision allowance. The
+        // former 1% tolerance could admit a visibly separate surface behind
+        // thin geometry (e.g. bars and grilles) on normalized meshes.
+        let epsilon = max(0.0005, scene_linear * 0.0001);
+        if (surface_linear > scene_linear + epsilon) {
             return vec3<f32>(0.0);
         }
     }
