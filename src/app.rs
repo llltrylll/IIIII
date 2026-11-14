@@ -470,6 +470,10 @@ struct StrokeMeter {
     gpu_apply: Stat,
     gpu_composite: Stat,
     gpu_composite_total: Stat,
+    /// Candidate screen triangles submitted to the UV raster pass (avg/peak).
+    screen_candidate_triangles: Stat,
+    /// Active texture-set triangle count while measuring Screen strokes.
+    screen_total_triangles: u32,
     /// Engine counters (full recompositions, thumbnails rendered) when F6
     /// went on, and the latest values.
     counters_base: Option<(u32, u32)>,
@@ -524,7 +528,7 @@ impl StrokeMeter {
         let patch_percent = if texture_pixels == 0 { 0.0 } else { scissor_pixels as f64 * 100.0 / texture_pixels as f64 };
         let bbox_percent = if texture_pixels == 0 { 0.0 } else { bbox_pixels as f64 * 100.0 / texture_pixels as f64 };
         format!(
-            "F6 CPU avg/peak ms: steps/frame {}, resolve {}, region {}, stamp {}, begin {}, recomp {}, end {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {} | paint {:.1}%/{} scissors | composite {:.1}% (bbox {:.1}%, {} scissors) | stack {}L/{}F | masks {}h/{}m/{}p | since F6: full recomps {full}, thumbnails {thumbs}",
+            "F6 CPU avg/peak ms: steps/frame {}, resolve {}, region {}, stamp {}, begin {}, recomp {}, end {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {} | screen tris {}/{} | paint {:.1}%/{} scissors | composite {:.1}% (bbox {:.1}%, {} scissors) | stack {}L/{}F | masks {}h/{}m/{}p | since F6: full recomps {full}, thumbnails {thumbs}",
             self.steps_per_frame.text(),
             self.resolve_cpu.text(),
             self.region_cpu.text(),
@@ -537,6 +541,8 @@ impl StrokeMeter {
             self.gpu_apply.text(),
             self.gpu_composite.text(),
             self.gpu_composite_total.text(),
+            self.screen_candidate_triangles.text(),
+            self.screen_total_triangles,
             paint_percent,
             paint_scissor_rects,
             patch_percent,
@@ -4997,17 +5003,23 @@ impl PainterApp {
                 let radius = self.brush.size * 0.5 * self.ppp;
                 let size = Vec2::new(w as f32, h as f32);
                 if self.brush.projection == BrushProjection::Screen {
-                    screen_stroke_plan_into(
+                    let active_triangles = self.engine.triangles();
+                    let regions = screen_stroke_plan_into(
                         &self.mesh,
                         &self.bvh,
-                        self.engine.triangles(),
+                        active_triangles.clone(),
                         &self.cam,
                         size,
                         self.brush.symmetry,
                         radius,
                         &stamps,
                         &mut self.screen_candidate_indices,
-                    )
+                    );
+                    if self.meter.on {
+                        self.meter.screen_candidate_triangles.add((self.screen_candidate_indices.len() / 3) as f64);
+                        self.meter.screen_total_triangles = (active_triangles.end - active_triangles.start) / 3;
+                    }
+                    regions
                 } else {
                     stroke_region(&self.mesh, &self.bvh, self.engine.triangles(), &self.cam, size, self.brush.projection, self.brush.symmetry, radius, &stamps)
                 }
