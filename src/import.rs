@@ -477,6 +477,18 @@ impl Builder {
 
 #[cfg(test)]
 mod tests {
+    fn write_temp_obj(label: &str, source: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "material-painter-{label}-{}-{id}.obj",
+            std::process::id()
+        ));
+        std::fs::write(&path, source).expect("write temporary OBJ fixture");
+        path
+    }
+
     #[test]
     fn object_normal_provenance_is_retained_per_imported_object() {
         let mut builder = super::Builder::default();
@@ -641,6 +653,57 @@ mod tests {
         for (i, normal) in normals[3..].iter().enumerate() {
             assert!(normal.distance(-glam::Vec3::Z) < 1e-5, "second shell normal {i} should be -Z, got {normal:?}");
         }
+    }
+
+    #[test]
+    fn obj_missing_corner_normals_are_not_filled_from_previous_corner() {
+        let path = write_temp_obj("partial-corner-normals", concat!(
+            "o partial_normals\n",
+            "v 0 0 0\n",
+            "v 1 0 0\n",
+            "v 1 1 0\n",
+            "v 0 1 0\n",
+            "vt 0 0\n",
+            "vt 1 0\n",
+            "vt 1 1\n",
+            "vt 0 1\n",
+            "vn 1 0 0\n",
+            // Corner 2 deliberately has no vn. Tobj supplies the previous
+            // normal index in its output, but the original OBJ does not.
+            "f 1/1/1 2/2 3/3/1 4/4/1\n",
+        ));
+        let loaded = super::load_obj(&path);
+        let _ = std::fs::remove_file(&path);
+        let raw = loaded.expect("partial-normal OBJ should load");
+        let normals = raw.normals.expect("missing corner normal should be generated");
+
+        assert_eq!(raw.positions.len(), 4);
+        assert_eq!(raw.indices.len(), 6, "quad should be fan-triangulated");
+        assert!(normals[0].distance(glam::Vec3::X) < 1e-5, "authored normal 0 must be preserved");
+        assert!(normals[1].distance(glam::Vec3::Z) < 1e-5,
+            "missing corner normal must be generated from geometry, got {:?}", normals[1]);
+        assert!(normals[2].distance(glam::Vec3::X) < 1e-5, "authored normal 2 must be preserved");
+        assert!(normals[3].distance(glam::Vec3::X) < 1e-5, "authored normal 3 must be preserved");
+    }
+
+    #[test]
+    fn obj_missing_corner_uv_is_reported_instead_of_reusing_previous_uv() {
+        let path = write_temp_obj("partial-corner-uv", concat!(
+            "o incomplete_uvs\n",
+            "v 0 0 0\n",
+            "v 1 0 0\n",
+            "v 0 1 0\n",
+            "vt 0 0\n",
+            "vt 1 0\n",
+            "vn 0 0 1\n",
+            "f 1/1/1 2/2/1 3//1\n",
+        ));
+        let loaded = super::load_obj(&path);
+        let _ = std::fs::remove_file(&path);
+        let raw = loaded.expect("partial-UV OBJ should be parsed for diagnostics");
+        assert!(raw.uvs.is_none(), "the whole object must not be treated as UV-complete");
+        assert!(raw.missing_uvs.iter().any(|name| name == "incomplete_uvs"),
+            "the object with the missing per-corner UV must be identified: {:?}", raw.missing_uvs);
     }
 
     #[test]
