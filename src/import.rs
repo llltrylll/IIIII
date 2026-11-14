@@ -327,10 +327,10 @@ mod tests {
         builder.begin_object("source normals");
         let raw = builder.finish();
 
-        assert_eq!(raw.object_ufbx_generated_normals, [true, false]);
-        assert_eq!(raw.object_reversed_winding, [true, false]);
-        assert_eq!(raw.object_negative_transform_determinant, [true, false]);
-        assert_eq!(raw.object_fallback_normals_generated, [false, false]);
+        assert_eq!(raw.object_ufbx_generated_normals.as_slice(), &[true, false]);
+        assert_eq!(raw.object_reversed_winding.as_slice(), &[true, false]);
+        assert_eq!(raw.object_negative_transform_determinant.as_slice(), &[true, false]);
+        assert_eq!(raw.object_fallback_normals_generated.as_slice(), &[false, false]);
     }
 
     #[test]
