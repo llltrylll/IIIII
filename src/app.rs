@@ -4907,12 +4907,28 @@ impl PainterApp {
             grain: self.grain_params(),
         };
         let region_started = self.meter.on.then(Instant::now);
+        let mut screen_candidate_indices = None;
         let region = match kind {
             ViewKind::V3d => {
                 let [w, h] = self.views.view3d.size;
                 let radius = self.brush.size * 0.5 * self.ppp;
                 let size = Vec2::new(w as f32, h as f32);
-                stroke_region(&self.mesh, &self.bvh, self.engine.triangles(), &self.cam, size, self.brush.projection, self.brush.symmetry, radius, &stamps)
+                if self.brush.projection == BrushProjection::Screen {
+                    let (regions, indices) = screen_stroke_plan(
+                        &self.mesh,
+                        &self.bvh,
+                        self.engine.triangles(),
+                        &self.cam,
+                        size,
+                        self.brush.symmetry,
+                        radius,
+                        &stamps,
+                    );
+                    screen_candidate_indices = Some(indices);
+                    regions
+                } else {
+                    stroke_region(&self.mesh, &self.bvh, self.engine.triangles(), &self.cam, size, self.brush.projection, self.brush.symmetry, radius, &stamps)
+                }
             }
             ViewKind::V2d => {
                 // The 2D view shows the texture: the stamps' own UV squares.
@@ -4935,9 +4951,11 @@ impl PainterApp {
         }
         let stamp_started = Instant::now();
         if kind == ViewKind::V3d && self.brush.projection == BrushProjection::Screen {
+            let indices = screen_candidate_indices.as_deref().unwrap_or(&[]);
             if self.meter.on {
-                self.engine.stroke_step_screen_profiled(
+                self.engine.stroke_step_screen_culled_profiled(
                     &self.gpu_mesh,
+                    indices,
                     &stamps,
                     su,
                     self.views.view3d.depth_view(),
@@ -4945,8 +4963,9 @@ impl PainterApp {
                     region,
                 );
             } else {
-                self.engine.stroke_step_screen(
+                self.engine.stroke_step_screen_culled(
                     &self.gpu_mesh,
+                    indices,
                     &stamps,
                     su,
                     self.views.view3d.depth_view(),
