@@ -2423,6 +2423,140 @@ fn screen_projection_skips_inward_front_surface_and_paints_background_chart() {
     assert!(correctly_oriented_background > 100, "the correctly oriented background surface must receive paint");
 }
 
+/// Raster shading must clamp a tangent-space normal that points behind
+/// the viewer, using the same geometric correction as the path tracer.
+/// The second material uses the analytically clamped tangent-space vector;
+/// both renders should therefore match.
+#[test]
+#[ignore]
+fn raster_normal_map_is_clamped_to_view_hemisphere_at_grazing_angle() {
+    use crate::engine::{FillParams, MatValues, NORMAL};
+    use crate::mesh::Mesh;
+    use crate::undo::UndoStack;
+    use crate::viewport::{OrbitCam, ViewMode};
+    use glam::{Vec2, Vec3};
+
+    let positions = vec![
+        Vec3::new(-0.8, -0.8, 0.0),
+        Vec3::new(0.8, -0.8, 0.0),
+        Vec3::new(0.8, 0.8, 0.0),
+        Vec3::new(-0.8, 0.8, 0.0),
+    ];
+    let uvs = vec![
+        Vec2::new(0.1, 0.1),
+        Vec2::new(0.9, 0.1),
+        Vec2::new(0.9, 0.9),
+        Vec2::new(0.1, 0.9),
+    ];
+    let mesh = Mesh::from_parts(
+        "Grazing-angle normal clamp fixture".into(),
+        positions,
+        Some(vec![Vec3::Z; 4]),
+        uvs,
+        vec![0, 1, 2, 0, 2, 3],
+    );
+    let vertex = &mesh.vertices[mesh.indices[0] as usize];
+    let geometric = Vec3::Z;
+    let tangent = Vec3::from_array([
+        vertex.tangent[0], vertex.tangent[1], vertex.tangent[2],
+    ]);
+    let bitangent = -geometric.cross(tangent) * vertex.tangent[3];
+    let camera = OrbitCam {
+        yaw: 1.37,
+        pitch: 0.0,
+        dist: 4.2,
+        target: Vec3::ZERO,
+        fov_y: 38f32.to_radians(),
+    };
+    let view = camera.eye().normalize();
+    let local_view = Vec3::new(view.dot(tangent), view.dot(bitangent), view.dot(geometric));
+    let bad_ts = Vec3::new(-local_view.x, -local_view.y, 0.1).normalize();
+    let mapped_world = (tangent * bad_ts.x + bitangent * bad_ts.y + geometric * bad_ts.z).normalize();
+    let normal_view_dot = mapped_world.dot(view);
+    assert!(normal_view_dot < 0.0, "fixture normal must point behind the viewer, got dot={normal_view_dot}");
+    let geometric_view_dot = geometric.dot(view).max(1e-4);
+    let corrected_world = (mapped_world
+        + geometric * ((0.01 - normal_view_dot) / geometric_view_dot))
+        .normalize();
+    let corrected_ts = Vec3::new(
+        corrected_world.dot(tangent),
+        corrected_world.dot(bitangent),
+        corrected_world.dot(geometric),
+    ).normalize();
+
+    let encode = |normal: Vec3| {
+        let color = ((normal * 0.5 + Vec3::splat(0.5)) * 255.0).round();
+        let image = image::RgbImage::from_pixel(
+            32,
+            32,
+            image::Rgb([color.x as u8, color.y as u8, color.z as u8]),
+        );
+        let mut encoded = Vec::new();
+        image.write_to(
+            &mut std::io::Cursor::new(&mut encoded),
+            image::ImageFormat::Png,
+        ).unwrap();
+        Arc::new(encoded)
+    };
+    let rs = render_state();
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let render = |normal: Vec3| {
+        let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 256);
+        let mut undo = UndoStack::default();
+        engine.add_fill_layer(
+            0,
+            None,
+            "Neutral base".into(),
+            FillParams {
+                mat: MatValues { color: [0.65, 0.65, 0.65], rough: 0.55, ..Default::default() },
+                ..Default::default()
+            },
+            &mut undo,
+        );
+        let mut normal_mat = MatValues { enabled: [false; crate::engine::CHANNELS], ..Default::default() };
+        normal_mat.enabled[NORMAL] = true;
+        let layer = engine.add_fill_layer(
+            1,
+            None,
+            "Grazing normal".into(),
+            FillParams { mat: normal_mat, ..Default::default() },
+            &mut undo,
+        );
+        let img = engine.decode_channel_image(NORMAL, "grazing.png".into(), encode(normal)).unwrap();
+        engine.set_fill_image(layer, NORMAL, Some(img), &mut undo);
+        engine.composite();
+        let mut views = ViewRenderer::new(&rs);
+        views.render_3d(
+            &rs,
+            [320, 320],
+            &[&engine],
+            &env,
+            &gpu_mesh,
+            &camera,
+            &ViewSettings { mode: ViewMode::Material, ..Default::default() },
+            None,
+        );
+        read_texture(&rs.device, &rs.queue, views.view3d.image())
+    };
+
+    let clamped_by_shader = render(bad_ts);
+    let explicitly_clamped = render(corrected_ts);
+    let total_error: u64 = clamped_by_shader.iter()
+        .zip(&explicitly_clamped)
+        .map(|(a, b)| a.abs_diff(*b) as u64)
+        .sum();
+    let mean_error = total_error as f64 / clamped_by_shader.len() as f64;
+    println!(
+        "  grazing normal-map hemisphere clamp: original view dot={normal_view_dot:.4}, mean image error={mean_error:.4}"
+    );
+    assert!(
+        mean_error < 0.8,
+        "the shader-clamped normal should match the analytically clamped normal map; mean byte error {mean_error:.4}"
+    );
+}
+
 /// A screen stroke must land in the visible face's UV region, not in the
 /// hidden counterpart's distinct region when the two UV charts overlap only partly.
 #[test]
