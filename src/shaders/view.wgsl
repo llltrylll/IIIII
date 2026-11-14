@@ -347,6 +347,18 @@ fn vs_mesh(v: VIn) -> MeshOut {
     return out;
 }
 
+// Depth for screen painting deliberately differs from viewport depth:
+// only surfaces whose imported shading normals face the camera can occlude
+// the brush. An inward-facing shell is skipped, allowing paint to reach the
+// correctly oriented surface behind it.
+@fragment
+fn fs_paint_depth(in: MeshOut) {
+    if (dot(in.n, in.n) <= 1e-12 || dot(in.n, g.cam_pos.xyz - in.wpos) <= 0.0) {
+        discard;
+    }
+}
+
+
 // Everything a shader sees at one point of the mesh; custom preview shaders
 // (shading graphs) read their inputs from it.
 struct Shade {
