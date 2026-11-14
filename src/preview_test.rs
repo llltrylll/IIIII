@@ -1891,6 +1891,64 @@ fn mask_stroke_redoes_only_the_mask_thumbnail() {
     assert_eq!(engine.thumb_renders(), settled + 1, "and the next recomposition doesn't redo it");
 }
 
+/// The raster viewport should shade the same geometric face the same way
+/// even when imported vertex shading normals point in the opposite direction.
+#[test]
+#[ignore]
+fn raster_view_is_stable_with_inverted_shading_normals() {
+    use crate::viewport::{OrbitCam, NEAR, FAR};
+    use glam::Vec2;
+
+    let rs = render_state();
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+    let camera = OrbitCam { yaw: 0.0, pitch: 0.0, dist: 4.0, target: Vec3::ZERO, fov_y: 38f32.to_radians() };
+    let size = [256u32, 256u32];
+    let positions = vec![
+        Vec3::new(-0.8, -0.8, 0.0),
+        Vec3::new(0.8, -0.8, 0.0),
+        Vec3::new(0.8, 0.8, 0.0),
+        Vec3::new(-0.8, 0.8, 0.0),
+    ];
+    let uvs = vec![
+        Vec2::new(0.1, 0.1),
+        Vec2::new(0.9, 0.1),
+        Vec2::new(0.9, 0.9),
+        Vec2::new(0.1, 0.9),
+    ];
+    let indices = vec![0, 1, 2, 0, 2, 3];
+
+    let render = |normal: Vec3| {
+        let mesh = Mesh::from_parts(
+            "Raster normal orientation fixture".into(),
+            positions.clone(),
+            Some(vec![normal; 4]),
+            uvs.clone(),
+            indices.clone(),
+        );
+        let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+        let engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 256);
+        let mut views = ViewRenderer::new(&rs);
+        views.render_3d(
+            &rs,
+            size,
+            &[&engine],
+            &env,
+            &gpu_mesh,
+            &camera,
+            &ViewSettings { mode: ViewMode::Material, ..Default::default() },
+            None,
+        );
+        read_texture(&rs.device, &rs.queue, views.view3d.image())
+    };
+
+    let outward = render(Vec3::Z);
+    let inverted = render(-Vec3::Z);
+    let differing = outward.iter().zip(&inverted).filter(|(a, b)| a != b).count();
+    println!("  raster shading with inverted vertex normals: {differing} differing bytes / {}", outward.len());
+    assert_eq!(outward, inverted, "geometrically identical surfaces must shade identically after face-forwarding");
+}
+
 /// Screen painting must use the visible face when multiple faces occupy
 /// the same UV coordinates. The far quad is deliberately last in index order,
 /// so the legacy UV bake stores its world position over the near quad.
