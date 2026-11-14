@@ -3721,7 +3721,7 @@ impl Engine {
             } else {
                 pass.draw(0..3, 0..1);
             }
-        }        } else {
+        } else {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("stamp"),
                 color_attachments: &stamp_attachments,
