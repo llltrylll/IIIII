@@ -113,6 +113,7 @@ fn project(
     n: vec3<f32>,
     world_dx: vec3<f32>,
     world_dy: vec3<f32>,
+    precise_msaa_visibility: bool,
 ) -> vec3<f32> {
     let clip = u.view_proj * vec4<f32>(p, 1.0);
     if (clip.w <= 0.0) {
@@ -129,20 +130,30 @@ fn project(
     }
     if (u.proj.y < 0.5) {
         let sp = clamp(vec2<i32>(screen), vec2<i32>(0), vec2<i32>(u.view.xy) - 1);
-        let surface_linear = lin_depth(ndc.z);
-        // A UV-rasterized point does not generally coincide with an MSAA
-        // sample. Compare against the closest sample, not always the nearest
-        // foreground sample, then account only for the face's subpixel slope.
-        var closest_depth_difference = 1e30;
-        let sample_count = textureNumSamples(depth_map);
-        for (var sample = 0u; sample < sample_count; sample++) {
-            let sample_depth = lin_depth(textureLoad(depth_map, sp, i32(sample)));
-            closest_depth_difference = min(closest_depth_difference, abs(surface_linear - sample_depth));
-        }
-        let slope_slack = subpixel_depth_slack(clip, ndc, world_dx, world_dy);
-        let epsilon = max(max(0.0005, surface_linear * 0.0001), slope_slack);
-        if (closest_depth_difference > epsilon) {
-            return vec3<f32>(0.0);
+        if (precise_msaa_visibility) {
+            // A UV-rasterized point does not generally coincide with an MSAA
+            // sample. Compare against the closest sample, not always the nearest
+            // foreground sample, then account only for the face's subpixel slope.
+            let surface_linear = lin_depth(ndc.z);
+            var closest_depth_difference = 1e30;
+            let sample_count = textureNumSamples(depth_map);
+            for (var sample = 0u; sample < sample_count; sample++) {
+                let sample_depth = lin_depth(textureLoad(depth_map, sp, i32(sample)));
+                closest_depth_difference = min(closest_depth_difference, abs(surface_linear - sample_depth));
+            }
+            let slope_slack = subpixel_depth_slack(clip, ndc, world_dx, world_dy);
+            let epsilon = max(max(0.0005, surface_linear * 0.0001), slope_slack);
+            if (closest_depth_difference > epsilon) {
+                return vec3<f32>(0.0);
+            }
+        } else {
+            // Preserve the legacy screen-stamp contract for position-map
+            // samples and dilated padding. The tighter sample-matched test is
+            // specific to triangles rasterized directly at their own UVs.
+            let scene = textureLoad(depth_map, sp, 0);
+            if (lin_depth(ndc.z) > lin_depth(scene) * 1.01 + 0.005) {
+                return vec3<f32>(0.0);
+            }
         }
     }
     return vec3<f32>(screen, face);
@@ -249,14 +260,14 @@ fn stamp_fullscreen(in: FsOut, padding_only: bool) -> vec4<f32> {
         if (u.proj.x > 0.5) {
             a = coverage_surface(p.xyz, n);
         } else {
-            let s = project(p.xyz, n, world_dx, world_dy);
+            let s = project(p.xyz, n, world_dx, world_dy, false);
             if (s.z > 0.0) {
                 a = coverage_screen(s.xy) * s.z;
             }
             let axis = i32(u.brush.w);
             if (axis > 0) {
                 let flip = select(vec3<f32>(1.0), vec3<f32>(-1.0), vec3<i32>(1, 2, 3) == vec3<i32>(axis));
-                let m = project(p.xyz * flip, n * flip, world_dx * flip, world_dy * flip);
+                let m = project(p.xyz * flip, n * flip, world_dx * flip, world_dy * flip, false);
                 if (m.z > 0.0) {
                     a = max(a, coverage_screen(m.xy) * m.z);
                 }
@@ -309,7 +320,7 @@ fn fs_stamp_uv(in: StampUvOut) -> @location(0) vec4<f32> {
     let n = screen_face_normal(in.world_pos, in.normal, geometric_normal);
 
     var a = 0.0;
-    let s = project(in.world_pos, n, world_dx, world_dy);
+    let s = project(in.world_pos, n, world_dx, world_dy, true);
     if (s.z > 0.0) {
         a = coverage_screen(s.xy) * s.z;
     }
@@ -319,7 +330,7 @@ fn fs_stamp_uv(in: StampUvOut) -> @location(0) vec4<f32> {
         let flip = select(vec3<f32>(1.0), vec3<f32>(-1.0), vec3<i32>(1, 2, 3) == vec3<i32>(axis));
         let mirrored_pos = in.world_pos * flip;
         let mirrored_normal = screen_face_normal(mirrored_pos, n * flip, geometric_normal * flip);
-        let mirrored = project(mirrored_pos, mirrored_normal, world_dx * flip, world_dy * flip);
+        let mirrored = project(mirrored_pos, mirrored_normal, world_dx * flip, world_dy * flip, true);
         if (mirrored.z > 0.0) {
             a = max(a, coverage_screen(mirrored.xy) * mirrored.z);
         }
