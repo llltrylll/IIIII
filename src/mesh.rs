@@ -63,6 +63,10 @@ pub struct Mesh {
     pub object_ufbx_generated_normals: Vec<bool>,
     pub object_reversed_winding: Vec<bool>,
     pub object_negative_transform_determinant: Vec<bool>,
+    pub object_smooth_faces: Vec<u32>,
+    pub object_total_faces: Vec<u32>,
+    pub object_smooth_edges: Vec<u32>,
+    pub object_total_edges: Vec<u32>,
     pub object_fallback_normals_generated: Vec<bool>,
     /// Vertex colors per triangle (sRGB), for color ID maps.
     pub tri_color: Option<Vec<[u8; 3]>>,
@@ -209,6 +213,10 @@ impl Mesh {
             object_ufbx_generated_normals: Vec::new(),
             object_reversed_winding: Vec::new(),
             object_negative_transform_determinant: Vec::new(),
+            object_smooth_faces: Vec::new(),
+            object_total_faces: Vec::new(),
+            object_smooth_edges: Vec::new(),
+            object_total_edges: Vec::new(),
             object_fallback_normals_generated: Vec::new(),
             tri_color: None,
             tri_vertex_color: None,
@@ -341,6 +349,10 @@ impl Mesh {
         mesh.object_ufbx_generated_normals = raw.object_ufbx_generated_normals;
         mesh.object_reversed_winding = raw.object_reversed_winding;
         mesh.object_negative_transform_determinant = raw.object_negative_transform_determinant;
+        mesh.object_smooth_faces = raw.object_smooth_faces;
+        mesh.object_total_faces = raw.object_total_faces;
+        mesh.object_smooth_edges = raw.object_smooth_edges;
+        mesh.object_total_edges = raw.object_total_edges;
         mesh.object_fallback_normals_generated = raw.object_fallback_normals_generated;
         mesh.tri_color = raw.tri_color;
         mesh.tri_vertex_color = raw.tri_vertex_color;
