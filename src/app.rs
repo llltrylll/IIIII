@@ -1839,22 +1839,23 @@ impl PainterApp {
     }
 
     pub fn new(cc: &eframe::CreationContext<'_>) -> Result<Self, String> {
+        let _new_total = crate::startup_trace::span("PainterApp::new total (after device)");
         let rs = cc.wgpu_render_state.clone().ok_or("Material Painter requires the wgpu renderer")?;
         let gpu = rs.adapter.get_info();
         crate::crash::set_context(format!("{} ({:?}, driver {} {})", gpu.name, gpu.backend, gpu.driver, gpu.driver_info));
         crate::startup_trace::event("PainterApp::new begin (window+device already created)");
         { let _s = crate::startup_trace::span("new: theme::apply"); theme::apply(&cc.egui_ctx); }
 
-        let prefs = Preferences::load();
-        let mesh = Primitive::MaterialBall.build();
-        let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
-        let bvh = Bvh::from_mesh(&mesh);
+        let prefs = { let _s = crate::startup_trace::span("new: Preferences::load"); Preferences::load() };
+        let mesh = { let _s = crate::startup_trace::span("new: MaterialBall.build"); Primitive::MaterialBall.build() };
+        let gpu_mesh = { let _s = crate::startup_trace::span("new: GpuMesh::new"); GpuMesh::new(&rs.device, &mesh) };
+        let bvh = { let _s = crate::startup_trace::span("new: Bvh::from_mesh"); Bvh::from_mesh(&mesh) };
         let _s_engine = crate::startup_trace::span("new: Engine+ViewRenderer");
         let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), prefs.default_resolution);
         engine.add_paint_layer(0, None, None, &mut UndoStack::default());
         let views = ViewRenderer::new(&rs);
         drop(_s_engine);
-        let env_baker = EnvBaker::new(&rs.device);
+        let env_baker = { let _s = crate::startup_trace::span("new: EnvBaker::new"); EnvBaker::new(&rs.device) };
         // A real studio HDRI (plus the key light) when installed, else the
         // procedural studio.
         let default_env = environment::BUILTIN
@@ -1870,7 +1871,7 @@ impl PainterApp {
         let mut raytracer = RayTracer::new(&rs);
         raytracer.set_mesh(&rs.device, &mesh, &bvh);
         drop(_s_rt);
-        let baker = GpuBaker::new(&rs.device);
+        let baker = { let _s = crate::startup_trace::span("new: GpuBaker::new"); GpuBaker::new(&rs.device) };
 
         let ctx = &cc.egui_ctx;
         let load = |name: &str, img: egui::ColorImage| ctx.load_texture(name, img, egui::TextureOptions::LINEAR);
@@ -1883,20 +1884,26 @@ impl PainterApp {
         drop(_s_cpu);
         // Brush tips show as white shapes; textures as their grayscale tile.
         const THUMB: u32 = 96;
-        let brushes = crate::brushes::BRUSH_ALPHAS
+        let brushes = {
+            let _s = crate::startup_trace::span("new: brush thumbnail render + texture handles");
+            crate::brushes::BRUSH_ALPHAS
             .iter()
             .map(|b| {
                 let px: Vec<Color32> = b.render(THUMB).into_iter().map(Color32::from_white_alpha).collect();
                 load(b.name, egui::ColorImage::new([THUMB as usize; 2], px))
             })
-            .collect();
-        let textures = crate::textures::TEXTURES
+            .collect()
+        };
+        let textures = {
+            let _s = crate::startup_trace::span("new: procedural texture thumbnail render + texture handles");
+            crate::textures::TEXTURES
             .iter()
             .map(|t| {
                 let px: Vec<Color32> = t.render(THUMB).into_iter().map(Color32::from_gray).collect();
                 load(t.name, egui::ColorImage::new([THUMB as usize; 2], px))
             })
-            .collect();
+            .collect()
+        };
 
         let _s_sp = crate::startup_trace::span("new: ShelfPreviews::start");
         let shelf_previews = shelf_previews::ShelfPreviews::start(&rs, ctx, &env_baker);
@@ -1937,7 +1944,10 @@ impl PainterApp {
             env_load: None,
             env_builtins: environment::available_builtins(),
             hdri_thumbs: Default::default(),
-            hdri_thumb_rx: Some(start_hdri_thumbs(&cc.egui_ctx, environment::available_builtins())),
+            hdri_thumb_rx: Some({
+                let _s = crate::startup_trace::span("new: start HDRI thumbnail worker");
+                start_hdri_thumbs(&cc.egui_ctx, environment::available_builtins())
+            }),
             hdri_new_thumb: None,
             stroke: None,
             bake_settings: BakeSettings::default(),
@@ -1951,9 +1961,9 @@ impl PainterApp {
             prefs_applied: prefs.clone(),
             prefs,
             prefs_ui: PrefsUi { open: false, page: prefs::Page::General },
-            graphs: GraphStore::new(&cc.egui_ctx),
+            graphs: { let _s = crate::startup_trace::span("new: GraphStore::new"); GraphStore::new(&cc.egui_ctx) },
             workspace: Workspace::Paint,
-            docks: dock::Docks::load(),
+            docks: { let _s = crate::startup_trace::span("new: Docks::load"); dock::Docks::load() },
             drew_3d: false,
             pending: Vec::new(),
             layer_clipboard: None,
@@ -1963,7 +1973,7 @@ impl PainterApp {
             show_welcome: false,
             welcome_tex: None,
             library: Default::default(),
-            user_smarts: smart_io::list(&cc.egui_ctx),
+            user_smarts: { let _s = crate::startup_trace::span("new: smart_io::list"); smart_io::list(&cc.egui_ctx) },
             path: Default::default(),
             bake_preview: Default::default(),
             custom_ui: Default::default(),
@@ -1980,9 +1990,9 @@ impl PainterApp {
             saved_serial: 0,
             confirm: None,
             allow_close: false,
-            recent: project_io::load_recent(),
+            recent: { let _s = crate::startup_trace::span("new: project_io::load_recent"); project_io::load_recent() },
             autosaved_serial: 0,
-            recovery: project_io::pending_recovery(),
+            recovery: { let _s = crate::startup_trace::span("new: project_io::pending_recovery"); project_io::pending_recovery() },
             window_title: String::new(),
             mcp_views: None,
             overlays: Overlays::default(),
@@ -2007,12 +2017,16 @@ impl PainterApp {
             pressure: 1.0,
             line_anchor: None,
         };
-        app.apply_startup_preferences(ctx);
-        match crate::mcp::McpServer::start(&cc.egui_ctx, app.prefs.mcp_port, app.prefs.mcp_on_start) {
+        { let _s = crate::startup_trace::span("new: apply_startup_preferences"); app.apply_startup_preferences(ctx); }
+        match {
+            let _s = crate::startup_trace::span("new: McpServer::start");
+            crate::mcp::McpServer::start(&cc.egui_ctx, app.prefs.mcp_port, app.prefs.mcp_on_start)
+        } {
             Ok(server) => app.mcp = Some(server),
             Err(e) => app.status = e,
         }
         if app.prefs.bake_on_load {
+            let _s = crate::startup_trace::span("new: start_bake (bake_on_load)");
             app.start_bake(ctx);
         }
         crate::startup_trace::event("PainterApp::new end");
