@@ -162,10 +162,14 @@ struct Builder {
     uvs: Vec<Vec2>,
     indices: Vec<u32>,
     tri_material: Vec<u32>,
-    all_normals: bool,
     all_uvs: bool,
     corners: usize,
     weld: HashMap<[u32; 9], u32>,
+    /// Whether each object needs generated normals for at least one corner.
+    object_missing_normals: Vec<bool>,
+    /// Per-vertex provenance, so authored normals survive a partial fallback.
+    vertex_has_normal: Vec<bool>,
+    vertex_object: Vec<u32>,
     missing_uvs: Vec<String>,
     max_material: u32,
     material_names: Vec<String>,
@@ -183,15 +187,20 @@ impl Builder {
     /// Starts a new object; its triangles are tagged with its index.
     fn begin_object(&mut self, name: &str) {
         self.objects.push(name.to_string());
+        self.object_missing_normals.push(false);
     }
 
     fn push_corner(&mut self, c: Corner) {
         if self.corners == 0 {
-            self.all_normals = true;
             self.all_uvs = true;
         }
         self.corners += 1;
-        self.all_normals &= c.normal.is_some();
+        let object = self.objects.len().saturating_sub(1) as u32;
+        if c.normal.is_none()
+            && let Some(missing) = self.object_missing_normals.get_mut(object as usize)
+        {
+            *missing = true;
+        }
         self.all_uvs &= c.uv.is_some();
         // Keep vertex colors even when only some objects carry a color layer.
         // Unpainted objects receive white so they remain a selectable ID region.
@@ -209,10 +218,10 @@ impl Builder {
             self.color_corners = [[0; 3]; 3];
             self.color_acc = Vec3::ZERO;
         }
+        let has_normal = c.normal.is_some();
         let n = c.normal.unwrap_or(Vec3::ZERO);
         let uv = c.uv.unwrap_or(Vec2::ZERO);
         // Objects never share vertices, even where they touch exactly.
-        let object = self.objects.len().saturating_sub(1) as u32;
         let key = [c.pos.x, c.pos.y, c.pos.z, n.x, n.y, n.z, uv.x, uv.y].map(f32::to_bits);
         let key = [key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7], object];
         let next = self.positions.len() as u32;
@@ -221,6 +230,8 @@ impl Builder {
             self.positions.push(c.pos);
             self.normals.push(n);
             self.uvs.push(uv);
+            self.vertex_has_normal.push(has_normal);
+            self.vertex_object.push(object);
         }
         self.indices.push(index);
     }
@@ -232,11 +243,32 @@ impl Builder {
         self.tri_object.extend(std::iter::repeat_n(object, triangles));
     }
 
-    fn finish(self) -> RawMesh {
+    fn finish(mut self) -> RawMesh {
+        // Generate missing normals one object at a time. A scene-wide fallback
+        // would discard authored normals from otherwise complete objects and
+        // can cancel opposite, coincident shells from separate objects.
+        for (object, &missing) in self.object_missing_normals.iter().enumerate() {
+            if !missing {
+                continue;
+            }
+            let mut object_indices = Vec::new();
+            for (triangle, &owner) in self.tri_object.iter().enumerate() {
+                if owner == object as u32 {
+                    object_indices.extend_from_slice(&self.indices[triangle * 3..triangle * 3 + 3]);
+                }
+            }
+            let generated = crate::mesh::smooth_normals(&self.positions, &object_indices);
+            for vertex in 0..self.normals.len() {
+                if self.vertex_object[vertex] == object as u32 && !self.vertex_has_normal[vertex] {
+                    self.normals[vertex] = generated[vertex];
+                }
+            }
+        }
+
         RawMesh {
             name: String::new(),
+            normals: (!self.positions.is_empty()).then_some(self.normals),
             positions: self.positions,
-            normals: self.all_normals.then_some(self.normals),
             uvs: self.all_uvs.then_some(self.uvs),
             indices: self.indices,
             tri_material: self.tri_material,
@@ -253,6 +285,106 @@ impl Builder {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn missing_normals_are_generated_per_object_without_replacing_authored_normals() {
+        let mut builder = super::Builder::default();
+        let positions = [
+            glam::Vec3::new(-1.0, -1.0, 0.0),
+            glam::Vec3::new(1.0, -1.0, 0.0),
+            glam::Vec3::new(-1.0, 1.0, 0.0),
+        ];
+        let uvs = [
+            glam::Vec2::new(0.0, 0.0),
+            glam::Vec2::new(1.0, 0.0),
+            glam::Vec2::new(0.0, 1.0),
+        ];
+
+        // Object 0 has valid authored normals and faces +Z.
+        builder.begin_object("authored normals");
+        for i in 0..3 {
+            builder.push_corner(super::Corner {
+                pos: positions[i],
+                normal: Some(glam::Vec3::X),
+                uv: Some(uvs[i]),
+                color: None,
+            });
+        }
+        builder.push_materials(1, 0);
+
+        // Object 1 occupies the exact same positions but has no normals and
+        // reversed winding. Its fallback must be -Z, not zero from cancellation.
+        builder.begin_object("missing normals");
+        for i in [0usize, 2, 1] {
+            builder.push_corner(super::Corner {
+                pos: positions[i],
+                normal: None,
+                uv: Some(uvs[i]),
+                color: None,
+            });
+        }
+        builder.push_materials(1, 0);
+
+        let raw = builder.finish();
+        let normals = raw.normals.expect("mixed scene should have usable normals");
+        assert_eq!(&normals[..3], &[glam::Vec3::X; 3], "authored normals must be preserved");
+        for (i, normal) in normals[3..].iter().enumerate() {
+            assert!(
+                normal.distance(-glam::Vec3::Z) < 1e-5,
+                "generated normal {i} should be -Z, got {normal:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn partial_normals_preserve_authored_vertices_and_generate_missing_ones() {
+        let mut builder = super::Builder::default();
+        let positions = [
+            glam::Vec3::new(-1.0, -1.0, 0.0),
+            glam::Vec3::new(1.0, -1.0, 0.0),
+            glam::Vec3::new(1.0, 1.0, 0.0),
+            glam::Vec3::new(-1.0, 1.0, 0.0),
+        ];
+        let uvs = [
+            glam::Vec2::new(0.0, 0.0),
+            glam::Vec2::new(1.0, 0.0),
+            glam::Vec2::new(1.0, 1.0),
+            glam::Vec2::new(0.0, 1.0),
+        ];
+        builder.begin_object("partially authored normals");
+
+        for i in [0usize, 1, 2] {
+            builder.push_corner(super::Corner {
+                pos: positions[i],
+                normal: Some(glam::Vec3::X),
+                uv: Some(uvs[i]),
+                color: None,
+            });
+        }
+        builder.push_materials(1, 0);
+
+        // The second triangle shares an edge but has missing authored normals.
+        // Position welding during fallback must still smooth across that edge.
+        for i in [0usize, 2, 3] {
+            builder.push_corner(super::Corner {
+                pos: positions[i],
+                normal: None,
+                uv: Some(uvs[i]),
+                color: None,
+            });
+        }
+        builder.push_materials(1, 0);
+
+        let raw = builder.finish();
+        let normals = raw.normals.expect("partial normals should be repaired");
+        assert_eq!(&normals[..3], &[glam::Vec3::X; 3], "authored normals must not be replaced");
+        for (i, normal) in normals[3..].iter().enumerate() {
+            assert!(
+                normal.distance(glam::Vec3::Z) < 1e-5,
+                "missing normal {i} should be generated as +Z, got {normal:?}"
+            );
+        }
+    }
+
     /// Opt-in smoke test: `MP_IMPORT_TEST="a.fbx;b.obj" cargo test -- --ignored`.
     #[test]
     #[ignore]

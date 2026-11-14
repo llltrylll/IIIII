@@ -434,6 +434,11 @@ fn fs_quad(in: QuadOut) -> @location(0) vec4<f32> {
         let cell = vec2<i32>(floor(in.clip.xy / 8.0));
         let checker = select(0.18, 0.32, (cell.x + cell.y) % 2 == 0);
         lit = mix(vec3<f32>(checker), lit, s.alpha);
+    } else if (i32(g.params.x) == 1) {
+        // Base Color is a flat texture view, but it still needs to preview alpha.
+        let cell = vec2<i32>(floor(in.clip.xy / 8.0));
+        let checker = select(0.18, 0.32, (cell.x + cell.y) % 2 == 0);
+        lit = mix(vec3<f32>(checker), s.albedo, s.alpha);
     }
     return vec4<f32>(lit, 1.0);
 }

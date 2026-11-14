@@ -585,6 +585,15 @@ mod stroke_meter_tests {
     }
 }
 
+
+#[derive(Default)]
+struct DiagnosticCapture {
+    active: bool,
+    started_context: String,
+    samples: Vec<String>,
+    dropped_samples: u32,
+}
+
 pub struct PainterApp {
     rs: egui_wgpu::RenderState,
     mesh: Arc<Mesh>,
@@ -616,6 +625,8 @@ pub struct PainterApp {
     time_composite: bool,
     /// F6: CPU time of the paint path.
     meter: StrokeMeter,
+    /// Temporary ray-hit trace used only by the diagnostic hotkey.
+    diagnostics: DiagnosticCapture,
     /// Changes whenever the active Engine instance is replaced or swapped.
     engine_epoch: u64,
     /// The running bake only makes the ID map (from vertex colors).
@@ -1914,6 +1925,7 @@ impl PainterApp {
             preview_update_at: None,
             time_composite: false,
             meter: StrokeMeter::default(),
+            diagnostics: DiagnosticCapture::default(),
             engine_epoch: 0,
             bake_id_only: false,
             cam: OrbitCam::default(),
@@ -2468,9 +2480,437 @@ impl PainterApp {
         }
     }
 
+
+    fn diagnostic_context_report(&self, phase: &str) -> String {
+        let layout = match self.layout {
+            Layout::Split => "Split (3D + UV)",
+            Layout::View3d => "3D only",
+            Layout::View2d => "UV only",
+        };
+        let target = match self.target {
+            StrokeTarget::Content => "Content",
+            StrokeTarget::Mask => "Mask",
+            StrokeTarget::BakeFix(_) => "Bake Fix",
+        };
+        let tool = match self.tool {
+            Tool::Paint => "Paint",
+            Tool::Eraser => "Eraser",
+            Tool::Picker => "Picker",
+            Tool::PolyFill => "Polygon Fill",
+            Tool::Path => "Path",
+        };
+        let project = self.project_path.as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(not saved)".into());
+        let active_set = self.mesh.sets.get(self.sets.active)
+            .map(|s| s.name.as_str())
+            .unwrap_or("(missing)");
+        let selected_layer = self.engine.layers.get(self.selected)
+            .map(|l| l.name.as_str())
+            .unwrap_or("(none)");
+        let eye = self.cam.eye();
+
+        format!(
+            "MATERIAL PAINTER — DIAGNOSTIC SNAPSHOT\n\
+             phase: {phase}\n\
+             unix_time: {}\n\
+             app_version: {}\n\
+             os: {} / {}\n\
+             project: {project}\n\
+             mesh: {}\n\
+             workspace: {}\n\
+             layout: {layout}\n\
+             viewport_mode: {}\n\
+             ray_traced_preview: {}\n\
+             viewport_3d_pixels: {:?}\n\
+             viewport_uv_pixels: {:?}\n\
+             pixels_per_point: {:.3}\n\
+             texture_sets: {}\n\
+             active_texture_set_index: {}\n\
+             active_texture_set_name: {active_set}\n\
+             active_texture_resolution: {}\n\
+             active_layer_index: {}\n\
+             active_layer_name: {selected_layer}\n\
+             stroke_target: {target}\n\
+             tool: {tool}\n\
+             brush_projection: {}\n\
+             brush_paint_through: {}\n\
+             brush_angle_limit_degrees: {:.2}\n\
+             brush_size_points: {:.2}\n\
+             camera_eye: {:?}\n\
+             camera_target: {:?}\n\
+             camera_yaw_pitch_fov_radians: {:.6}, {:.6}, {:.6}\n\
+             camera_distance: {:.6}\n\
+             uv_camera_zoom: {:.6}\n\
+             uv_camera_pan: {:?}\n\
+             environment: {}\n\
+             environment_intensity: {:.4}\n\
+             environment_rotation_radians: {:.4}\n\
+             exposure: {:.4}\n\
+             key_light_enabled: {}\n\
+             key_light_intensity: {:.4}\n\
+             key_light_azimuth_degrees: {:.3}\n\
+             key_light_elevation_degrees: {:.3}\n\
+             ao_strength: {:.4}\n\
+             emission_display_strength: {:.4}\n\
+             background: {}\n\
+             background_color_linear_rgb: {:?}\n\
+             baked_normal_display_enabled: {}\n\
+             uv_seams_enabled: {}\n\
+             uv_wire_opacity: {:.4}\n\
+             visible_layer_count: {}\n\
+             total_layer_count: {}\n\
+             engine_dirty: {}\n\
+             F6_meter_enabled: {}\n\
+             frame_time_ema_ms: {:.3}\n\
+             recent_frame_peak_ms: {:.3}\n",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs()).unwrap_or(0),
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            self.mesh.name,
+            self.workspace.name(),
+            self.view.mode.name(),
+            self.rt.enabled,
+            self.views.view3d.size,
+            self.views.view2d.size,
+            self.ppp,
+            self.mesh.sets.len(),
+            self.sets.active,
+            self.engine.res,
+            self.selected,
+            self.brush.projection.name(),
+            self.brush.paint_through,
+            self.brush.angle_limit,
+            self.brush.size,
+            eye,
+            self.cam.target,
+            self.cam.yaw,
+            self.cam.pitch,
+            self.cam.fov_y,
+            self.cam.dist,
+            self.cam2d.zoom,
+            self.cam2d.pan,
+            self.env.source.name(),
+            self.view.env_intensity,
+            self.view.env_rotation,
+            self.view.exposure,
+            self.view.key.on,
+            self.view.key.intensity,
+            self.view.key.azimuth,
+            self.view.key.elevation,
+            self.view.ao_strength,
+            self.view.emission,
+            self.view.background.name(),
+            self.view.bg_color,
+            self.view.use_baked_normal,
+            self.view.show_seams_2d,
+            self.view.uv_wire_opacity,
+            self.engine.layers.iter().filter(|l| l.visible).count(),
+            self.engine.layers.len(),
+            self.engine.dirty,
+            self.meter.on,
+            self.frame_ms,
+            self.frame_peak_ms,
+        )
+    }
+
+    fn diagnostic_mesh_report(&self) -> String {
+        use std::collections::HashMap;
+
+        let mut uv_min = Vec2::splat(f32::INFINITY);
+        let mut uv_max = Vec2::splat(f32::NEG_INFINITY);
+        let mut uv_outside_triangles = 0u32;
+        let mut uv_degenerate_triangles = 0u32;
+        let mut uv_positive_triangles = 0u32;
+        let mut uv_negative_triangles = 0u32;
+        let mut geometry_degenerate_triangles = 0u32;
+        let mut normals_aligned = 0u32;
+        let mut normals_opposed = 0u32;
+        let mut normals_mixed = 0u32;
+        let mut exact_uv_keys: HashMap<[i64; 6], u32> = HashMap::new();
+        let mut exact_uv_keys_by_set: HashMap<(usize, [i64; 6]), u32> = HashMap::new();
+
+        for tri in 0..self.mesh.triangle_count() {
+            let base = tri * 3;
+            let v = [
+                self.mesh.vertices[self.mesh.indices[base] as usize],
+                self.mesh.vertices[self.mesh.indices[base + 1] as usize],
+                self.mesh.vertices[self.mesh.indices[base + 2] as usize],
+            ];
+            let p = v.map(|v| Vec3::from_array(v.pos));
+            let uv = v.map(|v| Vec2::from_array(v.uv));
+            for t in uv {
+                uv_min = uv_min.min(t);
+                uv_max = uv_max.max(t);
+            }
+
+            let signed_uv_area = (uv[1].x - uv[0].x) * (uv[2].y - uv[0].y)
+                - (uv[1].y - uv[0].y) * (uv[2].x - uv[0].x);
+            if signed_uv_area.abs() < 1.0e-10 {
+                uv_degenerate_triangles += 1;
+            } else if signed_uv_area > 0.0 {
+                uv_positive_triangles += 1;
+            } else {
+                uv_negative_triangles += 1;
+            }
+            if uv.iter().any(|t| t.x < 0.0 || t.x > 1.0 || t.y < 0.0 || t.y > 1.0) {
+                uv_outside_triangles += 1;
+            }
+
+            let face = (p[1] - p[0]).cross(p[2] - p[0]);
+            if face.length() <= 1.0e-10 {
+                geometry_degenerate_triangles += 1;
+            }
+            let face_n = face.normalize_or_zero();
+            let normal_alignment = v.iter()
+                .map(|vertex| Vec3::from_array(vertex.normal).normalize_or_zero().dot(face_n))
+                .sum::<f32>() / 3.0;
+            if normal_alignment < -0.25 {
+                normals_opposed += 1;
+            } else if normal_alignment > 0.25 {
+                normals_aligned += 1;
+            } else {
+                normals_mixed += 1;
+            }
+
+            // Exact UV triangle identity (quantized to 1e-6), independent of vertex order.
+            // This detects exact stacks, not partial triangle intersections.
+            let mut q = uv.map(|t| [(t.x * 1_000_000.0).round() as i64, (t.y * 1_000_000.0).round() as i64]);
+            q.sort_unstable();
+            let key = [q[0][0], q[0][1], q[1][0], q[1][1], q[2][0], q[2][1]];
+            *exact_uv_keys.entry(key).or_default() += 1;
+            *exact_uv_keys_by_set.entry((self.mesh.set_of(tri as u32), key)).or_default() += 1;
+        }
+
+        let stacked_groups = exact_uv_keys.values().filter(|&&n| n > 1).count();
+        let stacked_faces = exact_uv_keys.values().filter(|&&n| n > 1).map(|&n| n as usize).sum::<usize>();
+        let same_set_stacked_groups = exact_uv_keys_by_set.values().filter(|&&n| n > 1).count();
+        let same_set_stacked_faces = exact_uv_keys_by_set.values().filter(|&&n| n > 1).map(|&n| n as usize).sum::<usize>();
+        let max_stack_depth = exact_uv_keys.values().copied().max().unwrap_or(0);
+
+        let mut out = format!(
+            "\nMESH / UV / NORMAL SUMMARY\n\
+             vertices_after_tangent_split: {}\n\
+             triangles: {}\n\
+             indices: {}\n\
+             mesh_texture_sets: {}\n\
+             uv_min: {:?}\n\
+             uv_max: {:?}\n\
+             triangles_with_any_uv_outside_0_1: {}\n\
+             uv_degenerate_triangles: {}\n\
+             uv_positive_winding_triangles: {}\n\
+             uv_negative_winding_triangles: {}\n\
+             geometric_degenerate_triangles: {}\n\
+             triangle_normals_aligned_with_vertex_normals: {}\n\
+             triangle_normals_opposed_to_vertex_normals: {}\n\
+             triangle_normals_mixed_or_uncertain: {}\n\
+             exact_duplicate_uv_triangle_groups_global: {}\n\
+             triangles_in_exact_uv_groups_global: {}\n\
+             exact_duplicate_uv_triangle_groups_same_texture_set: {}\n\
+             triangles_in_exact_uv_groups_same_texture_set: {}\n\
+             maximum_exact_uv_stack_depth: {}\n\
+             exact_stack_detection_tolerance: 1e-6 UV units\n\
+             note: exact duplicate UV triangle detection does not detect partial overlaps\n",
+            self.mesh.vertices.len(),
+            self.mesh.triangle_count(),
+            self.mesh.indices.len(),
+            self.mesh.sets.len(),
+            uv_min,
+            uv_max,
+            uv_outside_triangles,
+            uv_degenerate_triangles,
+            uv_positive_triangles,
+            uv_negative_triangles,
+            geometry_degenerate_triangles,
+            normals_aligned,
+            normals_opposed,
+            normals_mixed,
+            stacked_groups,
+            stacked_faces,
+            same_set_stacked_groups,
+            same_set_stacked_faces,
+            max_stack_depth,
+        );
+
+        out.push_str("texture_set_ranges:\n");
+        for (index, set) in self.mesh.sets.iter().enumerate() {
+            let state = if index == self.sets.active {
+                "ACTIVE"
+            } else if self.sets.parked.get(index).and_then(Option::as_ref).is_some() {
+                "parked engine loaded"
+            } else {
+                "engine not currently parked"
+            };
+            out.push_str(&format!(
+                "  [{}] {} | triangles {}..{} (count {}) | {}\n",
+                index, set.name, set.tris.start, set.tris.end, set.tris.end - set.tris.start, state
+            ));
+        }
+        out
+    }
+
+    fn record_diagnostic_ray_samples(&mut self, raw: &[([f32; 4], f32)]) {
+        if !self.diagnostics.active {
+            return;
+        }
+        let [width, height] = self.views.view3d.size;
+        let size = Vec2::new(width as f32, height as f32);
+
+        for (stamp, _) in raw {
+            if self.diagnostics.samples.len() >= 256 {
+                self.diagnostics.dropped_samples = self.diagnostics.dropped_samples.saturating_add(1);
+                continue;
+            }
+            let (origin, direction) = self.cam.ray(Vec2::new(stamp[0], stamp[1]), size);
+            let nearest = self.bvh.raycast(origin, direction);
+            let mut hits = Vec::new();
+            self.bvh.all_hits(origin, direction, FAR, &mut hits);
+            hits.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+            let nearest_text = match nearest {
+                Some(hit) => {
+                    let tri = hit.tri as usize;
+                    let base = tri * 3;
+                    let v = [
+                        self.mesh.vertices[self.mesh.indices[base] as usize],
+                        self.mesh.vertices[self.mesh.indices[base + 1] as usize],
+                        self.mesh.vertices[self.mesh.indices[base + 2] as usize],
+                    ];
+                    let p = v.map(|v| Vec3::from_array(v.pos));
+                    let face_n = (p[1] - p[0]).cross(p[2] - p[0]).normalize_or_zero();
+                    let (shading_n, uv, uv_scale) = surface_at(&self.mesh, hit.tri, hit.bary);
+                    let alignment = v.iter()
+                        .map(|vertex| Vec3::from_array(vertex.normal).normalize_or_zero().dot(face_n))
+                        .sum::<f32>() / 3.0;
+                    let facing = face_n.dot(-direction);
+                    let set = self.mesh.set_of(hit.tri);
+                    let set_name = self.mesh.sets.get(set).map(|s| s.name.as_str()).unwrap_or("(missing)");
+                    format!(
+                        "tri={} set={}({}) t={:.6} bary={:?} uv={:?} geomN={:?} shadeN={:?} NdotGeom={:.4} geomNdotToCamera={:.4} uvScale={:.6}",
+                        hit.tri, set, set_name, (hit.pos - origin).length(), hit.bary, uv, face_n, shading_n, alignment, facing, uv_scale
+                    )
+                }
+                None => "no hit".into(),
+            };
+
+            let candidates = hits.iter().take(8).map(|(distance, tri)| {
+                let base = *tri as usize * 3;
+                let v = [
+                    self.mesh.vertices[self.mesh.indices[base] as usize],
+                    self.mesh.vertices[self.mesh.indices[base + 1] as usize],
+                    self.mesh.vertices[self.mesh.indices[base + 2] as usize],
+                ];
+                let p = v.map(|v| Vec3::from_array(v.pos));
+                let uv = v.map(|v| Vec2::from_array(v.uv));
+                let hit_pos = origin + direction * *distance;
+                let e0 = p[1] - p[0];
+                let e1 = p[2] - p[0];
+                let vp = hit_pos - p[0];
+                let d00 = e0.dot(e0);
+                let d01 = e0.dot(e1);
+                let d11 = e1.dot(e1);
+                let d20 = vp.dot(e0);
+                let d21 = vp.dot(e1);
+                let denominator = d00 * d11 - d01 * d01;
+                let (bary, exact_uv) = if denominator.abs() > 1.0e-12 {
+                    let b = (d11 * d20 - d01 * d21) / denominator;
+                    let c = (d00 * d21 - d01 * d20) / denominator;
+                    let bary = Vec3::new(1.0 - b - c, b, c);
+                    let exact_uv = uv[0] * bary.x + uv[1] * bary.y + uv[2] * bary.z;
+                    (bary, exact_uv)
+                } else {
+                    (Vec3::ZERO, (uv[0] + uv[1] + uv[2]) / 3.0)
+                };
+                let face_n = (p[1] - p[0]).cross(p[2] - p[0]).normalize_or_zero();
+                let shading_n = (Vec3::from_array(v[0].normal) * bary.x
+                    + Vec3::from_array(v[1].normal) * bary.y
+                    + Vec3::from_array(v[2].normal) * bary.z).normalize_or_zero();
+                let n_dot_face = shading_n.dot(face_n);
+                let facing = face_n.dot(-direction);
+                let set = self.mesh.set_of(*tri);
+                let set_name = self.mesh.sets.get(set).map(|s| s.name.as_str()).unwrap_or("(missing)");
+                format!(
+                    "tri={} set={}({}) t={:.6} bary={:?} uv={:?} geomNdotToCamera={:.4} shadeNdotGeomN={:.4}",
+                    tri, set, set_name, distance, bary, exact_uv, facing, n_dot_face
+                )
+            }).collect::<Vec<_>>().join(" ; ");
+
+            self.diagnostics.samples.push(format!(
+                "sample {} cursor_px=({:.2},{:.2}) projection={} paint_through={} angle_limit_deg={:.2} active_set={} ray_origin={:?} ray_dir={:?}\n  nearest: {}\n  all_intersections={} first_up_to_8=[{}]",
+                self.diagnostics.samples.len() + 1, stamp[0], stamp[1],
+                self.brush.projection.name(), self.brush.paint_through, self.brush.angle_limit,
+                self.sets.active, origin, direction,
+                nearest_text, hits.len(), candidates
+            ));
+        }
+    }
+
+    fn save_diagnostic_report(&mut self, ctx: &egui::Context, stem: &str, report: String) {
+        let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs()).unwrap_or(0);
+        let file_name = format!("{stem}_{timestamp}.txt");
+        let path = rfd::FileDialog::new()
+            .add_filter("Text report", &["txt"])
+            .set_file_name(&file_name)
+            .save_file();
+        match path {
+            Some(path) => match std::fs::write(&path, report.as_bytes()) {
+                Ok(()) => self.status = format!("Diagnostic report saved to {}.", path.display()),
+                Err(error) => self.status = format!("Could not save diagnostic report: {error}"),
+            },
+            None => self.status = "Diagnostic report not saved; report copied to clipboard.".into(),
+        }
+        // Queue the clipboard update only after the native save dialog has closed.
+        ctx.copy_text(report);
+    }
+
+    fn start_diagnostic_capture(&mut self) {
+        let mut context = self.diagnostic_context_report("ray capture started");
+        context.push_str(&self.diagnostic_mesh_report());
+        context.push_str("\nRAY-HIT CAPTURE\nRecord only 3D brush stamp positions. Maximum retained samples: 256.\n");
+        context.push_str(&format!(
+            "brush_projection_at_start: {}\npaint_through_at_start: {}\nangle_limit_at_start: {:.3}\n",
+            self.brush.projection.name(), self.brush.paint_through, self.brush.angle_limit
+        ));
+        self.diagnostics = DiagnosticCapture {
+            active: true,
+            started_context: context,
+            samples: Vec::new(),
+            dropped_samples: 0,
+        };
+        self.status = "Ctrl+F2 capture ON. Paint both sides in 3D, then press Ctrl+F2 again to save the trace.".into();
+    }
+
+    fn stop_diagnostic_capture(&mut self, ctx: &egui::Context) {
+        let mut capture = std::mem::take(&mut self.diagnostics);
+        capture.active = false;
+        let mut report = capture.started_context;
+        report.push_str(&format!(
+            "\nRAY CAPTURE SUMMARY\nretained_samples: {}\ndropped_samples_after_limit: {}\n",
+            capture.samples.len(), capture.dropped_samples
+        ));
+        for sample in capture.samples {
+            report.push_str(&sample);
+            report.push('\n');
+        }
+        report.push_str("\nCAPTURE END STATE\n");
+        report.push_str(&self.diagnostic_context_report("ray capture stopped"));
+        self.save_diagnostic_report(ctx, "material_painter_ray_trace", report);
+    }
+
     fn shortcuts(&mut self, ctx: &egui::Context) {
         use egui::{Key, KeyboardShortcut, Modifiers};
+        let mut capture_view_snapshot = false;
+        let mut toggle_ray_capture = false;
         ctx.input_mut(|i| {
+            if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::CTRL, Key::F1)) {
+                capture_view_snapshot = true;
+            }
+            if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::CTRL, Key::F2)) {
+                toggle_ray_capture = true;
+            }
             if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::E)) {
                 self.export.open = true;
             }
@@ -2518,6 +2958,18 @@ impl PainterApp {
                 self.workspace = Workspace::ALL[(at + step) % Workspace::ALL.len()];
             }
         });
+        if capture_view_snapshot {
+            let mut report = self.diagnostic_context_report("viewport snapshot");
+            report.push_str("\nNOTE: capture once in Material mode and again in Base Color mode when diagnosing a black UV viewport.\n");
+            self.save_diagnostic_report(ctx, "material_painter_view_snapshot", report);
+        }
+        if toggle_ray_capture {
+            if self.diagnostics.active {
+                self.stop_diagnostic_capture(ctx);
+            } else {
+                self.start_diagnostic_capture();
+            }
+        }
         if ctx.egui_wants_keyboard_input() {
             return;
         }
@@ -2922,10 +3374,38 @@ impl PainterApp {
                         }
                     })
                     .response
-                    .on_hover_text("What the views show (M: material, C: next channel)");
+                    .on_hover_text("What the 3D viewport shows (M: material, C: next channel)");
+                if matches!(self.layout, Layout::Split | Layout::View2d) {
+                    ui.separator();
+                    egui::ComboBox::from_id_salt("uvviewmode")
+                        .selected_text(self.mode_name(self.view.uv_mode))
+                        .width(130.0)
+                        .height(600.0)
+                        .show_ui(ui, |ui| {
+                            ui.label(egui::RichText::new("MATERIAL").small().color(theme::TEXT_DIM));
+                            for m in ViewMode::CHANNELS {
+                                ui.selectable_value(&mut self.view.uv_mode, m, m.name());
+                            }
+                            ui.separator();
+                            ui.label(egui::RichText::new("MESH MAPS").small().color(theme::TEXT_DIM));
+                            for m in ViewMode::all().into_iter().skip(ViewMode::CHANNELS.len()) {
+                                ui.selectable_value(&mut self.view.uv_mode, m, m.name());
+                            }
+                            if !self.bake_settings.custom.is_empty() {
+                                ui.separator();
+                                ui.label(egui::RichText::new("CUSTOM MAPS").small().color(theme::TEXT_DIM));
+                            }
+                            for map in &self.bake_settings.custom {
+                                ui.selectable_value(&mut self.view.uv_mode, ViewMode::Custom(map.id), &map.name);
+                            }
+                        })
+                        .response
+                        .on_hover_text("What the UV viewport shows");
+                    ui.label(egui::RichText::new("UV display").color(theme::TEXT_DIM));
+                }
                 // Color selection is consolidated in the Color popup at the right end
                 // of this toolbar; do not show a second, competing color chip here.
-                ui.label(egui::RichText::new("Display").color(theme::TEXT_DIM));
+                ui.label(egui::RichText::new("3D display").color(theme::TEXT_DIM));
                 ui.separator();
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
@@ -3089,6 +3569,9 @@ impl PainterApp {
         ui.horizontal_centered(|ui| {
             ui.label(egui::RichText::new(&self.status).color(theme::TEXT_DIM));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.diagnostics.active {
+                    ui.label(egui::RichText::new("RAY CAPTURE ON  ·  Ctrl+F2 TO STOP").strong().color(theme::ACCENT));
+                }
                 let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
                 ui.label(
                     egui::RichText::new(format!(
@@ -4233,6 +4716,9 @@ impl PainterApp {
     }
 
     fn paint_stamps(&mut self, kind: ViewKind, raw: &[([f32; 4], f32)]) {
+        if kind == ViewKind::V3d {
+            self.record_diagnostic_ray_samples(raw);
+        }
         let su = self.stamp_uniform(kind);
         let resolve_started = self.meter.on.then(Instant::now);
         let stamps = match kind {
