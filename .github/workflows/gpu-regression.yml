@@ -73,6 +73,9 @@ jobs:
       - name: GPU parity - raster face-forward shading normals
         run: "cargo test --locked --bin material_painter preview_test::raster_view_is_stable_with_inverted_shading_normals -- --ignored --exact --nocapture --test-threads 1"
 
+      - name: GPU parity - inverted normals with tangent-space detail
+        run: "cargo test --locked --bin material_painter preview_test::raster_normal_map_is_stable_with_inverted_imported_normals -- --ignored --exact --nocapture --test-threads 1"
+
       - name: GPU parity - inverted normals and winding
         run: "cargo test --locked --bin material_painter preview_test::screen_projection_uses_geometric_face_normals -- --ignored --exact --nocapture --test-threads 1"
 
