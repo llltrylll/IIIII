@@ -2430,12 +2430,12 @@ fn screen_projection_rejects_close_occluded_uv_surface() {
 fn screen_projection_rejects_back_surface_behind_thin_occluder() {
     use crate::app::{BrushProjection, resolve_stamps, screen_stroke_plan};
     use crate::engine::{BrushPaint, Content, Engine, MatValues, StampUniform};
-    use crate::mesh::Mesh;
+    use crate::mesh::{Mesh, Vertex};
     use crate::undo::{StrokeTarget, UndoStack};
     use crate::viewport::{OrbitCam, ViewSettings, FAR, NEAR};
     use glam::{Vec2, Vec3};
 
-    let mut positions = vec![
+    let positions = vec![
         // Back plane: its UV chart occupies the left half.
         Vec3::new(-0.8, -0.8, 0.0),
         Vec3::new(0.8, -0.8, 0.0),
@@ -2447,7 +2447,7 @@ fn screen_projection_rejects_back_surface_behind_thin_occluder() {
         Vec3::new(0.003, 0.8, 0.02),
         Vec3::new(-0.003, 0.8, 0.02),
     ];
-    let mut uvs = vec![
+    let uvs = vec![
         Vec2::new(0.1, 0.1),
         Vec2::new(0.45, 0.1),
         Vec2::new(0.45, 0.9),
@@ -2457,33 +2457,42 @@ fn screen_projection_rejects_back_surface_behind_thin_occluder() {
         Vec2::new(0.9, 0.9),
         Vec2::new(0.55, 0.9),
     ];
-    let mut indices = vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7];
+    let indices = vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7];
+    let mut mesh = Mesh::from_parts(
+        "Thin occluder UV fixture".into(),
+        positions,
+        Some(vec![Vec3::Z; 8]),
+        uvs,
+        indices,
+    );
 
-    // Off-screen triangles make this a culling test as well: a small brush
-    // must not submit unrelated parts of a larger production mesh.
+    // Add unrelated geometry after import normalization. These triangles are
+    // genuinely outside the camera frustum, not pulled back toward the model
+    // by Mesh::from_parts' normalization step.
     for k in 0..24u32 {
-        let base = positions.len() as u32;
-        let x = 3.0 + k as f32 * 0.3;
-        positions.extend([
-            Vec3::new(x, -0.1, 0.02),
-            Vec3::new(x + 0.15, -0.1, 0.02),
-            Vec3::new(x + 0.15, 0.1, 0.02),
-            Vec3::new(x, 0.1, 0.02),
-        ]);
+        let base = mesh.vertices.len() as u32;
+        let x = 10.0 + k as f32 * 0.5;
         let col = (k % 8) as f32;
         let row = (k / 8) as f32;
         let u = 0.455 + col * 0.0105;
         let v = 0.02 + row * 0.24;
-        uvs.extend([
-            Vec2::new(u, v),
-            Vec2::new(u + 0.008, v),
-            Vec2::new(u + 0.008, v + 0.18),
-            Vec2::new(u, v + 0.18),
-        ]);
-        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        for (position, uv) in [
+            ([x, -0.1, 0.02], [u, v]),
+            ([x + 0.15, -0.1, 0.02], [u + 0.008, v]),
+            ([x + 0.15, 0.1, 0.02], [u + 0.008, v + 0.18]),
+            ([x, 0.1, 0.02], [u, v + 0.18]),
+        ] {
+            mesh.vertices.push(Vertex {
+                pos: position,
+                normal: [0.0, 0.0, 1.0],
+                uv,
+                tangent: [1.0, 0.0, 0.0, 1.0],
+            });
+        }
+        mesh.indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
     }
-    let normals = Some(vec![Vec3::Z; positions.len()]);
-    let mesh = Arc::new(Mesh::from_parts("Thin occluder UV fixture".into(), positions, normals, uvs, indices));
+    mesh.set_ranges(vec![("Thin occluder".into(), 0..mesh.triangle_count() as u32)]);
+    let mesh = Arc::new(mesh);
     let bvh = crate::bvh::Bvh::from_mesh(&mesh);
     let rs = render_state();
     let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
