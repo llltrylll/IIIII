@@ -484,6 +484,7 @@ mod tests {
                 normal: Some(glam::Vec3::X),
                 uv: Some(uvs[i]),
                 color: None,
+                source_vertex: i as u32,
             });
         }
         builder.push_materials(1, 0);
@@ -496,6 +497,7 @@ mod tests {
                 normal: None,
                 uv: Some(uvs[i]),
                 color: None,
+                source_vertex: i as u32,
             });
         }
         builder.push_materials(1, 0);
