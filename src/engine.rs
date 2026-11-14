@@ -1593,7 +1593,9 @@ impl Engine {
         let stamp_sbuf = buffer("stamps", (MAX_STAMPS * size_of::<Stamp>()) as u64, wgpu::BufferUsages::STORAGE);
         let apply_ubuf = buffer("apply uniform", size_of::<ApplyUniform>() as u64, wgpu::BufferUsages::UNIFORM);
 
-        let mut engine = Engine {
+        let mut engine = {
+            let _textures = crate::startup_trace::span("Engine::with_pipelines texture/buffer allocation");
+            Engine {
             rs: rs.clone(),
             gpu_profiler,
             active_gpu_profile: None,
@@ -1680,8 +1682,12 @@ impl Engine {
             p,
             device,
             queue,
+            }
         };
-        engine.bake_uv(mesh);
+        {
+            let _s = crate::startup_trace::span("Engine::bake_uv");
+            engine.bake_uv(mesh);
+        }
         engine.committed = engine.doc_props();
         engine
     }
