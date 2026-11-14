@@ -2554,7 +2554,7 @@ fn screen_projection_paints_visible_sloped_surface() {
 #[test]
 #[ignore]
 fn screen_projection_uses_geometric_face_normals() {
-    use crate::app::{BrushProjection, resolve_stamps, stroke_region};
+    use crate::app::{BrushProjection, resolve_stamps, screen_stroke_plan};
     use crate::engine::{BrushPaint, Content, Engine, MatValues, StampUniform};
     use crate::mesh::Mesh;
     use crate::undo::{StrokeTarget, UndoStack};
@@ -2620,8 +2620,8 @@ fn screen_projection_uses_geometric_face_normals() {
 
         let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
         assert_eq!(stamps.len(), 1);
-        let region = stroke_region(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps);
-        engine.stroke_step_screen(&gpu_mesh, &stamps, su, views.view3d.depth_view(), &paint, region);
+        let (region, candidate_indices) = screen_stroke_plan(&mesh, &bvh, engine.triangles(), &cam, fsize, 0, radius, &stamps);
+        engine.stroke_step_screen_culled(&gpu_mesh, &candidate_indices, &stamps, su, views.view3d.depth_view(), &paint, region);
         engine.end_stroke();
         engine.composite();
 
