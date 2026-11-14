@@ -368,15 +368,34 @@ fn mesh_shade_inputs(in: MeshOut, front: bool) -> Shade {
     }
     c.gn = gn;
 
-    // Preserve a valid imported tangent frame. When normals or tangents are
-    // unavailable, synthesize a stable tangent orthogonal to the face so
-    // normal-map decoding never normalizes a zero basis vector.
+    // Preserve a valid imported tangent frame. If its normal or tangent is
+    // missing, reconstruct the tangent basis from the surface's screen-space
+    // derivatives. This follows the actual UV orientation; an arbitrary world
+    // axis would rotate tangent-space normal detail on malformed imports.
     var tangent = in.t.xyz;
     var handedness = in.t.w;
     if (missing_shading_normal || dot(tangent, tangent) <= 1e-12) {
-        let axis = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(rn.x) > 0.9);
-        tangent = normalize(cross(axis, rn));
-        handedness = 1.0;
+        let dp_dx = dpdx(in.wpos);
+        let dp_dy = dpdy(in.wpos);
+        let duv_dx = dpdx(in.uv);
+        let duv_dy = dpdy(in.uv);
+        let uv_det = duv_dx.x * duv_dy.y - duv_dx.y * duv_dy.x;
+        var reconstructed = vec3<f32>(0.0);
+        var reconstructed_bitangent = vec3<f32>(0.0);
+        if (abs(uv_det) > 1e-10) {
+            reconstructed = (dp_dx * duv_dy.y - dp_dy * duv_dx.y) / uv_det;
+            reconstructed_bitangent = (dp_dy * duv_dx.x - dp_dx * duv_dy.x) / uv_det;
+        }
+        reconstructed = reconstructed - rn * dot(rn, reconstructed);
+        if (dot(reconstructed, reconstructed) > 1e-12) {
+            tangent = normalize(reconstructed);
+            handedness = select(1.0, -1.0, dot(reconstructed_bitangent, -cross(rn, tangent)) < 0.0);
+        } else {
+            // Only degenerate UV derivatives need a deterministic fallback.
+            let axis = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(rn.x) > 0.9);
+            tangent = normalize(cross(axis, rn));
+            handedness = 1.0;
+        }
     }
 
     // MikkTSpace decoding: the interpolated normal and tangent as they are
