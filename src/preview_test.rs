@@ -2360,10 +2360,10 @@ fn screen_projection_rejects_back_surface_behind_thin_occluder() {
         rgba[i + 3] > 0
     };
     let back_chart_count = rgba.chunks_exact(4).enumerate()
-        .filter(|(index, pixel)| *index % (res as usize) < res as usize / 2 && pixel[3] > 0)
+        .filter(|(index, pixel)| *index % (res as usize) < (res as usize / 2) && pixel[3] > 0)
         .count();
     let bar_chart_count = rgba.chunks_exact(4).enumerate()
-        .filter(|(index, pixel)| *index % (res as usize) >= res as usize / 2 && pixel[3] > 0)
+        .filter(|(index, pixel)| *index % (res as usize) >= (res as usize / 2) && pixel[3] > 0)
         .count();
     let hidden_column = (0..res as usize).filter(|&y| (96..=160).contains(&y))
         .filter(|&y| painted(70, y) || painted(71, y) || painted(72, y))
