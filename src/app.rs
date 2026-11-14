@@ -2802,6 +2802,10 @@ impl PainterApp {
             let ufbx_generated = self.mesh.object_ufbx_generated_normals.get(index).copied();
             let reversed = self.mesh.object_reversed_winding.get(index).copied();
             let negative_transform = self.mesh.object_negative_transform_determinant.get(index).copied();
+            let smooth_faces = self.mesh.object_smooth_faces.get(index).copied();
+            let total_faces = self.mesh.object_total_faces.get(index).copied();
+            let smooth_edges = self.mesh.object_smooth_edges.get(index).copied();
+            let total_edges = self.mesh.object_total_edges.get(index).copied();
             let fallback = self.mesh.object_fallback_normals_generated.get(index).copied();
             let fmt = |value: Option<bool>| match value {
                 Some(true) => "yes",
@@ -2810,8 +2814,12 @@ impl PainterApp {
             };
             let stats = object_normal_stats.get(index).copied().unwrap_or([0; 5]);
             out.push_str(&format!(
-                "  [{}] {} | triangles={} aligned={} opposed={} mixed={} zero_normal_corners={} | ufbx_generated_normals={} | ufbx_reversed_winding={} | negative_transform_determinant={} | importer_fallback_normals={}\n",
+                "  [{}] {} | triangles={} aligned={} opposed={} mixed={} zero_normal_corners={} | smooth_faces={}/{} smooth_edges={}/{} | ufbx_generated_normals={} | ufbx_reversed_winding={} | negative_transform_determinant={} | importer_fallback_normals={}\n",
                 index, name, stats[0], stats[2], stats[3], stats[4], stats[1],
+                smooth_faces.map_or_else(|| "unknown".to_string(), |v| v.to_string()),
+                total_faces.map_or_else(|| "unknown".to_string(), |v| v.to_string()),
+                smooth_edges.map_or_else(|| "unknown".to_string(), |v| v.to_string()),
+                total_edges.map_or_else(|| "unknown".to_string(), |v| v.to_string()),
                 fmt(ufbx_generated), fmt(reversed), fmt(negative_transform), fmt(fallback)
             ));
         }
