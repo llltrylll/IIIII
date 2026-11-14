@@ -878,19 +878,7 @@ impl ViewRenderer {
     /// Stable key for the shadow map. The light view-projection includes its
     /// direction and the mesh bounds; visible index ranges account for hidden sets.
     fn shadow_cache_key(engine: &Engine, mesh: &GpuMesh, shown: &[usize], settings: &ViewSettings) -> Vec<u32> {
-        let mut key: Vec<u32> = Self::light_view_proj(engine, settings)
-            .to_cols_array()
-            .into_iter()
-            .map(f32::to_bits)
-            .collect();
-        key.push(mesh.index_count);
-        key.push(mesh.sets.len() as u32);
-        key.push(shown.len() as u32);
-        for &set in shown {
-            let range = mesh.sets[set].index_range();
-            key.extend([set as u32, range.start, range.end]);
-        }
-        key
+        make_shadow_cache_key(Self::light_view_proj(engine, settings), mesh.index_count, &mesh.sets, shown)
     }
 
     /// Draws the mesh: texture set `k` of `mesh.sets` with `engines[k]`.
@@ -1090,5 +1078,57 @@ impl ViewRenderer {
             }
         }
         rs.queue.submit([encoder.finish()]);
+    }
+}
+
+/// A camera-independent shadow cache key. Geometry replacement is handled by
+/// explicit invalidation at the app's mesh-load boundary; this key covers all
+/// mutable inputs that affect the shadow pass itself.
+fn make_shadow_cache_key(
+    light_view_proj: Mat4,
+    index_count: u32,
+    sets: &[crate::mesh::MeshSet],
+    shown: &[usize],
+) -> Vec<u32> {
+    let mut key: Vec<u32> = light_view_proj.to_cols_array().into_iter().map(f32::to_bits).collect();
+    key.extend([index_count, sets.len() as u32, shown.len() as u32]);
+    for &set in shown {
+        let range = sets[set].index_range();
+        key.extend([set as u32, range.start, range.end]);
+    }
+    key
+}
+
+#[cfg(test)]
+mod shadow_cache_tests {
+    use super::*;
+    use crate::mesh::MeshSet;
+
+    fn set(name: &str, start: u32, end: u32) -> MeshSet {
+        MeshSet { name: name.into(), tris: start..end, edges: 0..0, seams: 0..0 }
+    }
+
+    #[test]
+    fn shadow_cache_key_is_stable_for_unchanged_inputs() {
+        let sets = [set("Body", 0, 2), set("Rotor", 2, 4)];
+        let shown = [0, 1];
+        let first = make_shadow_cache_key(Mat4::IDENTITY, 12, &sets, &shown);
+        let second = make_shadow_cache_key(Mat4::IDENTITY, 12, &sets, &shown);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn shadow_cache_key_changes_with_light_or_visible_texture_sets() {
+        let sets = [set("Body", 0, 2), set("Rotor", 2, 4)];
+        let both = [0, 1];
+        let body_only = [0];
+        let original = make_shadow_cache_key(Mat4::IDENTITY, 12, &sets, &both);
+        let moved_light = make_shadow_cache_key(Mat4::from_translation(Vec3::X), 12, &sets, &both);
+        let hidden_set = make_shadow_cache_key(Mat4::IDENTITY, 12, &sets, &body_only);
+        let changed_mesh_ranges = [set("Body", 0, 3), set("Rotor", 3, 4)];
+        let changed_ranges = make_shadow_cache_key(Mat4::IDENTITY, 12, &changed_mesh_ranges, &both);
+        assert_ne!(original, moved_light);
+        assert_ne!(original, hidden_set);
+        assert_ne!(original, changed_ranges);
     }
 }
