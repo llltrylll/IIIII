@@ -2,6 +2,14 @@
 use super::*;
 
 impl PainterApp {
+    /// Builds the GPU bake pipeline only when a bake is requested.
+    pub(super) fn ensure_baker(&mut self) {
+        if self.baker.is_none() {
+            let _s = crate::startup_trace::span("baker: lazy GpuBaker::new");
+            self.baker = Some(GpuBaker::new(&self.rs.device));
+        }
+    }
+
     /// Bakes the texture set being edited.
     pub(super) fn start_bake(&mut self, ctx: &egui::Context) {
         self.sets.bake_queue.clear();
@@ -36,6 +44,7 @@ impl PainterApp {
     }
 
     pub(super) fn start_bake_set(&mut self, set: usize, ctx: &egui::Context) {
+        self.ensure_baker();
         if set == self.sets.active {
             self.preview_full_bake_started();
         }
@@ -96,7 +105,11 @@ impl PainterApp {
                 Ok(Ok(Prepared::Scene(scene, key))) => {
                     let res = self.set_engines().get(self.sets.baking).map_or(self.engine.res, |e| e.res);
                     let settings = self.job_bake_settings();
-                    let (baker, rs, mesh) = (&self.baker, &self.rs, &self.gpu_mesh);
+                    let (baker, rs, mesh) = (
+                        self.baker.as_ref().expect("a bake job initializes the GPU baker"),
+                        &self.rs,
+                        &self.gpu_mesh,
+                    );
                     match out_of_memory_guard(&rs.device, || baker.start(&rs.device, &rs.queue, mesh, &scene, &settings, res)) {
                         Ok(run) => {
                             self.bake_job = Some(BakeJob::Running(run, key));
@@ -121,7 +134,10 @@ impl PainterApp {
                 }
             },
             Some(BakeJob::Running(run, key)) => {
-                let (baker, rs) = (&self.baker, &self.rs);
+                let (baker, rs) = (
+                    self.baker.as_ref().expect("a running bake owns an initialized GPU baker"),
+                    &self.rs,
+                );
                 let pumped = match out_of_memory_guard(&rs.device, || baker.pump(run, &rs.device, &rs.queue, ctx)) {
                     Ok(maps) => maps,
                     Err(e) => {
