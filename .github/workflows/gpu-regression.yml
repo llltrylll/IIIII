@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - gpt/stacked-uv-visible-pass
+      - gpt/integrated-three-fronts
   workflow_dispatch:
 
 permissions:
@@ -51,6 +52,9 @@ jobs:
       # The broader preview suite also contains unrelated interactive UI tests.
       - name: GPU parity - stacked UV screen paint
         run: "cargo test --locked --bin material_painter preview_test::screen_projection_paints_visible_face_of_overlapped_uvs -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU parity - close stacked UV occlusion
+        run: "cargo test --locked --bin material_painter preview_test::screen_projection_rejects_close_occluded_uv_surface -- --ignored --exact --nocapture --test-threads 1"
 
       - name: GPU parity - inverted normals and winding
         run: "cargo test --locked --bin material_painter preview_test::screen_projection_uses_geometric_face_normals -- --ignored --exact --nocapture --test-threads 1"
