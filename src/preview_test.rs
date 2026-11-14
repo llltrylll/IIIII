@@ -1912,7 +1912,7 @@ fn uv_base_color_is_independent_and_composites_alpha() {
         let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 256);
         let fill = FillParams {
             mat: MatValues {
-                enabled: [true, false, false, false, false, false, false, false],
+                enabled: [true, false, false, false, true, false, false, false],
                 color: [1.0, 0.0, 0.0],
                 opacity,
                 ..Default::default()
