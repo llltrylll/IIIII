@@ -352,11 +352,18 @@ fn mesh_shade_inputs(in: MeshOut, front: bool) -> Shade {
     // the actual face. This prevents inverted imported normals from shading
     // the raster viewport differently from the path-traced viewport.
     var rn = in.n;
-    if (!front) {
-        rn = -rn;
-    }
-    if (dot(rn, gn) < 0.0) {
-        rn = -rn;
+    if (dot(rn, rn) <= 1e-12) {
+        // Malformed or unavailable imported normals must not leave the
+        // raster shading frame undefined; the geometric face normal is the
+        // conservative fallback when there is no authored direction.
+        rn = gn;
+    } else {
+        if (!front) {
+            rn = -rn;
+        }
+        if (dot(rn, gn) < 0.0) {
+            rn = -rn;
+        }
     }
     c.gn = gn;
 
