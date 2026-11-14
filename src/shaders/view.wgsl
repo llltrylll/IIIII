@@ -389,7 +389,7 @@ fn mesh_shade_inputs(in: MeshOut, front: bool) -> Shade {
         reconstructed = reconstructed - rn * dot(rn, reconstructed);
         if (dot(reconstructed, reconstructed) > 1e-12) {
             tangent = normalize(reconstructed);
-            handedness = select(1.0, -1.0, dot(reconstructed_bitangent, -cross(rn, tangent)) < 0.0);
+            handedness = select(1.0, -1.0, dot(cross(rn, tangent), reconstructed_bitangent) < 0.0);
         } else {
             // Only degenerate UV derivatives need a deterministic fallback.
             let axis = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(rn.x) > 0.9);
