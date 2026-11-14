@@ -341,8 +341,8 @@ fn paint_projections() {
             assert_eq!(projection, BrushProjection::Uv, "{name}: unexpected full-frame fallback");
             println!("  {name}: UV bounds cross the safe tile; validating the conservative full-frame fallback");
         }
-        engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, regions.clone());
-        reference.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, None);
+        engine.stroke_step(&stamps, su, views.view3d.paint_depth_view(), &paint, regions.clone());
+        reference.stroke_step(&stamps, su, views.view3d.paint_depth_view(), &paint, None);
         engine.end_stroke();
         reference.end_stroke();
         fn paint_texture(engine: &Engine) -> &crate::gpu::Tex {
@@ -526,8 +526,8 @@ fn scissored_mask_stroke_matches_full_frame() {
         proj: [BrushProjection::Screen as u32 as f32, 0.0, 85f32.to_radians().cos(), 0.0],
     };
     let paint = BrushPaint { mat: MatValues::default(), mask_value: 0.0, opacity: 1.0, erase: false, grain: [0.0; 4] };
-    optimized.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, Some(regions.clone()));
-    reference.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, None);
+    optimized.stroke_step(&stamps, su, views.view3d.paint_depth_view(), &paint, Some(regions.clone()));
+    reference.stroke_step(&stamps, su, views.view3d.paint_depth_view(), &paint, None);
     optimized.end_stroke();
     reference.end_stroke();
     optimized.composite();
@@ -562,8 +562,8 @@ fn scissored_mask_stroke_matches_full_frame() {
         erase: false,
         grain: [0.0; 4],
     };
-    optimized.stroke_step(&stamps, su, views.view3d.depth_view(), &content_paint, Some(regions.clone()));
-    reference.stroke_step(&stamps, su, views.view3d.depth_view(), &content_paint, None);
+    optimized.stroke_step(&stamps, su, views.view3d.paint_depth_view(), &content_paint, Some(regions.clone()));
+    reference.stroke_step(&stamps, su, views.view3d.paint_depth_view(), &content_paint, None);
     optimized.end_stroke();
     reference.end_stroke();
     optimized.composite();
@@ -579,8 +579,8 @@ fn scissored_mask_stroke_matches_full_frame() {
     // A second mask stroke must invalidate just this mask's cached result.
     assert!(optimized.begin_stroke(target, StrokeTarget::Mask, [false; CHANNELS], false));
     assert!(reference.begin_stroke(reference_target, StrokeTarget::Mask, [false; CHANNELS], false));
-    optimized.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, Some(regions.clone()));
-    reference.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, None);
+    optimized.stroke_step(&stamps, su, views.view3d.paint_depth_view(), &paint, Some(regions.clone()));
+    reference.stroke_step(&stamps, su, views.view3d.paint_depth_view(), &paint, None);
     optimized.end_stroke();
     reference.end_stroke();
     optimized.composite();
@@ -662,7 +662,7 @@ fn perf_4k() {
         let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, 35.0, &raw);
         let t = Instant::now();
         let region = crate::app::stroke_region(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, 35.0, &stamps);
-        engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, region);
+        engine.stroke_step(&stamps, su, views.view3d.paint_depth_view(), &paint, region);
         wait(&rs);
         t_stroke += t.elapsed().as_secs_f64();
         let t = Instant::now();
@@ -789,7 +789,7 @@ fn multi_scissor_nested_folder_matches_full() {
             .expect("both UV islands must be included in the changed region");
         assert!(regions.len() >= 2, "expected disjoint UV scissors, got {}", regions.len());
 
-        engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, Some(regions.clone()));
+        engine.stroke_step(&stamps, su, views.view3d.paint_depth_view(), &paint, Some(regions.clone()));
         engine.composite();
 
         if frame == 0 {
@@ -1881,7 +1881,7 @@ fn mask_stroke_redoes_only_the_mask_thumbnail() {
     for frame in 0..4 {
         let raw: Vec<([f32; 4], f32)> = (0..10).map(|i| ([100.0 + (frame * 10 + i) as f32 * 8.0, 256.0, 1.0, 0.0], 1.0)).collect();
         let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 1, radius, &raw);
-        engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, None);
+        engine.stroke_step(&stamps, su, views.view3d.paint_depth_view(), &paint, None);
         engine.composite();
         assert_eq!(engine.thumb_renders(), settled, "no thumbnail is rebuilt while the stroke is held (frame {frame})");
     }
@@ -2284,7 +2284,7 @@ fn screen_projection_paints_visible_face_of_overlapped_uvs() {
     views.render_3d(&rs, size, &[&legacy], &env, &gpu_mesh, &cam, &ViewSettings::default(), None);
     assert!(legacy.begin_stroke(0, StrokeTarget::Content, paint.mat.enabled, false));
     let legacy_region = stroke_region(&mesh, &bvh, legacy.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps);
-    legacy.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, legacy_region);
+    legacy.stroke_step(&stamps, su, views.view3d.paint_depth_view(), &paint, legacy_region);
     legacy.end_stroke();
     legacy.composite();
     let legacy_count = painted_texels(&legacy);
@@ -2301,7 +2301,7 @@ fn screen_projection_paints_visible_face_of_overlapped_uvs() {
     let (visible_region, candidate_indices) = screen_stroke_plan(&mesh, &bvh, visible.triangles(), &cam, fsize, 0, radius, &stamps);
     assert!(visible_region.is_some(), "fixture must produce conservative UV scissors");
     assert!(!candidate_indices.is_empty(), "screen BVH must return visible triangle indices");
-    visible.stroke_step_screen_culled(&gpu_mesh, &candidate_indices, &stamps, su, views.view3d.depth_view(), &paint, visible_region);
+    visible.stroke_step_screen_culled(&gpu_mesh, &candidate_indices, &stamps, su, views.view3d.paint_depth_view(), &paint, visible_region);
     visible.end_stroke();
     visible.composite();
     let visible_count = painted_texels(&visible);
@@ -2316,6 +2316,111 @@ fn screen_projection_paints_visible_face_of_overlapped_uvs() {
     println!("  stacked UV screen stroke: legacy {legacy_count} painted texels, per-face {visible_count}");
     assert_eq!(legacy_count, 0, "the fixture must reproduce the old single-surface UV bake failure");
     assert!(visible_count > 500, "the visible overlapping face should receive paint, got {visible_count}");
+}
+
+/// When the front shell's imported normals face away from the camera,
+/// screen painting must pass through it and target the correctly oriented
+/// background surface, even when their UV charts are only partly overlapped.
+#[test]
+#[ignore]
+fn screen_projection_skips_inward_front_surface_and_paints_background_chart() {
+    use crate::app::{BrushProjection, resolve_stamps, screen_stroke_plan};
+    use crate::engine::{BrushPaint, Content, MatValues, StampUniform};
+    use crate::mesh::Mesh;
+    use crate::undo::{StrokeTarget, UndoStack};
+    use crate::viewport::{OrbitCam, ViewSettings, NEAR, FAR};
+    use glam::{Vec2, Vec3};
+
+    let near_uv = [
+        Vec2::new(0.1, 0.1), Vec2::new(0.5, 0.1),
+        Vec2::new(0.5, 0.9), Vec2::new(0.1, 0.9),
+    ];
+    let far_uv = [
+        Vec2::new(0.45, 0.1), Vec2::new(0.85, 0.1),
+        Vec2::new(0.85, 0.9), Vec2::new(0.45, 0.9),
+    ];
+    let near = [
+        Vec3::new(-0.8, -0.8, 0.8), Vec3::new(0.8, -0.8, 0.8),
+        Vec3::new(0.8, 0.8, 0.8), Vec3::new(-0.8, 0.8, 0.8),
+    ];
+    let far = [
+        Vec3::new(-0.8, -0.8, -0.8), Vec3::new(0.8, -0.8, -0.8),
+        Vec3::new(0.8, 0.8, -0.8), Vec3::new(-0.8, 0.8, -0.8),
+    ];
+    let mut positions = near.to_vec();
+    positions.extend(far);
+    let mut uvs = near_uv.to_vec();
+    uvs.extend(far_uv);
+    let mut normals = vec![Vec3::Z; 8];
+    normals[..4].fill(Vec3::NEG_Z); // front surface is inward-facing
+    let indices = vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7];
+    let mesh = Arc::new(Mesh::from_parts(
+        "Inward front surface paint fixture".into(),
+        positions, Some(normals), uvs, indices,
+    ));
+    let bvh = crate::bvh::Bvh::from_mesh(&mesh);
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let res = 256;
+    let cam = OrbitCam { yaw: 0.0, pitch: 0.0, dist: 4.0, target: Vec3::ZERO, fov_y: 38f32.to_radians() };
+    let size = [512u32, 512u32];
+    let fsize = Vec2::new(size[0] as f32, size[1] as f32);
+    let mut views = ViewRenderer::new(&rs);
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+    let paint = BrushPaint {
+        mat: MatValues { enabled: [true, false, false, false, false, false, false, false], color: [1.0, 0.02, 0.01], ..Default::default() },
+        mask_value: 1.0, opacity: 1.0, erase: false, grain: [0.0; 4],
+    };
+    let raw = [([256.0, 256.0, 1.0, 0.0], 1.0)];
+    let radius = 60.0;
+    let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+    assert_eq!(stamps.len(), 1);
+    let su = StampUniform {
+        view_proj: cam.view_proj(fsize.x / fsize.y).to_cols_array_2d(),
+        cam_pos: cam.eye().extend(1.0).to_array(),
+        view: [fsize.x, fsize.y, 0.0, 0.0],
+        view2d: [0.0; 4],
+        brush: [radius, 0.6, 1.0, 0.0],
+        clip: [NEAR, FAR, 0.0, 0.0],
+        proj: [BrushProjection::Screen as u32 as f32, 0.0, 85f32.to_radians().cos(), 0.0],
+    };
+    let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+    let mut undo = UndoStack::default();
+    engine.add_paint_layer(0, None, None, &mut undo);
+    engine.composite();
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &ViewSettings::default(), None);
+    assert!(engine.begin_stroke(0, StrokeTarget::Content, paint.mat.enabled, false));
+    let (region, candidate_indices) = screen_stroke_plan(&mesh, &bvh, engine.triangles(), &cam, fsize, 0, radius, &stamps);
+    assert!(region.is_some());
+    assert_eq!(candidate_indices.len(), 12);
+    engine.stroke_step_screen_culled(&gpu_mesh, &candidate_indices, &stamps, su, views.view3d.paint_depth_view(), &paint, region);
+    engine.end_stroke();
+    engine.composite();
+
+    let Content::Paint(channels) = &engine.layers[0].content else { panic!("expected paint layer") };
+    let color = channels[0].as_ref().expect("base color channel was allocated");
+    let pixels = read_texture(&rs.device, &rs.queue, color);
+    let count_rect = |u0: f32, v0: f32, u1: f32, v1: f32| {
+        let x0 = (u0 * res as f32).floor() as usize;
+        let y0 = (v0 * res as f32).floor() as usize;
+        let x1 = (u1 * res as f32).ceil() as usize;
+        let y1 = (v1 * res as f32).ceil() as usize;
+        let mut count = 0usize;
+        for y in y0..y1.min(res as usize) {
+            for x in x0..x1.min(res as usize) {
+                if pixels[(y * res as usize + x) * 4 + 3] > 0 { count += 1; }
+            }
+        }
+        count
+    };
+    let inward_front_chart = count_rect(0.20, 0.40, 0.40, 0.60);
+    let correctly_oriented_background = count_rect(0.55, 0.40, 0.75, 0.60);
+    println!(
+        "  normal-aware screen paint: inward front chart {inward_front_chart}, background chart {correctly_oriented_background}"
+    );
+    assert_eq!(inward_front_chart, 0, "the inward-facing front surface must not receive paint");
+    assert!(correctly_oriented_background > 100, "the correctly oriented background surface must receive paint");
 }
 
 /// A screen stroke must land in the visible face's UV region, not in the
@@ -2414,7 +2519,7 @@ fn screen_projection_paints_only_visible_face_uv_region() {
     let (region, candidate_indices) = screen_stroke_plan(&mesh, &bvh, engine.triangles(), &cam, fsize, 0, radius, &stamps);
     assert!(region.is_some());
     assert_eq!(candidate_indices.len(), 12, "both visible and hidden quads are screen candidates");
-    engine.stroke_step_screen_culled(&gpu_mesh, &candidate_indices, &stamps, su, views.view3d.depth_view(), &paint, region);
+    engine.stroke_step_screen_culled(&gpu_mesh, &candidate_indices, &stamps, su, views.view3d.paint_depth_view(), &paint, region);
     engine.end_stroke();
     engine.composite();
 
@@ -2529,7 +2634,7 @@ fn screen_projection_rejects_close_occluded_uv_surface() {
     let (region, candidate_indices) = screen_stroke_plan(&mesh, &bvh, engine.triangles(), &cam, fsize, 0, radius, &stamps);
     assert!(!candidate_indices.is_empty(), "screen BVH must return candidate triangles");
     assert!(region.is_some(), "fixture must produce conservative UV scissors");
-    engine.stroke_step_screen_culled(&gpu_mesh, &candidate_indices, &stamps, su, views.view3d.depth_view(), &paint, region);
+    engine.stroke_step_screen_culled(&gpu_mesh, &candidate_indices, &stamps, su, views.view3d.paint_depth_view(), &paint, region);
     engine.end_stroke();
     engine.composite();
 
@@ -2664,7 +2769,7 @@ fn screen_projection_rejects_back_surface_behind_thin_occluder() {
     assert_eq!(candidate_indices.len(), 12, "only the back plane and thin bar should reach the screen-space stamp bounds");
     assert!(candidate_indices.len() < mesh.indices.len() / 4, "the GPU draw should exclude off-screen triangles");
     assert!(region.is_some());
-    engine.stroke_step_screen_culled(&gpu_mesh, &candidate_indices, &stamps, su, views.view3d.depth_view(), &paint, region);
+    engine.stroke_step_screen_culled(&gpu_mesh, &candidate_indices, &stamps, su, views.view3d.paint_depth_view(), &paint, region);
     engine.end_stroke();
     engine.composite();
 
@@ -2768,7 +2873,7 @@ fn screen_projection_paints_visible_sloped_surface() {
     let (region, candidate_indices) = screen_stroke_plan(&mesh, &bvh, engine.triangles(), &cam, fsize, 0, radius, &stamps);
     assert!(!candidate_indices.is_empty(), "screen BVH must return candidate triangles");
     assert!(region.is_some(), "fixture must produce conservative UV scissors");
-    engine.stroke_step_screen_culled(&gpu_mesh, &candidate_indices, &stamps, su, views.view3d.depth_view(), &paint, region);
+    engine.stroke_step_screen_culled(&gpu_mesh, &candidate_indices, &stamps, su, views.view3d.paint_depth_view(), &paint, region);
     engine.end_stroke();
     engine.composite();
 
@@ -2786,7 +2891,7 @@ fn screen_projection_paints_visible_sloped_surface() {
 /// triangle winding disagree with the camera-facing geometric surface.
 #[test]
 #[ignore]
-fn screen_projection_uses_geometric_face_normals() {
+fn screen_projection_respects_imported_normal_facing() {
     use crate::app::{BrushProjection, resolve_stamps, screen_stroke_plan};
     use crate::engine::{BrushPaint, Content, Engine, MatValues, StampUniform};
     use crate::mesh::Mesh;
@@ -2854,7 +2959,7 @@ fn screen_projection_uses_geometric_face_normals() {
         let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
         assert_eq!(stamps.len(), 1);
         let (region, candidate_indices) = screen_stroke_plan(&mesh, &bvh, engine.triangles(), &cam, fsize, 0, radius, &stamps);
-        engine.stroke_step_screen_culled(&gpu_mesh, &candidate_indices, &stamps, su, views.view3d.depth_view(), &paint, region);
+        engine.stroke_step_screen_culled(&gpu_mesh, &candidate_indices, &stamps, su, views.view3d.paint_depth_view(), &paint, region);
         engine.end_stroke();
         engine.composite();
 
@@ -2868,10 +2973,15 @@ fn screen_projection_uses_geometric_face_normals() {
 
     for (reverse_winding, inverted_shading) in [(false, false), (false, true), (true, false), (true, true)] {
         let painted = run(reverse_winding, inverted_shading);
+        let normal_faces_camera = inverted_shading == reverse_winding;
         println!(
-            "  geometric normal paint: reverse_winding={reverse_winding}, inverted_shading={inverted_shading}, painted={painted}"
+            "  screen paint normal facing: reverse_winding={reverse_winding}, inverted_shading={inverted_shading}, facing_camera={normal_faces_camera}, painted={painted}"
         );
-        assert!(painted > 500, "visible face was rejected: reverse_winding={reverse_winding}, inverted_shading={inverted_shading}, painted={painted}");
+        if normal_faces_camera {
+            assert!(painted > 500, "a camera-facing imported normal must allow painting: reverse_winding={reverse_winding}, inverted_shading={inverted_shading}, painted={painted}");
+        } else {
+            assert_eq!(painted, 0, "an inward-facing imported normal must not occlude the paint target behind it: reverse_winding={reverse_winding}, inverted_shading={inverted_shading}, painted={painted}");
+        }
     }
 }
 
@@ -3065,7 +3175,7 @@ fn texture_sets_paint_apart() {
         erase: false,
         grain: [0.0; 4],
     };
-    left.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, None);
+    left.stroke_step(&stamps, su, views.view3d.paint_depth_view(), &paint, None);
     left.end_stroke();
     left.composite();
     right.composite();
@@ -3625,7 +3735,7 @@ fn transparency_paints_shows_and_exports() {
     let mut clear = MatValues { opacity: 0.0, ..Default::default() };
     clear.enabled = only_opacity;
     let paint = BrushPaint { mat: clear, mask_value: 1.0, opacity: 1.0, erase: false, grain: [0.0; 4] };
-    left.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, None);
+    left.stroke_step(&stamps, su, views.view3d.paint_depth_view(), &paint, None);
     left.end_stroke();
     left.composite();
     let a = alpha(&left);
@@ -4207,7 +4317,7 @@ fn emission_paints_glows_and_exports() {
     let mut green = MatValues { emission: [0.1, 1.0, 0.2], ..Default::default() };
     green.enabled = only;
     let paint = BrushPaint { mat: green, mask_value: 1.0, opacity: 1.0, erase: false, grain: [0.0; 4] };
-    engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, None);
+    engine.stroke_step(&stamps, su, views.view3d.paint_depth_view(), &paint, None);
     engine.end_stroke();
     engine.composite();
     assert!(engine.uses_emission());
@@ -4561,7 +4671,7 @@ fn multi_scissor_matches_full_composite() {
                 .collect();
             let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
             let region = crate::app::stroke_region(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps);
-            engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, region);
+            engine.stroke_step(&stamps, su, views.view3d.paint_depth_view(), &paint, region);
             engine.composite();
             rects_max = rects_max.max(engine.last_scissor_rects);
             patch_min = patch_min.min(engine.last_scissor_pixels as f64 * 100.0 / (res as f64 * res as f64));
