@@ -337,9 +337,13 @@ fn mesh_surface(h: Hit, o: vec3<f32>, d: vec3<f32>) -> Surface {
     // MikkTSpace decoding, as in the raster view.
     let b_up = -cross(rn, tg.xyz) * select(1.0, -1.0, tg.w < 0.0);
     s.n = normalize(tg.xyz * ts.x + b_up * ts.y + rn * ts.z);
-    if (dot(s.n, -d) <= 0.0) {
-        // Keep shading normals visible from the viewer.
-        s.n = normalize(s.n + s.ng * (0.01 - dot(s.n, -d)));
+    let normal_view_dot = dot(s.n, -d);
+    if (normal_view_dot <= 0.0) {
+        // Move the mapped normal just inside the viewer-facing hemisphere.
+        // Divide by the geometric normal's view component so this remains
+        // correct at grazing angles, where simply adding ng is insufficient.
+        let geometric_view_dot = max(dot(s.ng, -d), 1e-4);
+        s.n = normalize(s.n + s.ng * ((0.01 - normal_view_dot) / geometric_view_dot));
     }
     return s;
 }
