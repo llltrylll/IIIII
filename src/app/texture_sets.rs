@@ -363,7 +363,7 @@ impl PainterApp {
 
     /// The path-traced preview has all its samples (offscreen tests).
     pub(crate) fn test_ray_trace_done(&self) -> bool {
-        self.raytracer.converged(&self.rt)
+        self.raytracer.as_ref().is_some_and(|raytracer| raytracer.converged(&self.rt))
     }
 
     /// Loads `mesh` as the paintable mesh (offscreen tests).
