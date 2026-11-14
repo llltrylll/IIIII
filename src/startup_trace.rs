@@ -386,19 +386,21 @@ fn render(t: &Trace) -> String {
         let v: Vec<f64> = phases.iter().map(|p| fs.iter().map(|f| phase_sum(f, p)).sum()).collect();
         let upload: f64 = t.recs.iter().filter(|r| r.name == "scan: upload batch (UI thread)" && &r.detail == label).map(|r| r.dur).sum();
         let rt: f64 = t.recs.iter().filter(|r| r.name == "scan: request -> received on UI thread" && &r.detail == label).map(|r| r.dur).sum();
+        // Avoid printing negative zero for phases with no recorded work.
+        let clean = |x: f64| if x.abs() < 0.05 { 0.0 } else { x };
         let _ = writeln!(
             o,
             "  {label:<34} {:>5} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>9.1} {:>9.1} {:>11.1} {:>11.1}",
             fs.len(),
-            v[0],
-            v[1],
-            v[2],
-            v[3],
-            v[4],
-            v[5],
-            v[6],
-            upload,
-            rt
+            clean(v[0]),
+            clean(v[1]),
+            clean(v[2]),
+            clean(v[3]),
+            clean(v[4]),
+            clean(v[5]),
+            clean(v[6]),
+            clean(upload),
+            clean(rt)
         );
     }
 
