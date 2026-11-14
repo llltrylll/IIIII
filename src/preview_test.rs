@@ -2228,7 +2228,7 @@ fn screen_projection_paints_visible_face_of_overlapped_uvs() {
 #[test]
 #[ignore]
 fn screen_projection_rejects_close_occluded_uv_surface() {
-    use crate::app::{BrushProjection, resolve_stamps, screen_stroke_plan, stroke_region};
+    use crate::app::{BrushProjection, resolve_stamps, screen_stroke_plan};
     use crate::engine::{BrushPaint, Content, Engine, MatValues, StampUniform};
     use crate::mesh::Mesh;
     use crate::undo::{StrokeTarget, UndoStack};
@@ -2330,7 +2330,7 @@ fn screen_projection_rejects_close_occluded_uv_surface() {
 #[test]
 #[ignore]
 fn screen_projection_rejects_back_surface_behind_thin_occluder() {
-    use crate::app::{BrushProjection, resolve_stamps, screen_stroke_plan, stroke_region};
+    use crate::app::{BrushProjection, resolve_stamps, screen_stroke_plan};
     use crate::engine::{BrushPaint, Content, Engine, MatValues, StampUniform};
     use crate::mesh::Mesh;
     use crate::undo::{StrokeTarget, UndoStack};
@@ -2464,7 +2464,7 @@ fn screen_projection_rejects_back_surface_behind_thin_occluder() {
 #[test]
 #[ignore]
 fn screen_projection_paints_visible_sloped_surface() {
-    use crate::app::{BrushProjection, resolve_stamps, screen_stroke_plan, stroke_region};
+    use crate::app::{BrushProjection, resolve_stamps, screen_stroke_plan};
     use crate::engine::{BrushPaint, Content, Engine, MatValues, StampUniform};
     use crate::mesh::Mesh;
     use crate::undo::{StrokeTarget, UndoStack};
