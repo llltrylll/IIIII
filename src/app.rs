@@ -4916,14 +4916,17 @@ impl eframe::App for PainterApp {
         let ctx = ui.ctx().clone();
         self.ppp = ctx.pixels_per_point();
         let _ = self.rs.device.poll(wgpu::PollType::Poll);
-        self.undo.update();
-        self.poll_bake(&ctx);
-        self.poll_spp_open(&ctx);
-        self.update_preview(&ctx);
-        self.poll_env();
-        self.poll_hdri_thumbs(&ctx);
-        self.poll_library(&ctx);
-        self.poll_cpu_shelf_previews(&ctx);
+        {
+            let _s = crate::startup_trace::span("frame: async job polling");
+            self.undo.update();
+            self.poll_bake(&ctx);
+            self.poll_spp_open(&ctx);
+            self.update_preview(&ctx);
+            self.poll_env();
+            self.poll_hdri_thumbs(&ctx);
+            self.poll_library(&ctx);
+            self.poll_cpu_shelf_previews(&ctx);
+        }
         // Closing the window with unsaved changes asks first.
         if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close {
             if self.is_modified() {
@@ -4933,9 +4936,12 @@ impl eframe::App for PainterApp {
                 project_io::remove_autosave();
             }
         }
-        self.recovery_dialog(&ctx);
-        self.confirm_dialog(&ctx);
-        self.autosave_if_due();
+        {
+            let _s = crate::startup_trace::span("frame: recovery/confirm/autosave UI");
+            self.recovery_dialog(&ctx);
+            self.confirm_dialog(&ctx);
+            self.autosave_if_due();
+        }
         let title = format!(
             "{}{} — Material Painter",
             self.project_path.as_ref().and_then(|p| p.file_stem()).map_or("Untitled".to_string(), |n| n.to_string_lossy().into_owned()),
@@ -4954,12 +4960,17 @@ impl eframe::App for PainterApp {
             self.shelf_previews = None;
             crate::startup_trace::shelf_done();
         }
-        self.path_keys(&ctx);
-        self.shortcuts(&ctx);
-        self.process_actions(&ctx);
-        self.process_mcp(&ctx);
+        {
+            let _s = crate::startup_trace::span("frame: shortcuts/actions/MCP");
+            self.path_keys(&ctx);
+            self.shortcuts(&ctx);
+            self.process_actions(&ctx);
+            self.process_mcp(&ctx);
+        }
 
-        egui::Panel::top("menu").frame(theme::bar().inner_margin(egui::Margin::symmetric(10, 5))).show(ui, |ui| self.menu_bar(ui));
+        {
+            let _s = crate::startup_trace::span("frame: menu and top/bottom toolbars");
+            egui::Panel::top("menu").frame(theme::bar().inner_margin(egui::Margin::symmetric(10, 5))).show(ui, |ui| self.menu_bar(ui));
         let paint = self.workspace == Workspace::Paint;
         if paint {
             egui::Panel::top("toolbar")
@@ -4974,28 +4985,35 @@ impl eframe::App for PainterApp {
             .frame(theme::card(theme::PANEL).inner_margin(egui::Margin::symmetric(7, 10)))
             .show(ui, |ui| self.tool_strip(ui));
         }
+        }
 
         // Panel actions (add layer, etc.) apply before this frame's GPU work.
-        self.process_actions(&ctx);
-        self.sync_brush_tip();
-        self.sync_brush_grain();
-        self.update_graphs();
-        self.update_preview_shader();
-        self.update_cage_preview(&ctx);
-        self.sync_vertex_color_preview(&ctx);
+        {
+            let _s = crate::startup_trace::span("frame: process panels and update previews");
+            self.process_actions(&ctx);
+            self.sync_brush_tip();
+            self.sync_brush_grain();
+            self.update_graphs();
+            self.update_preview_shader();
+            self.update_cage_preview(&ctx);
+            self.sync_vertex_color_preview(&ctx);
+        }
         // The ID mask panel says again, below, whether it is open.
         self.vertex_id.panel = None;
-        match self.workspace {
-            Workspace::Paint => {
-                egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::same(4))).show(ui, |ui| {
-                    self.dock_ui(ui, Workspace::Paint);
-                });
-            }
-            Workspace::Designer => {
-                egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG)).show(ui, |ui| self.designer(ui));
-            }
-            Workspace::ShaderMaker => {
-                egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG)).show(ui, |ui| self.shader_maker(ui));
+        {
+            let _s = crate::startup_trace::span("frame: workspace/dock UI");
+            match self.workspace {
+                Workspace::Paint => {
+                    egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::same(4))).show(ui, |ui| {
+                        self.dock_ui(ui, Workspace::Paint);
+                    });
+                }
+                Workspace::Designer => {
+                    egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG)).show(ui, |ui| self.designer(ui));
+                }
+                Workspace::ShaderMaker => {
+                    egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG)).show(ui, |ui| self.shader_maker(ui));
+                }
             }
         }
         if self.workspace != Workspace::Designer {
@@ -5004,20 +5022,23 @@ impl eframe::App for PainterApp {
         self.views_end_frame(&ctx);
         self.docks.save_if_changed(&ctx);
 
-        self.export_window(&ctx);
-        self.preferences_window(&ctx);
-        self.apply_preferences(&ctx);
-        self.bake_window(&ctx);
-        self.spp_report_window(&ctx);
-        self.help_window(&ctx);
-        self.about_window(&ctx);
-        self.crash_window(&ctx);
-        self.welcome_window(&ctx);
-        self.library_window(&ctx);
-        // Settings changed in the bake window show on the next frame.
-        self.update_cage_preview(&ctx);
-        self.sync_vertex_color_preview(&ctx);
-        self.service_preview_debounce(&ctx);
+        {
+            let _s = crate::startup_trace::span("frame: secondary windows and preview services");
+            self.export_window(&ctx);
+            self.preferences_window(&ctx);
+            self.apply_preferences(&ctx);
+            self.bake_window(&ctx);
+            self.spp_report_window(&ctx);
+            self.help_window(&ctx);
+            self.about_window(&ctx);
+            self.crash_window(&ctx);
+            self.welcome_window(&ctx);
+            self.library_window(&ctx);
+            // Settings changed in the bake window show on the next frame.
+            self.update_cage_preview(&ctx);
+            self.sync_vertex_color_preview(&ctx);
+            self.service_preview_debounce(&ctx);
+        }
 
         // Property edits become one undo step once the interaction ends: no
         // button held (slider drags) and no text field focused (typing).
