@@ -352,10 +352,11 @@ fn mesh_shade_inputs(in: MeshOut, front: bool) -> Shade {
     // the actual face. This prevents inverted imported normals from shading
     // the raster viewport differently from the path-traced viewport.
     var rn = in.n;
-    if (dot(rn, rn) <= 1e-12) {
+    let missing_shading_normal = dot(rn, rn) <= 1e-12;
+    if (missing_shading_normal) {
         // Malformed or unavailable imported normals must not leave the
-        // raster shading frame undefined; the geometric face normal is the
-        // conservative fallback when there is no authored direction.
+        // raster shading frame undefined; use the face-oriented geometric
+        // normal as the conservative fallback.
         rn = gn;
     } else {
         if (!front) {
@@ -367,12 +368,23 @@ fn mesh_shade_inputs(in: MeshOut, front: bool) -> Shade {
     }
     c.gn = gn;
 
+    // Preserve a valid imported tangent frame. When normals or tangents are
+    // unavailable, synthesize a stable tangent orthogonal to the face so
+    // normal-map decoding never normalizes a zero basis vector.
+    var tangent = in.t.xyz;
+    var handedness = in.t.w;
+    if (missing_shading_normal || dot(tangent, tangent) <= 1e-12) {
+        let axis = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(rn.x) > 0.9);
+        tangent = normalize(cross(axis, rn));
+        handedness = 1.0;
+    }
+
     // MikkTSpace decoding: the interpolated normal and tangent as they are
     // (not normalized or made orthogonal), the bitangent from their cross
     // product, normalized only after combining. The baker inverts exactly
     // this, and so do Unity, Unreal, Godot and Blender.
-    let b_up = -cross(rn, in.t.xyz) * in.t.w;
-    c.n = normalize(in.t.xyz * c.s.ts.x + b_up * c.s.ts.y + rn * c.s.ts.z);
+    let b_up = -cross(rn, tangent) * handedness;
+    c.n = normalize(tangent * c.s.ts.x + b_up * c.s.ts.y + rn * c.s.ts.z);
     c.l = normalize(g.sun.xyz);
     c.light = g.sun_c.rgb * g.sun.w * g.sun_c.w;
     c.shadow = 1.0;
