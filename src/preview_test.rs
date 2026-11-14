@@ -1891,6 +1891,82 @@ fn mask_stroke_redoes_only_the_mask_thumbnail() {
     assert_eq!(engine.thumb_renders(), settled + 1, "and the next recomposition doesn't redo it");
 }
 
+/// The UV display mode is independent from the 3D mode, and Base Color
+/// composites transparent texels over the checkerboard.
+#[test]
+#[ignore]
+fn uv_base_color_is_independent_and_composites_alpha() {
+    use crate::engine::{FillParams, MatValues};
+    use crate::mesh::Primitive;
+    use crate::viewport::{Cam2d, ViewMode};
+
+    let rs = render_state();
+    let mesh = Primitive::Plane.build();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+    let size = [256u32, 256u32];
+    let cam = Cam2d { zoom: 256.0, pan: glam::Vec2::ZERO };
+
+    let make_engine = |opacity: f32| {
+        let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 256);
+        let fill = FillParams {
+            mat: MatValues {
+                enabled: [true, false, false, false, false, false, false, false],
+                color: [1.0, 0.0, 0.0],
+                opacity,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        engine.add_fill_layer(0, None, "UV alpha regression".into(), fill, &mut crate::undo::UndoStack::default());
+        engine.composite();
+        engine
+    };
+
+    let mut transparent = make_engine(0.0);
+    let mut opaque = make_engine(1.0);
+    let mut views = ViewRenderer::new(&rs);
+    let settings = |mode| ViewSettings {
+        mode,
+        uv_mode: ViewMode::BaseColor,
+        show_wire: false,
+        show_seams_2d: false,
+        ..Default::default()
+    };
+    let render_uv = |views: &mut ViewRenderer, engine: &Engine, mode| {
+        views.render_2d(&rs, size, engine, &env, &gpu_mesh, 0, &cam, &settings(mode));
+        read_texture(&rs.device, &rs.queue, views.view2d.image())
+    };
+
+    let transparent_material = render_uv(&mut views, &transparent, ViewMode::Material);
+    let transparent_normal = render_uv(&mut views, &transparent, ViewMode::Normal);
+    assert_eq!(
+        transparent_material,
+        transparent_normal,
+        "changing the 3D display mode must not change the UV Base Color view"
+    );
+
+    let opaque_base = render_uv(&mut views, &opaque, ViewMode::Material);
+    let pixel = |bytes: &[u8], x: usize, y: usize| {
+        let i = (y * size[0] as usize + x) * 4;
+        [bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]
+    };
+    let checker_a = pixel(&transparent_material, 16, 16);
+    let checker_b = pixel(&transparent_material, 24, 16);
+    let opaque_a = pixel(&opaque_base, 16, 16);
+    let opaque_b = pixel(&opaque_base, 24, 16);
+
+    println!(
+        "  UV alpha checker: transparent {checker_a:?} / {checker_b:?}; opaque {opaque_a:?} / {opaque_b:?}"
+    );
+    assert_ne!(checker_a, checker_b, "transparent Base Color texels must expose both checker shades");
+    assert!(checker_a[0].abs_diff(checker_a[1]) < 3 && checker_a[1].abs_diff(checker_a[2]) < 3,
+        "transparent preview should be neutral checkerboard, got {checker_a:?}");
+    assert_eq!(opaque_a, opaque_b, "opaque Base Color should cover the checkerboard uniformly");
+    assert!(opaque_a[0] > opaque_a[1].saturating_add(40), "opaque red Base Color was not shown: {opaque_a:?}");
+}
+
 /// The raster viewport should shade the same geometric face the same way
 /// even when imported vertex shading normals point in the opposite direction.
 #[test]
