@@ -82,6 +82,9 @@ jobs:
       - name: GPU parity - inverted normals with tangent-space detail
         run: "cargo test --locked --bin material_painter preview_test::raster_normal_map_is_stable_with_inverted_imported_normals -- --ignored --exact --nocapture --test-threads 1"
 
+      - name: GPU parity - grazing-angle normal map facing
+        run: "cargo test --locked --bin material_painter preview_test::raster_normal_map_is_clamped_to_view_hemisphere_at_grazing_angle -- --ignored --exact --nocapture --test-threads 1"
+
       - name: GPU parity - screen painting follows imported normal facing
         run: "cargo test --locked --bin material_painter preview_test::screen_projection_respects_imported_normal_facing -- --ignored --exact --nocapture --test-threads 1"
 
