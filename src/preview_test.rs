@@ -1952,9 +1952,13 @@ fn raster_view_is_stable_with_inverted_shading_normals() {
 
     let outward = render(Vec3::Z);
     let inverted = render(-Vec3::Z);
+    let zero = render(Vec3::ZERO);
     let differing = outward.iter().zip(&inverted).filter(|(a, b)| a != b).count();
+    let zero_differing = outward.iter().zip(&zero).filter(|(a, b)| a != b).count();
     println!("  raster shading with inverted vertex normals: {differing} differing bytes / {}", outward.len());
+    println!("  raster shading with zero vertex normals: {zero_differing} differing bytes / {}", outward.len());
     assert_eq!(outward, inverted, "geometrically identical surfaces must shade identically after face-forwarding");
+    assert_eq!(outward, zero, "zero shading normals must fall back to the geometric face normal");
 }
 
 /// Screen painting must use the visible face when multiple faces occupy
