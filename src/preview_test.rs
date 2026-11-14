@@ -1924,8 +1924,8 @@ fn uv_base_color_is_independent_and_composites_alpha() {
         engine
     };
 
-    let mut transparent = make_engine(0.0);
-    let mut opaque = make_engine(1.0);
+    let transparent = make_engine(0.0);
+    let opaque = make_engine(1.0);
     let mut views = ViewRenderer::new(&rs);
     let settings = |mode| ViewSettings {
         mode,
