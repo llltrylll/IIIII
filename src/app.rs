@@ -2809,8 +2809,9 @@ impl PainterApp {
         let mut normals_mixed = 0u32;
         let mut exact_uv_keys: HashMap<[i64; 6], u32> = HashMap::new();
         let mut exact_uv_keys_by_set: HashMap<(usize, [i64; 6]), u32> = HashMap::new();
-        // [triangles, zero normal corners, aligned, opposed, mixed]
-        let mut object_normal_stats = vec![[0u32; 5]; self.mesh.objects.len()];
+        // Per object: triangles, zero normals, normal alignment classes,
+        // positive/negative tangent handedness, and invalid tangent frames.
+        let mut object_normal_stats = vec![[0u32; 8]; self.mesh.objects.len()];
 
         for tri in 0..self.mesh.triangle_count() {
             let base = tri * 3;
@@ -2845,11 +2846,25 @@ impl PainterApp {
             }
             let face_n = face.normalize_or_zero();
             let mut triangle_zero_normals = 0u32;
+            let mut triangle_tangent_positive = 0u32;
+            let mut triangle_tangent_negative = 0u32;
+            let mut triangle_tangent_invalid = 0u32;
             let alignments = v.map(|vertex| {
                 let normal = Vec3::from_array(vertex.normal);
                 if normal.length_squared() <= 1.0e-12 {
                     zero_vertex_normal_corners += 1;
                     triangle_zero_normals += 1;
+                }
+                let tangent = Vec3::new(vertex.tangent[0], vertex.tangent[1], vertex.tangent[2]);
+                let handedness = vertex.tangent[3];
+                if !tangent.is_finite() || tangent.length_squared() <= 1.0e-12 || !handedness.is_finite()
+                    || (handedness.abs() - 1.0).abs() > 0.05
+                {
+                    triangle_tangent_invalid += 1;
+                } else if handedness < 0.0 {
+                    triangle_tangent_negative += 1;
+                } else {
+                    triangle_tangent_positive += 1;
                 }
                 normal.normalize_or_zero().dot(face_n)
             });
@@ -2872,6 +2887,9 @@ impl PainterApp {
                 stats[0] += 1;
                 stats[1] += triangle_zero_normals;
                 stats[normal_class] += 1;
+                stats[5] += triangle_tangent_positive;
+                stats[6] += triangle_tangent_negative;
+                stats[7] += triangle_tangent_invalid;
             }
 
             // Exact UV triangle identity (quantized to 1e-6), independent of vertex order.
@@ -2965,10 +2983,10 @@ impl PainterApp {
                 Some(false) => "no",
                 None => "unknown",
             };
-            let stats = object_normal_stats.get(index).copied().unwrap_or([0; 5]);
+            let stats = object_normal_stats.get(index).copied().unwrap_or([0; 8]);
             out.push_str(&format!(
-                "  [{}] {} | triangles={} aligned={} opposed={} mixed={} zero_normal_corners={} | soft_faces={}/{} soft_edges={}/{} | ufbx_generated_normals={} | ufbx_reversed_winding={} | negative_transform_determinant={} | importer_fallback_normals={}\n",
-                index, name, stats[0], stats[2], stats[3], stats[4], stats[1],
+                "  [{}] {} | triangles={} aligned={} opposed={} mixed={} zero_normal_corners={} | tangentW_positive={} tangentW_negative={} tangent_invalid={} | soft_faces={}/{} soft_edges={}/{} | ufbx_generated_normals={} | ufbx_reversed_winding={} | negative_transform_determinant={} | importer_fallback_normals={}\n",
+                index, name, stats[0], stats[2], stats[3], stats[4], stats[1], stats[5], stats[6], stats[7],
                 smooth_faces.map_or_else(|| "unknown".to_string(), |v| v.to_string()),
                 face_smoothing_entries.map_or_else(|| "unknown".to_string(), |v| v.to_string()),
                 smooth_edges.map_or_else(|| "unknown".to_string(), |v| v.to_string()),
