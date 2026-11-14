@@ -96,7 +96,7 @@ Suggested behavior:
 
 ---
 
-# 2. Painting fails on one side of stacked / mirrored UVs
+# 2. Painting fails on one side of overlapping UVs
 
 ## Source findings
 
@@ -171,7 +171,7 @@ The Airfox capture recorded:
 - No triangle outside the 0–1 UV tile.
 - Multiple ray samples intersected several world surfaces; some were in the active \`chassi\` texture set.
 
-These figures establish that stacked geometry is common in this asset. They do not, by themselves, prove which projection branch caused a particular failed stroke. The capture also does not prove that every overlap group is a mirrored front/back pair; groups may contain more than two triangles.
+These figures establish that overlapping geometry is common in this asset. They do not, by themselves, prove which projection branch caused a particular failed stroke or identify which modeling operation created an overlap. Groups may contain more than two triangles.
 
 ## Fix direction
 
@@ -365,7 +365,7 @@ This is distinct from the one-surface-per-texel UV bake limitation. Add a fixtur
 
 ## D. Diagnostic interpretation guardrails
 
-- The 8,560 exact-overlap groups describe exact UV overlap groups; they are not necessarily mirrored pairs.
+- The 8,560 exact-overlap groups describe coordinate overlap only; they do not identify the modeling operation that produced each overlap.
 - The reported maximum depth of 558 is an observed stack depth. It does not dictate a fixed layered representation; any multi-layer design must handle overflow.
 - A ray with multiple world intersections only proves geometric ray overlap. It does not prove a stroke was written or composited.
 - A `normals_opposed` diagnostic compares geometric face orientation with vertex shading normals. It does not identify which convention is authoritative for every open or double-sided surface.
