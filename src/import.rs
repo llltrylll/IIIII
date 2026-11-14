@@ -32,9 +32,9 @@ pub struct RawMesh {
     pub object_negative_transform_determinant: Vec<bool>,
     /// ufbx smoothing-group summary per object: soft faces / faces, soft edges / edges.
     pub object_smooth_faces: Vec<u32>,
-    pub object_total_faces: Vec<u32>,
+    pub object_face_smoothing_entries: Vec<u32>,
     pub object_smooth_edges: Vec<u32>,
-    pub object_total_edges: Vec<u32>,
+    pub object_edge_smoothing_entries: Vec<u32>,
     /// Per-object fallback normal generation performed by this importer.
     pub object_fallback_normals_generated: Vec<bool>,
     /// Average vertex color per triangle (legacy ID report).
@@ -129,7 +129,7 @@ fn load_fbx(path: &Path) -> Result<RawMesh, String> {
         out.set_ufbx_normal_metadata(mesh.generated_normals, mesh.reversed_winding, negative_transform_determinant);
         out.set_ufbx_smoothing_metadata(
             mesh.face_smoothing.iter().filter(|&&smooth| smooth).count() as u32,
-            mesh.faces.len() as u32,
+            mesh.face_smoothing.len() as u32,
             mesh.edge_smoothing.iter().filter(|&&smooth| smooth).count() as u32,
             mesh.edge_smoothing.len() as u32,
         );
@@ -194,9 +194,9 @@ struct Builder {
     /// Negative determinant of the node's geometry-to-world transform.
     object_negative_transform_determinant: Vec<bool>,
     object_smooth_faces: Vec<u32>,
-    object_total_faces: Vec<u32>,
+    object_face_smoothing_entries: Vec<u32>,
     object_smooth_edges: Vec<u32>,
-    object_total_edges: Vec<u32>,
+    object_edge_smoothing_entries: Vec<u32>,
     /// Per-vertex provenance, so authored normals survive a partial fallback.
     vertex_has_normal: Vec<bool>,
     vertex_object: Vec<u32>,
@@ -222,9 +222,9 @@ impl Builder {
         self.object_reversed_winding.push(false);
         self.object_negative_transform_determinant.push(false);
         self.object_smooth_faces.push(0);
-        self.object_total_faces.push(0);
+        self.object_face_smoothing_entries.push(0);
         self.object_smooth_edges.push(0);
-        self.object_total_edges.push(0);
+        self.object_edge_smoothing_entries.push(0);
     }
 
     fn set_ufbx_normal_metadata(&mut self, generated_normals: bool, reversed_winding: bool, negative_transform_determinant: bool) {
@@ -239,11 +239,11 @@ impl Builder {
         }
     }
 
-    fn set_ufbx_smoothing_metadata(&mut self, smooth_faces: u32, total_faces: u32, smooth_edges: u32, total_edges: u32) {
+    fn set_ufbx_smoothing_metadata(&mut self, smooth_faces: u32, face_entries: u32, smooth_edges: u32, edge_entries: u32) {
         if let Some(value) = self.object_smooth_faces.last_mut() { *value = smooth_faces; }
-        if let Some(value) = self.object_total_faces.last_mut() { *value = total_faces; }
+        if let Some(value) = self.object_face_smoothing_entries.last_mut() { *value = face_entries; }
         if let Some(value) = self.object_smooth_edges.last_mut() { *value = smooth_edges; }
-        if let Some(value) = self.object_total_edges.last_mut() { *value = total_edges; }
+        if let Some(value) = self.object_edge_smoothing_entries.last_mut() { *value = edge_entries; }
     }
 
     fn push_corner(&mut self, c: Corner) {
@@ -337,9 +337,9 @@ impl Builder {
             object_reversed_winding: self.object_reversed_winding,
             object_negative_transform_determinant: self.object_negative_transform_determinant,
             object_smooth_faces: self.object_smooth_faces,
-            object_total_faces: self.object_total_faces,
+            object_face_smoothing_entries: self.object_face_smoothing_entries,
             object_smooth_edges: self.object_smooth_edges,
-            object_total_edges: self.object_total_edges,
+            object_edge_smoothing_entries: self.object_edge_smoothing_entries,
             object_fallback_normals_generated: self.object_missing_normals,
             tri_color: (self.any_colors && self.corners > 0).then_some(self.tri_color),
             tri_vertex_color: (self.any_colors && self.corners > 0).then_some(self.tri_vertex_color),
