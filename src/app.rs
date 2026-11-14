@@ -1408,6 +1408,7 @@ pub(crate) fn add_smart_material(
             // Maps the set lacks (or a missing assets folder) leave the
             // material's own values in place.
             if let Some(dir) = crate::environment::asset_dir("pbr").map(|d| d.join(scan.id)) {
+                let _scan_span = crate::startup_trace::span("smart material: scan images (disk+decode+upload)");
                 for (ch, file) in presets::Scan::FILES {
                     let path = dir.join(file);
                     if path.is_file()

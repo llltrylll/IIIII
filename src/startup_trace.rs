@@ -34,6 +34,11 @@ fn with<R>(f: impl FnOnce(&mut Trace) -> R) -> Option<R> {
     Some(f(t))
 }
 
+/// Whether tracing is on (for measurements that would otherwise change timing).
+pub fn enabled() -> bool {
+    target().is_some()
+}
+
 /// Starts the clock; call first thing in `main`.
 pub fn init() {
     with(|_| ());

@@ -136,9 +136,12 @@ fn render(
     let _total = crate::startup_trace::span("shelf thumb: total");
     let _s = crate::startup_trace::span("shelf thumb: build layers");
     let mut undo = UndoStack::default();
+    let _del = crate::startup_trace::span("shelf thumb: delete previous layers");
     while !engine.layers.is_empty() {
         engine.delete_layer(0, &mut undo);
     }
+    drop(_del);
+    let _add = crate::startup_trace::span("shelf thumb: add layers/mask");
     match item {
         Item::Smart(i) => {
             add_smart_material(engine, &mut undo, &presets::SMART_MATERIALS[i], 0, None);
@@ -158,6 +161,7 @@ fn render(
             engine.add_mask(top, true, Some(GenKind::ALL[i].default_generator()), &mut undo);
         }
     }
+    drop(_add);
     drop(_s);
     let _s = crate::startup_trace::span("shelf thumb: composite (submit)");
     engine.composite();
@@ -170,7 +174,13 @@ fn render(
     views.render_3d(rs, [THUMB, THUMB], &[engine], env, mesh, &cam, &settings, None);
     drop(_s);
     let img = views.view3d.image();
-    let _s = crate::startup_trace::span("shelf thumb: read_texture (blocking)");
+    // Waiting for the queue first separates GPU execution of this thumbnail
+    // from the copy + map that read_texture then does.
+    if crate::startup_trace::enabled() {
+        let _w = crate::startup_trace::span("shelf thumb: GPU wait (composite+render execute)");
+        let _ = rs.device.poll(eframe::wgpu::PollType::wait_indefinitely());
+    }
+    let _s = crate::startup_trace::span("shelf thumb: read_texture (copy+map after wait)");
     let rgba = crate::gpu::read_texture(&rs.device, &rs.queue, img);
     drop(_s);
     // MSAA resolve averages edge samples with the transparent clear, so the
