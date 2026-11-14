@@ -181,12 +181,20 @@ fn key_shadow(p: vec3<f32>, gn: vec3<f32>) -> f32 {
     return lit / 9.0;
 }
 
-// Key light: GGX specular and Lambert diffuse from a directional light.
-fn key_light(s: Surface, n: vec3<f32>, v: vec3<f32>, shadow: f32) -> vec3<f32> {
-    if (g.sun_c.w < 0.5 || shadow <= 0.0) {
+// GGX specular and Lambert diffuse from a directional light.
+fn direct_light(
+    s: Surface,
+    n: vec3<f32>,
+    v: vec3<f32>,
+    light_dir: vec3<f32>,
+    light_color: vec3<f32>,
+    intensity: f32,
+    shadow: f32,
+) -> vec3<f32> {
+    if (shadow <= 0.0) {
         return vec3<f32>(0.0);
     }
-    let l = normalize(g.sun.xyz);
+    let l = normalize(light_dir);
     let nl = dot(n, l);
     if (nl <= 0.0) {
         return vec3<f32>(0.0);
@@ -205,7 +213,34 @@ fn key_light(s: Surface, n: vec3<f32>, v: vec3<f32>, shadow: f32) -> vec3<f32> {
     let f0 = mix(vec3<f32>(0.08 * s.spec), s.albedo, s.metal);
     let f = f0 + (1.0 - f0) * pow(1.0 - vh, 5.0);
     let diffuse = s.albedo * (1.0 - s.metal) * (1.0 - f) / PI;
-    return (diffuse + d * vis * f) * g.sun_c.rgb * g.sun.w * nl * shadow;
+    return (diffuse + d * vis * f) * light_color * intensity * nl * shadow;
+}
+
+fn key_light(s: Surface, n: vec3<f32>, v: vec3<f32>, shadow: f32) -> vec3<f32> {
+    if (g.sun_c.w < 0.5) {
+        return vec3<f32>(0.0);
+    }
+    return direct_light(s, n, v, g.sun.xyz, g.sun_c.rgb, g.sun.w, shadow);
+}
+
+// The UV panel is a flat material sheet, not a surface in the 3D scene.
+// Interpret its tangent-space normal in the canvas plane and light it with
+// fixed neutral studio sources. This keeps metallic and rough materials
+// readable even when the selected 3D HDRI is dark or the 3D key light is off.
+fn shade_uv_material(s: Surface) -> vec3<f32> {
+    let n = normalize(s.ts);
+    let v = vec3<f32>(0.0, 0.0, 1.0);
+    let f0 = mix(vec3<f32>(0.08 * s.spec), s.albedo, s.metal);
+    let ambient = s.albedo * (1.0 - s.metal) * 0.22 + f0 * 0.16;
+    let key = direct_light(
+        s, n, v, vec3<f32>(-0.42, 0.56, 0.72),
+        vec3<f32>(1.0, 0.98, 0.94), 1.7, 1.0
+    );
+    let fill = direct_light(
+        s, n, v, vec3<f32>(0.58, 0.18, 0.79),
+        vec3<f32>(0.76, 0.84, 1.0), 0.55, 1.0
+    );
+    return ambient + key + fill + s.emission * g.bg2.z;
 }
 
 fn shade(s: Surface, n: vec3<f32>, v: vec3<f32>, shadow: f32) -> vec3<f32> {
@@ -483,14 +518,10 @@ fn vs_quad(@builtin(vertex_index) vi: u32) -> QuadOut {
 @fragment
 fn fs_quad(in: QuadOut) -> @location(0) vec4<f32> {
     let s = sample_surface(in.uv);
-    let pn = s.ts;
-    // Lit by the environment with the camera looking straight at the texture.
-    // The 2D view has no post pass, so it tone maps here.
-    // The 2D view's normals are in texture space: no key light there.
-    var lit = shade(s, pn, vec3<f32>(0.0, 0.0, 1.0), 0.0);
+    var lit = vec3<f32>(0.0);
     if (i32(g.params.x) == 0) {
-        lit = aces(lit * g.light.y);
-        // See-through texels over a checkerboard.
+        // The 2D view has no post pass, so tone map its fixed studio preview here.
+        lit = aces(shade_uv_material(s) * g.light.y);
         let cell = vec2<i32>(floor(in.clip.xy / 8.0));
         let checker = select(0.18, 0.32, (cell.x + cell.y) % 2 == 0);
         lit = mix(vec3<f32>(checker), lit, s.alpha);
@@ -499,6 +530,9 @@ fn fs_quad(in: QuadOut) -> @location(0) vec4<f32> {
         let cell = vec2<i32>(floor(in.clip.xy / 8.0));
         let checker = select(0.18, 0.32, (cell.x + cell.y) % 2 == 0);
         lit = mix(vec3<f32>(checker), s.albedo, s.alpha);
+    } else {
+        // Channel and bake-map views retain their unlit diagnostic colors.
+        lit = shade(s, s.ts, vec3<f32>(0.0, 0.0, 1.0), 0.0);
     }
     return vec4<f32>(lit, 1.0);
 }
