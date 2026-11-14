@@ -325,3 +325,55 @@ Choose between screen-to-UV mapping, layered surface records, or a hybrid after 
 - Do not use Paint Through as a substitute for correct multi-surface handling.
 - Do not treat the diagnostic overlap counts as proof of a particular stroke failure.
 - Run the available Rust tests and Windows packaging workflow after each isolated code change. A successful compile alone is not proof that GPU painting behavior is correct.
+
+
+---
+
+# Additional cross-cutting findings from the second source pass
+
+These findings refine the three investigations and should be included in the implementation review.
+
+## A. Imported normal completeness is global, not per object
+
+**Confirmed in source; important expansion of Bug 3.**
+
+The FBX/OBJ builder tracks a single `all_normals` boolean for the entire imported scene. Each corner updates it with `all_normals &= c.normal.is_some()`. At finish, the complete normals vector is retained only when that global flag remains true.
+
+Implication: if one object or one corner in a multi-object import has no normal, the importer returns no normals for the entire combined mesh. `Mesh::from_parts()` then regenerates normals for all vertices, including objects that did contain valid authored normals.
+
+This makes the position-weld fallback a wider risk than only the individual object that lacked normals. Tests must include a multi-object file where one object has authored normals and another does not.
+
+## B. Raster viewport's `gn` is not a geometric face normal
+
+**Confirmed in source; shader contract inconsistency.**
+
+In `mesh_shade_inputs()`, the variable assigned to `c.gn` is the interpolated vertex normal `in.n`, optionally negated for a back-facing fragment. It is not derived from the triangle's edge cross product. Despite the field/comment describing a geometric normal, the raster path is carrying a face-forwarded shading/interpolated normal.
+
+The path tracer separately calculates a true geometric normal from triangle positions. Thus the raster and path-traced paths do not have the same geometric-normal semantics.
+
+This is relevant to Bug 3 because shadow bias, custom preview inputs and any logic relying on `gn` may react to authored shading normals rather than actual triangle winding. Do not silently rename or reuse this as a true geometric normal; introduce a real geometric normal only with a deliberate shader interface update and regression tests.
+
+## C. Surface and UV stamp resolution are not scoped to the active texture set
+
+**Confirmed in source; likely secondary failure mode for Bug 2.**
+
+`resolve_stamps()` receives the full mesh and full BVH. For Surface and UV projections it calls `bvh.raycast()`, which returns the nearest hit across all triangles. It does not receive the active texture-set triangle range and does not reject a hit from another set before computing the stamp's world center, normal, UV and UV radius.
+
+The engine later paints only the active texture set's texture. This can misassociate a Surface/UV stamp with the wrong face when material boundaries overlap or when the ray first hits a different texture set.
+
+This is distinct from the one-surface-per-texel UV bake limitation. Add a fixture where two coincident or near-coincident surfaces use different material sets and have different UV coordinates. The active-set behavior must be explicit: either resolve to the active set's first valid hit, or provide a UI rule that selects the hit set. Do not permit an accidental cross-set UV stamp.
+
+## D. Diagnostic interpretation guardrails
+
+- The 8,560 exact-overlap groups describe exact UV overlap groups; they are not necessarily mirrored pairs.
+- The reported maximum depth of 558 is an observed stack depth. It does not dictate a fixed layered representation; any multi-layer design must handle overflow.
+- A ray with multiple world intersections only proves geometric ray overlap. It does not prove a stroke was written or composited.
+- A `normals_opposed` diagnostic compares geometric face orientation with vertex shading normals. It does not identify which convention is authoritative for every open or double-sided surface.
+- A zero normal can arise from fallback-normal cancellation; it must be reported explicitly rather than treated as an ordinary vector.
+
+## E. Additional regression fixtures
+
+1. Multi-object import: object A has authored normals, object B has none. Confirm whether A's authored normals survive.
+2. Coincident opposite shells with no imported normals: inspect the generated vectors at their shared positions and report zero/near-zero results.
+3. Same world-space overlap, two different texture sets, distinct UV coordinates: run Screen, Surface and UV projections while changing the active set.
+4. Raster vs path tracer: use deliberately inverted shading normals with unchanged winding, then reversed winding with unchanged normals. Compare actual geometric orientation, displayed shading and brush acceptance.
