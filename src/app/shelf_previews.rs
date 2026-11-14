@@ -65,15 +65,18 @@ impl ShelfPreviews {
         let bake_ctx = ctx.clone();
         {
             let _s = crate::startup_trace::span("shelf: spawn bake preparation worker");
-            std::thread::spawn(move || {
-                let settings = BakeSettings { quality: Quality::Draft, ..Default::default() };
-                let prepared = {
-                    let _s = crate::startup_trace::span("shelf: CPU bake::prepare (worker)");
-                    bake::prepare(&mesh, &settings, 0)
-                };
-                let _ = tx.send(prepared);
-                bake_ctx.request_repaint();
-            });
+            std::thread::Builder::new()
+                .name("shelf-bake-prepare".into())
+                .spawn(move || {
+                    let settings = BakeSettings { quality: Quality::Draft, ..Default::default() };
+                    let prepared = {
+                        let _s = crate::startup_trace::span("shelf: CPU bake::prepare (worker)");
+                        bake::prepare(&mesh, &settings, 0)
+                    };
+                    let _ = tx.send(prepared);
+                    bake_ctx.request_repaint();
+                })
+                .expect("could not start shelf bake preparation worker");
         }
 
         let (scan_request_tx, scan_request_rx) = mpsc::channel::<Vec<PathBuf>>();
