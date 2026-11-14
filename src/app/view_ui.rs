@@ -325,7 +325,8 @@ impl PainterApp {
                 let state = if self.raytracer.converged(&self.rt) { "done" } else { "refining" };
                 format!("Ray traced · {}/{} spp ({state})", self.raytracer.samples, self.rt.max_samples)
             }
-            _ => self.mode_name(self.view.mode),
+            ViewKind::V3d => self.mode_name(self.view.mode),
+            ViewKind::V2d => self.mode_name(self.view.uv_mode),
         };
         painter.text(rect.min + vec2(10.0, 8.0), egui::Align2::LEFT_TOP, label, egui::FontId::proportional(11.5), Color32::from_white_alpha(150));
         if let Some(item) = resp.dnd_hover_payload::<ShelfItem>() {
