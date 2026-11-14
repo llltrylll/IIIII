@@ -478,6 +478,9 @@ pub struct ViewRenderer {
     shadow_bgl: wgpu::BindGroupLayout,
     shadow_map: Tex,
     shadow_sampler: wgpu::Sampler,
+    /// Key-light shadows depend on the mesh, visible texture sets and light transform,
+    /// not on the camera or material textures. Reuse the map until one of those changes.
+    shadow_key: Option<Vec<u32>>,
     bgl: wgpu::BindGroupLayout,
     /// Per-draw uniforms: the 2D view's, then one per texture set in the 3D
     /// view (each set has its own resolution, bake and custom maps).
@@ -702,6 +705,7 @@ impl ViewRenderer {
             shadow_bgl,
             shadow_map,
             shadow_sampler,
+            shadow_key: None,
             bgl,
             globals,
             sampler: gpu::linear_sampler(device, wgpu::AddressMode::ClampToEdge),
@@ -866,6 +870,29 @@ impl ViewRenderer {
         proj * view
     }
 
+    /// Invalidates the cached key-light shadow map after replacing the mesh buffers.
+    pub fn invalidate_shadow(&mut self) {
+        self.shadow_key = None;
+    }
+
+    /// Stable key for the shadow map. The light view-projection includes its
+    /// direction and the mesh bounds; visible index ranges account for hidden sets.
+    fn shadow_cache_key(engine: &Engine, mesh: &GpuMesh, shown: &[usize], settings: &ViewSettings) -> Vec<u32> {
+        let mut key: Vec<u32> = Self::light_view_proj(engine, settings)
+            .to_cols_array()
+            .into_iter()
+            .map(f32::to_bits)
+            .collect();
+        key.push(mesh.index_count);
+        key.push(mesh.sets.len() as u32);
+        key.push(shown.len() as u32);
+        for &set in shown {
+            let range = mesh.sets[set].index_range();
+            key.extend([set as u32, range.start, range.end]);
+        }
+        key
+    }
+
     /// Draws the mesh: texture set `k` of `mesh.sets` with `engines[k]`.
     pub fn render_3d(
         &mut self,
@@ -904,29 +931,34 @@ impl ViewRenderer {
         let t = &self.view3d;
         let mut encoder = rs.device.create_command_encoder(&Default::default());
         if settings.key.on {
-            let shadow_bg = rs.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("key shadow"),
-                layout: &self.shadow_bgl,
-                entries: &[wgpu::BindGroupEntry { binding: 0, resource: self.globals[1].as_entire_binding() }],
-            });
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("key shadow"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.shadow_map.view,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_bind_group(0, &shadow_bg, &[]);
-            pass.set_pipeline(&self.shadow);
-            pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-            pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-            for &k in &shown {
-                pass.draw_indexed(mesh.sets[k].index_range(), 0, 0..1);
+            let shadow_key = Self::shadow_cache_key(engines[0], mesh, &shown, settings);
+            if self.shadow_key.as_ref() != Some(&shadow_key) {
+                let shadow_bg = rs.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("key shadow"),
+                    layout: &self.shadow_bgl,
+                    entries: &[wgpu::BindGroupEntry { binding: 0, resource: self.globals[1].as_entire_binding() }],
+                });
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("key shadow"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.shadow_map.view,
+                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_bind_group(0, &shadow_bg, &[]);
+                pass.set_pipeline(&self.shadow);
+                pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                for &k in &shown {
+                    pass.draw_indexed(mesh.sets[k].index_range(), 0, 0..1);
+                }
+                drop(pass);
+                self.shadow_key = Some(shadow_key);
             }
         }
         {
