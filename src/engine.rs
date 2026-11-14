@@ -1536,14 +1536,29 @@ fn fit_fill_image<P: image::Pixel<Subpixel = u8> + 'static>(
 impl Engine {
     /// A document of one texture set covering the whole mesh.
     pub fn new(rs: &egui_wgpu::RenderState, mesh: &GpuMesh, bounds: (Vec3, Vec3), res: u32) -> Engine {
-        let p = Arc::new(Self::create_pipelines(&rs.device));
+        let p = {
+            let _s = crate::startup_trace::span("Engine::create_pipelines");
+            Arc::new(Self::create_pipelines(&rs.device))
+        };
         Self::with_pipelines(rs, p, mesh, 0..mesh.index_count, bounds, res)
     }
 
     /// Another texture set of the same document: `tris` is its range in the
-    /// mesh's index buffer. Shares this engine's pipelines.
+    /// mesh's index buffer. Shares this engine's pipelines and document bounds.
     pub fn sibling(&self, mesh: &GpuMesh, tris: std::ops::Range<u32>, res: u32) -> Engine {
         Self::with_pipelines(&self.rs, self.p.clone(), mesh, tris, self.bounds, res)
+    }
+
+    /// Creates an engine for another mesh while reusing immutable GPU pipelines.
+    /// Useful for secondary render targets that share the same device and formats.
+    pub fn sibling_with_bounds(
+        &self,
+        mesh: &GpuMesh,
+        tris: std::ops::Range<u32>,
+        bounds: (Vec3, Vec3),
+        res: u32,
+    ) -> Engine {
+        Self::with_pipelines(&self.rs, self.p.clone(), mesh, tris, bounds, res)
     }
 
     fn with_pipelines(
@@ -1554,6 +1569,7 @@ impl Engine {
         bounds: (Vec3, Vec3),
         res: u32,
     ) -> Engine {
+        let _allocation = crate::startup_trace::span("Engine::with_pipelines GPU allocations");
         let device = rs.device.clone();
         let queue = rs.queue.clone();
         let sampler = gpu::linear_sampler(&device, wgpu::AddressMode::ClampToEdge);
