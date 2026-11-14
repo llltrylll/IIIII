@@ -61,22 +61,77 @@ pub fn load(path: &Path) -> Result<RawMesh, String> {
     Ok(mesh)
 }
 
+/// Returns the original per-corner (has UV, has normal) flags from an OBJ
+/// file in the same triangle-fan order used by tobj's triangulation. tobj
+/// fills missing vt/vn indices with the previous index, so its index arrays
+/// alone cannot distinguish authored attributes from fallback references.
+fn obj_corner_attribute_presence(path: &Path) -> Result<Vec<(bool, bool)>, String> {
+    let source = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read OBJ attribute flags: {e}"))?;
+    let mut result = Vec::new();
+
+    for line in source.lines() {
+        let line = line.split('#').next().unwrap_or_default();
+        let mut words = line.split_whitespace();
+        if words.next() != Some("f") {
+            continue;
+        }
+
+        let corners: Vec<(bool, bool)> = words
+            .map(|token| {
+                let mut parts = token.split('/');
+                let _position = parts.next();
+                let uv = parts.next().is_some_and(|value| !value.is_empty());
+                let normal = parts.next().is_some_and(|value| !value.is_empty());
+                (uv, normal)
+            })
+            .collect();
+
+        // The OBJ loader ignores points and lines for this import path.
+        // Polygons are triangulated as a fan: (0,1,2), (0,2,3), ...
+        if corners.len() < 3 {
+            continue;
+        }
+        for i in 1..corners.len() - 1 {
+            result.extend_from_slice(&[corners[0], corners[i], corners[i + 1]]);
+        }
+    }
+
+    Ok(result)
+}
+
 fn load_obj(path: &Path) -> Result<RawMesh, String> {
     // Keep OBJ position indices separate from UV/normal indices. The position
     // index is the logical vertex identity used to generate normals across UV
     // seams without welding distinct coincident shells together.
-    let (models, materials) = tobj::load_obj(path, &tobj::LoadOptions { single_index: false, triangulate: true, ..Default::default() })
-        .map_err(|e| format!("Failed to read OBJ: {e}"))?;
+    let (models, materials) = tobj::load_obj(path, &tobj::LoadOptions {
+        single_index: false,
+        triangulate: true,
+        ignore_points: true,
+        ignore_lines: true,
+        ..Default::default()
+    })
+    .map_err(|e| format!("Failed to read OBJ: {e}"))?;
+    let corner_presence = obj_corner_attribute_presence(path)?;
+    let expected_corners: usize = models.iter().map(|m| m.mesh.indices.len()).sum();
+    if corner_presence.len() != expected_corners {
+        return Err(format!(
+            "OBJ attribute stream mismatch: found {} face corners after triangulation, expected {expected_corners}",
+            corner_presence.len()
+        ));
+    }
+    let mut presence_offset = 0usize;
     let mut out = Builder::default();
     // A missing .mtl leaves the indices (and default names).
     out.material_names = materials.map(|m| m.into_iter().map(|m| m.name).collect()).unwrap_or_default();
     for m in &models {
         let mesh = &m.mesh;
         let count = mesh.positions.len() / 3;
+        let model_presence = &corner_presence[presence_offset..presence_offset + mesh.indices.len()];
+        presence_offset += mesh.indices.len();
         let uv_count = mesh.texcoords.len() / 2;
-        let has_uv = !mesh.texcoords.is_empty()
-            && mesh.texcoord_indices.len() >= mesh.indices.len()
-            && mesh.texcoord_indices.iter().take(mesh.indices.len()).all(|&i| (i as usize) < uv_count);
+        let normal_count = mesh.normals.len() / 3;
+        let has_uv = model_presence.iter().all(|(has_uv, _)| *has_uv);
         if !has_uv {
             out.missing_uvs.push(m.name.clone());
         }
@@ -85,16 +140,32 @@ fn load_obj(path: &Path) -> Result<RawMesh, String> {
         out.begin_object(&m.name);
         for (corner_index, &position_index) in mesh.indices.iter().enumerate() {
             let position_index = position_index as usize;
-            let normal = mesh.normal_indices.get(corner_index)
-                .and_then(|&i| {
-                    let i = i as usize;
-                    (i < mesh.normals.len() / 3)
-                        .then(|| Vec3::from_slice(&mesh.normals[i * 3..i * 3 + 3]))
-                });
-            let uv = has_uv.then(|| {
-                let i = mesh.texcoord_indices[corner_index] as usize;
-                Vec2::new(mesh.texcoords[i * 2], 1.0 - mesh.texcoords[i * 2 + 1])
-            });
+            let (corner_has_uv, corner_has_normal) = model_presence[corner_index];
+
+            let normal = if corner_has_normal {
+                let i = *mesh.normal_indices.get(corner_index)
+                    .ok_or_else(|| format!("OBJ normal index missing at model {} corner {corner_index}", m.name))?
+                    as usize;
+                if i >= normal_count {
+                    return Err(format!("OBJ normal index out of bounds at model {} corner {corner_index}", m.name));
+                }
+                Some(Vec3::from_slice(&mesh.normals[i * 3..i * 3 + 3]))
+            } else {
+                None
+            };
+
+            let uv = if corner_has_uv {
+                let i = *mesh.texcoord_indices.get(corner_index)
+                    .ok_or_else(|| format!("OBJ UV index missing at model {} corner {corner_index}", m.name))?
+                    as usize;
+                if i >= uv_count {
+                    return Err(format!("OBJ UV index out of bounds at model {} corner {corner_index}", m.name));
+                }
+                Some(Vec2::new(mesh.texcoords[i * 2], 1.0 - mesh.texcoords[i * 2 + 1]))
+            } else {
+                None
+            };
+
             out.push_corner(Corner {
                 pos: Vec3::from_slice(&mesh.positions[position_index * 3..position_index * 3 + 3]),
                 normal,
@@ -104,6 +175,12 @@ fn load_obj(path: &Path) -> Result<RawMesh, String> {
             });
         }
         out.push_materials(mesh.indices.len() / 3, material);
+    }
+    if presence_offset != corner_presence.len() {
+        return Err(format!(
+            "OBJ attribute stream mismatch: consumed {presence_offset} of {} triangulated corners",
+            corner_presence.len()
+        ));
     }
     Ok(out.finish())
 }
