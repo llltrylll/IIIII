@@ -362,9 +362,9 @@ mod tests {
         assert_eq!(raw.object_reversed_winding.as_slice(), &[true, false]);
         assert_eq!(raw.object_negative_transform_determinant.as_slice(), &[true, false]);
         assert_eq!(raw.object_smooth_faces.as_slice(), &[4, 0]);
-        assert_eq!(raw.object_total_faces.as_slice(), &[6, 0]);
+        assert_eq!(raw.object_face_smoothing_entries.as_slice(), &[6, 0]);
         assert_eq!(raw.object_smooth_edges.as_slice(), &[3, 0]);
-        assert_eq!(raw.object_total_edges.as_slice(), &[5, 0]);
+        assert_eq!(raw.object_edge_smoothing_entries.as_slice(), &[5, 0]);
         assert_eq!(raw.object_fallback_normals_generated.as_slice(), &[false, false]);
     }
 
