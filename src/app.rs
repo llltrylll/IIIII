@@ -1242,7 +1242,9 @@ fn stroke_region_impl(
             let vp = cam.view_proj(size.x / size.y.max(1.0));
             let on_screen = |lo: Vec3, hi: Vec3| {
                 // Clip-space w is linear over the AABB, so its extrema occur
-                // at corners. Keep boxes crossing the eye plane conservatively.
+                // at corners. Cache those transforms: this closure is called
+                // for both BVH nodes and leaf triangles on every brush step.
+                let mut clips = [glam::Vec4::ZERO; 8];
                 let (mut w_min, mut w_max) = (f32::INFINITY, f32::NEG_INFINITY);
                 for k in 0..8 {
                     let p = Vec3::new(
@@ -1250,9 +1252,10 @@ fn stroke_region_impl(
                         if k & 2 == 0 { lo.y } else { hi.y },
                         if k & 4 == 0 { lo.z } else { hi.z },
                     );
-                    let w = (vp * p.extend(1.0)).w;
-                    w_min = w_min.min(w);
-                    w_max = w_max.max(w);
+                    let c = vp * p.extend(1.0);
+                    clips[k] = c;
+                    w_min = w_min.min(c.w);
+                    w_max = w_max.max(c.w);
                 }
                 if w_max <= 0.0 {
                     return false;
@@ -1261,13 +1264,7 @@ fn stroke_region_impl(
                     return true;
                 }
                 let (mut smin, mut smax) = (Vec2::MAX, Vec2::MIN);
-                for k in 0..8 {
-                    let p = Vec3::new(
-                        if k & 1 == 0 { lo.x } else { hi.x },
-                        if k & 2 == 0 { lo.y } else { hi.y },
-                        if k & 4 == 0 { lo.z } else { hi.z },
-                    );
-                    let c = vp * p.extend(1.0);
+                for c in clips {
                     let q = (Vec2::new(c.x, -c.y) / c.w * 0.5 + 0.5) * size;
                     smin = smin.min(q);
                     smax = smax.max(q);
