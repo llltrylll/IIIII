@@ -1006,8 +1006,8 @@ pub struct Layer {
     pub blend: Blend,
     pub content: Content,
     pub mask: Option<Mask>,
-    /// Channels present in the source material but disabled by project settings.
-    /// This is a display hint only; those channels are not evaluated or exported.
+    /// Per-layer project-channel mask. Source maps and paint remain stored;
+    /// masked outputs are excluded from compositing and export until re-enabled.
     pub disabled_channels: [bool; CHANNELS],
     /// The folder this layer is in. A folder's layers sit directly below it.
     pub parent: Option<u64>,
