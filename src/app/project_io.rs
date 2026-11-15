@@ -821,8 +821,7 @@ impl PainterApp {
                     };
                     // The project-wide setting is authoritative when a saved per-layer
                     // mask comes from an older or partially migrated project.
-                    disabled_channels[ch] =
-                        !self.active_channels[ch] && (disabled_channels[ch] || has_data);
+                    disabled_channels[ch] = !self.active_channels[ch] && has_data;
                 }
                 layers.push(Layer {
                     id: lv["id"].as_u64().ok_or_else(bad)?,
