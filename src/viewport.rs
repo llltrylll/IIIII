@@ -491,6 +491,82 @@ pub struct SetLook {
     pub highlight: f32,
 }
 
+/// Compact per-object index buffers used when one or more imported objects are hidden.
+/// They are rebuilt only when the hidden-object set changes, not every frame.
+struct ObjectDrawBuffers {
+    triangles: wgpu::Buffer,
+    triangle_ranges: Vec<std::ops::Range<u32>>,
+    edges: wgpu::Buffer,
+    edge_ranges: Vec<std::ops::Range<u32>>,
+    seams: wgpu::Buffer,
+    seam_ranges: Vec<std::ops::Range<u32>>,
+}
+
+impl ObjectDrawBuffers {
+    fn index_buffer(device: &wgpu::Device, label: &str, indices: &[u32]) -> wgpu::Buffer {
+        use wgpu::util::DeviceExt;
+        let fallback = [0u32];
+        let data = if indices.is_empty() { &fallback[..] } else { indices };
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::cast_slice(data),
+            usage: wgpu::BufferUsages::INDEX,
+        })
+    }
+
+    fn new(device: &wgpu::Device, mesh: &GpuMesh, hidden: &[bool]) -> Self {
+        let is_hidden = |object: u32| {
+            object != u32::MAX && hidden.get(object as usize).copied().unwrap_or(false)
+        };
+
+        let mut triangles = Vec::with_capacity(mesh.cpu_indices.len());
+        let mut triangle_ranges = Vec::with_capacity(mesh.sets.len());
+        let mut edges = Vec::with_capacity(mesh.cpu_edges.len());
+        let mut edge_ranges = Vec::with_capacity(mesh.sets.len());
+        let mut seams = Vec::with_capacity(mesh.cpu_seams.len());
+        let mut seam_ranges = Vec::with_capacity(mesh.sets.len());
+
+        for set in &mesh.sets {
+            let start = triangles.len() as u32;
+            for tri in set.tris.clone() {
+                let object = mesh.tri_object.get(tri as usize).copied().unwrap_or(u32::MAX);
+                let first = tri as usize * 3;
+                if !is_hidden(object) && first + 3 <= mesh.cpu_indices.len() {
+                    triangles.extend_from_slice(&mesh.cpu_indices[first..first + 3]);
+                }
+            }
+            triangle_ranges.push(start..triangles.len() as u32);
+
+            let start = edges.len() as u32;
+            for pair in (set.edges.start as usize..set.edges.end as usize).step_by(2) {
+                let object = mesh.edge_object.get(pair / 2).copied().unwrap_or(u32::MAX);
+                if !is_hidden(object) && pair + 2 <= mesh.cpu_edges.len() {
+                    edges.extend_from_slice(&mesh.cpu_edges[pair..pair + 2]);
+                }
+            }
+            edge_ranges.push(start..edges.len() as u32);
+
+            let start = seams.len() as u32;
+            for pair in (set.seams.start as usize..set.seams.end as usize).step_by(2) {
+                let object = mesh.seam_object.get(pair / 2).copied().unwrap_or(u32::MAX);
+                if !is_hidden(object) && pair + 2 <= mesh.cpu_seams.len() {
+                    seams.extend_from_slice(&mesh.cpu_seams[pair..pair + 2]);
+                }
+            }
+            seam_ranges.push(start..seams.len() as u32);
+        }
+
+        Self {
+            triangles: Self::index_buffer(device, "visible object triangles", &triangles),
+            triangle_ranges,
+            edges: Self::index_buffer(device, "visible object edges", &edges),
+            edge_ranges,
+            seams: Self::index_buffer(device, "visible object seams", &seams),
+            seam_ranges,
+        }
+    }
+}
+
 pub struct ViewRenderer {
     /// Per texture set (missing entries: shown, no highlight).
     pub set_looks: Vec<SetLook>,
@@ -522,6 +598,9 @@ pub struct ViewRenderer {
     shadow_key: Option<Vec<u32>>,
     /// Cached inputs for the normal-aware screen-paint depth pass.
     paint_depth_key: Option<Vec<u32>>,
+    /// Cached compact draw indices for per-object visibility.
+    object_draw: Option<ObjectDrawBuffers>,
+    object_draw_key: Option<Vec<u32>>,
     bgl: wgpu::BindGroupLayout,
     /// Per-draw uniforms: the 2D view's, then one per texture set in the 3D
     /// view (each set has its own resolution, bake and custom maps).
@@ -770,6 +849,8 @@ impl ViewRenderer {
             shadow_sampler,
             shadow_key: None,
             paint_depth_key: None,
+            object_draw: None,
+            object_draw_key: None,
             bgl,
             globals,
             sampler: gpu::linear_sampler(device, wgpu::AddressMode::ClampToEdge),
@@ -951,12 +1032,46 @@ impl ViewRenderer {
     }
 
     /// Stable key for the shadow map. The light view-projection includes its
-    /// direction and the mesh bounds; visible index ranges account for hidden sets.
-    fn shadow_cache_key(engine: &Engine, mesh: &GpuMesh, shown: &[usize], settings: &ViewSettings) -> Vec<u32> {
-        make_shadow_cache_key(Self::light_view_proj(engine, settings), mesh.index_count, &mesh.sets, shown)
+    /// direction and the mesh bounds; visible index ranges account for hidden sets
+    /// and imported objects.
+    fn shadow_cache_key(
+        engine: &Engine,
+        mesh: &GpuMesh,
+        shown: &[usize],
+        settings: &ViewSettings,
+        hidden_objects: &[bool],
+    ) -> Vec<u32> {
+        let mut key = make_shadow_cache_key(Self::light_view_proj(engine, settings), mesh.index_count, &mesh.sets, shown);
+        key.extend([mesh.mesh_id as u32, (mesh.mesh_id >> 32) as u32]);
+        key.extend(hidden_objects.iter().map(|hidden| u32::from(*hidden)));
+        key
     }
 
-    /// Draws the mesh: texture set `k` of `mesh.sets` with `engines[k]`.
+    fn ensure_object_draw_buffers(&mut self, device: &wgpu::Device, mesh: &GpuMesh, hidden: &[bool]) {
+        let mut key = vec![mesh.mesh_id as u32, (mesh.mesh_id >> 32) as u32, hidden.len() as u32];
+        key.extend(hidden.iter().map(|value| u32::from(*value)));
+        let valid_object_map = mesh.tri_object.len() == mesh.index_count as usize / 3 && !mesh.tri_object.is_empty();
+        let has_hidden = hidden.iter().any(|value| *value);
+        if !valid_object_map || !has_hidden {
+            if self.object_draw.is_some() {
+                self.object_draw = None;
+                self.paint_depth_key = None;
+                self.shadow_key = None;
+            }
+            self.object_draw_key = Some(key);
+            return;
+        }
+        if self.object_draw_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.object_draw = Some(ObjectDrawBuffers::new(device, mesh, hidden));
+        self.object_draw_key = Some(key);
+        self.paint_depth_key = None;
+        self.shadow_key = None;
+    }
+
+    /// Draws the mesh using the current texture-set visibility.
+    /// Kept as a wrapper for offscreen callers that do not manage object visibility.
     pub fn render_3d(
         &mut self,
         rs: &egui_wgpu::RenderState,
@@ -968,7 +1083,26 @@ impl ViewRenderer {
         settings: &ViewSettings,
         overlays: Option<&Overlays>,
     ) {
+        self.render_3d_with_object_visibility(rs, size, engines, env, mesh, cam, settings, overlays, &[]);
+    }
+
+    /// Draws the mesh while excluding hidden imported objects from color, depth,
+    /// shadow, wire and seam passes. The compact index buffers are rebuilt only
+    /// when visibility changes.
+    pub fn render_3d_with_object_visibility(
+        &mut self,
+        rs: &egui_wgpu::RenderState,
+        size: [u32; 2],
+        engines: &[&Engine],
+        env: &Environment,
+        mesh: &GpuMesh,
+        cam: &OrbitCam,
+        settings: &ViewSettings,
+        overlays: Option<&Overlays>,
+        hidden_objects: &[bool],
+    ) {
         self.view3d.ensure_size(rs, size);
+        self.ensure_object_draw_buffers(&rs.device, mesh, hidden_objects);
         let size = self.view3d.size;
         let vp = cam.view_proj(size[0] as f32 / size[1] as f32);
         while self.globals.len() < engines.len() + 1 {
@@ -997,7 +1131,9 @@ impl ViewRenderer {
         // This buffer is separate from viewport depth: a surface whose imported
         // normal points away from the camera must not block screen painting.
         // Camera, mesh and visibility changes invalidate it; material edits do not.
-        let paint_depth_key = Self::screen_paint_depth_key(vp, size, mesh, &shown);
+        let mut paint_depth_key = Self::screen_paint_depth_key(vp, size, mesh, &shown);
+        paint_depth_key.extend([mesh.mesh_id as u32, (mesh.mesh_id >> 32) as u32]);
+        paint_depth_key.extend(hidden_objects.iter().map(|hidden| u32::from(*hidden)));
         if self.paint_depth_key.as_ref() != Some(&paint_depth_key) {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("screen paint depth"),
@@ -1013,11 +1149,22 @@ impl ViewRenderer {
             });
             pass.set_pipeline(&self.paint_depth);
             pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-            pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-            for &k in &shown {
-                if let Some(bg) = bgs.get(k) {
-                    pass.set_bind_group(0, bg, &[]);
-                    pass.draw_indexed(mesh.sets[k].index_range(), 0, 0..1);
+            if let Some(draw) = self.object_draw.as_ref() {
+                pass.set_index_buffer(draw.triangles.slice(..), wgpu::IndexFormat::Uint32);
+                for &k in &shown {
+                    if let (Some(bg), Some(range)) = (bgs.get(k), draw.triangle_ranges.get(k))
+                        && range.start < range.end {
+                        pass.set_bind_group(0, bg, &[]);
+                        pass.draw_indexed(range.clone(), 0, 0..1);
+                    }
+                }
+            } else {
+                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                for &k in &shown {
+                    if let Some(bg) = bgs.get(k) {
+                        pass.set_bind_group(0, bg, &[]);
+                        pass.draw_indexed(mesh.sets[k].index_range(), 0, 0..1);
+                    }
                 }
             }
             drop(pass);
@@ -1025,7 +1172,7 @@ impl ViewRenderer {
         }
 
         if settings.key.on {
-            let shadow_key = Self::shadow_cache_key(engines[0], mesh, &shown, settings);
+            let shadow_key = Self::shadow_cache_key(engines[0], mesh, &shown, settings, hidden_objects);
             if self.shadow_key.as_ref() != Some(&shadow_key) {
                 let shadow_bg = rs.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("key shadow"),
@@ -1047,9 +1194,18 @@ impl ViewRenderer {
                 pass.set_bind_group(0, &shadow_bg, &[]);
                 pass.set_pipeline(&self.shadow);
                 pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                for &k in &shown {
-                    pass.draw_indexed(mesh.sets[k].index_range(), 0, 0..1);
+                if let Some(draw) = self.object_draw.as_ref() {
+                    pass.set_index_buffer(draw.triangles.slice(..), wgpu::IndexFormat::Uint32);
+                    for &k in &shown {
+                        if let Some(range) = draw.triangle_ranges.get(k).filter(|range| range.start < range.end) {
+                            pass.draw_indexed(range.clone(), 0, 0..1);
+                        }
+                    }
+                } else {
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    for &k in &shown {
+                        pass.draw_indexed(mesh.sets[k].index_range(), 0, 0..1);
+                    }
                 }
                 drop(pass);
                 self.shadow_key = Some(shadow_key);
@@ -1083,11 +1239,22 @@ impl ViewRenderer {
             }
             pass.set_pipeline(self.custom_mesh.as_ref().filter(|_| settings.mode == ViewMode::Material).unwrap_or(&self.mesh));
             pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-            pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-            for &k in &shown {
-                if let Some(bg) = bgs.get(k) {
-                    pass.set_bind_group(0, bg, &[]);
-                    pass.draw_indexed(mesh.sets[k].index_range(), 0, 0..1);
+            if let Some(draw) = self.object_draw.as_ref() {
+                pass.set_index_buffer(draw.triangles.slice(..), wgpu::IndexFormat::Uint32);
+                for &k in &shown {
+                    if let (Some(bg), Some(range)) = (bgs.get(k), draw.triangle_ranges.get(k))
+                        && range.start < range.end {
+                        pass.set_bind_group(0, bg, &[]);
+                        pass.draw_indexed(range.clone(), 0, 0..1);
+                    }
+                }
+            } else {
+                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                for &k in &shown {
+                    if let Some(bg) = bgs.get(k) {
+                        pass.set_bind_group(0, bg, &[]);
+                        pass.draw_indexed(mesh.sets[k].index_range(), 0, 0..1);
+                    }
                 }
             }
             // See-through texels, over everything opaque (the built-in look
@@ -1105,16 +1272,34 @@ impl ViewRenderer {
             pass.set_bind_group(0, bg, &[]);
             if settings.show_wire_3d {
                 pass.set_pipeline(&self.wire3d);
-                pass.set_index_buffer(mesh.edges.slice(..), wgpu::IndexFormat::Uint32);
-                for &k in &shown {
-                    pass.draw_indexed(mesh.sets[k].edges.clone(), 0, 0..1);
+                if let Some(draw) = self.object_draw.as_ref() {
+                    pass.set_index_buffer(draw.edges.slice(..), wgpu::IndexFormat::Uint32);
+                    for &k in &shown {
+                        if let Some(range) = draw.edge_ranges.get(k).filter(|range| range.start < range.end) {
+                            pass.draw_indexed(range.clone(), 0, 0..1);
+                        }
+                    }
+                } else {
+                    pass.set_index_buffer(mesh.edges.slice(..), wgpu::IndexFormat::Uint32);
+                    for &k in &shown {
+                        pass.draw_indexed(mesh.sets[k].edges.clone(), 0, 0..1);
+                    }
                 }
             }
             if settings.show_seams_3d && mesh.seam_count > 0 {
                 pass.set_pipeline(&self.seam3d);
-                pass.set_index_buffer(mesh.seams.slice(..), wgpu::IndexFormat::Uint32);
-                for &k in &shown {
-                    pass.draw_indexed(mesh.sets[k].seams.clone(), 0, 0..1);
+                if let Some(draw) = self.object_draw.as_ref() {
+                    pass.set_index_buffer(draw.seams.slice(..), wgpu::IndexFormat::Uint32);
+                    for &k in &shown {
+                        if let Some(range) = draw.seam_ranges.get(k).filter(|range| range.start < range.end) {
+                            pass.draw_indexed(range.clone(), 0, 0..1);
+                        }
+                    }
+                } else {
+                    pass.set_index_buffer(mesh.seams.slice(..), wgpu::IndexFormat::Uint32);
+                    for &k in &shown {
+                        pass.draw_indexed(mesh.sets[k].seams.clone(), 0, 0..1);
+                    }
                 }
             }
             if let Some(overlays) = overlays {
