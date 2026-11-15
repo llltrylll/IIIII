@@ -172,7 +172,7 @@ impl PainterApp {
         let mut decision = None;
         if let Some(ch) = self.pending_channel_remove {
             egui::Window::new(format!("Remove {}?", CHANNEL_LABELS[ch]))
-                .id(egui::Id::unique())
+                .id(egui::Id::new("remove_project_channel"))
                 .collapsible(false)
                 .resizable(false)
                 .show(ui.ctx(), |ui| {
