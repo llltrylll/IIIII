@@ -4860,17 +4860,17 @@ impl PainterApp {
     /// Fills the faces the fill mode selects around each seed triangle,
     /// skipping any already filled during this drag. `at`: where a single
     /// pick landed (face loops run through the edge nearest it).
-    fn poly_fill(&mut self, seeds: &[u32], at: Option<Vec3>) {
+    fn poly_fill(&mut self, seeds: &[u32], at: Option<Vec3>, kind: ViewKind) {
         let topo = self.poly_topology();
         let opts = self.poly_opts(at);
         let mut tris = Vec::new();
         for &s in seeds {
             // Hidden geometry cannot seed or receive a polygon fill.
-            if self.tri_hidden(s) || self.poly.filled.contains(&s) {
+            if self.tri_hidden(s, kind) || self.poly.filled.contains(&s) {
                 continue;
             }
             for t in topo.select_with(self.poly.mode, s, &opts) {
-                if !self.tri_hidden(t) && self.poly.filled.insert(t) {
+                if !self.tri_hidden(t, kind) && self.poly.filled.insert(t) {
                     tris.push(t);
                 }
             }
@@ -4914,7 +4914,7 @@ impl PainterApp {
         let inside = |p: Vec2| !(p.cmplt(lo).any() || p.cmpgt(hi).any()) && (outline.len() < 3 || crate::polyfill::in_outline(p, outline));
         let through = self.poly.through;
         let n = topo.triangle_count() as u32;
-        let hidden_triangles: Vec<bool> = (0..n).map(|tri| self.tri_hidden(tri)).collect();
+        let hidden_triangles: Vec<bool> = (0..n).map(|tri| self.tri_hidden(tri, kind)).collect();
         match kind {
             ViewKind::V3d => {
                 let size = Vec2::new(self.views.view3d.size[0] as f32, self.views.view3d.size[1] as f32);
@@ -4977,7 +4977,6 @@ impl PainterApp {
                 let topo = self.poly_topology();
                 let color = if erase { [255, 90, 80] } else { [80, 160, 255] };
                 let mut tris = topo.select_with(w.mode, w.tri, &self.poly_opts(Some(at)));
-                tris.retain(|&tri| !self.tri_hidden(tri));
                 if let Some(set) = self.mesh.sets.get(self.sets.active) {
                     tris.retain(|t| set.tris.contains(t));
                 }
