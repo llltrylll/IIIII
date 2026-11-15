@@ -2417,7 +2417,8 @@ impl PainterApp {
                     }
                 }
                 Action::PasteLayer => {
-                    if let Some(layers) = self.layer_clipboard.take() {
+                    if let Some(mut layers) = self.layer_clipboard.take() {
+                        project_settings_ui::filter_layer_channels(&mut layers, &self.active_channels);
                         if layers.is_empty() {
                             self.status = "The layer clipboard is empty.".into();
                         } else {
