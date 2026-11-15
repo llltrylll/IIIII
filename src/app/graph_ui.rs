@@ -497,6 +497,7 @@ impl PainterApp {
     /// that has none yet (an opened project) gets them rendered on its own
     /// mesh maps.
     fn fill_parked_graphs(&mut self) {
+        let active_channels = self.active_channels;
         let (lib, docs) = (&self.graphs.lib, &mut self.graphs.docs);
         for p in self.sets.parked.iter_mut().flatten() {
             let engine = &mut p.engine;
@@ -518,7 +519,7 @@ impl PainterApp {
                 d.maps_seen = u64::MAX;
                 let outs: [Option<Arc<Tex>>; graph::USAGES.len()] = d.graph.outputs(lib).map(|o| o.and_then(|n| d.rt.output(n).cloned()));
                 let name = d.graph.name.clone();
-                engine.set_graph_images(li, graph::channel_outputs(&outs), &name);
+                engine.set_graph_images(li, graph::channel_outputs_enabled(&outs, &active_channels), &name);
             }
         }
     }
@@ -532,7 +533,7 @@ impl PainterApp {
             let l = &self.engine.layers[li];
             let (fill, mask) = (matches!(&l.content, Content::Fill(f) if f.graph == Some(id)), l.mask.as_ref().is_some_and(|m| m.graph == Some(id)));
             if fill {
-                self.engine.set_graph_images(li, graph::channel_outputs(&outs), &name);
+                self.engine.set_graph_images(li, graph::channel_outputs_enabled(&outs, &self.active_channels), &name);
             }
             if mask
                 && let Some(t) = outs[graph::MASK_USAGE].as_ref().or(outs[0].as_ref()) {
