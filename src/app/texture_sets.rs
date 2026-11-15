@@ -272,11 +272,16 @@ impl PainterApp {
         }
     }
 
-    /// Whether triangle `t` belongs to a hidden texture set or object.
-    pub(super) fn tri_hidden(&self, t: u32) -> bool {
+    /// Whether triangle `t` is hidden in this view. Imported objects are
+    /// hidden only in 3D; their UV islands remain available in the 2D editor.
+    pub(super) fn tri_hidden(&self, t: u32, view: super::ViewKind) -> bool {
         let set_hidden = self.sets.hidden.get(self.mesh.set_of(t)).copied().unwrap_or(false);
-        let object = self.mesh.tri_object.get(t as usize).copied().unwrap_or(u32::MAX) as usize;
-        let object_hidden = self.hidden_objects.get(object).copied().unwrap_or(false);
+        let object_hidden = if view == super::ViewKind::V3d {
+            let object = self.mesh.tri_object.get(t as usize).copied().unwrap_or(u32::MAX) as usize;
+            self.hidden_objects.get(object).copied().unwrap_or(false)
+        } else {
+            false
+        };
         set_hidden || object_hidden
     }
 
