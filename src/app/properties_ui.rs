@@ -129,13 +129,24 @@ impl PainterApp {
                     if let Content::Fill(f) = &mut self.engine.layers[idx].content {
                         section(ui, "Fill material");
                         dirty |= material_controls(ui, &mut f.mat, true, &self.active_channels);
+                        if self.active_channels.iter().any(|active| !*active) {
+                            ui.label(
+                                egui::RichText::new("Dimmed channels are disabled in Project. Their maps remain stored.")
+                                    .small()
+                                    .color(theme::TEXT_DIM),
+                            );
+                        }
                         if graph_name.is_none() {
                         section(ui, "Images");
                         let shelf_textures = &self.shelf.textures;
                         for (ch, label) in ["Color", "Roughness", "Metallic", "Height", "Opacity", "Emission", "Normal", "Specular"].into_iter().enumerate() {
-                            if !self.active_channels[ch] { continue; }
-                            // A shelf texture dropped on the row feeds the channel.
-                            let row = ui.scope(|ui| labeled(ui, label, |ui| {
+                            let display_label = if self.active_channels[ch] {
+                                label.to_string()
+                            } else {
+                                format!("{label} · disabled")
+                            };
+                            // A shelf texture dropped on the row feeds the channel, even while disabled.
+                            let row = ui.scope(|ui| labeled(ui, &display_label, |ui| {
                                 match &names[ch] {
                                     Some(name) => {
                                         ui.add(egui::Label::new(name.as_str()).truncate()).on_hover_text(name.as_str());
