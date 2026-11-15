@@ -289,6 +289,7 @@ impl PainterApp {
         }
         if changed {
             engine.commit_props_without_undo();
+            engine.refresh_project_channel_thumbnails(ch);
         }
     }
 }
