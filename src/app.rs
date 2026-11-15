@@ -1762,13 +1762,10 @@ fn add_smart_material_inner(
             if let Some(dir) = crate::environment::asset_dir("pbr").map(|d| d.join(scan.id)) {
                 for (ch, file) in presets::Scan::FILES {
                     let path = dir.join(file);
-                    let image = if let Some(images) = cached_images {
-                        images.get(&path).cloned()
-                    } else if path.is_file() {
-                        engine.shared_fill_image(&path).ok()
-                    } else {
-                        None
-                    };
+                    let cached = cached_images.and_then(|images| images.get(&path).cloned());
+                    let image = cached.or_else(|| {
+                        path.is_file().then(|| engine.shared_fill_image(&path).ok()).flatten()
+                    });
                     if let Some(img) = image {
                         engine.set_fill_image(idx, ch, Some(img), undo);
                         if !active_channels[ch] {
