@@ -86,15 +86,18 @@ impl PainterApp {
         let indent = self.engine.depth(idx) as f32 * 16.0;
         // A smart-material folder also signals disabled maps in any of its
         // descendants, so the warning is visible on the collapsed parent row.
-        let inactive_map_names = if self.engine.layers[idx].is_folder() {
-            self.engine
-                .block(idx)
-                .flat_map(|child| project_settings_ui::disabled_map_names(&self.engine.layers[child], &self.active_channels))
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter()
-                .collect()
+        let inactive_map_flags = if self.engine.layers[idx].is_folder() {
+            let mut flags = [false; crate::engine::CHANNELS];
+            for child in self.engine.block(idx) {
+                let child_flags =
+                    project_settings_ui::disabled_map_flags(&self.engine.layers[child], &self.active_channels);
+                for (flag, child_flag) in flags.iter_mut().zip(child_flags) {
+                    *flag |= child_flag;
+                }
+            }
+            flags
         } else {
-            project_settings_ui::disabled_map_names(&self.engine.layers[idx], &self.active_channels)
+            project_settings_ui::disabled_map_flags(&self.engine.layers[idx], &self.active_channels)
         };
         let layer = &self.engine.layers[idx];
         let (id, visible, name) = (layer.id, layer.visible, layer.name.clone());
@@ -195,7 +198,7 @@ impl PainterApp {
 
         // Name and blend info.
         let text_col = if visible { Color32::WHITE } else { theme::TEXT_DIM };
-        let has_inactive_maps = !inactive_map_names.is_empty();
+        let has_inactive_maps = inactive_map_flags.iter().any(|&flag| flag);
         let marker_reserve = if has_inactive_maps { 25.0 } else { 8.0 };
         let title = theme::elided(
             &painter,
@@ -223,7 +226,7 @@ impl PainterApp {
             );
             marker.on_hover_text(format!(
                 "This layer or its folder contents include channels disabled in Project: {}",
-                inactive_map_names.join(", ")
+                project_settings_ui::disabled_map_names(&inactive_map_flags).join(", ")
             ));
         }
         let mb = self.engine.layer_vram_bytes(idx) as f64 / (1024.0 * 1024.0);
