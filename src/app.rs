@@ -1696,6 +1696,18 @@ fn material_controls(
     changed
 }
 
+/// Legacy all-channel helper used by preview tests that exercise the default project.
+#[cfg(test)]
+pub(crate) fn add_smart_material(
+    engine: &mut Engine,
+    undo: &mut UndoStack,
+    smart: &presets::SmartMaterial,
+    at: usize,
+    parent: Option<u64>,
+) -> usize {
+    add_smart_material_inner(engine, undo, smart, at, parent, None, &[true; crate::engine::CHANNELS])
+}
+
 /// Adds a shelf smart material while excluding channels removed from the project.
 /// Disabled scan maps are never decoded or uploaded to the GPU.
 pub(crate) fn add_smart_material_with_channels(
