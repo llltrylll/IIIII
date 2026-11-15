@@ -1,7 +1,7 @@
 //! MCP tool handlers. They run on the UI thread against the live document and
 //! record into the same undo history as the UI (see `crate::mcp`).
 
-use super::{Layout, PainterApp, add_smart_material};
+use super::{Layout, PainterApp, add_smart_material_with_channels};
 use crate::bake::Quality;
 use crate::engine::{Blend, BrushPaint, Content, GEN_INPUTS, GenKind, Generator, MAPS, MAX_STAMPS, StampUniform};
 use crate::undo::StrokeTarget;
