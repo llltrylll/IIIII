@@ -716,10 +716,11 @@ impl PainterApp {
         let id = self.graphs.insert(&self.rs, graph, None);
         let mut fill = FillParams { graph: Some(id), ..FillParams::default() };
         fill.mat.enabled = graph::channel_outputs(&outs).map(|o| o.is_some());
-        self.filter_fill_channels(&mut fill);
+        let disabled = super::project_settings_ui::disabled_fill_channels(&fill, &self.active_channels);
         // An emission output is the emitted color itself: no tint.
         fill.mat.emission = [1.0; 3];
         self.selected = self.engine.add_fill_layer(at, parent, name, fill, &mut self.undo);
+        self.engine.layers[self.selected].disabled_channels = disabled;
         self.target = StrokeTarget::Content;
         self.open_graph(id);
         self.status = "Added a graph fill layer. Edit its graph in the Material Graph window.".into();
@@ -738,8 +739,9 @@ impl PainterApp {
         let id = self.graphs.insert(&self.rs, graph, None);
         let mut fill = FillParams { graph: Some(id), ..FillParams::default() };
         fill.mat.enabled = graph::channel_outputs(&outs).map(|o| o.is_some());
-        self.filter_fill_channels(&mut fill);
+        let disabled = super::project_settings_ui::disabled_fill_channels(&fill, &self.active_channels);
         self.selected = self.engine.add_fill_layer(at, parent, name, fill, &mut self.undo);
+        self.engine.layers[self.selected].disabled_channels = disabled;
         self.target = StrokeTarget::Content;
     }
 
