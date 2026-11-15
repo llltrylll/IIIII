@@ -682,6 +682,8 @@ pub struct PainterApp {
     workspace: Workspace,
     /// The docked panel layouts of the workspaces.
     docks: dock::Docks,
+    /// Whether the fixed Project sidebar is open in the Paint workspace.
+    project_panel_open: bool,
     /// A 3D view drew this frame (else its depth is rendered offscreen).
     drew_3d: bool,
     pending: Vec<Action>,
@@ -2166,6 +2168,7 @@ impl PainterApp {
             graphs: { let _s = crate::startup_trace::span("new: GraphStore::new"); GraphStore::new(&cc.egui_ctx) },
             workspace: Workspace::Paint,
             docks: { let _s = crate::startup_trace::span("new: Docks::load"); dock::Docks::load() },
+            project_panel_open: false,
             drew_3d: false,
             pending: Vec::new(),
             layer_clipboard: None,
@@ -3905,6 +3908,9 @@ impl PainterApp {
         if theme::icon_button(ui, icons::FIRE, self.show_bake, 34.0).on_hover_text("Bake mesh maps…").clicked() {
             self.show_bake = !self.show_bake;
         }
+        if theme::icon_button(ui, icons::GEAR, self.project_panel_open, 34.0).on_hover_text("Project settings").clicked() {
+            self.project_panel_open = !self.project_panel_open;
+        }
         if theme::icon_button(ui, icons::EXPORT, self.export.open, 34.0).on_hover_text("Export textures… (Ctrl+Shift+E)").clicked() {
             self.export.open = !self.export.open;
         }
@@ -5351,10 +5357,16 @@ impl eframe::App for PainterApp {
         }
         egui::Panel::bottom("status").exact_size(24.0).frame(theme::bar()).show(ui, |ui| self.status_bar(ui));
         if paint {
-        egui::Panel::left("tools")
-            .exact_size(56.0)
-            .frame(theme::card(theme::PANEL).inner_margin(egui::Margin::symmetric(7, 10)))
-            .show(ui, |ui| self.tool_strip(ui));
+            egui::Panel::left("tools")
+                .exact_size(56.0)
+                .frame(theme::card(theme::PANEL).inner_margin(egui::Margin::symmetric(7, 10)))
+                .show(ui, |ui| self.tool_strip(ui));
+            if self.project_panel_open {
+                egui::Panel::left("project_settings")
+                    .exact_size(320.0)
+                    .frame(theme::card(theme::PANEL).inner_margin(egui::Margin::same(10)))
+                    .show(ui, |ui| self.project_settings_panel(ui));
+            }
         }
         }
 
