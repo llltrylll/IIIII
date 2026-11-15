@@ -4666,6 +4666,7 @@ impl PainterApp {
         self.undo.begin_group(format!("Add {}", t.name));
         let idx = self.engine.add_fill_layer(at, parent, t.name.to_string(), fill, &mut self.undo);
         self.engine.set_fill_image(idx, 3, Some(img), &mut self.undo);
+        self.engine.layers[idx].disabled_channels[3] = !self.active_channels[3];
         self.undo.end_group();
         self.selected = idx;
         self.target = StrokeTarget::Content;
