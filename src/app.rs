@@ -2098,7 +2098,7 @@ impl PainterApp {
             bake_id_only: false,
             cam: OrbitCam::default(),
             walk_navigation: false,
-            walk_speed: 3.5,
+            walk_speed: 1.5,
             cam2d: Cam2d::default(),
             layout: Layout::Split,
             view: ViewSettings::default(),
