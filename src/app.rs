@@ -1699,7 +1699,20 @@ pub(crate) fn add_smart_material(
     at: usize,
     parent: Option<u64>,
 ) -> usize {
-    add_smart_material_inner(engine, undo, smart, at, parent, None)
+    add_smart_material_inner(engine, undo, smart, at, parent, None, &[true; crate::engine::CHANNELS])
+}
+
+/// Adds a shelf smart material while excluding channels removed from the project.
+/// Disabled scan maps are never decoded or uploaded to the GPU.
+pub(crate) fn add_smart_material_with_channels(
+    engine: &mut Engine,
+    undo: &mut UndoStack,
+    smart: &presets::SmartMaterial,
+    at: usize,
+    parent: Option<u64>,
+    active_channels: &[bool; crate::engine::CHANNELS],
+) -> usize {
+    add_smart_material_inner(engine, undo, smart, at, parent, None, active_channels)
 }
 
 /// Adds a smart material using a caller-owned scan image cache. This is used
@@ -1713,7 +1726,7 @@ pub(crate) fn add_smart_material_with_images(
     parent: Option<u64>,
     images: &std::collections::HashMap<std::path::PathBuf, FillImage>,
 ) -> usize {
-    add_smart_material_inner(engine, undo, smart, at, parent, Some(images))
+    add_smart_material_inner(engine, undo, smart, at, parent, Some(images), &[true; crate::engine::CHANNELS])
 }
 
 fn add_smart_material_inner(
@@ -1723,19 +1736,28 @@ fn add_smart_material_inner(
     at: usize,
     parent: Option<u64>,
     cached_images: Option<&std::collections::HashMap<std::path::PathBuf, FillImage>>,
+    active_channels: &[bool; crate::engine::CHANNELS],
 ) -> usize {
     undo.begin_group(format!("Add {}", smart.name));
     let mut folder = engine.add_folder(at, parent, smart.name.to_string(), undo);
     let folder_id = engine.layers[folder].id;
     for l in smart.layers.iter().chain(&presets::MICRO_DETAIL) {
         // Each layer goes on top of the folder's contents, right below the folder.
-        let idx = engine.add_fill_layer(folder, Some(folder_id), l.name.to_string(), l.fill(), undo);
+        // Excluded channels are removed before the layer enters the Engine.
+        let mut fill = l.fill();
+        for ch in 0..crate::engine::CHANNELS {
+            if !active_channels[ch] {
+                fill.mat.enabled[ch] = false;
+            }
+        }
+        let idx = engine.add_fill_layer(folder, Some(folder_id), l.name.to_string(), fill, undo);
         folder = idx + 1;
         if let Some(scan) = l.scan {
             // Maps the set lacks (or a missing assets folder) leave the
             // material's own values in place.
             if let Some(dir) = crate::environment::asset_dir("pbr").map(|d| d.join(scan.id)) {
                 for (ch, file) in presets::Scan::FILES {
+                    if !active_channels[ch] { continue; }
                     let path = dir.join(file);
                     if let Some(images) = cached_images {
                         if let Some(img) = images.get(&path) {
