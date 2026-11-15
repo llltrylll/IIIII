@@ -49,6 +49,7 @@ pub(super) fn filter_layer_channels(
     for layer in layers {
         for ch in 0..crate::engine::CHANNELS {
             if active[ch] {
+                layer.disabled_channels[ch] = false;
                 continue;
             }
             let has_data = match &layer.content {
@@ -374,6 +375,11 @@ impl PainterApp {
         }
         self.undo.set = active_set;
         self.active_channels[ch] = true;
+        if let Some(layers) = self.layer_clipboard.as_mut() {
+            for layer in layers {
+                layer.disabled_channels[ch] = false;
+            }
+        }
         self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
         self.status = format!("Enabled {} output. Preserved maps and paint are available again.", CHANNEL_LABELS[ch]);
     }
