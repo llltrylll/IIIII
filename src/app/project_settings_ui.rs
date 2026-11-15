@@ -42,7 +42,7 @@ pub(super) fn disabled_map_names(
 }
 
 /// Marks inactive channels on pasted layers without deleting their maps or paint.
-pub(super) fn filter_layer_channels(
+pub(super) fn mark_inactive_layer_channels(
     layers: &mut [Layer],
     active: &[bool; crate::engine::CHANNELS],
 ) {
@@ -99,7 +99,7 @@ mod channel_mask_tests {
 
     #[test]
     fn clipboard_marks_disabled_outputs_without_stripping_their_maps() {
-        use super::filter_layer_channels;
+        use super::mark_inactive_layer_channels;
 
         let mut fill = FillParams::default();
         fill.mat.enabled = [true; CHANNELS];
@@ -119,7 +119,7 @@ mod channel_mask_tests {
         let mut active = [true; CHANNELS];
         active[HEIGHT_CHANNEL] = false;
 
-        filter_layer_channels(std::slice::from_mut(&mut layer), &active);
+        mark_inactive_layer_channels(std::slice::from_mut(&mut layer), &active);
 
         let Content::Fill(fill) = &layer.content else { panic!("expected fill layer") };
         assert!(fill.mat.enabled[HEIGHT_CHANNEL], "clipboard must retain the source map flag");
@@ -353,7 +353,7 @@ impl PainterApp {
         self.undo.set = active_set;
         self.active_channels[ch] = false;
         if let Some(layers) = self.layer_clipboard.as_mut() {
-            filter_layer_channels(layers, &self.active_channels);
+            mark_inactive_layer_channels(layers, &self.active_channels);
         }
         self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
         self.status = format!("Disabled {} output. Existing maps and paint were preserved.", CHANNEL_LABELS[ch]);
