@@ -254,7 +254,7 @@ impl PainterApp {
         }
         match &want {
             Some(shown) => {
-                let triangles = vertex_id::overlay(&self.mesh, shown);
+                let triangles = vertex_id::overlay(&self.mesh, shown, &self.hidden_objects);
                 self.overlays.set(&self.rs.device, OverlaySlot::VertexColors, &triangles, &[]);
             }
             None => self.overlays.clear(OverlaySlot::VertexColors),
