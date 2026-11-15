@@ -14,6 +14,26 @@ fn apply_project_channel_mask(fill: &mut FillParams, active: &[bool; crate::engi
     }
 }
 
+/// Removes disabled-channel data from layer blocks before they enter the project.
+pub(super) fn filter_layer_channels(
+    layers: &mut [Layer],
+    active: &[bool; crate::engine::CHANNELS],
+) {
+    for layer in layers {
+        for ch in 0..crate::engine::CHANNELS {
+            if active[ch] {
+                continue;
+            }
+            match &mut layer.content {
+                Content::Paint(channels) => channels[ch] = None,
+                Content::Fill(fill) => fill.mat.enabled[ch] = false,
+                Content::Folder(_) => {}
+            }
+            layer.images[ch] = None;
+        }
+    }
+}
+
 #[cfg(test)]
 mod channel_mask_tests {
     use super::apply_project_channel_mask;
@@ -217,6 +237,9 @@ impl PainterApp {
         // can be restored by undo or redo; unrelated edits remain available.
         self.undo.discard_channel(ch);
         self.active_channels[ch] = false;
+        if let Some(layers) = self.layer_clipboard.as_mut() {
+            filter_layer_channels(layers, &self.active_channels);
+        }
         self.brush.mat.enabled[ch] = false;
         self.other_brush.mat.enabled[ch] = false;
         self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
