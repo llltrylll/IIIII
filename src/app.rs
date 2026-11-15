@@ -719,7 +719,7 @@ pub struct PainterApp {
     project_settings_serial: u64,
     saved_project_settings_serial: u64,
     autosaved_project_settings_serial: u64,
-    /// Channel awaiting confirmation before its data is discarded.
+    /// Project channel awaiting confirmation before disabling its output.
     pending_channel_disable: Option<usize>,
     /// The open project file, if it has been saved or opened.
     project_path: Option<std::path::PathBuf>,
@@ -2196,7 +2196,7 @@ impl PainterApp {
             project_settings_serial: 0,
             saved_project_settings_serial: 0,
             autosaved_project_settings_serial: 0,
-            pending_channel_remove: None,
+            pending_channel_disable: None,
             project_path: None,
             saved_serial: 0,
             confirm: None,
@@ -2588,7 +2588,7 @@ impl PainterApp {
             Action::NewProject(p) => {
                 self.active_channels = [true; crate::engine::CHANNELS];
                 self.hidden_objects.clear();
-                self.pending_channel_remove = None;
+                self.pending_channel_disable = None;
                 self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
                 self.saved_project_settings_serial = self.project_settings_serial;
                 self.autosaved_project_settings_serial = self.project_settings_serial;
