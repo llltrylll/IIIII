@@ -95,6 +95,10 @@ impl PainterApp {
                 }
                 if let Some(ch) = added {
                     self.active_channels[ch] = true;
+                    // A removed channel also disables both brush material
+                    // masks. Re-enable it for the newly added empty channel.
+                    self.brush.mat.enabled[ch] = true;
+                    self.other_brush.mat.enabled[ch] = true;
                     self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
                     self.status = format!("Added {} channel. It starts empty; shelf materials can now provide it.", CHANNEL_LABELS[ch]);
                 }
