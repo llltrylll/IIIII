@@ -147,13 +147,25 @@ Therefore, with exactly coincident UVs in the **same texture set**, a UV-project
 
 If UV projection also fails, the cause is likely elsewhere in stamp generation, active texture-set selection, scissor regions, channel/layer state or the actual UV correspondence. Do not attribute that failure to the one-surface position map without isolating it.
 
-### 2.5 A second issue exists in non-Screen stamp resolution
+### 2.5 Cross-Texture-Set raycasts in Surface/UV stamp resolution
 
-**Confirmed in source; relevance depends on the chosen projection.**
+**Confirmed in source; implementation added in PR #8, CI validation pending.**
 
-\`resolve_stamps()\` uses \`bvh.raycast()\` for Surface and UV projection. The BVH is over the whole mesh, not filtered to the active texture set. The first hit can therefore belong to another material/texture set while the resulting stamp is applied to the active set's engine.
+Previously, `resolve_stamps()` used the full-mesh BVH for Surface and UV projections. The first world-space hit could therefore belong to a different material/texture set than the Engine currently receiving the stroke. The UV and surface frame from that foreign hit were then used for the active set.
 
-This needs a dedicated test. It is not the primary explanation for the user's Screen-projection snapshot, but it could create confusing failures when testing Surface or UV projection.
+Implementation on `gpt/fix-active-texture-set-raycast`:
+- `Bvh::raycast_range()` filters candidate hits by their original mesh-triangle index while preserving the shared full-mesh BVH.
+- `resolve_stamps()` receives the active Texture Set's global triangle range.
+- Both the primary Surface/UV hit and the mirrored UV lookup use that range.
+- The normal UI and MCP painting path both pass the active Engine's range.
+- Screen projection is unchanged; its visibility path remains independent.
+
+Regression coverage:
+- Two overlapping quads in separate material sets with distinct UV islands.
+- Surface and UV resolution are checked against the world-space hit and UV island belonging to each selected set.
+- Existing fixtures pass the full mesh range explicitly.
+
+The build has passed on the latest PR revision. Unit and GPU checks are still running, and the actual user's asset/owner-machine behavior remains unverified.
 
 ### 2.6 Region/scissor filtering must be kept in the investigation
 
