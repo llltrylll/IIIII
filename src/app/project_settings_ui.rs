@@ -22,23 +22,29 @@ pub(super) fn effective_channel_mask(
     std::array::from_fn(|ch| brush_enabled[ch] && active[ch])
 }
 
-/// Names channels that contain data on a layer even though the project channel is disabled.
-/// This is display-only: it does not strip or alter imported material data.
-pub(super) fn disabled_map_names(
+/// Fixed-size mask of channels that contain data while disabled in Project.
+/// This is display-only and does not strip or alter imported material data.
+pub(super) fn disabled_map_flags(
     layer: &Layer,
     active: &[bool; crate::engine::CHANNELS],
-) -> Vec<&'static str> {
-    CHANNEL_ORDER.iter().copied().filter_map(|ch| {
+) -> [bool; crate::engine::CHANNELS] {
+    std::array::from_fn(|ch| {
         if active[ch] {
-            return None;
+            return false;
         }
-        let has_data = layer.disabled_channels[ch] || match &layer.content {
+        layer.disabled_channels[ch] || match &layer.content {
             Content::Paint(channels) => channels[ch].is_some(),
             Content::Fill(fill) => fill.mat.enabled[ch] || layer.images[ch].is_some(),
             Content::Folder(_) => false,
-        };
-        has_data.then_some(CHANNEL_LABELS[ch])
-    }).collect()
+        }
+    })
+}
+
+/// Converts the fixed channel mask to labels only when a tooltip is requested.
+pub(super) fn disabled_map_names(
+    flags: &[bool; crate::engine::CHANNELS],
+) -> Vec<&'static str> {
+    CHANNEL_ORDER.iter().copied().filter_map(|ch| flags[ch].then_some(CHANNEL_LABELS[ch])).collect()
 }
 
 /// Marks inactive channels on pasted layers without deleting their maps or paint.
@@ -134,7 +140,7 @@ mod channel_mask_tests {
 
     #[test]
     fn inactive_map_indicator_only_marks_disabled_channels_with_data() {
-        use super::disabled_map_names;
+        use super::{disabled_map_flags, disabled_map_names};
 
         let mut fill = FillParams::default();
         fill.mat.enabled[HEIGHT_CHANNEL] = true;
@@ -156,9 +162,13 @@ mod channel_mask_tests {
         let mut active = [true; CHANNELS];
         active[HEIGHT_CHANNEL] = false;
 
-        assert_eq!(disabled_map_names(&layer, &active), vec!["Height"]);
+        let flags = disabled_map_flags(&layer, &active);
+        assert!(flags[HEIGHT_CHANNEL]);
+        assert_eq!(disabled_map_names(&flags), vec!["Height"]);
         active[HEIGHT_CHANNEL] = true;
-        assert!(disabled_map_names(&layer, &active).is_empty());
+        let flags = disabled_map_flags(&layer, &active);
+        assert!(!flags[HEIGHT_CHANNEL]);
+        assert!(disabled_map_names(&flags).is_empty());
     }
 
     #[test]
