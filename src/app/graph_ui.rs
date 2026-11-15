@@ -497,6 +497,7 @@ impl PainterApp {
     /// that has none yet (an opened project) gets them rendered on its own
     /// mesh maps.
     fn fill_parked_graphs(&mut self) {
+        let active_channels = self.active_channels;
         let (lib, docs) = (&self.graphs.lib, &mut self.graphs.docs);
         for p in self.sets.parked.iter_mut().flatten() {
             let engine = &mut p.engine;
@@ -519,6 +520,10 @@ impl PainterApp {
                 let outs: [Option<Arc<Tex>>; graph::USAGES.len()] = d.graph.outputs(lib).map(|o| o.and_then(|n| d.rt.output(n).cloned()));
                 let name = d.graph.name.clone();
                 engine.set_graph_images(li, outs, &name);
+                super::project_settings_ui::mark_inactive_layer_channels(
+                    std::slice::from_mut(&mut engine.layers[li]),
+                    &active_channels,
+                );
             }
         }
     }
@@ -538,6 +543,12 @@ impl PainterApp {
                 && let Some(t) = outs[graph::MASK_USAGE].as_ref().or(outs[0].as_ref()) {
                     self.engine.set_graph_mask(li, t);
                 }
+            if fill {
+                super::project_settings_ui::mark_inactive_layer_channels(
+                    std::slice::from_mut(&mut self.engine.layers[li]),
+                    &self.active_channels,
+                );
+            }
         }
         self.graphs.docs[i].push = false;
     }
