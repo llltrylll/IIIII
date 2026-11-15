@@ -260,12 +260,12 @@ impl PainterApp {
                     if self.begin_stroke_on_target(kind, at.unwrap_or_default(), erase) {
                         self.poly.filled.clear();
                         self.poly.stroke_erase = erase;
-                        self.poly_fill(&[t], Some(pos));
+                        self.poly_fill(&[t], Some(pos), kind);
                     }
                 }
             } else if down && self.stroke.as_ref().is_some_and(|s| s.view == kind)
                 && let Some((t, pos)) = tri {
-                    self.poly_fill(&[t], Some(pos));
+                    self.poly_fill(&[t], Some(pos), kind);
                 }
             return;
         }
