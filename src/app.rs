@@ -4635,6 +4635,10 @@ impl PainterApp {
     /// A fill layer whose height comes from a shelf texture, projected
     /// tri-planar so it tiles seamlessly on any mesh.
     fn add_texture_layer(&mut self, i: usize, at: usize, parent: Option<u64>) {
+        if !self.active_channels[crate::engine::HEIGHT] {
+            self.status = "Height is disabled. Add the Height channel in Project Settings before using shelf textures.".into();
+            return;
+        }
         let t = &crate::textures::TEXTURES[i];
         let img = match self.texture_image(i) {
             Ok(img) => img,
