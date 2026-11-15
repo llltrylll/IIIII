@@ -3358,18 +3358,6 @@ impl Engine {
                     Self::attach_thumb(&self.rs, l);
                 }
             }
-            Edit::PaintChannel { id, ch, texture } => {
-                let mut changed = false;
-                if let Some(layer) = self.layers.iter_mut().find(|layer| layer.id == *id)
-                    && let Content::Paint(channels) = &mut layer.content
-                    && let Some(target) = channels.get_mut(*ch) {
-                    std::mem::swap(target, texture);
-                    changed = true;
-                }
-                if changed {
-                    self.mark_dirty();
-                }
-            }
             Edit::Mask { id, mask } => {
                 if let Some(l) = self.layers.iter_mut().find(|l| l.id == *id) {
                     std::mem::swap(&mut l.mask, mask);
