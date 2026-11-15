@@ -3249,6 +3249,11 @@ impl PainterApp {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
+        // While walking, WASD/E/Q and other viewport keys belong exclusively
+        // to camera navigation, not to global tools or layer shortcuts.
+        if self.walk_navigation {
+            return;
+        }
         // Layer shortcuts only in the paint workspace, and not over the graph
         // editor: there Delete removes nodes and Ctrl+C / Ctrl+V copy them, and
         // consuming the key here would hide it from the editor.
