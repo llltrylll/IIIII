@@ -1300,12 +1300,25 @@ impl ViewRenderer {
             // only; a preview shader cuts them out at half opacity).
             if self.custom_mesh.is_none() || settings.mode != ViewMode::Material {
                 pass.set_pipeline(&self.mesh_t);
-                for &k in &shown {
-                    if let (Some(bg), Some(e)) = (bgs.get(k), engines.get(k))
-                        && e.uses_opacity() {
+                if let Some(draw) = self.object_draw.as_ref() {
+                    pass.set_index_buffer(draw.triangles.slice(..), wgpu::IndexFormat::Uint32);
+                    for &k in &shown {
+                        if let (Some(bg), Some(e), Some(range)) =
+                            (bgs.get(k), engines.get(k), draw.triangle_ranges.get(k))
+                            && e.uses_opacity() && range.start < range.end {
+                            pass.set_bind_group(0, bg, &[]);
+                            pass.draw_indexed(range.clone(), 0, 0..1);
+                        }
+                    }
+                } else {
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    for &k in &shown {
+                        if let (Some(bg), Some(e)) = (bgs.get(k), engines.get(k))
+                            && e.uses_opacity() {
                             pass.set_bind_group(0, bg, &[]);
                             pass.draw_indexed(mesh.sets[k].index_range(), 0, 0..1);
                         }
+                    }
                 }
             }
             pass.set_bind_group(0, bg, &[]);
