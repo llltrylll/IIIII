@@ -541,10 +541,6 @@ impl ObjectDrawBuffers {
     }
 
     fn new(device: &wgpu::Device, mesh: &GpuMesh, source: &crate::mesh::Mesh, hidden: &[bool]) -> Self {
-        let is_hidden = |object: u32| {
-            object != u32::MAX && hidden.get(object as usize).copied().unwrap_or(false)
-        };
-
         let mut edge_owner_by_vertices = std::collections::HashMap::new();
         if source.tri_object.len() == source.triangle_count() {
             for (tri, ids) in source.indices.chunks_exact(3).enumerate() {
@@ -1429,7 +1425,7 @@ mod object_visibility_index_tests {
         let ranges = [0..2, 2..3];
         let (packed, draw_ranges) = filter_indices_by_object(&indices, &owners, &ranges, 3, &[false, true]);
         assert_eq!(packed, [0, 1, 2, 6, 7, 8]);
-        assert_eq!(draw_ranges, [0..3, 3..6]);
+        assert_eq!(draw_ranges, vec![0..3, 3..6]);
     }
 
     #[test]
@@ -1439,7 +1435,7 @@ mod object_visibility_index_tests {
         let ranges = [0..3];
         let (packed, draw_ranges) = filter_indices_by_object(&indices, &owners, &ranges, 2, &[false, true]);
         assert_eq!(packed, [0, 1, 4, 5]);
-        assert_eq!(draw_ranges, [0..4]);
+        assert_eq!(draw_ranges, vec![0..4]);
     }
 }
 
