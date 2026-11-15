@@ -219,7 +219,7 @@ impl PainterApp {
                 && let Content::Fill(fill)=&mut layer.content {
                     let material=&mut fill.mat;
                     material_changed |= slider(ui,"Opacity",&mut material.opacity,0.0..=1.0);
-                    material_changed |= channel_toggles(ui,&mut material.enabled);
+                    material_changed |= channel_toggles_filtered(ui, &mut material.enabled, &self.active_channels);
                     if material.enabled[3] { material_changed |= slider(ui,"Height",&mut material.height,-1.0..=1.0); }
                     if material.enabled[1] { material_changed |= slider(ui,"Roughness",&mut material.rough,0.0..=1.0); }
                     if material.enabled[2] { material_changed |= slider(ui,"Metallic",&mut material.metal,0.0..=1.0); }
@@ -227,7 +227,7 @@ impl PainterApp {
         } else {
             let material=&mut self.brush.mat;
             slider(ui,"Opacity",&mut material.opacity,0.0..=1.0);
-            channel_toggles(ui,&mut material.enabled);
+            channel_toggles_filtered(ui, &mut material.enabled, &self.active_channels);
             if material.enabled[3] { slider(ui,"Height",&mut material.height,-1.0..=1.0); }
             if material.enabled[1] { slider(ui,"Roughness",&mut material.rough,0.0..=1.0); }
             if material.enabled[2] { slider(ui,"Metallic",&mut material.metal,0.0..=1.0); }
