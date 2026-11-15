@@ -240,7 +240,7 @@ impl PainterApp {
                 if !seeds.is_empty() && self.begin_stroke_on_target(kind, a, b.erase) {
                     self.poly.filled.clear();
                     self.poly.stroke_erase = b.erase;
-                    self.poly_fill(&seeds, at);
+                    self.poly_fill(&seeds, at, kind);
                     self.end_stroke();
                 }
                 return;
