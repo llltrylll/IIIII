@@ -491,6 +491,32 @@ pub struct SetLook {
     pub highlight: f32,
 }
 
+/// Packs only primitives whose source object is visible. Ranges are expressed
+/// in primitive units, and the returned draw ranges are in index units.
+fn filter_indices_by_object(
+    indices: &[u32],
+    owners: &[u32],
+    source_ranges: &[std::ops::Range<u32>],
+    stride: usize,
+    hidden: &[bool],
+) -> (Vec<u32>, Vec<std::ops::Range<u32>>) {
+    let mut packed = Vec::with_capacity(indices.len());
+    let mut ranges = Vec::with_capacity(source_ranges.len());
+    for source_range in source_ranges {
+        let start = packed.len() as u32;
+        for primitive in source_range.clone() {
+            let owner = owners.get(primitive as usize).copied().unwrap_or(u32::MAX);
+            let first = primitive as usize * stride;
+            let is_hidden = owner != u32::MAX && hidden.get(owner as usize).copied().unwrap_or(false);
+            if !is_hidden && first + stride <= indices.len() {
+                packed.extend_from_slice(&indices[first..first + stride]);
+            }
+        }
+        ranges.push(start..packed.len() as u32);
+    }
+    (packed, ranges)
+}
+
 /// Compact per-object index buffers used when one or more imported objects are hidden.
 /// They are rebuilt only when the hidden-object set changes, not every frame.
 struct ObjectDrawBuffers {
@@ -538,42 +564,15 @@ impl ObjectDrawBuffers {
         let edge_object = edge_owners(&source.uv_edges);
         let seam_object = edge_owners(&source.seam_edges);
 
-        let mut triangles = Vec::with_capacity(source.indices.len());
-        let mut triangle_ranges = Vec::with_capacity(mesh.sets.len());
-        let mut edges = Vec::with_capacity(source.uv_edges.len());
-        let mut edge_ranges = Vec::with_capacity(mesh.sets.len());
-        let mut seams = Vec::with_capacity(source.seam_edges.len());
-        let mut seam_ranges = Vec::with_capacity(mesh.sets.len());
-
-        for set in &mesh.sets {
-            let start = triangles.len() as u32;
-            for tri in set.tris.clone() {
-                let object = source.tri_object.get(tri as usize).copied().unwrap_or(u32::MAX);
-                let first = tri as usize * 3;
-                if !is_hidden(object) && first + 3 <= source.indices.len() {
-                    triangles.extend_from_slice(&source.indices[first..first + 3]);
-                }
-            }
-            triangle_ranges.push(start..triangles.len() as u32);
-
-            let start = edges.len() as u32;
-            for pair in (set.edges.start as usize..set.edges.end as usize).step_by(2) {
-                let object = edge_object.get(pair / 2).copied().unwrap_or(u32::MAX);
-                if !is_hidden(object) && pair + 2 <= source.uv_edges.len() {
-                    edges.extend_from_slice(&source.uv_edges[pair..pair + 2]);
-                }
-            }
-            edge_ranges.push(start..edges.len() as u32);
-
-            let start = seams.len() as u32;
-            for pair in (set.seams.start as usize..set.seams.end as usize).step_by(2) {
-                let object = seam_object.get(pair / 2).copied().unwrap_or(u32::MAX);
-                if !is_hidden(object) && pair + 2 <= source.seam_edges.len() {
-                    seams.extend_from_slice(&source.seam_edges[pair..pair + 2]);
-                }
-            }
-            seam_ranges.push(start..seams.len() as u32);
-        }
+        let triangle_source_ranges: Vec<_> = mesh.sets.iter().map(|set| set.tris.clone()).collect();
+        let edge_source_ranges: Vec<_> = mesh.sets.iter().map(|set| set.edges.start / 2..set.edges.end / 2).collect();
+        let seam_source_ranges: Vec<_> = mesh.sets.iter().map(|set| set.seams.start / 2..set.seams.end / 2).collect();
+        let (triangles, triangle_ranges) =
+            filter_indices_by_object(&source.indices, &source.tri_object, &triangle_source_ranges, 3, hidden);
+        let (edges, edge_ranges) =
+            filter_indices_by_object(&source.uv_edges, &edge_object, &edge_source_ranges, 2, hidden);
+        let (seams, seam_ranges) =
+            filter_indices_by_object(&source.seam_edges, &seam_object, &seam_source_ranges, 2, hidden);
 
         Self {
             triangles: Self::index_buffer(device, "visible object triangles", &triangles),
@@ -1419,6 +1418,31 @@ impl ViewRenderer {
 /// A camera-independent shadow cache key. Geometry replacement is handled by
 /// explicit invalidation at the app's mesh-load boundary; this key covers all
 /// mutable inputs that affect the shadow pass itself.
+#[cfg(test)]
+mod object_visibility_index_tests {
+    use super::filter_indices_by_object;
+
+    #[test]
+    fn hidden_object_is_removed_without_reordering_other_sets() {
+        let indices = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+        let owners = [0, 1, 0];
+        let ranges = [0..2, 2..3];
+        let (packed, draw_ranges) = filter_indices_by_object(&indices, &owners, &ranges, 3, &[false, true]);
+        assert_eq!(packed, [0, 1, 2, 6, 7, 8]);
+        assert_eq!(draw_ranges, [0..3, 3..6]);
+    }
+
+    #[test]
+    fn unowned_edges_remain_visible_while_hidden_object_edges_are_removed() {
+        let indices = [0, 1, 2, 3, 4, 5];
+        let owners = [0, 1, u32::MAX];
+        let ranges = [0..3];
+        let (packed, draw_ranges) = filter_indices_by_object(&indices, &owners, &ranges, 2, &[false, true]);
+        assert_eq!(packed, [0, 1, 4, 5]);
+        assert_eq!(draw_ranges, [0..4]);
+    }
+}
+
 fn make_shadow_cache_key(
     light_view_proj: Mat4,
     index_count: u32,
