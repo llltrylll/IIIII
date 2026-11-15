@@ -1634,7 +1634,7 @@ fn swap_brushes(active: &mut Brush, other: &mut Brush) {
     active.stabilize = left.stabilize;
 }
 /// Channel toggles in Substance order: color, height, rough, metal, opacity.
-fn channel_toggles(ui: &mut egui::Ui, enabled: &mut [bool; crate::engine::CHANNELS], active: &[bool; crate::engine::CHANNELS]) -> bool {
+fn channel_toggles_filtered(ui: &mut egui::Ui, enabled: &mut [bool; crate::engine::CHANNELS], active: &[bool; crate::engine::CHANNELS]) -> bool {
     let mut changed = false;
     ui.horizontal_wrapped(|ui| {
         use crate::engine::{NORMAL, SPECULAR};
@@ -1664,7 +1664,7 @@ fn material_controls(
     show_values: bool,
     active: &[bool; crate::engine::CHANNELS],
 ) -> bool {
-    let mut changed = channel_toggles(ui, &mut m.enabled, active);
+    let mut changed = channel_toggles_filtered(ui, &mut m.enabled, active);
     if !show_values {
         return changed;
     }
@@ -4641,7 +4641,7 @@ impl PainterApp {
     /// A fill layer whose height comes from a shelf texture, projected
     /// tri-planar so it tiles seamlessly on any mesh.
     fn add_texture_layer(&mut self, i: usize, at: usize, parent: Option<u64>) {
-        if !self.active_channels[crate::engine::HEIGHT] {
+        if !self.active_channels[3] {
             self.status = "Height is disabled. Add the Height channel in Project Settings before using shelf textures.".into();
             return;
         }
