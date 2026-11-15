@@ -32,7 +32,7 @@ pub(super) fn disabled_map_names(
         if active[ch] {
             return None;
         }
-        let has_data = match &layer.content {
+        let has_data = layer.disabled_channels[ch] || match &layer.content {
             Content::Paint(channels) => channels[ch].is_some(),
             Content::Fill(fill) => fill.mat.enabled[ch] || layer.images[ch].is_some(),
             Content::Folder(_) => false,
@@ -111,6 +111,7 @@ mod channel_mask_tests {
             blend: Blend::Normal,
             content: Content::Fill(fill),
             mask: None,
+            disabled_channels: [false; CHANNELS],
             parent: None,
             images: Default::default(),
             thumb: None,
@@ -130,7 +131,9 @@ mod channel_mask_tests {
         use super::disabled_map_names;
 
         let mut fill = FillParams::default();
-        fill.mat.enabled[HEIGHT_CHANNEL] = true;
+        fill.mat.enabled[HEIGHT_CHANNEL] = false;
+        let mut disabled_channels = [false; CHANNELS];
+        disabled_channels[HEIGHT_CHANNEL] = true;
         let layer = Layer {
             id: 1,
             name: "Preset height".into(),
@@ -139,6 +142,7 @@ mod channel_mask_tests {
             blend: Blend::Normal,
             content: Content::Fill(fill),
             mask: None,
+            disabled_channels,
             parent: None,
             images: Default::default(),
             thumb: None,
