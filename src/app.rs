@@ -1696,19 +1696,6 @@ fn material_controls(
     changed
 }
 
-/// Adds a smart material as a folder holding its layers, at `at` inside
-/// `parent`, as one undo step; returns the folder's index.
-#[cfg(test)]
-pub(crate) fn add_smart_material(
-    engine: &mut Engine,
-    undo: &mut UndoStack,
-    smart: &presets::SmartMaterial,
-    at: usize,
-    parent: Option<u64>,
-) -> usize {
-    add_smart_material_inner(engine, undo, smart, at, parent, None, &[true; crate::engine::CHANNELS])
-}
-
 /// Adds a shelf smart material while excluding channels removed from the project.
 /// Disabled scan maps are never decoded or uploaded to the GPU.
 pub(crate) fn add_smart_material_with_channels(
@@ -1882,7 +1869,7 @@ impl PainterApp {
     pub(crate) fn test_smart_roundtrip(&mut self, ctx: &egui::Context) -> [[usize; 6]; 2] {
         let k = presets::SMART_MATERIALS.iter().position(|s| s.is_scanned()).expect("a scanned smart material");
         let at = self.engine.layers.len();
-        self.selected = add_smart_material(&mut self.engine, &mut self.undo, &presets::SMART_MATERIALS[k], at, None);
+        self.selected = add_smart_material_with_channels(&mut self.engine, &mut self.undo, &presets::SMART_MATERIALS[k], at, None, &[true; crate::engine::CHANNELS]);
         // A mask filter, which smart materials must keep.
         let first = self.engine.block(self.selected).start;
         if let Some(m) = self.engine.layers[first..self.selected].iter_mut().find_map(|l| l.mask.as_mut()) {
@@ -1962,7 +1949,7 @@ impl PainterApp {
         self.show_bake = true;
         let k = presets::SMART_MATERIALS.iter().position(|s| s.needs_maps() & (1 << 5) != 0).expect("a smart material with edge wear");
         let at = self.engine.layers.len();
-        let folder = add_smart_material(&mut self.engine, &mut self.undo, &presets::SMART_MATERIALS[k], at, None);
+        let folder = add_smart_material_with_channels(&mut self.engine, &mut self.undo, &presets::SMART_MATERIALS[k], at, None, &[true; crate::engine::CHANNELS]);
         // The layer in it whose mask reads the edges.
         let block = self.engine.block(folder);
         self.selected = block
