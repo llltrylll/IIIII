@@ -209,7 +209,7 @@ impl PainterApp {
                         section(ui, "Procedural variation");
                         dirty |= slider(ui, "Color var.", &mut f.color_var, 0.0..=1.0);
                         dirty |= slider(ui, "Rough var.", &mut f.rough_var, 0.0..=1.0);
-                        if self.active_channels[crate::engine::HEIGHT] {
+                        if self.active_channels[3] {
                             dirty |= slider(ui, "Height var.", &mut f.height_var, 0.0..=1.0);
                         }
                         dirty |= slider(ui, "Scale", &mut f.var_scale, 0.5..=60.0);
