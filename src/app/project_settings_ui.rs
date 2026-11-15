@@ -207,9 +207,9 @@ impl PainterApp {
         for set in 0..set_count {
             self.undo.set = set;
             if set == active_set {
-                Self::discard_channel_from_engine(&mut self.engine, &mut self.undo, ch, CHANNEL_LABELS[ch]);
+                Self::discard_channel_from_engine(&mut self.engine, &mut self.undo, ch);
             } else if let Some(parked) = self.sets.parked.get_mut(set).and_then(Option::as_mut) {
-                Self::discard_channel_from_engine(&mut parked.engine, &mut self.undo, ch, CHANNEL_LABELS[ch]);
+                Self::discard_channel_from_engine(&mut parked.engine, &mut self.undo, ch);
             }
         }
         self.undo.set = active_set;
@@ -223,55 +223,27 @@ impl PainterApp {
         self.status = format!("Removed {} channel and discarded its data from all texture sets.", CHANNEL_LABELS[ch]);
     }
 
-    fn discard_channel_from_engine(
-        engine: &mut Engine,
-        undo: &mut UndoStack,
-        ch: usize,
-        label: &str,
-    ) {
+    fn discard_channel_from_engine(engine: &mut Engine, undo: &mut UndoStack, ch: usize) {
+        // Preserve any property edits that were already pending before removal.
         engine.commit_props(undo);
-        undo.begin_group(format!("Remove {label} channel"));
         let mut changed = false;
         for layer in &mut engine.layers {
-            let id = layer.id;
-            let mut removed_paint = None;
-            let fill_changed = match &mut layer.content {
+            match &mut layer.content {
                 Content::Paint(channels) => {
-                    removed_paint = channels[ch].take();
-                    removed_paint.is_some()
+                    changed |= channels[ch].take().is_some();
                 }
                 Content::Fill(fill) => {
-                    let was_enabled = fill.mat.enabled[ch];
-                    fill.mat.enabled[ch] = false;
-                    was_enabled
+                    if fill.mat.enabled[ch] {
+                        fill.mat.enabled[ch] = false;
+                        changed = true;
+                    }
                 }
-                Content::Folder(_) => false,
-            };
-            if let Some(texture) = removed_paint {
-                undo.push(
-                    format!("Remove {label} paint from {}", layer.name),
-                    crate::undo::Edit::PaintChannel { id, ch, texture: Some(texture) },
-                );
-                changed = true;
-            } else if fill_changed {
-                changed = true;
+                Content::Folder(_) => {}
             }
-            if layer.images[ch].is_some() {
-                let old_images = layer.images.clone();
-                layer.images[ch] = None;
-                undo.push(
-                    format!("Remove {label} image from {}", layer.name),
-                    crate::undo::Edit::Images { id, images: old_images },
-                );
-                changed = true;
-            }
+            changed |= layer.images[ch].take().is_some();
         }
-        // Fill-layer channel toggles are document properties and join the
-        // same per-texture-set undo group.
-        engine.commit_props(undo);
-        undo.end_group();
         if changed {
-            engine.mark_dirty();
+            engine.commit_props_without_undo();
         }
     }
 }
