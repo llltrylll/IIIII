@@ -99,7 +99,7 @@ impl PainterApp {
             }
             ui.add_space(3.0);
             ui.label(
-                egui::RichText::new("Removing a channel permanently discards its paint and material maps from every texture set. Adding it again starts with an empty channel.")
+                egui::RichText::new("Removing a channel permanently discards its paint and material maps from every texture set. Adding it again starts empty.")
                     .small()
                     .color(theme::TEXT_DIM),
             );
@@ -177,7 +177,7 @@ impl PainterApp {
                 .resizable(false)
                 .show(ui.ctx(), |ui| {
                     ui.label(format!(
-                        "This removes {} data from every layer and texture set. The operation can be undone through the layer history, but adding the channel again will not restore its data automatically.",
+                        "This permanently discards {} data from every layer and texture set. This action cannot be undone. Adding the channel again starts empty.",
                         CHANNEL_LABELS[ch]
                     ));
                     ui.horizontal(|ui| {
