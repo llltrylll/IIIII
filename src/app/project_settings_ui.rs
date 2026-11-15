@@ -189,8 +189,8 @@ impl PainterApp {
                     .small()
                     .color(theme::TEXT_DIM),
             );
-            let mut remove_channel = None;
-            ui.menu_button(theme::with_icon(icons::PLUS, "Add Channel"), |ui| {
+            let mut disable_channel = None;
+            ui.menu_button(theme::with_icon(icons::PLUS, "Enable Channel"), |ui| {
                 let mut added = None;
                 for ch in CHANNEL_ORDER {
                     if !self.active_channels[ch] && ui.button(CHANNEL_LABELS[ch]).clicked() {
@@ -215,7 +215,7 @@ impl PainterApp {
                     ui.label(CHANNEL_LABELS[ch]);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button("×").on_hover_text(format!("Disable {} output but preserve its maps", CHANNEL_LABELS[ch])).clicked() {
-                            remove_channel = Some(ch);
+                            disable_channel = Some(ch);
                         }
                     });
                 });
@@ -301,15 +301,15 @@ impl PainterApp {
                 }
             }
 
-            if let Some(ch) = remove_channel {
-                self.pending_channel_remove = Some(ch);
+            if let Some(ch) = disable_channel {
+                self.pending_channel_disable = Some(ch);
             }
         });
 
         let mut decision = None;
         if let Some(ch) = self.pending_channel_remove {
             egui::Window::new(format!("Disable {}?", CHANNEL_LABELS[ch]))
-                .id(egui::Id::unique("remove_project_channel"))
+                .id(egui::Id::unique("disable_project_channel"))
                 .collapsible(false)
                 .resizable(false)
                 .show(ui.ctx(), |ui| {
@@ -329,7 +329,7 @@ impl PainterApp {
         }
         if let (Some(ch), Some(remove)) = (self.pending_channel_remove, decision) {
             self.pending_channel_remove = None;
-            if remove {
+            if disable {
                 self.disable_project_channel(ch);
             }
         }
@@ -344,9 +344,9 @@ impl PainterApp {
         for set in 0..set_count {
             self.undo.set = set;
             if set == active_set {
-                Self::mark_channel_disabled(&mut self.engine, ch);
+                Self::mark_channel_disabled(&mut self.engine, &mut self.undo, ch);
             } else if let Some(parked) = self.sets.parked.get_mut(set).and_then(Option::as_mut) {
-                Self::mark_channel_disabled(&mut parked.engine, ch);
+                Self::mark_channel_disabled(&mut parked.engine, &mut self.undo, ch);
             }
         }
         self.undo.set = active_set;
@@ -367,9 +367,9 @@ impl PainterApp {
         for set in 0..set_count {
             self.undo.set = set;
             if set == active_set {
-                Self::mark_channel_enabled(&mut self.engine, ch);
+                Self::mark_channel_enabled(&mut self.engine, &mut self.undo, ch);
             } else if let Some(parked) = self.sets.parked.get_mut(set).and_then(Option::as_mut) {
-                Self::mark_channel_enabled(&mut parked.engine, ch);
+                Self::mark_channel_enabled(&mut parked.engine, &mut self.undo, ch);
             }
         }
         self.undo.set = active_set;
@@ -378,7 +378,8 @@ impl PainterApp {
         self.status = format!("Enabled {} output. Preserved maps and paint are available again.", CHANNEL_LABELS[ch]);
     }
 
-    fn mark_channel_disabled(engine: &mut Engine, ch: usize) {
+    fn mark_channel_disabled(engine: &mut Engine, undo: &mut UndoStack, ch: usize) {
+        engine.commit_props(undo);
         for layer in &mut engine.layers {
             let has_data = match &layer.content {
                 Content::Paint(channels) => channels[ch].is_some(),
@@ -392,7 +393,8 @@ impl PainterApp {
         engine.mark_dirty();
     }
 
-    fn mark_channel_enabled(engine: &mut Engine, ch: usize) {
+    fn mark_channel_enabled(engine: &mut Engine, undo: &mut UndoStack, ch: usize) {
+        engine.commit_props(undo);
         for layer in &mut engine.layers {
             layer.disabled_channels[ch] = false;
         }
