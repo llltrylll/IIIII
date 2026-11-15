@@ -306,6 +306,13 @@ impl PainterApp {
                 blend: Blend::ALL.into_iter().find(|b| b.name() == blend).unwrap_or(Blend::Normal),
                 content,
                 mask: None,
+                disabled_channels: std::array::from_fn(|ch| {
+                    lv["disabled_channels"]
+                        .as_array()
+                        .and_then(|channels| channels.get(ch))
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                }),
                 parent: lv["parent"].as_u64(),
                 images,
                 thumb: None,
