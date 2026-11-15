@@ -213,6 +213,9 @@ impl PainterApp {
             }
         }
         self.undo.set = active_set;
+        // Remove this channel from every historical snapshot/edit before it
+        // can be restored by undo or redo; unrelated edits remain available.
+        self.undo.discard_channel(ch);
         self.active_channels[ch] = false;
         self.brush.mat.enabled[ch] = false;
         self.other_brush.mat.enabled[ch] = false;
