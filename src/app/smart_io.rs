@@ -308,8 +308,7 @@ impl PainterApp {
                     Content::Folder(_) => false,
                     Content::Paint(_) => false,
                 };
-                disabled_channels[ch] =
-                    !self.active_channels[ch] && (disabled_channels[ch] || has_data);
+                disabled_channels[ch] = !self.active_channels[ch] && has_data;
             }
             let blend = lv["blend"].as_str().unwrap_or("Normal");
             layers.push(Layer {
