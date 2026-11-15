@@ -1634,11 +1634,12 @@ fn swap_brushes(active: &mut Brush, other: &mut Brush) {
     active.stabilize = left.stabilize;
 }
 /// Channel toggles in Substance order: color, height, rough, metal, opacity.
-fn channel_toggles(ui: &mut egui::Ui, enabled: &mut [bool; crate::engine::CHANNELS]) -> bool {
+fn channel_toggles(ui: &mut egui::Ui, enabled: &mut [bool; crate::engine::CHANNELS], active: &[bool; crate::engine::CHANNELS]) -> bool {
     let mut changed = false;
     ui.horizontal_wrapped(|ui| {
         use crate::engine::{NORMAL, SPECULAR};
         for (c, name) in [(0, "color"), (3, "height"), (1, "rough"), (2, "metal"), (SPECULAR, "specular"), (NORMAL, "normal"), (4, "opacity"), (5, "emission")] {
+            if !active[c] { continue; }
             let on = enabled[c];
             let text = egui::RichText::new(name).color(if on { Color32::WHITE } else { theme::TEXT_DIM });
             let b = egui::Button::new(text).fill(if on { theme::ACCENT_DIM } else { theme::WIDGET }).min_size(vec2(56.0, 20.0));
@@ -1657,8 +1658,13 @@ fn channel_toggles(ui: &mut egui::Ui, enabled: &mut [bool; crate::engine::CHANNE
     changed
 }
 
-fn material_controls(ui: &mut egui::Ui, m: &mut MatValues, show_values: bool) -> bool {
-    let mut changed = channel_toggles(ui, &mut m.enabled);
+fn material_controls(
+    ui: &mut egui::Ui,
+    m: &mut MatValues,
+    show_values: bool,
+    active: &[bool; crate::engine::CHANNELS],
+) -> bool {
+    let mut changed = channel_toggles(ui, &mut m.enabled, active);
     if !show_values {
         return changed;
     }
