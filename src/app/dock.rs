@@ -14,6 +14,7 @@ pub(super) enum Pane {
     View2d,
     Layers,
     Properties,
+    ProjectSettings,
     MeshMaps,
     TextureSet,
     Preview,
@@ -38,6 +39,7 @@ impl Pane {
             Pane::View2d => (i::SQUARE, "2D View"),
             Pane::Layers => (i::STACK, "Layers"),
             Pane::Properties => (i::GEAR, "Properties"),
+            Pane::ProjectSettings => (i::GEAR, "Project"),
             Pane::MeshMaps => (i::FIRE, "Mesh Maps"),
             Pane::TextureSet => (i::GRID_FOUR, "Texture Set"),
             Pane::Preview => (i::APERTURE, "Preview"),
@@ -66,6 +68,7 @@ fn panes(ws: Workspace) -> &'static [Pane] {
             Pane::View2d,
             Pane::Layers,
             Pane::Properties,
+            Pane::ProjectSettings,
             Pane::MeshMaps,
             Pane::TextureSet,
             Pane::Preview,
@@ -100,7 +103,8 @@ fn default_tree(ws: Workspace) -> Tree<Pane> {
             let stack: Vec<TileId> = [Pane::Layers, Pane::MeshMaps, Pane::TextureSet, Pane::Preview].map(|p| t.insert_pane(p)).to_vec();
             let stack = t.insert_tab_tile(stack);
             let props = t.insert_pane(Pane::Properties);
-            let props = t.insert_tab_tile(vec![props]);
+            let project = t.insert_pane(Pane::ProjectSettings);
+            let props = t.insert_tab_tile(vec![props, project]);
             let right = t.insert_vertical_tile(vec![stack, props]);
             share(&mut t, right, stack, 1.0);
             share(&mut t, right, props, 1.4);
@@ -213,6 +217,7 @@ impl Behavior<Pane> for DockBehavior<'_> {
             Pane::View2d => app.view_pane(ui, ViewKind::V2d),
             Pane::Layers => app.layers_panel(ui),
             Pane::Properties => app.properties(ui),
+            Pane::ProjectSettings => app.project_settings_panel(ui),
             Pane::MeshMaps => app.mesh_maps_panel(ui),
             Pane::TextureSet => app.texture_set_panel(ui),
             Pane::Preview => app.preview_panel(ui),
