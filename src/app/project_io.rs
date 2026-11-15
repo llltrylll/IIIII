@@ -446,6 +446,7 @@ impl PainterApp {
                 "opacity": l.opacity,
                 "blend": l.blend.name(),
                 "parent": l.parent,
+                "disabled_channels": l.disabled_channels,
                 "content": content,
                 "mask": mask,
             }));
@@ -815,6 +816,13 @@ impl PainterApp {
                     }
                 }
                 let blend_name = s(lv, "blend").unwrap_or("Normal");
+                let disabled_channels = std::array::from_fn(|ch| {
+                    lv["disabled_channels"]
+                        .as_array()
+                        .and_then(|channels| channels.get(ch))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                });
                 layers.push(Layer {
                     id: lv["id"].as_u64().ok_or_else(bad)?,
                     name,
@@ -823,6 +831,7 @@ impl PainterApp {
                     blend: Blend::ALL.into_iter().find(|x| x.name() == blend_name).unwrap_or(Blend::Normal),
                     content,
                     mask,
+                    disabled_channels,
                     parent: lv["parent"].as_u64(),
                     images,
                     thumb: None,
