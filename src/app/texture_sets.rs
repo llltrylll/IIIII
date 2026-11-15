@@ -240,6 +240,8 @@ impl PainterApp {
         }
         self.hidden_objects[object] = hidden;
         self.rebuild_visible_bvh();
+        // Rebuild the key-light shadow map and depth passes as soon as object visibility changes.
+        self.views.invalidate_shadow();
         self.poly.shown = None;
         self.overlays.clear(OverlaySlot::Selection);
         self.vertex_id.shown = None;
