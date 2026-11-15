@@ -514,43 +514,62 @@ impl ObjectDrawBuffers {
         })
     }
 
-    fn new(device: &wgpu::Device, mesh: &GpuMesh, hidden: &[bool]) -> Self {
+    fn new(device: &wgpu::Device, mesh: &GpuMesh, source: &crate::mesh::Mesh, hidden: &[bool]) -> Self {
         let is_hidden = |object: u32| {
             object != u32::MAX && hidden.get(object as usize).copied().unwrap_or(false)
         };
 
-        let mut triangles = Vec::with_capacity(mesh.cpu_indices.len());
+        let mut edge_owner_by_vertices = std::collections::HashMap::new();
+        if source.tri_object.len() == source.triangle_count() {
+            for (tri, ids) in source.indices.chunks_exact(3).enumerate() {
+                let object = source.tri_object[tri];
+                for (a, b) in [(ids[0], ids[1]), (ids[1], ids[2]), (ids[2], ids[0])] {
+                    let key = if a < b { (a, b) } else { (b, a) };
+                    edge_owner_by_vertices.entry(key).or_insert(object);
+                }
+            }
+        }
+        let edge_owners = |pairs: &[u32]| -> Vec<u32> {
+            pairs.chunks_exact(2).map(|pair| {
+                let key = if pair[0] < pair[1] { (pair[0], pair[1]) } else { (pair[1], pair[0]) };
+                edge_owner_by_vertices.get(&key).copied().unwrap_or(u32::MAX)
+            }).collect()
+        };
+        let edge_object = edge_owners(&source.uv_edges);
+        let seam_object = edge_owners(&source.seam_edges);
+
+        let mut triangles = Vec::with_capacity(source.indices.len());
         let mut triangle_ranges = Vec::with_capacity(mesh.sets.len());
-        let mut edges = Vec::with_capacity(mesh.cpu_edges.len());
+        let mut edges = Vec::with_capacity(source.uv_edges.len());
         let mut edge_ranges = Vec::with_capacity(mesh.sets.len());
-        let mut seams = Vec::with_capacity(mesh.cpu_seams.len());
+        let mut seams = Vec::with_capacity(source.seam_edges.len());
         let mut seam_ranges = Vec::with_capacity(mesh.sets.len());
 
         for set in &mesh.sets {
             let start = triangles.len() as u32;
             for tri in set.tris.clone() {
-                let object = mesh.tri_object.get(tri as usize).copied().unwrap_or(u32::MAX);
+                let object = source.tri_object.get(tri as usize).copied().unwrap_or(u32::MAX);
                 let first = tri as usize * 3;
-                if !is_hidden(object) && first + 3 <= mesh.cpu_indices.len() {
-                    triangles.extend_from_slice(&mesh.cpu_indices[first..first + 3]);
+                if !is_hidden(object) && first + 3 <= source.indices.len() {
+                    triangles.extend_from_slice(&source.indices[first..first + 3]);
                 }
             }
             triangle_ranges.push(start..triangles.len() as u32);
 
             let start = edges.len() as u32;
             for pair in (set.edges.start as usize..set.edges.end as usize).step_by(2) {
-                let object = mesh.edge_object.get(pair / 2).copied().unwrap_or(u32::MAX);
-                if !is_hidden(object) && pair + 2 <= mesh.cpu_edges.len() {
-                    edges.extend_from_slice(&mesh.cpu_edges[pair..pair + 2]);
+                let object = edge_object.get(pair / 2).copied().unwrap_or(u32::MAX);
+                if !is_hidden(object) && pair + 2 <= source.uv_edges.len() {
+                    edges.extend_from_slice(&source.uv_edges[pair..pair + 2]);
                 }
             }
             edge_ranges.push(start..edges.len() as u32);
 
             let start = seams.len() as u32;
             for pair in (set.seams.start as usize..set.seams.end as usize).step_by(2) {
-                let object = mesh.seam_object.get(pair / 2).copied().unwrap_or(u32::MAX);
-                if !is_hidden(object) && pair + 2 <= mesh.cpu_seams.len() {
-                    seams.extend_from_slice(&mesh.cpu_seams[pair..pair + 2]);
+                let object = seam_object.get(pair / 2).copied().unwrap_or(u32::MAX);
+                if !is_hidden(object) && pair + 2 <= source.seam_edges.len() {
+                    seams.extend_from_slice(&source.seam_edges[pair..pair + 2]);
                 }
             }
             seam_ranges.push(start..seams.len() as u32);
@@ -1043,14 +1062,22 @@ impl ViewRenderer {
     ) -> Vec<u32> {
         let mut key = make_shadow_cache_key(Self::light_view_proj(engine, settings), mesh.index_count, &mesh.sets, shown);
         key.extend([mesh.mesh_id as u32, (mesh.mesh_id >> 32) as u32]);
-        key.extend(hidden_objects.iter().map(|hidden| u32::from(*hidden)));
+        key.extend(hidden_objects.iter().map(|hidden| if *hidden { 1 } else { 0 }));
         key
     }
 
-    fn ensure_object_draw_buffers(&mut self, device: &wgpu::Device, mesh: &GpuMesh, hidden: &[bool]) {
+    fn ensure_object_draw_buffers(
+        &mut self,
+        device: &wgpu::Device,
+        mesh: &GpuMesh,
+        source: Option<&crate::mesh::Mesh>,
+        hidden: &[bool],
+    ) {
         let mut key = vec![mesh.mesh_id as u32, (mesh.mesh_id >> 32) as u32, hidden.len() as u32];
-        key.extend(hidden.iter().map(|value| u32::from(*value)));
-        let valid_object_map = mesh.tri_object.len() == mesh.index_count as usize / 3 && !mesh.tri_object.is_empty();
+        key.extend(hidden.iter().map(|value| if *value { 1 } else { 0 }));
+        let valid_object_map = source.is_some_and(|source| {
+            source.tri_object.len() == mesh.index_count as usize / 3 && !source.tri_object.is_empty()
+        });
         let has_hidden = hidden.iter().any(|value| *value);
         if !valid_object_map || !has_hidden {
             if self.object_draw.is_some() {
@@ -1064,7 +1091,7 @@ impl ViewRenderer {
         if self.object_draw_key.as_ref() == Some(&key) {
             return;
         }
-        self.object_draw = Some(ObjectDrawBuffers::new(device, mesh, hidden));
+        self.object_draw = Some(ObjectDrawBuffers::new(device, mesh, source.expect("validated object map"), hidden));
         self.object_draw_key = Some(key);
         self.paint_depth_key = None;
         self.shadow_key = None;
@@ -1083,7 +1110,7 @@ impl ViewRenderer {
         settings: &ViewSettings,
         overlays: Option<&Overlays>,
     ) {
-        self.render_3d_with_object_visibility(rs, size, engines, env, mesh, cam, settings, overlays, &[]);
+        self.render_3d_internal(rs, size, engines, env, mesh, cam, settings, overlays, None, &[]);
     }
 
     /// Draws the mesh while excluding hidden imported objects from color, depth,
@@ -1096,13 +1123,30 @@ impl ViewRenderer {
         engines: &[&Engine],
         env: &Environment,
         mesh: &GpuMesh,
+        source_mesh: &crate::mesh::Mesh,
         cam: &OrbitCam,
         settings: &ViewSettings,
         overlays: Option<&Overlays>,
         hidden_objects: &[bool],
     ) {
+        self.render_3d_internal(rs, size, engines, env, mesh, cam, settings, overlays, Some(source_mesh), hidden_objects);
+    }
+
+    fn render_3d_internal(
+        &mut self,
+        rs: &egui_wgpu::RenderState,
+        size: [u32; 2],
+        engines: &[&Engine],
+        env: &Environment,
+        mesh: &GpuMesh,
+        cam: &OrbitCam,
+        settings: &ViewSettings,
+        overlays: Option<&Overlays>,
+        source_mesh: Option<&crate::mesh::Mesh>,
+        hidden_objects: &[bool],
+    ) {
         self.view3d.ensure_size(rs, size);
-        self.ensure_object_draw_buffers(&rs.device, mesh, hidden_objects);
+        self.ensure_object_draw_buffers(&rs.device, mesh, source_mesh, hidden_objects);
         let size = self.view3d.size;
         let vp = cam.view_proj(size[0] as f32 / size[1] as f32);
         while self.globals.len() < engines.len() + 1 {
@@ -1133,7 +1177,7 @@ impl ViewRenderer {
         // Camera, mesh and visibility changes invalidate it; material edits do not.
         let mut paint_depth_key = Self::screen_paint_depth_key(vp, size, mesh, &shown);
         paint_depth_key.extend([mesh.mesh_id as u32, (mesh.mesh_id >> 32) as u32]);
-        paint_depth_key.extend(hidden_objects.iter().map(|hidden| u32::from(*hidden)));
+        paint_depth_key.extend(hidden_objects.iter().map(|hidden| if *hidden { 1 } else { 0 }));
         if self.paint_depth_key.as_ref() != Some(&paint_depth_key) {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("screen paint depth"),
