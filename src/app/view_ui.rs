@@ -19,6 +19,79 @@ impl PainterApp {
         let local = |p: egui::Pos2| Vec2::new((p.x - rect.min.x) * ppp, (p.y - rect.min.y) * ppp);
         use egui::PointerButton as B;
 
+        // Ctrl+' toggles first-person navigation while the pointer is over
+        // the 3D viewport. While active, the pointer is locked/hidden and
+        // keyboard motion is routed exclusively to the camera.
+        let toggle_walk = kind == ViewKind::V3d
+            && (self.walk_navigation || resp.hovered())
+            && !ui.ctx().wants_keyboard_input()
+            && ui.input_mut(|i| {
+                i.consume_shortcut(&egui::KeyboardShortcut::new(
+                    egui::Modifiers::CTRL,
+                    egui::Key::Quote,
+                ))
+            });
+        if toggle_walk {
+            self.walk_navigation = !self.walk_navigation;
+            if self.walk_navigation {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorGrab(
+                    egui::viewport::CursorGrab::Locked,
+                ));
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorVisible(false));
+                self.status = "First-person navigation: WASD move, mouse look, E/Q vertical, Shift faster, Esc exit.".into();
+            } else {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorGrab(
+                    egui::viewport::CursorGrab::None,
+                ));
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
+                self.status = "First-person navigation ended.".into();
+            }
+            ui.ctx().request_repaint();
+            return;
+        }
+
+        if self.walk_navigation && kind == ViewKind::V3d {
+            let (look_delta, dt, forward, backward, left, right, up, down, fast, slow, exit, scroll) =
+                ui.input(|i| (
+                    i.pointer.delta(),
+                    i.stable_dt.clamp(0.0, 0.05),
+                    i.key_down(egui::Key::W),
+                    i.key_down(egui::Key::S),
+                    i.key_down(egui::Key::A),
+                    i.key_down(egui::Key::D),
+                    i.key_down(egui::Key::E),
+                    i.key_down(egui::Key::Q),
+                    i.modifiers.shift,
+                    i.modifiers.ctrl,
+                    i.key_pressed(egui::Key::Escape),
+                    i.smooth_scroll_delta.y,
+                ));
+            if exit {
+                self.walk_navigation = false;
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorGrab(
+                    egui::viewport::CursorGrab::None,
+                ));
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
+                self.status = "First-person navigation ended.".into();
+            } else {
+                self.cam.walk_look(look_delta, 0.0025);
+                if scroll != 0.0 {
+                    self.walk_speed = (self.walk_speed * (scroll * 0.004).exp()).clamp(0.25, 24.0);
+                    self.status = format!("First-person speed: {:.1}", self.walk_speed);
+                }
+                let speed = self.walk_speed * if fast { 4.0 } else if slow { 0.25 } else { 1.0 };
+                self.cam.walk_move(
+                    forward as i32 as f32 - backward as i32 as f32,
+                    right as i32 as f32 - left as i32 as f32,
+                    up as i32 as f32 - down as i32 as f32,
+                    dt,
+                    speed,
+                );
+            }
+            ui.ctx().request_repaint();
+            return;
+        }
+
         // One brush value per gesture, all with the right mouse button and a
         // horizontal drag (right: more): X changes only the size, Z only the
         // stroke opacity, Ctrl only the hardness.
