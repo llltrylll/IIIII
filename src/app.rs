@@ -1710,8 +1710,8 @@ pub(crate) fn add_smart_material(
     add_smart_material_inner(engine, undo, smart, at, parent, None, &[true; crate::engine::CHANNELS])
 }
 
-/// Adds a shelf smart material while excluding channels removed from the project.
-/// Disabled scan maps are never decoded or uploaded to the GPU.
+/// Adds a shelf smart material while preserving every source channel.
+/// Project-disabled channels are retained in the layer and filtered only at compositing time.
 pub(crate) fn add_smart_material_with_channels(
     engine: &mut Engine,
     undo: &mut UndoStack,
@@ -1751,37 +1751,29 @@ fn add_smart_material_inner(
     let folder_id = engine.layers[folder].id;
     for l in smart.layers.iter().chain(&presets::MICRO_DETAIL) {
         // Each layer goes on top of the folder's contents, right below the folder.
-        // Excluded channels are removed before the layer enters the Engine.
-        let mut fill = l.fill();
-        let mut disabled_channels = std::array::from_fn(|ch| !active_channels[ch] && fill.mat.enabled[ch]);
-        for ch in 0..crate::engine::CHANNELS {
-            if !active_channels[ch] {
-                fill.mat.enabled[ch] = false;
-            }
-        }
+        // Keep its original channel flags even when the project currently disables them.
+        let fill = l.fill();
+        let mut disabled_channels =
+            project_settings_ui::disabled_fill_channels(&fill, active_channels);
         let idx = engine.add_fill_layer(folder, Some(folder_id), l.name.to_string(), fill, undo);
         folder = idx + 1;
         if let Some(scan) = l.scan {
-            // Maps the set lacks (or a missing assets folder) leave the
-            // material's own values in place.
+            // Load every source map, including channels currently disabled by the project.
             if let Some(dir) = crate::environment::asset_dir("pbr").map(|d| d.join(scan.id)) {
                 for (ch, file) in presets::Scan::FILES {
                     let path = dir.join(file);
-                    if !active_channels[ch] {
-                        let exists = cached_images.is_some_and(|images| images.contains_key(&path)) || path.is_file();
-                        if exists {
+                    let image = if let Some(images) = cached_images {
+                        images.get(&path).cloned()
+                    } else if path.is_file() {
+                        engine.shared_fill_image(&path).ok()
+                    } else {
+                        None
+                    };
+                    if let Some(img) = image {
+                        engine.set_fill_image(idx, ch, Some(img), undo);
+                        if !active_channels[ch] {
                             disabled_channels[ch] = true;
                         }
-                        continue;
-                    }
-                    if let Some(images) = cached_images {
-                        if let Some(img) = images.get(&path) {
-                            engine.set_fill_image(idx, ch, Some(img.clone()), undo);
-                        }
-                    } else if path.is_file()
-                        && let Ok(img) = engine.shared_fill_image(&path)
-                    {
-                        engine.set_fill_image(idx, ch, Some(img), undo);
                     }
                 }
             }
@@ -2348,9 +2340,10 @@ impl PainterApp {
                     self.selected = self.engine.add_paint_layer(at, parent, None, &mut self.undo);
                     self.target = StrokeTarget::Content;
                 }
-                Action::AddFill(mut fill, name) => {
-                    self.filter_fill_channels(&mut fill);
+                Action::AddFill(fill, name) => {
+                    let disabled = project_settings_ui::disabled_fill_channels(&fill, &self.active_channels);
                     self.selected = self.engine.add_fill_layer(at, parent, name, fill, &mut self.undo);
+                    self.engine.layers[self.selected].disabled_channels = disabled;
                     self.target = StrokeTarget::Content;
                 }
                 Action::AddFolder => {
@@ -2473,12 +2466,10 @@ impl PainterApp {
                     }
                     ShelfItem::Material(i) => {
                         let m = &presets::MATERIALS[i];
-                        let mut fill = m.fill();
-                        let source_channels = fill.mat.enabled;
-                        self.filter_fill_channels(&mut fill);
+                        let fill = m.fill();
+                        let disabled = project_settings_ui::disabled_fill_channels(&fill, &self.active_channels);
                         self.selected = self.engine.add_fill_layer(at, parent, m.name.to_string(), fill, &mut self.undo);
-                        self.engine.layers[self.selected].disabled_channels =
-                            std::array::from_fn(|ch| !self.active_channels[ch] && source_channels[ch]);
+                        self.engine.layers[self.selected].disabled_channels = disabled;
                         self.target = StrokeTarget::Content;
                     }
                     ShelfItem::Generator(g) => self.pending.push(Action::AddGenerator(g)),
@@ -2519,10 +2510,6 @@ impl PainterApp {
                     self.status = format!("Brush tip: {name}.");
                 }
                 Action::TextureToChannel { texture, ch } => {
-                    if !self.active_channels.get(ch).copied().unwrap_or(false) {
-                        self.status = "Enable this channel in Project Settings before adding an image to it.".into();
-                        continue;
-                    }
                     let is_fill = self.engine.layers.get(self.selected).is_some_and(|l| l.is_fill());
                     if !is_fill {
                         self.status = "Select a fill layer to put the texture on.".into();
@@ -2534,6 +2521,7 @@ impl PainterApp {
                                     f.mat.enabled[ch] = true;
                                 }
                                 self.engine.set_fill_image(idx, ch, Some(img), &mut self.undo);
+                                self.engine.layers[idx].disabled_channels[ch] = !self.active_channels[ch];
                             }
                             Err(e) => self.status = e,
                         }
@@ -2541,16 +2529,18 @@ impl PainterApp {
                 }
                 Action::SetFillImage { idx, ch, path } => match path {
                     None => self.engine.set_fill_image(idx, ch, None, &mut self.undo),
-                    Some(_path) if !self.active_channels.get(ch).copied().unwrap_or(false) => {
-                        self.status = "Enable this channel in Project Settings before loading an image.".into();
-                    }
                     Some(path) => {
                         let name = path.file_name().map_or("image".into(), |n| n.to_string_lossy().into_owned());
                         let loaded = std::fs::read(&path)
                             .map_err(|e| format!("can't read {}: {e}", path.display()))
                             .and_then(|bytes| self.engine.decode_fill_image(name, Arc::new(bytes)));
                         match loaded {
-                            Ok(img) => self.engine.set_fill_image(idx, ch, Some(img), &mut self.undo),
+                            Ok(img) => {
+                                self.engine.set_fill_image(idx, ch, Some(img), &mut self.undo);
+                                if let Some(layer) = self.engine.layers.get_mut(idx) {
+                                    layer.disabled_channels[ch] = !self.active_channels[ch];
+                                }
+                            },
                             Err(e) => self.status = e,
                         }
                     }
@@ -4659,10 +4649,6 @@ impl PainterApp {
     /// A fill layer whose height comes from a shelf texture, projected
     /// tri-planar so it tiles seamlessly on any mesh.
     fn add_texture_layer(&mut self, i: usize, at: usize, parent: Option<u64>) {
-        if !self.active_channels[3] {
-            self.status = "Height is disabled. Add the Height channel in Project Settings before using shelf textures.".into();
-            return;
-        }
         let t = &crate::textures::TEXTURES[i];
         let img = match self.texture_image(i) {
             Ok(img) => img,
