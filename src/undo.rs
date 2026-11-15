@@ -212,6 +212,8 @@ pub enum Edit {
     /// Layer order, by id.
     Order(Vec<u64>),
     Content { id: u64, content: Content },
+    /// One painted channel on a paint layer.
+    PaintChannel { id: u64, ch: usize, texture: Option<Tex> },
     /// The folder a layer is in.
     Parent { id: u64, parent: Option<u64> },
     /// A fill layer's channel images.
