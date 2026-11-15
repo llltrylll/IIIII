@@ -340,6 +340,12 @@ impl RayTracer {
         self.shown_post = None;
     }
 
+    /// The displayed image, for tests that read the path tracer's output back.
+    #[cfg(test)]
+    pub(crate) fn display_image(&self) -> Option<&Tex> {
+        self.target.as_ref().map(|t| &t.display)
+    }
+
     pub fn converged(&self, settings: &RtSettings) -> bool {
         self.samples >= settings.max_samples
     }

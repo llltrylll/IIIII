@@ -22,6 +22,8 @@ mod polyfill;
 mod post;
 mod presets;
 #[cfg(test)]
+mod normal_parity_test;
+#[cfg(test)]
 mod preview_test;
 mod raytrace;
 mod select;

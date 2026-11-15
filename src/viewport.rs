@@ -32,9 +32,27 @@ pub enum ViewMode {
     WorldNormal,
     Position,
     MissedRays,
+    /// Shading diagnostics (3D view only): the pieces of the tangent frame
+    /// behind the lit normal, as world-space vectors. See `shading_debug` in view.wgsl.
+    DiagGeometricNormal,
+    DiagShadingNormal,
+    DiagTangent,
+    DiagBitangent,
+    DiagMappedNormal,
+    DiagGrazingClamp,
 }
 
 impl ViewMode {
+    /// The shading diagnostics, listed in the 3D view menu only.
+    pub const DIAGNOSTICS: [ViewMode; 6] = [
+        ViewMode::DiagGeometricNormal,
+        ViewMode::DiagShadingNormal,
+        ViewMode::DiagTangent,
+        ViewMode::DiagBitangent,
+        ViewMode::DiagMappedNormal,
+        ViewMode::DiagGrazingClamp,
+    ];
+
     pub const CHANNELS: [ViewMode; 9] = [
         ViewMode::Material,
         ViewMode::BaseColor,
@@ -71,6 +89,12 @@ impl ViewMode {
             ViewMode::WorldNormal => 19,
             ViewMode::Position => 20,
             ViewMode::MissedRays => 21,
+            ViewMode::DiagGeometricNormal => 26,
+            ViewMode::DiagShadingNormal => 27,
+            ViewMode::DiagTangent => 28,
+            ViewMode::DiagBitangent => 29,
+            ViewMode::DiagMappedNormal => 30,
+            ViewMode::DiagGrazingClamp => 31,
         }
     }
 
@@ -91,6 +115,12 @@ impl ViewMode {
             ViewMode::WorldNormal => "World Space Normal",
             ViewMode::Position => "Position",
             ViewMode::MissedRays => "Missed Rays",
+            ViewMode::DiagGeometricNormal => "Geometric normal",
+            ViewMode::DiagShadingNormal => "Shading normal",
+            ViewMode::DiagTangent => "Tangent",
+            ViewMode::DiagBitangent => "Bitangent",
+            ViewMode::DiagMappedNormal => "Mapped normal (world)",
+            ViewMode::DiagGrazingClamp => "Grazing clamp",
         }
     }
 }

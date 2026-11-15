@@ -300,7 +300,8 @@ fn mesh_surface(h: Hit, o: vec3<f32>, d: vec3<f32>) -> Surface {
     let layer = i32(tri_uv[i].z);
     let tg = tri_tan[i] * w0 + tri_tan[i + 1u] * h.b1 + tri_tan[i + 2u] * h.b2;
     // Face toward the incoming ray (open meshes, backfaces).
-    if (dot(s.ng, d) > 0.0) {
+    let back_face = dot(s.ng, d) > 0.0;
+    if (back_face) {
         s.ng = -s.ng;
     }
     if (dot(n, s.ng) < 0.0) {
@@ -334,9 +335,17 @@ fn mesh_surface(h: Hit, o: vec3<f32>, d: vec3<f32>) -> Surface {
     let pn = normalize(textureSampleLevel(t_normal, samp, uv, layer, 0.0).xyz * 2.0 - 1.0);
     base = normalize(vec3<f32>(base.xy + pn.xy, base.z * pn.z));
     let ts = normalize(vec3<f32>(base.xy + vec2<f32>(-hu, ht), base.z));
-    // MikkTSpace decoding, as in the raster view.
-    let b_up = -cross(rn, tg.xyz) * select(1.0, -1.0, tg.w < 0.0);
-    s.n = normalize(tg.xyz * ts.x + b_up * ts.y + rn * ts.z);
+    // MikkTSpace decoding, as in the raster view, including its back-face
+    // rule: seen from behind the tangent and handedness flip (Blender negates
+    // the whole mapped normal there), so the bitangent keeps its direction.
+    var tan_dir = tg.xyz;
+    var tan_sign = select(1.0, -1.0, tg.w < 0.0);
+    if (back_face) {
+        tan_dir = -tan_dir;
+        tan_sign = -tan_sign;
+    }
+    let b_up = -cross(rn, tan_dir) * tan_sign;
+    s.n = normalize(tan_dir * ts.x + b_up * ts.y + rn * ts.z);
     let normal_view_dot = dot(s.n, -d);
     if (normal_view_dot <= 0.0) {
         // Move the mapped normal just inside the viewer-facing hemisphere.

@@ -3653,6 +3653,11 @@ impl PainterApp {
                         for c in &self.bake_settings.custom {
                             ui.selectable_value(&mut self.view.mode, ViewMode::Custom(c.id), &c.name);
                         }
+                        ui.separator();
+                        ui.label(egui::RichText::new("SHADING DIAGNOSTICS").small().color(theme::TEXT_DIM));
+                        for m in ViewMode::DIAGNOSTICS {
+                            ui.selectable_value(&mut self.view.mode, m, m.name());
+                        }
                     })
                     .response
                     .on_hover_text("What the 3D viewport shows (M: material, C: next channel)");

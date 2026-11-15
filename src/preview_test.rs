@@ -17,7 +17,7 @@ use glam::Vec3;
 use std::path::Path;
 use std::sync::Arc;
 
-fn render_state() -> egui_wgpu::RenderState {
+pub(crate) fn render_state() -> egui_wgpu::RenderState {
     let (instance, adapter, device, queue) = gpu_with_adapter();
     let target_format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let renderer = egui_wgpu::Renderer::new(&device, target_format, Default::default());

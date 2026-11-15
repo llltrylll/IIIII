@@ -374,6 +374,15 @@ struct Shade {
     shadow: f32,
     uv: vec2<f32>,
     wpos: vec3<f32>,
+    // Diagnostics (view modes 26-31): the world-space frame behind `n`. `rn`,
+    // `tg` and `bt` are the oriented shading normal, tangent and bitangent
+    // (V up); `nm` is the normal map's vector transformed to world space,
+    // before the grazing-angle clamp; `clamped` is 1 where that clamp moved it.
+    rn: vec3<f32>,
+    tg: vec3<f32>,
+    bt: vec3<f32>,
+    nm: vec3<f32>,
+    clamped: f32,
 };
 
 fn mesh_shade_inputs(in: MeshOut, front: bool) -> Shade {
@@ -445,12 +454,28 @@ fn mesh_shade_inputs(in: MeshOut, front: bool) -> Shade {
         }
     }
 
+    // Seen from behind, Blender maps the normal in the front-side frame and
+    // negates the whole result: tangent, bitangent and normal all flip. `rn`
+    // above already flipped the normal (and with it the bitangent), so the
+    // tangent has to flip too, with the handedness so the bitangent keeps
+    // the direction it has. Without this the tilt along U is mirrored on every
+    // back-facing fragment (cables, rotor blades, open edges).
+    if (!front) {
+        tangent = -tangent;
+        handedness = -handedness;
+    }
+
     // MikkTSpace decoding: the interpolated normal and tangent as they are
     // (not normalized or made orthogonal), the bitangent from their cross
     // product, normalized only after combining. The baker inverts exactly
     // this, and so do Unity, Unreal, Godot and Blender.
     let b_up = -cross(rn, tangent) * handedness;
     c.n = normalize(tangent * c.s.ts.x + b_up * c.s.ts.y + rn * c.s.ts.z);
+    c.rn = rn;
+    c.tg = tangent;
+    c.bt = b_up;
+    c.nm = c.n;
+    c.clamped = 0.0;
     // Keep the mapped shading normal in the viewer-facing hemisphere. The
     // path tracer applies the same correction; without it, steep normal maps
     // can make the raster viewport reflect the environment from behind the
@@ -459,6 +484,7 @@ fn mesh_shade_inputs(in: MeshOut, front: bool) -> Shade {
     if (normal_view_dot <= 0.0) {
         let geometric_view_dot = max(dot(c.gn, c.v), 1e-4);
         c.n = normalize(c.n + c.gn * ((0.01 - normal_view_dot) / geometric_view_dot));
+        c.clamped = 1.0;
     }
     c.l = normalize(g.sun.xyz);
     c.light = g.sun_c.rgb * g.sun.w * g.sun_c.w;
@@ -491,11 +517,35 @@ fn view_alpha(s: Surface) -> f32 {
     return select(1.0, s.alpha, i32(g.params.x) == 0);
 }
 
+// Shading diagnostics (view modes 26-31): one piece of the frame that
+// `mesh_shade_inputs` builds per mode, as a world-space vector encoded 0..1.
+// Mode 31 shows the grazing clamp: red where it moved the mapped normal,
+// otherwise how much the shading normal faces the viewer.
+fn shading_debug(mode: i32, c: Shade) -> vec3<f32> {
+    var v = c.gn;
+    switch mode {
+        case 27: { v = c.rn; }
+        case 28: { v = c.tg; }
+        case 29: { v = c.bt; }
+        case 30: { v = c.nm; }
+        case 31: {
+            return mix(lin(clamp(dot(c.n, c.v), 0.0, 1.0)), vec3<f32>(1.0, 0.0, 0.0), c.clamped);
+        }
+        default: {}
+    }
+    let e = v * 0.5 + 0.5;
+    return e * e;
+}
+
 @fragment
 fn fs_mesh(in: MeshOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let c = mesh_shade_inputs(in, front);
     if (view_alpha(c.s) < OPAQUE) {
         discard;
+    }
+    let mode = i32(g.params.x);
+    if (mode >= 26 && mode <= 31) {
+        return vec4<f32>(shading_debug(mode, c), 1.0);
     }
     return vec4<f32>(highlighted(shade(c.s, c.n, c.v, c.shadow)), 1.0);
 }
