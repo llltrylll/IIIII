@@ -293,7 +293,7 @@ impl PainterApp {
                         pos2(rect.right() - 27.0, rect.top() + 1.0),
                         vec2(25.0, 23.0),
                     );
-                    let eye_id = ui.id().with(("project_mesh_object_eye", index));
+                    let eye_id = ui.scope_id().with(("project_mesh_object_eye", index));
                     let eye = ui.interact(eye_rect, eye_id, Sense::click());
                     let icon = if hidden { icons::EYE_SLASH } else { icons::EYE };
                     if eye.hovered() {
