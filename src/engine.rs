@@ -30,6 +30,8 @@ use wgpu::TextureFormat as F;
 /// Paint channels: base color, roughness, metallic, height, opacity,
 /// emission, normal, specular.
 pub const CHANNELS: usize = 8;
+/// The height channel (displacement data).
+pub const HEIGHT: usize = 3;
 /// The opacity channel (composited into the final base color's alpha).
 pub const OPACITY: usize = 4;
 /// The emission channel: light the surface gives off (sRGB color).
