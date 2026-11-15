@@ -74,7 +74,7 @@ impl PainterApp {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
                 self.status = "First-person navigation ended.".into();
             } else {
-                self.cam.walk_look(look_delta, 0.0025);
+                self.cam.walk_look(Vec2::new(look_delta.x, look_delta.y), 0.0025);
                 if scroll != 0.0 {
                     self.walk_speed = (self.walk_speed * (scroll * 0.004).exp()).clamp(0.25, 24.0);
                     self.status = format!("First-person speed: {:.1}", self.walk_speed);
