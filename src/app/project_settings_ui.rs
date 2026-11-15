@@ -3,7 +3,7 @@ use super::*;
 
 const CHANNEL_LABELS: [&str; crate::engine::CHANNELS] =
     ["Base Color", "Roughness", "Metallic", "Height", "Opacity", "Emission", "Normal", "Specular"];
-const CHANNEL_ORDER: [usize; crate::engine::CHANNELS] = [0, 6, 1, 2, 3, 4, 5, 7];
+const CHANNEL_ORDER: [usize; crate::engine::CHANNELS] = [0, 6, 1, 2, HEIGHT_CHANNEL, 4, 5, 7];
 const HEIGHT_CHANNEL: usize = 3;
 
 fn apply_project_channel_mask(fill: &mut FillParams, active: &[bool; crate::engine::CHANNELS]) {
@@ -172,7 +172,7 @@ impl PainterApp {
         let mut decision = None;
         if let Some(ch) = self.pending_channel_remove {
             egui::Window::new(format!("Remove {}?", CHANNEL_LABELS[ch]))
-                .id(egui::Id::new("remove_project_channel"))
+                .id(egui::Id::unique())
                 .collapsible(false)
                 .resizable(false)
                 .show(ui.ctx(), |ui| {
