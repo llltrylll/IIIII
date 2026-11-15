@@ -399,7 +399,17 @@ pub struct GpuMesh {
     pub seam_count: u32,
     /// The texture sets' ranges (see [`crate::mesh::MeshSet`]).
     pub sets: Vec<crate::mesh::MeshSet>,
+    /// CPU index data retained so object visibility can rebuild compact draw lists.
+    pub cpu_indices: Vec<u32>,
+    pub tri_object: Vec<u32>,
+    pub edge_object: Vec<u32>,
+    pub seam_object: Vec<u32>,
+    /// Unique for this GPU mesh, so cached filtered index buffers cannot leak
+    /// across two different meshes with the same triangle counts.
+    pub mesh_id: u64,
 }
+
+static NEXT_GPU_MESH_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl GpuMesh {
     pub fn new(device: &wgpu::Device, mesh: &crate::mesh::Mesh) -> GpuMesh {
@@ -426,6 +436,28 @@ impl GpuMesh {
             contents: bytemuck::cast_slice(seam_data),
             usage: wgpu::BufferUsages::INDEX,
         });
+
+        let mut edge_owner_by_vertices = std::collections::HashMap::new();
+        if mesh.tri_object.len() == mesh.triangle_count() {
+            for (tri, ids) in mesh.indices.chunks_exact(3).enumerate() {
+                let object = mesh.tri_object[tri];
+                for (a, b) in [(ids[0], ids[1]), (ids[1], ids[2]), (ids[2], ids[0])] {
+                    let key = if a < b { (a, b) } else { (b, a) };
+                    edge_owner_by_vertices.entry(key).or_insert(object);
+                }
+            }
+        }
+        let owners_for_edges = |edges: &[u32]| -> Vec<u32> {
+            edges
+                .chunks_exact(2)
+                .map(|pair| {
+                    let key = if pair[0] < pair[1] { (pair[0], pair[1]) } else { (pair[1], pair[0]) };
+                    edge_owner_by_vertices.get(&key).copied().unwrap_or(u32::MAX)
+                })
+                .collect()
+        };
+        let edge_object = owners_for_edges(&mesh.uv_edges);
+        let seam_object = owners_for_edges(&mesh.seam_edges);
         GpuMesh {
             vertices,
             indices,
@@ -435,6 +467,11 @@ impl GpuMesh {
             seams,
             seam_count: mesh.seam_edges.len() as u32,
             sets: mesh.sets.clone(),
+            cpu_indices: mesh.indices.clone(),
+            tri_object: mesh.tri_object.clone(),
+            edge_object,
+            seam_object,
+            mesh_id: NEXT_GPU_MESH_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
     }
 }
