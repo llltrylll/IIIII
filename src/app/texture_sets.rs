@@ -223,6 +223,7 @@ impl PainterApp {
         self.sets.hidden[k] = hidden;
         self.rebuild_visible_bvh();
         self.poly.shown = None;
+        self.overlays.clear(OverlaySlot::Selection);
         self.status = format!("{} {}.", if hidden { "Hid" } else { "Showed" }, self.mesh.sets[k].name);
     }
 
@@ -240,6 +241,7 @@ impl PainterApp {
         self.hidden_objects[object] = hidden;
         self.rebuild_visible_bvh();
         self.poly.shown = None;
+        self.overlays.clear(OverlaySlot::Selection);
         self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
         self.status = format!("{} object '{}'.", if hidden { "Hid" } else { "Showed" }, self.mesh.objects[object]);
     }
