@@ -221,24 +221,60 @@ impl PainterApp {
             return;
         }
         self.sets.hidden[k] = hidden;
+        self.rebuild_visible_bvh();
+        self.poly.shown = None;
+        self.status = format!("{} {}.", if hidden { "Hid" } else { "Showed" }, self.mesh.sets[k].name);
+    }
+
+    /// Hides one imported object without removing its triangles from the mesh.
+    pub(super) fn set_object_hidden(&mut self, object: usize, hidden: bool) {
+        let n = self.mesh.objects.len();
+        self.hidden_objects.resize(n, false);
+        if object >= n || self.hidden_objects[object] == hidden {
+            return;
+        }
+        if hidden && self.hidden_objects.iter().filter(|value| !**value).count() <= 1 {
+            self.status = "At least one mesh object must remain visible.".into();
+            return;
+        }
+        self.hidden_objects[object] = hidden;
+        self.rebuild_visible_bvh();
+        self.poly.shown = None;
+        self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
+        self.status = format!("{} object '{}'.", if hidden { "Hid" } else { "Showed" }, self.mesh.objects[object]);
+    }
+
+    /// Rebuilds picking/ray-tracing geometry with both hidden texture sets
+    /// and hidden imported objects excluded from the acceleration structure.
+    pub(super) fn rebuild_visible_bvh(&mut self) {
         let mesh = self.mesh.clone();
-        let shown: Vec<std::ops::Range<u32>> =
-            mesh.sets.iter().zip(&self.sets.hidden).filter(|(_, h)| !**h).map(|(s, _)| s.tris.clone()).collect();
-        self.bvh = Arc::new(if shown.len() == n {
+        let sets_hidden = self.sets.hidden.clone();
+        let objects_hidden = self.hidden_objects.clone();
+        let any_hidden = sets_hidden.iter().any(|hidden| *hidden)
+            || objects_hidden.iter().any(|hidden| *hidden);
+        self.bvh = Arc::new(if !any_hidden {
             Bvh::from_mesh(&mesh)
         } else {
-            Bvh::from_mesh_where(&mesh, |t| shown.iter().any(|r| r.contains(&(t as u32))))
+            Bvh::from_mesh_where(&mesh, |tri| {
+                let tri = tri as u32;
+                if sets_hidden.get(mesh.set_of(tri)).copied().unwrap_or(false) {
+                    return false;
+                }
+                let object = mesh.tri_object.get(tri as usize).copied().unwrap_or(u32::MAX) as usize;
+                !objects_hidden.get(object).copied().unwrap_or(false)
+            })
         });
         if let Some(raytracer) = self.raytracer.as_mut() {
             raytracer.set_mesh(&self.rs.device, &mesh, &self.bvh);
         }
-        self.poly.shown = None;
-        self.status = format!("{} {}.", if hidden { "Hid" } else { "Showed" }, mesh.sets[k].name);
     }
 
-    /// Whether triangle `t` belongs to a hidden texture set.
+    /// Whether triangle `t` belongs to a hidden texture set or object.
     pub(super) fn tri_hidden(&self, t: u32) -> bool {
-        self.sets.hidden.iter().any(|h| *h) && self.sets.hidden.get(self.mesh.set_of(t)).copied().unwrap_or(false)
+        let set_hidden = self.sets.hidden.get(self.mesh.set_of(t)).copied().unwrap_or(false);
+        let object = self.mesh.tri_object.get(t as usize).copied().unwrap_or(u32::MAX) as usize;
+        let object_hidden = self.hidden_objects.get(object).copied().unwrap_or(false);
+        set_hidden || object_hidden
     }
 
     /// How the 3D view draws each set this frame: hidden ones left out,
