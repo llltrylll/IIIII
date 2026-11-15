@@ -671,6 +671,11 @@ impl PainterApp {
                     .find(|m| m.key() == mode_key)
                     .ok_or(format!("mode must be triangle, polygon, part, object or uv_island, not '{mode_key}'"))?;
                 let topo = self.poly_topology();
+                let view_kind = if args.get("uv").and_then(Value::as_array).is_some() {
+                    super::ViewKind::V2d
+                } else {
+                    super::ViewKind::V3d
+                };
                 let tri = if let Some(uv) = args.get("uv").and_then(Value::as_array) {
                     let v = |k: usize| uv.get(k).and_then(Value::as_f64).unwrap_or(0.0) as f32;
                     topo.pick_uv(glam::Vec2::new(v(0), v(1))).ok_or("no triangle at that UV position")?
@@ -717,7 +722,13 @@ impl PainterApp {
                 if !self.engine.begin_stroke(i, target, mat.enabled, erase) {
                     return Err("nothing to fill: check the channels (or, erasing, that the layer has paint)".into());
                 }
-                let tris = topo.select(mode, tri);
+                let tris: Vec<u32> = topo.select(mode, tri)
+                    .into_iter()
+                    .filter(|&triangle| !self.tri_hidden(triangle, view_kind))
+                    .collect();
+                if tris.is_empty() {
+                    return Err("the selected region contains no visible triangles".into());
+                }
                 let geometry = topo.uv_geometry(&tris, 2.0 / self.engine.res as f32);
                 let paint = BrushPaint {
                     mat,
