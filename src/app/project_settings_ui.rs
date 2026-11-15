@@ -143,6 +143,8 @@ impl PainterApp {
                         if changed {
                             self.hidden_objects.fill(false);
                             self.rebuild_visible_bvh();
+                            self.poly.shown = None;
+                            self.overlays.clear(OverlaySlot::Selection);
                             self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
                             self.status = "Showed all mesh objects.".into();
                         }
