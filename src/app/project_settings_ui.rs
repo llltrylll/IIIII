@@ -51,6 +51,14 @@ pub(super) fn filter_layer_channels(
             if active[ch] {
                 continue;
             }
+            let has_data = match &layer.content {
+                Content::Paint(channels) => channels[ch].is_some(),
+                Content::Fill(fill) => fill.mat.enabled[ch] || layer.images[ch].is_some(),
+                Content::Folder(_) => false,
+            };
+            if has_data {
+                layer.disabled_channels[ch] = true;
+            }
             match &mut layer.content {
                 Content::Paint(channels) => channels[ch] = None,
                 Content::Fill(fill) => fill.mat.enabled[ch] = false,
@@ -124,6 +132,8 @@ mod channel_mask_tests {
         let Content::Fill(fill) = &layer.content else { panic!("expected fill layer") };
         assert!(!fill.mat.enabled[HEIGHT_CHANNEL]);
         assert!(fill.mat.enabled[0]);
+        assert!(layer.disabled_channels[HEIGHT_CHANNEL]);
+        assert!(!layer.disabled_channels[0]);
     }
 
     #[test]
@@ -370,6 +380,14 @@ impl PainterApp {
         engine.commit_props(undo);
         let mut changed = false;
         for layer in &mut engine.layers {
+            let has_data = match &layer.content {
+                Content::Paint(channels) => channels[ch].is_some(),
+                Content::Fill(fill) => fill.mat.enabled[ch] || layer.images[ch].is_some(),
+                Content::Folder(_) => false,
+            };
+            if has_data {
+                layer.disabled_channels[ch] = true;
+            }
             match &mut layer.content {
                 Content::Paint(channels) => {
                     changed |= channels[ch].take().is_some();
