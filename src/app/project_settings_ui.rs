@@ -307,7 +307,7 @@ impl PainterApp {
         });
 
         let mut decision = None;
-        if let Some(ch) = self.pending_channel_remove {
+        if let Some(ch) = self.pending_channel_disable {
             egui::Window::new(format!("Disable {}?", CHANNEL_LABELS[ch]))
                 .id(egui::Id::unique("disable_project_channel"))
                 .collapsible(false)
@@ -327,8 +327,8 @@ impl PainterApp {
                     });
                 });
         }
-        if let (Some(ch), Some(remove)) = (self.pending_channel_remove, decision) {
-            self.pending_channel_remove = None;
+        if let (Some(ch), Some(disable)) = (self.pending_channel_disable, decision) {
+            self.pending_channel_disable = None;
             if disable {
                 self.disable_project_channel(ch);
             }
