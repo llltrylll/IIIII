@@ -421,7 +421,7 @@ mod tests {
         match &history.undo[0].edit {
             Edit::Group(edits) => {
                 assert_eq!(edits.len(), 1);
-                assert!(matches!(edits[0], Edit::Order(_)));
+                assert!(matches!(&edits[0], Edit::Order(_)));
             }
             _ => panic!("unrelated grouped edits should remain grouped"),
         }
