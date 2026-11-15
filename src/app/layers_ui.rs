@@ -85,6 +85,7 @@ impl PainterApp {
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click_and_drag());
         let indent = self.engine.depth(idx) as f32 * 16.0;
         let layer = &self.engine.layers[idx];
+        let inactive_map_names = project_settings_ui::disabled_map_names(layer, &self.active_channels);
         let (id, visible, name) = (layer.id, layer.visible, layer.name.clone());
         resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListItem, true, idx == self.selected, &name));
         let folder_open = match layer.content {
@@ -183,9 +184,35 @@ impl PainterApp {
 
         // Name and blend info.
         let text_col = if visible { Color32::WHITE } else { theme::TEXT_DIM };
-        let title = theme::elided(&painter, &name, egui::FontId::proportional(12.5), text_col, rect.max.x - x - 8.0);
+        let has_inactive_maps = !inactive_map_names.is_empty();
+        let marker_reserve = if has_inactive_maps { 25.0 } else { 8.0 };
+        let title = theme::elided(
+            &painter,
+            &name,
+            egui::FontId::proportional(12.5),
+            text_col,
+            (rect.max.x - x - marker_reserve).max(0.0),
+        );
         let name_cut = title.elided;
         painter.galley(pos2(x, rect.min.y + 13.0 - title.size().y * 0.5), title, text_col);
+        if has_inactive_maps {
+            let marker_rect = Rect::from_center_size(
+                pos2(rect.right() - 13.0, rect.min.y + 13.0),
+                vec2(20.0, 20.0),
+            );
+            let marker = ui.interact(marker_rect, base_id.with("disabled_map_warning"), Sense::hover());
+            painter.text(
+                marker_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                icons::INFO,
+                egui::FontId::proportional(14.0),
+                Color32::from_rgb(238, 171, 67),
+            );
+            marker.on_hover_text(format!(
+                "This layer contains data in disabled channels: {}",
+                inactive_map_names.join(", ")
+            ));
+        }
         let mb = self.engine.layer_vram_bytes(idx) as f64 / (1024.0 * 1024.0);
         let info = match &layer.content {
             Content::Folder(_) => {
