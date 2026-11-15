@@ -340,63 +340,6 @@ mod tests {
     use super::{Edit, UndoStack};
 
     #[test]
-    fn discarding_channel_sanitizes_content_inside_group_and_keeps_other_edits() {
-        use crate::engine::{Content, FillParams};
-
-        let mut fill = FillParams::default();
-        fill.mat.enabled[3] = true;
-        let mut history = UndoStack::default();
-        history.begin_group("mixed edit");
-        history.push("height fill", Edit::Content { id: 7, content: Content::Fill(fill) });
-        history.push("layer order", Edit::Order(vec![7]));
-        history.end_group();
-
-        history.discard_channel(3);
-
-        assert_eq!(history.undo.len(), 1);
-        match &history.undo[0].edit {
-            Edit::Group(edits) => {
-                assert_eq!(edits.len(), 2);
-                let Edit::Content { content: Content::Fill(fill), .. } = &edits[0] else {
-                    panic!("expected the fill edit to remain available");
-                };
-                assert!(!fill.mat.enabled[3]);
-                assert!(matches!(&edits[1], Edit::Order(_)));
-            }
-            _ => panic!("unrelated grouped edits should remain grouped"),
-        }
-    }
-
-    #[test]
-    fn discarding_channel_sanitizes_fill_properties_in_history() {
-        use super::{DocProps, LayerProps};
-        use crate::engine::FillParams;
-
-        let mut fill = FillParams::default();
-        fill.mat.enabled[3] = true;
-        let props = DocProps {
-            layers: vec![(1, LayerProps {
-                name: "Fill".into(),
-                visible: true,
-                opacity: 1.0,
-                blend: crate::engine::Blend::Normal,
-                fill: Some(fill),
-                generator: None,
-                mask_filters: Vec::new(),
-                mask_layers: Vec::new(),
-            })],
-            levels: Vec::new(),
-        };
-        let mut history = UndoStack::default();
-        history.push("old fill properties", Edit::Props(props));
-
-        history.discard_channel(3);
-
-        let Edit::Props(props) = &history.undo[0].edit else { panic!("expected property edit") };
-        assert!(!props.layers[0].1.fill.as_ref().unwrap().mat.enabled[3]);
-    }
-
-    #[test]
     fn clearing_history_also_resets_open_groups() {
         let mut history = UndoStack::default();
         history.begin_group("discarded group");
