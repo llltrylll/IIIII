@@ -401,6 +401,8 @@ pub struct GpuMesh {
     pub sets: Vec<crate::mesh::MeshSet>,
     /// CPU index data retained so object visibility can rebuild compact draw lists.
     pub cpu_indices: Vec<u32>,
+    pub cpu_edges: Vec<u32>,
+    pub cpu_seams: Vec<u32>,
     pub tri_object: Vec<u32>,
     pub edge_object: Vec<u32>,
     pub seam_object: Vec<u32>,
@@ -468,6 +470,8 @@ impl GpuMesh {
             seam_count: mesh.seam_edges.len() as u32,
             sets: mesh.sets.clone(),
             cpu_indices: mesh.indices.clone(),
+            cpu_edges: mesh.uv_edges.clone(),
+            cpu_seams: mesh.seam_edges.clone(),
             tri_object: mesh.tri_object.clone(),
             edge_object,
             seam_object,
