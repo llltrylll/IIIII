@@ -4881,6 +4881,7 @@ impl PainterApp {
         // Padding past UV island borders hides seams.
         let geometry = topo.uv_geometry(&tris, self.prefs.poly_padding / self.engine.res as f32);
         let mut mat = self.brush.mat;
+        mat.enabled = project_settings_ui::effective_channel_mask(mat.enabled, &self.active_channels);
         if let StrokeTarget::BakeFix(_) = self.target {
             mat.rough = self.brush.fix_value;
         }
@@ -5012,7 +5013,9 @@ impl PainterApp {
             self.status = "Fill layers are procedural. Add a mask to paint on it, or select a paint layer.".into();
             return false;
         }
-        if self.engine.begin_stroke(idx, self.target, self.brush.mat.enabled, erase) {
+        let enabled_channels =
+            project_settings_ui::effective_channel_mask(self.brush.mat.enabled, &self.active_channels);
+        if self.engine.begin_stroke(idx, self.target, enabled_channels, erase) {
             self.stroke = Some(StrokeInput { view: kind, last: at, lazy: at, pressure: self.pressure });
             true
         } else {
@@ -5083,6 +5086,7 @@ impl PainterApp {
             self.meter.resolve_cpu.add(started.elapsed().as_secs_f64() * 1000.0);
         }
         let mut mat = self.brush.mat;
+        mat.enabled = project_settings_ui::effective_channel_mask(mat.enabled, &self.active_channels);
         if let StrokeTarget::BakeFix(_) = self.target {
             mat.rough = self.brush.fix_value;
         }
