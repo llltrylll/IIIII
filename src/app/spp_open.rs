@@ -217,6 +217,9 @@ impl PainterApp {
         let Imported { mesh, sets, came, left } = imported;
         self.graphs.clear(&self.rs);
         self.apply_project_defaults();
+        // An imported Painter document is a new project: don't inherit channel
+        // removals from whichever project happened to be open before it.
+        self.active_channels = [true; crate::engine::CHANNELS];
         let sizes: Vec<u32> = sets.iter().map(|s| s.resolution).collect();
         self.load_mesh_sized(mesh, ctx, &sizes);
         let mut stack = Rebuilt::default();
