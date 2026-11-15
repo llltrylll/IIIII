@@ -84,8 +84,19 @@ impl PainterApp {
         let h = 46.0;
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click_and_drag());
         let indent = self.engine.depth(idx) as f32 * 16.0;
+        // A smart-material folder also signals disabled maps in any of its
+        // descendants, so the warning is visible on the collapsed parent row.
+        let inactive_map_names = if self.engine.layers[idx].is_folder() {
+            self.engine
+                .block(idx)
+                .flat_map(|child| project_settings_ui::disabled_map_names(&self.engine.layers[child], &self.active_channels))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        } else {
+            project_settings_ui::disabled_map_names(&self.engine.layers[idx], &self.active_channels)
+        };
         let layer = &self.engine.layers[idx];
-        let inactive_map_names = project_settings_ui::disabled_map_names(layer, &self.active_channels);
         let (id, visible, name) = (layer.id, layer.visible, layer.name.clone());
         resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListItem, true, idx == self.selected, &name));
         let folder_open = match layer.content {
@@ -211,7 +222,7 @@ impl PainterApp {
                 Color32::from_gray(28),
             );
             marker.on_hover_text(format!(
-                "Source material includes channels disabled in Project: {}",
+                "This layer or its folder contents include channels disabled in Project: {}",
                 inactive_map_names.join(", ")
             ));
         }
