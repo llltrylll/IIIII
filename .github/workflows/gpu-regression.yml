@@ -6,6 +6,7 @@ on:
     branches:
       - gpt/stacked-uv-visible-pass
       - gpt/integrated-three-fronts
+      - gpt/phase1-thumbnail-regression
   workflow_dispatch:
 
 permissions:
@@ -102,6 +103,12 @@ jobs:
 
       - name: GPU parity - multi-scissor composite
         run: "cargo test --locked --bin material_painter preview_test::multi_scissor_matches_full_composite -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU parity - content stroke keeps unrelated thumbnails
+        run: "cargo test --locked --bin material_painter preview_test::content_stroke_keeps_unrelated_thumbnails -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU parity - mask stroke refreshes only its thumbnail on release
+        run: "cargo test --locked --bin material_painter preview_test::mask_stroke_redoes_only_the_mask_thumbnail -- --ignored --exact --nocapture --test-threads 1"
 
       - name: GPU parity - mask filters
         run: "cargo test --locked --bin material_painter preview_test::mask_filters_apply -- --ignored --exact --nocapture --test-threads 1"
