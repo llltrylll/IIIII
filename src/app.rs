@@ -4865,9 +4865,14 @@ impl PainterApp {
         let opts = self.poly_opts(at);
         let mut tris = Vec::new();
         for &s in seeds {
-            // A filled seed's whole selection is already filled.
-            if !self.poly.filled.contains(&s) {
-                tris.extend(topo.select_with(self.poly.mode, s, &opts).into_iter().filter(|t| self.poly.filled.insert(*t)));
+            // Hidden geometry cannot seed or receive a polygon fill.
+            if self.tri_hidden(s) || self.poly.filled.contains(&s) {
+                continue;
+            }
+            for t in topo.select_with(self.poly.mode, s, &opts) {
+                if !self.tri_hidden(t) && self.poly.filled.insert(t) {
+                    tris.push(t);
+                }
             }
         }
         // Only the edited texture set takes paint, and only where it's shown.
@@ -4909,6 +4914,7 @@ impl PainterApp {
         let inside = |p: Vec2| !(p.cmplt(lo).any() || p.cmpgt(hi).any()) && (outline.len() < 3 || crate::polyfill::in_outline(p, outline));
         let through = self.poly.through;
         let n = topo.triangle_count() as u32;
+        let hidden_triangles: Vec<bool> = (0..n).map(|tri| self.tri_hidden(tri)).collect();
         match kind {
             ViewKind::V3d => {
                 let size = Vec2::new(self.views.view3d.size[0] as f32, self.views.view3d.size[1] as f32);
@@ -4918,6 +4924,9 @@ impl PainterApp {
                 (0..n)
                     .into_par_iter()
                     .filter(|&t| {
+                        if hidden_triangles[t as usize] {
+                            return false;
+                        }
                         let c = topo.centroid(t);
                         let q = vp * c.extend(1.0);
                         if q.w <= 0.0 {
@@ -4942,7 +4951,7 @@ impl PainterApp {
                 let (pan, zoom) = (self.cam2d.pan, self.cam2d.zoom.max(1.0));
                 // Back from UV to view pixels, where the box or lasso is.
                 let to_px = |uv: Vec2| (uv - Vec2::splat(0.5)) * zoom + center + pan;
-                (0..n).into_par_iter().filter(|&t| inside(to_px(topo.uv_centroid(t)))).collect()
+                (0..n).into_par_iter().filter(|&t| !hidden_triangles[t as usize] && inside(to_px(topo.uv_centroid(t)))).collect()
             }
         }
     }
@@ -4968,6 +4977,7 @@ impl PainterApp {
                 let topo = self.poly_topology();
                 let color = if erase { [255, 90, 80] } else { [80, 160, 255] };
                 let mut tris = topo.select_with(w.mode, w.tri, &self.poly_opts(Some(at)));
+                tris.retain(|&tri| !self.tri_hidden(tri));
                 if let Some(set) = self.mesh.sets.get(self.sets.active) {
                     tris.retain(|t| set.tris.contains(t));
                 }
