@@ -227,9 +227,11 @@ impl PainterApp {
                     "fill" => {
                         let p = preset.unwrap_or("Iron Raw");
                         let m = presets::MATERIALS.iter().find(|m| eq(m.name, p)).ok_or(format!("unknown material '{p}'"))?;
-                        let mut fill = m.fill();
-                        self.filter_fill_channels(&mut fill);
-                        self.engine.add_fill_layer(at, parent, name.unwrap_or_else(|| m.name.to_string()), fill, &mut self.undo)
+                        let fill = m.fill();
+                        let disabled = super::project_settings_ui::disabled_fill_channels(&fill, &self.active_channels);
+                        let idx = self.engine.add_fill_layer(at, parent, name.unwrap_or_else(|| m.name.to_string()), fill, &mut self.undo);
+                        self.engine.layers[idx].disabled_channels = disabled;
+                        idx
                     }
                     "texture" => {
                         let p = preset.ok_or("texture layers need 'preset' (a texture name)")?;
@@ -264,9 +266,6 @@ impl PainterApp {
                     for (key, v) in obj {
                         const NAMES: [&str; crate::engine::CHANNELS] = ["color", "roughness", "metallic", "height", "opacity", "emission", "normal", "specular"];
                         let ch = NAMES.iter().position(|c| c == key).ok_or(format!("unknown image channel '{key}' ({})", NAMES.join(", ")))?;
-                        if v.is_string() && !self.active_channels[ch] {
-                            return Err(format!("cannot assign an image to disabled project channel '{}'", NAMES[ch]));
-                        }
                         let img = match v.as_str() {
                             None => None,
                             Some(path) => {
@@ -381,21 +380,33 @@ impl PainterApp {
                         if let Some(v) = f32_arg(args, "triplanar_sharpness") {
                             f.tri_sharpness = v.clamp(1.0, 64.0);
                         }
-                        for ch in 0..crate::engine::CHANNELS {
-                            if !self.active_channels[ch] {
-                                f.mat.enabled[ch] = false;
-                            }
-                        }
+                        // Keep source material flags and images; the per-layer inactive mask
+                        // prevents disabled outputs from contributing to the composite.
                     }
                     Content::Paint(_) | Content::Folder(_) if material => {
                         return Err("material and variation values apply to fill layers only".into());
                     }
                     Content::Paint(_) | Content::Folder(_) => {}
                 }
+                for ch in 0..crate::engine::CHANNELS {
+                    if !self.active_channels[ch] {
+                        let has_data = match &layer.content {
+                            Content::Paint(channels) => channels[ch].is_some(),
+                            Content::Fill(fill) => fill.mat.enabled[ch] || layer.images[ch].is_some(),
+                            Content::Folder(_) => false,
+                        };
+                        if has_data {
+                            layer.disabled_channels[ch] = true;
+                        }
+                    }
+                }
                 self.engine.mark_dirty();
                 self.engine.commit_props(&mut self.undo);
                 for (ch, img) in images {
                     self.engine.set_fill_image(i, ch, img, &mut self.undo);
+                    if !self.active_channels[ch] {
+                        self.engine.layers[i].disabled_channels[ch] = true;
+                    }
                 }
                 text(format!("Updated layer {i}."))
             }
