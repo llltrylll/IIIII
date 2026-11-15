@@ -110,6 +110,9 @@ jobs:
       - name: GPU parity - mask stroke refreshes only its thumbnail on release
         run: "cargo test --locked --bin material_painter preview_test::mask_stroke_redoes_only_the_mask_thumbnail -- --ignored --exact --nocapture --test-threads 1"
 
+      - name: GPU parity - content stroke patch under current filtered mask
+        run: "cargo test --locked --bin material_painter preview_test::content_stroke_patch_ignores_current_filtered_masks -- --ignored --exact --nocapture --test-threads 1"
+
       - name: GPU parity - mask filters
         run: "cargo test --locked --bin material_painter preview_test::mask_filters_apply -- --ignored --exact --nocapture --test-threads 1"
 
