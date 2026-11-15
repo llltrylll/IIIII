@@ -227,7 +227,9 @@ impl PainterApp {
                     "fill" => {
                         let p = preset.unwrap_or("Iron Raw");
                         let m = presets::MATERIALS.iter().find(|m| eq(m.name, p)).ok_or(format!("unknown material '{p}'"))?;
-                        self.engine.add_fill_layer(at, parent, name.unwrap_or_else(|| m.name.to_string()), m.fill(), &mut self.undo)
+                        let mut fill = m.fill();
+                        self.filter_fill_channels(&mut fill);
+                        self.engine.add_fill_layer(at, parent, name.unwrap_or_else(|| m.name.to_string()), fill, &mut self.undo)
                     }
                     "texture" => {
                         let p = preset.ok_or("texture layers need 'preset' (a texture name)")?;
@@ -238,7 +240,7 @@ impl PainterApp {
                     "smart" => {
                         let p = preset.ok_or("smart layers need 'preset'")?;
                         let s = presets::SMART_MATERIALS.iter().find(|s| eq(s.name, p)).ok_or(format!("unknown smart material '{p}'"))?;
-                        add_smart_material(&mut self.engine, &mut self.undo, s, at, parent)
+                        add_smart_material_with_channels(&mut self.engine, &mut self.undo, s, at, parent, &self.active_channels)
                     }
                     k => return Err(format!("unknown kind '{k}'")),
                 };
@@ -262,6 +264,9 @@ impl PainterApp {
                     for (key, v) in obj {
                         const NAMES: [&str; crate::engine::CHANNELS] = ["color", "roughness", "metallic", "height", "opacity", "emission", "normal", "specular"];
                         let ch = NAMES.iter().position(|c| c == key).ok_or(format!("unknown image channel '{key}' ({})", NAMES.join(", ")))?;
+                        if v.is_string() && !self.active_channels[ch] {
+                            return Err(format!("cannot assign an image to disabled project channel '{}'", NAMES[ch]));
+                        }
                         let img = match v.as_str() {
                             None => None,
                             Some(path) => {
@@ -375,6 +380,11 @@ impl PainterApp {
                         }
                         if let Some(v) = f32_arg(args, "triplanar_sharpness") {
                             f.tri_sharpness = v.clamp(1.0, 64.0);
+                        }
+                        for ch in 0..crate::engine::CHANNELS {
+                            if !self.active_channels[ch] {
+                                f.mat.enabled[ch] = false;
+                            }
                         }
                     }
                     Content::Paint(_) | Content::Folder(_) if material => {
@@ -536,6 +546,10 @@ impl PainterApp {
                         mat.enabled[k] = true;
                     }
                 }
+                mat.enabled =
+                    super::project_settings_ui::effective_channel_mask(mat.enabled, &self.active_channels);
+                mat.enabled =
+                    super::project_settings_ui::effective_channel_mask(mat.enabled, &self.active_channels);
                 let erase = args.get("erase").and_then(Value::as_bool).unwrap_or(false);
                 if target == StrokeTarget::Content && !erase && !mat.enabled.contains(&true) {
                     return Err("give at least one of color, roughness, metallic, height, opacity, emission, specular".into());
