@@ -68,7 +68,6 @@ fn panes(ws: Workspace) -> &'static [Pane] {
             Pane::View2d,
             Pane::Layers,
             Pane::Properties,
-            Pane::ProjectSettings,
             Pane::MeshMaps,
             Pane::TextureSet,
             Pane::Preview,
@@ -103,8 +102,7 @@ fn default_tree(ws: Workspace) -> Tree<Pane> {
             let stack: Vec<TileId> = [Pane::Layers, Pane::MeshMaps, Pane::TextureSet, Pane::Preview].map(|p| t.insert_pane(p)).to_vec();
             let stack = t.insert_tab_tile(stack);
             let props = t.insert_pane(Pane::Properties);
-            let project = t.insert_pane(Pane::ProjectSettings);
-            let props = t.insert_tab_tile(vec![props, project]);
+            let props = t.insert_tab_tile(vec![props]);
             let right = t.insert_vertical_tile(vec![stack, props]);
             share(&mut t, right, stack, 1.0);
             share(&mut t, right, props, 1.4);
