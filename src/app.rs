@@ -1698,6 +1698,7 @@ fn material_controls(
 
 /// Adds a smart material as a folder holding its layers, at `at` inside
 /// `parent`, as one undo step; returns the folder's index.
+#[cfg(test)]
 pub(crate) fn add_smart_material(
     engine: &mut Engine,
     undo: &mut UndoStack,
