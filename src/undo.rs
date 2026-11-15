@@ -212,8 +212,6 @@ pub enum Edit {
     /// Layer order, by id.
     Order(Vec<u64>),
     Content { id: u64, content: Content },
-    /// One painted channel on a paint layer.
-    PaintChannel { id: u64, ch: usize, texture: Option<Tex> },
     /// The folder a layer is in.
     Parent { id: u64, parent: Option<u64> },
     /// A fill layer's channel images.
@@ -252,7 +250,6 @@ impl Edit {
                 Self::discard_content_channel(content, ch);
                 true
             }
-            Edit::PaintChannel { ch: edited, .. } => *edited != ch,
             Edit::Images { images, .. } => {
                 images[ch] = None;
                 true
@@ -408,10 +405,14 @@ mod tests {
     use super::{Edit, UndoStack};
 
     #[test]
-    fn discarding_channel_prunes_only_its_edits_from_grouped_history() {
+    fn discarding_channel_sanitizes_content_inside_group_and_keeps_other_edits() {
+        use crate::engine::{Content, FillParams};
+
+        let mut fill = FillParams::default();
+        fill.mat.enabled[3] = true;
         let mut history = UndoStack::default();
         history.begin_group("mixed edit");
-        history.push("height paint", Edit::PaintChannel { id: 7, ch: 3, texture: None });
+        history.push("height fill", Edit::Content { id: 7, content: Content::Fill(fill) });
         history.push("layer order", Edit::Order(vec![7]));
         history.end_group();
 
@@ -420,8 +421,12 @@ mod tests {
         assert_eq!(history.undo.len(), 1);
         match &history.undo[0].edit {
             Edit::Group(edits) => {
-                assert_eq!(edits.len(), 1);
-                assert!(matches!(&edits[0], Edit::Order(_)));
+                assert_eq!(edits.len(), 2);
+                let Edit::Content { content: Content::Fill(fill), .. } = &edits[0] else {
+                    panic!("expected the fill edit to remain available");
+                };
+                assert!(!fill.mat.enabled[3]);
+                assert!(matches!(&edits[1], Edit::Order(_)));
             }
             _ => panic!("unrelated grouped edits should remain grouped"),
         }
