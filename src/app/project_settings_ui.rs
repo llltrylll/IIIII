@@ -22,6 +22,25 @@ pub(super) fn effective_channel_mask(
     std::array::from_fn(|ch| brush_enabled[ch] && active[ch])
 }
 
+/// Names channels that contain data on a layer even though the project channel is disabled.
+/// This is display-only: it does not strip or alter imported material data.
+pub(super) fn disabled_map_names(
+    layer: &Layer,
+    active: &[bool; crate::engine::CHANNELS],
+) -> Vec<&'static str> {
+    CHANNEL_ORDER.iter().copied().filter_map(|ch| {
+        if active[ch] {
+            return None;
+        }
+        let has_data = match &layer.content {
+            Content::Paint(channels) => channels[ch].is_some(),
+            Content::Fill(fill) => fill.mat.enabled[ch] || layer.images[ch].is_some(),
+            Content::Folder(_) => false,
+        };
+        has_data.then_some(CHANNEL_LABELS[ch])
+    }).collect()
+}
+
 /// Removes disabled-channel data from layer blocks before they enter the project.
 pub(super) fn filter_layer_channels(
     layers: &mut [Layer],
@@ -124,7 +143,17 @@ impl PainterApp {
 
     pub(super) fn project_settings_panel(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            ui.heading("Project Settings");
+            ui.horizontal(|ui| {
+                ui.heading("Project");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::icon_button(ui, icons::X, false, 22.0)
+                        .on_hover_text("Close Project panel")
+                        .clicked()
+                    {
+                        self.project_panel_open = false;
+                    }
+                });
+            });
             ui.add_space(8.0);
 
             section(ui, "Channels");
@@ -217,18 +246,28 @@ impl PainterApp {
                         egui::FontId::proportional(13.0),
                         color,
                     );
-                    // The eye appears on row hover; it remains visible for hidden
-                    // rows so they can always be restored without hunting.
-                    if response.hovered() || hidden {
-                        let eye_rect = Rect::from_min_size(
-                            pos2(rect.right() - 27.0, rect.top() + 1.0),
-                            vec2(25.0, 23.0),
-                        );
-                        let icon = if hidden { icons::EYE_SLASH } else { icons::EYE };
-                        let button = ui.put(eye_rect, egui::Button::new(icon).frame(false));
-                        if button.on_hover_text(if hidden { "Show this object" } else { "Hide this object" }).clicked() {
-                            toggle_object = Some((index, !hidden));
-                        }
+                    // Keep the hit target alive while the cursor enters it. If the
+                    // button is created only while the row is hovered, its own hover
+                    // state can make the row response false and remove the button.
+                    let eye_rect = Rect::from_min_size(
+                        pos2(rect.right() - 27.0, rect.top() + 1.0),
+                        vec2(25.0, 23.0),
+                    );
+                    let eye_id = ui.id().with(("project_mesh_object_eye", index));
+                    let eye = ui.interact(eye_rect, eye_id, Sense::click());
+                    let icon = if hidden { icons::EYE_SLASH } else { icons::EYE };
+                    if eye.hovered() {
+                        ui.painter().rect_filled(eye_rect, 3.0, Color32::from_gray(58));
+                    }
+                    ui.painter().text(
+                        eye_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        icon,
+                        egui::FontId::proportional(15.0),
+                        if hidden { theme::TEXT_DIM } else { theme::TEXT },
+                    );
+                    if eye.on_hover_text(if hidden { "Show this object" } else { "Hide this object" }).clicked() {
+                        toggle_object = Some((index, !hidden));
                     }
                 }
                 if let Some((index, hidden)) = toggle_object {
