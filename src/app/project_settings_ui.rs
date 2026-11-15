@@ -126,6 +126,32 @@ mod channel_mask_tests {
     }
 
     #[test]
+    fn inactive_map_indicator_only_marks_disabled_channels_with_data() {
+        use super::disabled_map_names;
+
+        let mut fill = FillParams::default();
+        fill.mat.enabled[HEIGHT_CHANNEL] = true;
+        let layer = Layer {
+            id: 1,
+            name: "Preset height".into(),
+            visible: true,
+            opacity: 1.0,
+            blend: Blend::Normal,
+            content: Content::Fill(fill),
+            mask: None,
+            parent: None,
+            images: Default::default(),
+            thumb: None,
+        };
+        let mut active = [true; CHANNELS];
+        active[HEIGHT_CHANNEL] = false;
+
+        assert_eq!(disabled_map_names(&layer, &active), vec!["Height"]);
+        active[HEIGHT_CHANNEL] = true;
+        assert!(disabled_map_names(&layer, &active).is_empty());
+    }
+
+    #[test]
     fn enabled_channels_keep_their_material_flags() {
         let mut fill = FillParams::default();
         fill.mat.enabled = [false; CHANNELS];
