@@ -4,6 +4,7 @@ use super::*;
 const CHANNEL_LABELS: [&str; crate::engine::CHANNELS] =
     ["Base Color", "Roughness", "Metallic", "Height", "Opacity", "Emission", "Normal", "Specular"];
 const CHANNEL_ORDER: [usize; crate::engine::CHANNELS] = [0, 6, 1, 2, 3, 4, 5, 7];
+const HEIGHT_CHANNEL: usize = 3;
 
 fn apply_project_channel_mask(fill: &mut FillParams, active: &[bool; crate::engine::CHANNELS]) {
     for ch in 0..crate::engine::CHANNELS {
@@ -16,20 +17,21 @@ fn apply_project_channel_mask(fill: &mut FillParams, active: &[bool; crate::engi
 #[cfg(test)]
 mod channel_mask_tests {
     use super::apply_project_channel_mask;
-    use crate::engine::{FillParams, CHANNELS, HEIGHT};
+    use crate::engine::{FillParams, CHANNELS};
+    use super::HEIGHT_CHANNEL;
 
     #[test]
     fn disabled_height_is_removed_from_a_shelf_fill_material() {
         let mut fill = FillParams::default();
         fill.mat.enabled = [true; CHANNELS];
         let mut active = [true; CHANNELS];
-        active[HEIGHT] = false;
+        active[HEIGHT_CHANNEL] = false;
 
         apply_project_channel_mask(&mut fill, &active);
 
-        assert!(!fill.mat.enabled[HEIGHT]);
+        assert!(!fill.mat.enabled[HEIGHT_CHANNEL]);
         for ch in 0..CHANNELS {
-            if ch != HEIGHT {
+            if ch != HEIGHT_CHANNEL {
                 assert!(fill.mat.enabled[ch], "active channel {ch} was unexpectedly removed");
             }
         }
@@ -39,9 +41,9 @@ mod channel_mask_tests {
     fn enabled_channels_keep_their_material_flags() {
         let mut fill = FillParams::default();
         fill.mat.enabled = [false; CHANNELS];
-        fill.mat.enabled[HEIGHT] = true;
+        fill.mat.enabled[HEIGHT_CHANNEL] = true;
         apply_project_channel_mask(&mut fill, &[true; CHANNELS]);
-        assert!(fill.mat.enabled[HEIGHT]);
+        assert!(fill.mat.enabled[HEIGHT_CHANNEL]);
     }
 }
 
@@ -229,9 +231,12 @@ impl PainterApp {
         let mut changed = false;
         for layer in &mut engine.layers {
             let id = layer.id;
-            let old_content = layer.content.clone();
-            let content_changed = match &mut layer.content {
-                Content::Paint(channels) => channels[ch].take().is_some(),
+            let mut removed_paint = None;
+            let fill_changed = match &mut layer.content {
+                Content::Paint(channels) => {
+                    removed_paint = channels[ch].take();
+                    removed_paint.is_some()
+                }
                 Content::Fill(fill) => {
                     let was_enabled = fill.mat.enabled[ch];
                     fill.mat.enabled[ch] = false;
@@ -239,13 +244,13 @@ impl PainterApp {
                 }
                 Content::Folder(_) => false,
             };
-            if content_changed {
-                if matches!(old_content, Content::Paint(_)) {
-                    undo.push(
-                        format!("Remove {label} paint from {}", layer.name),
-                        crate::undo::Edit::Content { id, content: old_content },
-                    );
-                }
+            if let Some(texture) = removed_paint {
+                undo.push(
+                    format!("Remove {label} paint from {}", layer.name),
+                    crate::undo::Edit::PaintChannel { id, ch, texture: Some(texture) },
+                );
+                changed = true;
+            } else if fill_changed {
                 changed = true;
             }
             if layer.images[ch].is_some() {
