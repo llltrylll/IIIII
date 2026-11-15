@@ -720,7 +720,7 @@ pub struct PainterApp {
     saved_project_settings_serial: u64,
     autosaved_project_settings_serial: u64,
     /// Channel awaiting confirmation before its data is discarded.
-    pending_channel_remove: Option<usize>,
+    pending_channel_disable: Option<usize>,
     /// The open project file, if it has been saved or opened.
     project_path: Option<std::path::PathBuf>,
     /// Undo state at the last save (see `UndoStack::state_serial`).
