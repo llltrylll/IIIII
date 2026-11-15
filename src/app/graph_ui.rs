@@ -715,6 +715,7 @@ impl PainterApp {
         let id = self.graphs.insert(&self.rs, graph, None);
         let mut fill = FillParams { graph: Some(id), ..FillParams::default() };
         fill.mat.enabled = graph::channel_outputs(&outs).map(|o| o.is_some());
+        self.filter_fill_channels(&mut fill);
         // An emission output is the emitted color itself: no tint.
         fill.mat.emission = [1.0; 3];
         self.selected = self.engine.add_fill_layer(at, parent, name, fill, &mut self.undo);
@@ -736,6 +737,7 @@ impl PainterApp {
         let id = self.graphs.insert(&self.rs, graph, None);
         let mut fill = FillParams { graph: Some(id), ..FillParams::default() };
         fill.mat.enabled = graph::channel_outputs(&outs).map(|o| o.is_some());
+        self.filter_fill_channels(&mut fill);
         self.selected = self.engine.add_fill_layer(at, parent, name, fill, &mut self.undo);
         self.target = StrokeTarget::Content;
     }
