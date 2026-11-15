@@ -406,10 +406,18 @@ impl PainterApp {
         for l in &engine.layers {
             let content = match &l.content {
                 Content::Paint(ch) => {
-                    let channels: Vec<Value> = ch.iter().map(|t| t.as_ref().map_or(Value::Null, |t| self.tex_json(w, t))).collect();
+                    let channels: Vec<Value> = ch.iter().enumerate().map(|(i, t)| {
+                        if self.active_channels[i] { t.as_ref().map_or(Value::Null, |t| self.tex_json(w, t)) } else { Value::Null }
+                    }).collect();
                     json!({"kind": "paint", "channels": channels})
                 }
-                Content::Fill(p) => json!({"kind": "fill", "fill": fill_json(p)}),
+                Content::Fill(p) => {
+                    let mut filtered = p.clone();
+                    for ch in 0..crate::engine::CHANNELS {
+                        if !self.active_channels[ch] { filtered.mat.enabled[ch] = false; }
+                    }
+                    json!({"kind": "fill", "fill": fill_json(&filtered)})
+                },
                 Content::Folder(fo) => json!({"kind": "folder", "open": fo.open, "graph": fo.graph}),
             };
             let mask = l.mask.as_ref().map(|m| {
@@ -426,7 +434,8 @@ impl PainterApp {
             let images: Vec<Value> = l
                 .images
                 .iter()
-                .map(|im| im.as_ref().filter(|_| !from_graph))
+                .enumerate()
+                .map(|(ch, im)| im.as_ref().filter(|_| !from_graph && self.active_channels[ch]))
                 .map(|im| im.map_or(Value::Null, |im| json!({"name": im.name, "data": w.blob(&im.encoded)})))
                 .collect();
             layers.push(json!({
@@ -457,6 +466,8 @@ impl PainterApp {
         let bytes = self.write_project(path)?;
         self.project_path = Some(path.to_path_buf());
         self.saved_serial = self.undo.state_serial();
+        self.saved_project_settings_serial = self.project_settings_serial;
+        self.autosaved_project_settings_serial = self.project_settings_serial;
         self.status = format!("Saved {} ({:.1} MB).", path.display(), bytes as f64 / 1048576.0);
         self.remember_recent(path);
         remove_autosave();
@@ -468,13 +479,18 @@ impl PainterApp {
     pub(super) fn autosave_if_due(&mut self) {
         let every = self.prefs.autosave_every.max(1) as u64;
         let serial = self.undo.state_serial();
-        if !self.prefs.autosave || self.stroke.is_some() || !self.is_modified() || serial.abs_diff(self.autosaved_serial) < every {
+        let settings_changed = self.project_settings_serial != self.autosaved_project_settings_serial;
+        if !self.prefs.autosave || self.stroke.is_some() || !self.is_modified()
+            || (!settings_changed && serial.abs_diff(self.autosaved_serial) < every) {
             return;
         }
         let Some(path) = autosave_path() else { return };
-        self.autosaved_serial = serial;
-        if let Err(e) = self.write_project(&path) {
-            self.status = format!("Autosave failed: {e}");
+        match self.write_project(&path) {
+            Ok(_) => {
+                self.autosaved_serial = self.undo.state_serial();
+                self.autosaved_project_settings_serial = self.project_settings_serial;
+            }
+            Err(e) => self.status = format!("Autosave failed: {e}"),
         }
     }
 
@@ -492,6 +508,7 @@ impl PainterApp {
             "indices": w.blob(bytemuck::cast_slice(&mesh.indices)),
             "objects": mesh.objects,
             "tri_object": w.blob(bytemuck::cast_slice(&mesh.tri_object)),
+            "hidden_objects": self.hidden_objects,
             "tri_color": mesh.tri_color.as_ref().map(|c| w.blob(bytemuck::cast_slice(c))),
             // Per-corner vertex colors: the ID mask palette and the mesh eyedropper read them.
             "tri_vertex_color": mesh.tri_vertex_color.as_ref().map(|c| w.blob(bytemuck::cast_slice(c))),
@@ -563,7 +580,9 @@ impl PainterApp {
             "app": "Material Painter",
             // 2: map levels gamma brightens above 1 (version 1 darkened).
             // 3: texture sets (layers, size and map fixes per set).
-            "version": 3,
+            // 4: project channel selection and per-object visibility.
+            "version": 4,
+            "active_channels": self.active_channels,
             "mesh": mesh_json,
             "texture_sets": sets,
             "active_set": self.sets.active,
@@ -616,6 +635,9 @@ impl PainterApp {
         let u64_at = |b: &[u8]| u64::from_le_bytes(b.try_into().unwrap()) as usize;
         let len = u64_at(take(8)?);
         let manifest: Value = serde_json::from_slice(take(len)?).map_err(|e| format!("{}: {e}", bad()))?;
+        self.active_channels = std::array::from_fn(|i| {
+            manifest["active_channels"].as_array().and_then(|channels| channels.get(i)).and_then(Value::as_bool).unwrap_or(true)
+        });
         let count = u64_at(take(8)?);
         let mut blobs = Vec::with_capacity(count);
         for _ in 0..count {
@@ -720,6 +742,12 @@ impl PainterApp {
         self.bake_settings = bs;
         let sizes: Vec<u32> = set_values.iter().map(|sv| sv["resolution"].as_u64().unwrap_or(2048) as u32).collect();
         self.load_mesh_sized(mesh, ctx, &sizes);
+        self.hidden_objects = manifest["mesh"]["hidden_objects"]
+            .as_array()
+            .map(|hidden| hidden.iter().map(|value| value.as_bool().unwrap_or(false)).take(self.mesh.objects.len()).collect())
+            .unwrap_or_else(|| vec![false; self.mesh.objects.len()]);
+        self.hidden_objects.resize(self.mesh.objects.len(), false);
+        self.rebuild_visible_bvh();
         self.graphs.clear(&self.rs);
         for gv in manifest["graphs"].as_array().into_iter().flatten() {
             let Some(id) = gv["id"].as_u64() else { continue };
@@ -748,13 +776,17 @@ impl PainterApp {
                         let ch = c["channels"].as_array().ok_or_else(bad)?;
                         let mut out: [Option<Tex>; crate::engine::CHANNELS] = Default::default();
                         for (k, t) in ch.iter().enumerate().take(crate::engine::CHANNELS) {
-                            if !t.is_null() {
+                            if self.active_channels[k] && !t.is_null() {
                                 out[k] = Some(self.tex_from(&r, t, "layer")?);
                             }
                         }
                         Content::Paint(out)
                     }
-                    Some("fill") => Content::Fill(fill_from(&c["fill"])),
+                    Some("fill") => {
+                        let mut fill = fill_from(&c["fill"]);
+                        self.filter_fill_channels(&mut fill);
+                        Content::Fill(fill)
+                    },
                     Some("folder") => Content::Folder(Folder { open: b(c, "open", true), graph: c["graph"].as_u64() }),
                     _ => return Err(bad()),
                 };
@@ -777,7 +809,7 @@ impl PainterApp {
                 };
                 let mut images: [Option<crate::engine::FillImage>; crate::engine::CHANNELS] = Default::default();
                 for (k, iv) in lv["images"].as_array().into_iter().flatten().enumerate().take(crate::engine::CHANNELS) {
-                    if !iv.is_null() {
+                    if self.active_channels[k] && !iv.is_null() {
                         let data = std::sync::Arc::new(r.blob(&iv["data"])?);
                         images[k] = Some(self.engine.decode_channel_image(k, s(iv, "name").unwrap_or("image").to_string(), data)?);
                     }
@@ -882,6 +914,8 @@ impl PainterApp {
         self.undo.clear();
         self.saved_serial = self.undo.state_serial();
         self.autosaved_serial = self.saved_serial;
+        self.saved_project_settings_serial = self.project_settings_serial;
+        self.autosaved_project_settings_serial = self.project_settings_serial;
         if is_autosave(path) {
             // Recovered work isn't saved anywhere yet; its file goes once opened.
             remove_recovery(path);
@@ -898,7 +932,9 @@ impl PainterApp {
 
     /// Unsaved edits since the last save or open.
     pub(super) fn is_modified(&self) -> bool {
-        self.undo.state_serial() != self.saved_serial || self.engine.has_uncommitted_props()
+        self.undo.state_serial() != self.saved_serial
+            || self.engine.has_uncommitted_props()
+            || self.project_settings_serial != self.saved_project_settings_serial
     }
 
     pub(super) fn save_dialog(&self) -> Option<PathBuf> {
