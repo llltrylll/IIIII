@@ -346,7 +346,7 @@ impl PainterApp {
         let mut enabled = [true, maps[1].is_some(), true, maps[3].is_some(), false, false, false, false];
         enabled[crate::engine::NORMAL] = maps[crate::engine::NORMAL].is_some();
         fill.mat.enabled = enabled;
-        let mut disabled = project_settings_ui::disabled_fill_channels(&fill, &self.active_channels);
+        let mut disabled = super::project_settings_ui::disabled_fill_channels(&fill, &self.active_channels);
         fill.mat.metal = 0.0;
         // With a height image the value is its strength, as for the built-in scans.
         fill.mat.height = 0.3;
