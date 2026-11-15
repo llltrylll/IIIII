@@ -346,12 +346,14 @@ impl PainterApp {
         let mut enabled = [true, maps[1].is_some(), true, maps[3].is_some(), false, false, false, false];
         enabled[crate::engine::NORMAL] = maps[crate::engine::NORMAL].is_some();
         fill.mat.enabled = enabled;
+        self.filter_fill_channels(&mut fill);
         fill.mat.metal = 0.0;
         // With a height image the value is its strength, as for the built-in scans.
         fill.mat.height = 0.3;
         self.undo.begin_group(format!("Add {name}"));
         let idx = self.engine.add_fill_layer(at, parent, name.clone(), fill, &mut self.undo);
         for (ch, path) in maps.iter().enumerate() {
+            if !self.active_channels.get(ch).copied().unwrap_or(false) { continue; }
             let Some(path) = path else { continue };
             match self.engine.shared_fill_image(path) {
                 Ok(img) => self.engine.set_fill_image(idx, ch, Some(img), &mut self.undo),
