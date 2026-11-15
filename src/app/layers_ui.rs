@@ -224,10 +224,13 @@ impl PainterApp {
                 egui::FontId::proportional(11.0),
                 Color32::from_gray(28),
             );
-            marker.on_hover_text(format!(
-                "This layer or its folder contents include channels disabled in Project: {}",
-                project_settings_ui::disabled_map_names(&inactive_map_flags).join(", ")
-            ));
+            marker.on_hover_ui(|ui| {
+                let names = project_settings_ui::disabled_map_names(&inactive_map_flags);
+                ui.label(format!(
+                    "This layer or its folder contents include channels disabled in Project: {}",
+                    names.join(", ")
+                ));
+            });
         }
         let mb = self.engine.layer_vram_bytes(idx) as f64 / (1024.0 * 1024.0);
         let info = match &layer.content {
