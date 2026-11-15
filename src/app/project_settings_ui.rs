@@ -246,6 +246,7 @@ impl PainterApp {
                         if changed {
                             self.hidden_objects.fill(false);
                             self.rebuild_visible_bvh();
+                            self.views.invalidate_shadow();
                             self.poly.shown = None;
                             self.overlays.clear(OverlaySlot::Selection);
                             self.vertex_id.shown = None;
