@@ -518,8 +518,9 @@ impl PainterApp {
                 // The edited set's outputs are made again on its own maps.
                 d.maps_seen = u64::MAX;
                 let outs: [Option<Arc<Tex>>; graph::USAGES.len()] = d.graph.outputs(lib).map(|o| o.and_then(|n| d.rt.output(n).cloned()));
+                let channels = graph::channel_outputs(&outs);
                 let name = d.graph.name.clone();
-                engine.set_graph_images(li, outs, &name);
+                engine.set_graph_images(li, channels, &name);
                 super::project_settings_ui::mark_inactive_layer_channels(
                     std::slice::from_mut(&mut engine.layers[li]),
                     &active_channels,
@@ -532,12 +533,13 @@ impl PainterApp {
     fn push_graph(&mut self, i: usize) {
         let d = &self.graphs.docs[i];
         let outs: [Option<Arc<Tex>>; graph::USAGES.len()] = d.graph.outputs(&self.graphs.lib).map(|o| o.and_then(|n| d.rt.output(n).cloned()));
+        let channels = graph::channel_outputs(&outs);
         let (id, name) = (d.id, d.graph.name.clone());
         for li in 0..self.engine.layers.len() {
             let l = &self.engine.layers[li];
             let (fill, mask) = (matches!(&l.content, Content::Fill(f) if f.graph == Some(id)), l.mask.as_ref().is_some_and(|m| m.graph == Some(id)));
             if fill {
-                self.engine.set_graph_images(li, outs.clone(), &name);
+                self.engine.set_graph_images(li, channels.clone(), &name);
             }
             if mask
                 && let Some(t) = outs[graph::MASK_USAGE].as_ref().or(outs[0].as_ref()) {
