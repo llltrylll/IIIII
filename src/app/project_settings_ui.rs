@@ -145,6 +145,7 @@ impl PainterApp {
                             self.rebuild_visible_bvh();
                             self.poly.shown = None;
                             self.overlays.clear(OverlaySlot::Selection);
+                            self.vertex_id.shown = None;
                             self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
                             self.status = "Showed all mesh objects.".into();
                         }
