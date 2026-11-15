@@ -548,8 +548,6 @@ impl PainterApp {
                 }
                 mat.enabled =
                     super::project_settings_ui::effective_channel_mask(mat.enabled, &self.active_channels);
-                mat.enabled =
-                    super::project_settings_ui::effective_channel_mask(mat.enabled, &self.active_channels);
                 let erase = args.get("erase").and_then(Value::as_bool).unwrap_or(false);
                 if target == StrokeTarget::Content && !erase && !mat.enabled.contains(&true) {
                     return Err("give at least one of color, roughness, metallic, height, opacity, emission, specular".into());
@@ -710,6 +708,8 @@ impl PainterApp {
                         mat.enabled[k] = true;
                     }
                 }
+                mat.enabled =
+                    super::project_settings_ui::effective_channel_mask(mat.enabled, &self.active_channels);
                 let erase = args.get("erase").and_then(Value::as_bool).unwrap_or(false);
                 if target == StrokeTarget::Content && !erase && !mat.enabled.contains(&true) {
                     return Err("give at least one of color, roughness, metallic, height, opacity, emission, specular".into());
