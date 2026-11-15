@@ -57,9 +57,7 @@ pub(super) fn mark_inactive_layer_channels(
                 Content::Fill(fill) => fill.mat.enabled[ch] || layer.images[ch].is_some(),
                 Content::Folder(_) => false,
             };
-            if has_data {
-                layer.disabled_channels[ch] = true;
-            }
+            layer.disabled_channels[ch] = has_data;
         }
     }
 }
@@ -392,9 +390,7 @@ impl PainterApp {
                 Content::Fill(fill) => fill.mat.enabled[ch] || layer.images[ch].is_some(),
                 Content::Folder(_) => false,
             };
-            if has_data {
-                layer.disabled_channels[ch] = true;
-            }
+            layer.disabled_channels[ch] = has_data;
         }
         engine.mark_dirty();
     }
