@@ -769,8 +769,8 @@ fn composite_passes(layers: &[Layer]) -> (Vec<Pass>, usize) {
         }
 
         let has_content = match &layer.content {
-            Content::Paint(ch) => ch.iter().any(Option::is_some),
-            Content::Fill(fill) => fill.mat.enabled.iter().any(|&enabled| enabled),
+            Content::Paint(ch) => ch.iter().enumerate().any(|(ch, tex)| tex.is_some() && !layer.disabled_channels[ch]),
+            Content::Fill(fill) => fill.mat.enabled.iter().enumerate().any(|(ch, enabled)| *enabled && !layer.disabled_channels[ch]),
             Content::Folder(_) => false,
         };
         if has_content && layer.opacity > 0.0 && shown[i] {
@@ -4200,28 +4200,34 @@ impl Engine {
     fn layer_uniform(&self, layer: &Layer) -> LayerUniform {
         let mut u: LayerUniform = bytemuck::Zeroable::zeroed();
         let flags = |b: [bool; CHANNELS]| b.map(|v| if v { 1.0 } else { 0.0 });
+        let enabled = |ch: usize| !layer.disabled_channels[ch];
         let (kind, ch) = match &layer.content {
-            Content::Paint(ch) => (0.0, flags(std::array::from_fn(|i| ch[i].is_some()))),
+            Content::Paint(ch) => (
+                0.0,
+                flags(std::array::from_fn(|i| ch[i].is_some() && enabled(i))),
+            ),
             Content::Fill(f) => {
                 let m = &f.mat;
                 u.fill_color = [m.color[0], m.color[1], m.color[2], m.opacity];
                 u.fill_rmh = [m.rough, m.metal, m.height, 0.0];
                 u.var0 = [f.color_var, f.var_scale, f.rough_var, f.height_var];
-                let mut bits = (0..4).filter(|&i| layer.images[i].is_some()).fold(0u32, |b, i| b | 1 << i);
+                let mut bits = (0..4)
+                    .filter(|&i| enabled(i) && layer.images[i].is_some())
+                    .fold(0u32, |b, i| b | 1 << i);
                 // A grayscale color image is single-channel: the shader spreads it to rgb.
-                if layer.images[0].as_ref().is_some_and(|im| im.tex.format == F::R8Unorm) {
+                if enabled(0) && layer.images[0].as_ref().is_some_and(|im| im.tex.format == F::R8Unorm) {
                     bits |= 16;
                 }
-                if layer.images[OPACITY].is_some() {
+                if enabled(OPACITY) && layer.images[OPACITY].is_some() {
                     bits |= 32;
                 }
-                if layer.images[EMISSION].is_some() {
+                if enabled(EMISSION) && layer.images[EMISSION].is_some() {
                     bits |= 64;
                 }
-                if layer.images[NORMAL].is_some() {
+                if enabled(NORMAL) && layer.images[NORMAL].is_some() {
                     bits |= 128;
                 }
-                if layer.images[SPECULAR].is_some() {
+                if enabled(SPECULAR) && layer.images[SPECULAR].is_some() {
                     bits |= 256;
                 }
                 u.emis = [m.emission[0], m.emission[1], m.emission[2], 0.0];
@@ -4229,7 +4235,7 @@ impl Engine {
                 u.var1 = [f.seed, f.part_var, f.projection as u32 as f32, bits as f32];
                 u.img = [f.tiling, f.rotation, f.offset[0], f.offset[1]];
                 u.gx[2] = f.tri_sharpness;
-                (1.0, flags(m.enabled))
+                (1.0, flags(std::array::from_fn(|i| m.enabled[i] && enabled(i))))
             }
             Content::Folder(_) => (2.0, [0.0; CHANNELS]),
         };
@@ -4746,9 +4752,10 @@ impl Engine {
     pub fn uses_opacity(&self) -> bool {
         self.layers.iter().any(|l| {
             l.visible
+                && !l.disabled_channels[OPACITY]
                 && match &l.content {
                     Content::Paint(ch) => ch[OPACITY].is_some(),
-                    Content::Fill(f) => f.mat.enabled[OPACITY] || l.images[OPACITY].is_some(),
+                    Content::Fill(fill) => fill.mat.enabled[OPACITY] || l.images[OPACITY].is_some(),
                     Content::Folder(_) => false,
                 }
         })
@@ -4758,9 +4765,10 @@ impl Engine {
     pub fn uses_emission(&self) -> bool {
         self.layers.iter().any(|l| {
             l.visible
+                && !l.disabled_channels[EMISSION]
                 && match &l.content {
                     Content::Paint(ch) => ch[EMISSION].is_some(),
-                    Content::Fill(f) => f.mat.enabled[EMISSION] || l.images[EMISSION].is_some(),
+                    Content::Fill(fill) => fill.mat.enabled[EMISSION] || l.images[EMISSION].is_some(),
                     Content::Folder(_) => false,
                 }
         })
@@ -4771,9 +4779,10 @@ impl Engine {
     pub fn uses_channel(&self, ch: usize) -> bool {
         self.layers.iter().any(|l| {
             l.visible
+                && !l.disabled_channels[ch]
                 && match &l.content {
                     Content::Paint(c) => c[ch].is_some(),
-                    Content::Fill(f) => f.mat.enabled[ch] || l.images[ch].is_some(),
+                    Content::Fill(fill) => fill.mat.enabled[ch] || l.images[ch].is_some(),
                     Content::Folder(_) => false,
                 }
         })
