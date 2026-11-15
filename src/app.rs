@@ -1030,6 +1030,7 @@ fn uv_aliases_at(mesh: &Mesh, source_tri: u32, source_pos: Vec3, uv_point: Vec2,
 pub(crate) fn resolve_stamps(
     mesh: &Mesh,
     bvh: &Bvh,
+    triangle_range: std::ops::Range<u32>,
     cam: &OrbitCam,
     size: Vec2,
     projection: BrushProjection,
@@ -1051,7 +1052,7 @@ pub(crate) fn resolve_stamps(
             continue;
         }
         let (o, d) = cam.ray(Vec2::new(s[0], s[1]), size);
-        let Some(hit) = bvh.raycast(o, d) else { continue };
+        let Some(hit) = bvh.raycast_range(o, d, &triangle_range) else { continue };
         let r = radius * s[2] * (hit.pos - eye).dot(fwd).max(1e-4) * px_world;
         let (n, uv, uv_scale) = surface_at(mesh, hit.tri, hit.bary);
         let x = tangent(n, right);
@@ -1070,7 +1071,7 @@ pub(crate) fn resolve_stamps(
             m[3] = (x * flip).extend(0.0).to_array();
             if projection == BrushProjection::Uv {
                 // The mirror image's UV: the surface at the mirrored point.
-                match bvh.raycast(c + n * r, -n) {
+                match bvh.raycast_range(c + n * r, -n, &triangle_range) {
                     Some(h) if h.pos.distance(c) < 2.0 * r => {
                         let (_, uv, scale) = surface_at(mesh, h.tri, h.bary);
                         m[2][3] = r * scale;
@@ -5087,10 +5088,10 @@ impl PainterApp {
             ViewKind::V3d => {
                 let [w, h] = self.views.view3d.size;
                 let radius = self.brush.size * 0.5 * self.ppp;
-                resolve_stamps(&self.mesh, &self.bvh, &self.cam, Vec2::new(w as f32, h as f32), self.brush.projection, self.brush.symmetry, radius, raw)
+                resolve_stamps(&self.mesh, &self.bvh, self.engine.triangles(), &self.cam, Vec2::new(w as f32, h as f32), self.brush.projection, self.brush.symmetry, radius, raw)
             }
             // The 2D view is the texture: stamps land where they are drawn.
-            ViewKind::V2d => resolve_stamps(&self.mesh, &self.bvh, &self.cam, Vec2::ONE, BrushProjection::Screen, 0, 0.0, raw),
+            ViewKind::V2d => resolve_stamps(&self.mesh, &self.bvh, self.engine.triangles(), &self.cam, Vec2::ONE, BrushProjection::Screen, 0, 0.0, raw),
         };
         if let Some(started) = resolve_started {
             self.meter.resolve_cpu.add(started.elapsed().as_secs_f64() * 1000.0);
@@ -5499,5 +5500,73 @@ mod stroke_region_tile_tests {
         assert_eq!([x0, y0], [0.0, 0.0]);
         assert!((x1 - 63.0 / STROKE_REGION_GRID as f32).abs() < f32::EPSILON);
         assert!((y1 - 63.0 / STROKE_REGION_GRID as f32).abs() < f32::EPSILON);
+    }
+}
+
+
+#[cfg(test)]
+mod texture_set_stamp_resolution_tests {
+    use super::*;
+
+    /// Two overlapping surfaces belong to different material/texture sets and
+    /// deliberately occupy different UV regions. Surface and UV brush
+    /// resolution must select the closest hit within the active set, not the
+    /// globally closest triangle from another set.
+    #[test]
+    fn surface_and_uv_stamps_resolve_only_inside_the_active_texture_set() {
+        let positions = vec![
+            Vec3::new(-1.0, -1.0, 0.25),
+            Vec3::new(1.0, -1.0, 0.25),
+            Vec3::new(1.0, 1.0, 0.25),
+            Vec3::new(-1.0, 1.0, 0.25),
+            Vec3::new(-1.0, -1.0, -0.25),
+            Vec3::new(1.0, -1.0, -0.25),
+            Vec3::new(1.0, 1.0, -0.25),
+            Vec3::new(-1.0, 1.0, -0.25),
+        ];
+        let normals = Some(vec![Vec3::Z; positions.len()]);
+        let uvs = vec![
+            Vec2::new(0.1, 0.1),
+            Vec2::new(0.4, 0.1),
+            Vec2::new(0.4, 0.4),
+            Vec2::new(0.1, 0.4),
+            Vec2::new(0.6, 0.6),
+            Vec2::new(0.9, 0.6),
+            Vec2::new(0.9, 0.9),
+            Vec2::new(0.6, 0.9),
+        ];
+        let indices = vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7];
+        let mut mesh = Mesh::from_parts("overlapping texture sets".into(), positions, normals, uvs, indices);
+        mesh.split_by_material(&[0, 0, 1, 1], &["Front".into(), "Back".into()]);
+        assert_eq!(mesh.sets.len(), 2);
+        let bvh = Bvh::from_mesh(&mesh);
+        let cam = OrbitCam::default();
+        let size = Vec2::new(800.0, 500.0);
+        let raw = [([400.0, 250.0, 1.0, 0.0], 1.0)];
+        let radius = 18.0;
+
+        for projection in [BrushProjection::Surface, BrushProjection::Uv] {
+            let front = resolve_stamps(
+                &mesh, &bvh, mesh.sets[0].tris.clone(), &cam, size, projection, 0, radius, &raw,
+            );
+            let back = resolve_stamps(
+                &mesh, &bvh, mesh.sets[1].tris.clone(), &cam, size, projection, 0, radius, &raw,
+            );
+            assert_eq!(front.len(), 1, "{projection:?}: front set should resolve one stamp");
+            assert_eq!(back.len(), 1, "{projection:?}: back set should resolve one stamp");
+
+            let front_u = front[0][4][0];
+            let back_u = back[0][4][0];
+            assert!(
+                front_u < 0.5 && back_u > 0.5,
+                "{projection:?}: expected the selected set's distinct UV island, front u={front_u}, back u={back_u}"
+            );
+            assert!(
+                front[0][1][2] > back[0][1][2] + 0.3,
+                "{projection:?}: expected separate world-space hits, front z={}, back z={}",
+                front[0][1][2],
+                back[0][1][2]
+            );
+        }
     }
 }

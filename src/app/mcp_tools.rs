@@ -645,7 +645,7 @@ impl PainterApp {
                     proj: [projection as u32 as f32, if paint_through { 1.0 } else { 0.0 }, 85f32.to_radians().cos(), 0.0],
                 };
                 let raw: Vec<([f32; 4], f32)> = stamps.iter().map(|&s| (s, 1.0)).collect();
-                let stamps = super::resolve_stamps(&self.mesh, &self.bvh, &cam, glam::Vec2::new(w as f32, h as f32), projection, symmetry as u8, size * 0.5, &raw);
+                let stamps = super::resolve_stamps(&self.mesh, &self.bvh, self.engine.triangles(), &cam, glam::Vec2::new(w as f32, h as f32), projection, symmetry as u8, size * 0.5, &raw);
                 let paint = BrushPaint {
                     mat,
                     mask_value: f32_arg(args, "mask_value").unwrap_or(1.0).clamp(0.0, 1.0),

@@ -311,7 +311,7 @@ fn paint_projections() {
         let radius = 28.0;
         let raw: Vec<([f32; 4], f32)> = (0..24).map(|i| ([180.0 + i as f32 * 12.5, 250.0, 1.0, 0.0], 1.0)).collect();
         let fsize = Vec2::new(size[0] as f32, size[1] as f32);
-        let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, projection, 1, radius, &raw);
+        let stamps = resolve_stamps(&mesh, &bvh, 0..mesh.triangle_count() as u32, &cam, fsize, projection, 1, radius, &raw);
         assert!(!stamps.is_empty(), "{name}: no stamps hit the mesh");
         let su = StampUniform {
             view_proj: cam.view_proj(fsize.x / fsize.y).to_cols_array_2d(),
@@ -509,7 +509,7 @@ fn scissored_mask_stroke_matches_full_frame() {
     let raw: Vec<([f32; 4], f32)> = (0..16)
         .map(|i| ([178.0 + i as f32 * 8.0, 128.0, 1.0, 0.0], 1.0))
         .collect();
-    let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+    let stamps = resolve_stamps(&mesh, &bvh, 0..mesh.triangle_count() as u32, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
     assert!(!stamps.is_empty(), "the test stroke must resolve stamps");
     let regions = stroke_region(
         &mesh, &bvh, optimized.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps,
@@ -659,7 +659,7 @@ fn perf_4k() {
     let (mut t_stroke, mut t_comp, mut t_view) = (0.0, 0.0, 0.0);
     for f in 0..frames {
         let raw: Vec<([f32; 4], f32)> = (0..6).map(|i| ([500.0 + (f * 6 + i) as f32 * 3.0, 500.0, 1.0, 0.0], 1.0)).collect();
-        let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, 35.0, &raw);
+        let stamps = resolve_stamps(&mesh, &bvh, 0..mesh.triangle_count() as u32, &cam, fsize, BrushProjection::Screen, 0, 35.0, &raw);
         let t = Instant::now();
         let region = crate::app::stroke_region(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, 35.0, &stamps);
         engine.stroke_step(&stamps, su, views.view3d.paint_depth_view(), &paint, region);
@@ -784,7 +784,7 @@ fn multi_scissor_nested_folder_matches_full() {
             ([132.0 + frame as f32 * 4.0, 256.0, 1.0, 0.0], 1.0),
             ([380.0 - frame as f32 * 4.0, 256.0, 1.0, 0.0], 1.0),
         ];
-        let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+        let stamps = resolve_stamps(&mesh, &bvh, 0..mesh.triangle_count() as u32, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
         let regions = stroke_region(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps)
             .expect("both UV islands must be included in the changed region");
         assert!(regions.len() >= 2, "expected disjoint UV scissors, got {}", regions.len());
@@ -1880,7 +1880,7 @@ fn mask_stroke_redoes_only_the_mask_thumbnail() {
     // Several paint frames: stamps, then the recomposition each one triggers.
     for frame in 0..4 {
         let raw: Vec<([f32; 4], f32)> = (0..10).map(|i| ([100.0 + (frame * 10 + i) as f32 * 8.0, 256.0, 1.0, 0.0], 1.0)).collect();
-        let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 1, radius, &raw);
+        let stamps = resolve_stamps(&mesh, &bvh, 0..mesh.triangle_count() as u32, &cam, fsize, BrushProjection::Screen, 1, radius, &raw);
         engine.stroke_step(&stamps, su, views.view3d.paint_depth_view(), &paint, None);
         engine.composite();
         assert_eq!(engine.thumb_renders(), settled, "no thumbnail is rebuilt while the stroke is held (frame {frame})");
@@ -2254,7 +2254,7 @@ fn screen_projection_paints_visible_face_of_overlapped_uvs() {
     };
     let raw = [([256.0, 256.0, 1.0, 0.0], 1.0)];
     let radius = 88.0;
-    let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+    let stamps = resolve_stamps(&mesh, &bvh, 0..mesh.triangle_count() as u32, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
     assert_eq!(stamps.len(), 1);
 
     let su = StampUniform {
@@ -2374,7 +2374,7 @@ fn screen_projection_skips_inward_front_surface_and_paints_background_chart() {
     };
     let raw = [([256.0, 256.0, 1.0, 0.0], 1.0)];
     let radius = 60.0;
-    let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+    let stamps = resolve_stamps(&mesh, &bvh, 0..mesh.triangle_count() as u32, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
     assert_eq!(stamps.len(), 1);
     let su = StampUniform {
         view_proj: cam.view_proj(fsize.x / fsize.y).to_cols_array_2d(),
@@ -2652,7 +2652,7 @@ fn screen_projection_paints_only_visible_face_uv_region() {
     };
     let raw = [([256.0, 256.0, 1.0, 0.0], 1.0)];
     let radius = 60.0;
-    let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+    let stamps = resolve_stamps(&mesh, &bvh, 0..mesh.triangle_count() as u32, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
     assert_eq!(stamps.len(), 1);
     let su = StampUniform {
         view_proj: cam.view_proj(fsize.x / fsize.y).to_cols_array_2d(),
@@ -2767,7 +2767,7 @@ fn screen_projection_rejects_close_occluded_uv_surface() {
     };
     let radius = 88.0;
     let raw = [([256.0, 256.0, 1.0, 0.0], 1.0)];
-    let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+    let stamps = resolve_stamps(&mesh, &bvh, 0..mesh.triangle_count() as u32, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
     assert_eq!(stamps.len(), 1);
     let su = StampUniform {
         view_proj: cam.view_proj(fsize.x / fsize.y).to_cols_array_2d(),
@@ -2901,7 +2901,7 @@ fn screen_projection_rejects_back_surface_behind_thin_occluder() {
     };
     let radius = 88.0;
     let raw = [([256.0, 256.0, 1.0, 0.0], 1.0)];
-    let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+    let stamps = resolve_stamps(&mesh, &bvh, 0..mesh.triangle_count() as u32, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
     assert_eq!(stamps.len(), 1);
     let su = StampUniform {
         view_proj: cam.view_proj(fsize.x / fsize.y).to_cols_array_2d(),
@@ -3006,7 +3006,7 @@ fn screen_projection_paints_visible_sloped_surface() {
     };
     let radius = 88.0;
     let raw = [([256.0, 256.0, 1.0, 0.0], 1.0)];
-    let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+    let stamps = resolve_stamps(&mesh, &bvh, 0..mesh.triangle_count() as u32, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
     assert_eq!(stamps.len(), 1);
     let su = StampUniform {
         view_proj: cam.view_proj(fsize.x / fsize.y).to_cols_array_2d(),
@@ -3110,7 +3110,7 @@ fn screen_projection_respects_imported_normal_facing() {
         views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &ViewSettings::default(), None);
         assert!(engine.begin_stroke(0, StrokeTarget::Content, paint.mat.enabled, false));
 
-        let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+        let stamps = resolve_stamps(&mesh, &bvh, 0..mesh.triangle_count() as u32, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
         assert_eq!(stamps.len(), 1);
         let (region, candidate_indices) = screen_stroke_plan(&mesh, &bvh, engine.triangles(), &cam, fsize, 0, radius, &stamps);
         engine.stroke_step_screen_culled(&gpu_mesh, &candidate_indices, &stamps, su, views.view3d.paint_depth_view(), &paint, region);
@@ -3310,7 +3310,7 @@ fn texture_sets_paint_apart() {
     let radius = 40.0;
     let raw: Vec<([f32; 4], f32)> = (0..90).map(|i| ([30.0 + i as f32 * 5.0, 256.0, 1.0, 0.0], 1.0)).collect();
     let fsize = Vec2::new(size[0] as f32, size[1] as f32);
-    let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+    let stamps = resolve_stamps(&mesh, &bvh, 0..mesh.triangle_count() as u32, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
     assert!(!stamps.is_empty(), "the stroke hits the plane");
     let su = StampUniform {
         view_proj: cam.view_proj(fsize.x / fsize.y).to_cols_array_2d(),
@@ -3876,7 +3876,7 @@ fn transparency_paints_shows_and_exports() {
     let radius = 30.0;
     let raw: Vec<([f32; 4], f32)> = (0..40).map(|i| ([60.0 + i as f32 * 4.0, 256.0, 1.0, 0.0], 1.0)).collect();
     let fsize = Vec2::new(size[0] as f32, size[1] as f32);
-    let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 1, radius, &raw);
+    let stamps = resolve_stamps(&mesh, &bvh, 0..mesh.triangle_count() as u32, &cam, fsize, BrushProjection::Screen, 1, radius, &raw);
     let su = StampUniform {
         view_proj: cam.view_proj(fsize.x / fsize.y).to_cols_array_2d(),
         cam_pos: cam.eye().extend(1.0).to_array(),
@@ -4458,7 +4458,7 @@ fn emission_paints_glows_and_exports() {
     let dark_frame = read_texture(&rs.device, &rs.queue, views.view3d.image());
     let radius = 30.0;
     let raw: Vec<([f32; 4], f32)> = (0..40).map(|i| ([100.0 + i as f32 * 8.0, 256.0, 1.0, 0.0], 1.0)).collect();
-    let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 1, radius, &raw);
+    let stamps = resolve_stamps(&mesh, &bvh, 0..mesh.triangle_count() as u32, &cam, fsize, BrushProjection::Screen, 1, radius, &raw);
     let su = StampUniform {
         view_proj: cam.view_proj(fsize.x / fsize.y).to_cols_array_2d(),
         cam_pos: cam.eye().extend(1.0).to_array(),
@@ -4823,7 +4823,7 @@ fn multi_scissor_matches_full_composite() {
                     ([215.0 + k * 8.0, 250.0 + 85.0 * (k * 0.09).sin(), 1.0, 0.0], 1.0)
                 })
                 .collect();
-            let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+            let stamps = resolve_stamps(&mesh, &bvh, 0..mesh.triangle_count() as u32, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
             let region = crate::app::stroke_region(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps);
             engine.stroke_step(&stamps, su, views.view3d.paint_depth_view(), &paint, region);
             engine.composite();
