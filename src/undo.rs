@@ -281,6 +281,11 @@ impl Edit {
     fn discard_layer_channel(layer: &mut Layer, ch: usize) {
         Self::discard_content_channel(&mut layer.content, ch);
         layer.images[ch] = None;
+        // A Base Color layer thumbnail is a registered GPU texture handle.
+        // Historical layer snapshots must not keep the handle freed by removal.
+        if ch == 0 {
+            layer.thumb = None;
+        }
     }
 
     fn bytes(&self) -> usize {
