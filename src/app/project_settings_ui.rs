@@ -6,12 +6,12 @@ const CHANNEL_LABELS: [&str; crate::engine::CHANNELS] =
 const CHANNEL_ORDER: [usize; crate::engine::CHANNELS] = [0, 6, 1, 2, HEIGHT_CHANNEL, 4, 5, 7];
 const HEIGHT_CHANNEL: usize = crate::engine::HEIGHT;
 
-fn apply_project_channel_mask(fill: &mut FillParams, active: &[bool; crate::engine::CHANNELS]) {
-    for ch in 0..crate::engine::CHANNELS {
-        if !active[ch] {
-            fill.mat.enabled[ch] = false;
-        }
-    }
+/// Per-layer channel outputs that stay stored but remain inactive in this project.
+pub(super) fn disabled_fill_channels(
+    fill: &FillParams,
+    active: &[bool; crate::engine::CHANNELS],
+) -> [bool; crate::engine::CHANNELS] {
+    std::array::from_fn(|ch| !active[ch] && fill.mat.enabled[ch])
 }
 
 /// Intersects a brush's own channel choices with the channels this project permits.
@@ -41,7 +41,7 @@ pub(super) fn disabled_map_names(
     }).collect()
 }
 
-/// Removes disabled-channel data from layer blocks before they enter the project.
+/// Marks inactive channels on pasted layers without deleting their maps or paint.
 pub(super) fn filter_layer_channels(
     layers: &mut [Layer],
     active: &[bool; crate::engine::CHANNELS],
@@ -59,37 +59,28 @@ pub(super) fn filter_layer_channels(
             if has_data {
                 layer.disabled_channels[ch] = true;
             }
-            match &mut layer.content {
-                Content::Paint(channels) => channels[ch] = None,
-                Content::Fill(fill) => fill.mat.enabled[ch] = false,
-                Content::Folder(_) => {}
-            }
-            layer.images[ch] = None;
         }
     }
 }
 
 #[cfg(test)]
 mod channel_mask_tests {
-    use super::apply_project_channel_mask;
+    use super::disabled_fill_channels;
     use crate::engine::{Blend, Content, FillParams, Layer, CHANNELS};
     use super::HEIGHT_CHANNEL;
 
     #[test]
-    fn disabled_height_is_removed_from_a_shelf_fill_material() {
+    fn disabled_height_is_recorded_without_mutating_the_source_material() {
         let mut fill = FillParams::default();
         fill.mat.enabled = [true; CHANNELS];
         let mut active = [true; CHANNELS];
         active[HEIGHT_CHANNEL] = false;
 
-        apply_project_channel_mask(&mut fill, &active);
+        let disabled = disabled_fill_channels(&fill, &active);
 
-        assert!(!fill.mat.enabled[HEIGHT_CHANNEL]);
-        for ch in 0..CHANNELS {
-            if ch != HEIGHT_CHANNEL {
-                assert!(fill.mat.enabled[ch], "active channel {ch} was unexpectedly removed");
-            }
-        }
+        assert!(disabled[HEIGHT_CHANNEL]);
+        assert!(!disabled[0]);
+        assert!(fill.mat.enabled[HEIGHT_CHANNEL], "the source map must remain stored and enabled");
     }
 
     #[test]
@@ -106,7 +97,7 @@ mod channel_mask_tests {
     }
 
     #[test]
-    fn clipboard_filter_strips_disabled_fill_outputs() {
+    fn clipboard_marks_disabled_outputs_without_stripping_their_maps() {
         use super::filter_layer_channels;
 
         let mut fill = FillParams::default();
@@ -130,7 +121,7 @@ mod channel_mask_tests {
         filter_layer_channels(std::slice::from_mut(&mut layer), &active);
 
         let Content::Fill(fill) = &layer.content else { panic!("expected fill layer") };
-        assert!(!fill.mat.enabled[HEIGHT_CHANNEL]);
+        assert!(fill.mat.enabled[HEIGHT_CHANNEL], "clipboard must retain the source map flag");
         assert!(fill.mat.enabled[0]);
         assert!(layer.disabled_channels[HEIGHT_CHANNEL]);
         assert!(!layer.disabled_channels[0]);
@@ -166,21 +157,17 @@ mod channel_mask_tests {
     }
 
     #[test]
-    fn enabled_channels_keep_their_material_flags() {
+    fn active_project_channels_do_not_mark_source_maps_inactive() {
         let mut fill = FillParams::default();
         fill.mat.enabled = [false; CHANNELS];
         fill.mat.enabled[HEIGHT_CHANNEL] = true;
-        apply_project_channel_mask(&mut fill, &[true; CHANNELS]);
+        let disabled = disabled_fill_channels(&fill, &[true; CHANNELS]);
+        assert!(!disabled[HEIGHT_CHANNEL]);
         assert!(fill.mat.enabled[HEIGHT_CHANNEL]);
     }
 }
 
 impl PainterApp {
-    /// Keeps a material preset from introducing channels excluded by the project.
-    pub(super) fn filter_fill_channels(&self, fill: &mut FillParams) {
-        apply_project_channel_mask(fill, &self.active_channels);
-    }
-
     pub(super) fn project_settings_panel(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -198,7 +185,7 @@ impl PainterApp {
 
             section(ui, "Channels");
             ui.label(
-                egui::RichText::new("Only active channels are accepted from shelf materials and stored in the project file.")
+                egui::RichText::new("Inactive channels stay stored in their layers, but are excluded from the material output.")
                     .small()
                     .color(theme::TEXT_DIM),
             );
@@ -212,9 +199,7 @@ impl PainterApp {
                     }
                 }
                 if let Some(ch) = added {
-                    self.active_channels[ch] = true;
-                    self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
-                    self.status = format!("Added {} channel. It starts empty; shelf materials can now provide it.", CHANNEL_LABELS[ch]);
+                    self.enable_project_channel(ch);
                 }
             });
 
@@ -229,7 +214,7 @@ impl PainterApp {
                 ui.horizontal(|ui| {
                     ui.label(CHANNEL_LABELS[ch]);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("×").on_hover_text(format!("Remove {} from this project", CHANNEL_LABELS[ch])).clicked() {
+                        if ui.small_button("×").on_hover_text(format!("Disable {} output but preserve its maps", CHANNEL_LABELS[ch])).clicked() {
                             remove_channel = Some(ch);
                         }
                     });
@@ -237,7 +222,7 @@ impl PainterApp {
             }
             ui.add_space(3.0);
             ui.label(
-                egui::RichText::new("Removing a channel permanently discards its paint and material maps from every texture set. Adding it again starts empty.")
+                egui::RichText::new("Disabling a channel only hides its output. Its maps and paint remain stored and are restored when it is enabled again.")
                     .small()
                     .color(theme::TEXT_DIM),
             );
@@ -322,17 +307,17 @@ impl PainterApp {
 
         let mut decision = None;
         if let Some(ch) = self.pending_channel_remove {
-            egui::Window::new(format!("Remove {}?", CHANNEL_LABELS[ch]))
+            egui::Window::new(format!("Disable {}?", CHANNEL_LABELS[ch]))
                 .id(egui::Id::unique("remove_project_channel"))
                 .collapsible(false)
                 .resizable(false)
                 .show(ui.ctx(), |ui| {
                     ui.label(format!(
-                        "This permanently discards {} data from every layer and texture set. This action cannot be undone. Adding the channel again starts empty.",
+                        "This disables {} in the material output. All existing maps and paint remain stored and return when the channel is enabled again.",
                         CHANNEL_LABELS[ch]
                     ));
                     ui.horizontal(|ui| {
-                        if ui.button("Remove Channel").clicked() {
+                        if ui.button("Disable Channel").clicked() {
                             decision = Some(true);
                         }
                         if ui.button("Cancel").clicked() {
@@ -344,12 +329,12 @@ impl PainterApp {
         if let (Some(ch), Some(remove)) = (self.pending_channel_remove, decision) {
             self.pending_channel_remove = None;
             if remove {
-                self.remove_project_channel(ch);
+                self.disable_project_channel(ch);
             }
         }
     }
 
-    fn remove_project_channel(&mut self, ch: usize) {
+    fn disable_project_channel(&mut self, ch: usize) {
         if ch >= crate::engine::CHANNELS || !self.active_channels[ch] {
             return;
         }
@@ -358,27 +343,41 @@ impl PainterApp {
         for set in 0..set_count {
             self.undo.set = set;
             if set == active_set {
-                Self::discard_channel_from_engine(&mut self.engine, &mut self.undo, ch);
+                Self::mark_channel_disabled(&mut self.engine, ch);
             } else if let Some(parked) = self.sets.parked.get_mut(set).and_then(Option::as_mut) {
-                Self::discard_channel_from_engine(&mut parked.engine, &mut self.undo, ch);
+                Self::mark_channel_disabled(&mut parked.engine, ch);
             }
         }
         self.undo.set = active_set;
-        // Remove this channel from every historical snapshot/edit before it
-        // can be restored by undo or redo; unrelated edits remain available.
-        self.undo.discard_channel(ch);
         self.active_channels[ch] = false;
         if let Some(layers) = self.layer_clipboard.as_mut() {
             filter_layer_channels(layers, &self.active_channels);
         }
         self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
-        self.status = format!("Removed {} channel and discarded its data from all texture sets.", CHANNEL_LABELS[ch]);
+        self.status = format!("Disabled {} output. Existing maps and paint were preserved.", CHANNEL_LABELS[ch]);
     }
 
-    fn discard_channel_from_engine(engine: &mut Engine, undo: &mut UndoStack, ch: usize) {
-        // Preserve any property edits that were already pending before removal.
-        engine.commit_props(undo);
-        let mut changed = false;
+    fn enable_project_channel(&mut self, ch: usize) {
+        if ch >= crate::engine::CHANNELS || self.active_channels[ch] {
+            return;
+        }
+        let active_set = self.sets.active;
+        let set_count = self.mesh.sets.len().max(1);
+        for set in 0..set_count {
+            self.undo.set = set;
+            if set == active_set {
+                Self::mark_channel_enabled(&mut self.engine, ch);
+            } else if let Some(parked) = self.sets.parked.get_mut(set).and_then(Option::as_mut) {
+                Self::mark_channel_enabled(&mut parked.engine, ch);
+            }
+        }
+        self.undo.set = active_set;
+        self.active_channels[ch] = true;
+        self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
+        self.status = format!("Enabled {} output. Preserved maps and paint are available again.", CHANNEL_LABELS[ch]);
+    }
+
+    fn mark_channel_disabled(engine: &mut Engine, ch: usize) {
         for layer in &mut engine.layers {
             let has_data = match &layer.content {
                 Content::Paint(channels) => channels[ch].is_some(),
@@ -388,23 +387,14 @@ impl PainterApp {
             if has_data {
                 layer.disabled_channels[ch] = true;
             }
-            match &mut layer.content {
-                Content::Paint(channels) => {
-                    changed |= channels[ch].take().is_some();
-                }
-                Content::Fill(fill) => {
-                    if fill.mat.enabled[ch] {
-                        fill.mat.enabled[ch] = false;
-                        changed = true;
-                    }
-                }
-                Content::Folder(_) => {}
-            }
-            changed |= layer.images[ch].take().is_some();
         }
-        if changed {
-            engine.commit_props_without_undo();
-            engine.refresh_project_channel_thumbnails(ch);
+        engine.mark_dirty();
+    }
+
+    fn mark_channel_enabled(engine: &mut Engine, ch: usize) {
+        for layer in &mut engine.layers {
+            layer.disabled_channels[ch] = false;
         }
+        engine.mark_dirty();
     }
 }
