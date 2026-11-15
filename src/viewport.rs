@@ -148,6 +148,30 @@ impl OrbitCam {
         let right = fwd.cross(Vec3::Y).normalize();
         (right, right.cross(fwd))
     }
+
+    /// Rotate in first-person mode without moving the camera position.
+    pub fn walk_look(&mut self, delta: Vec2, sensitivity: f32) {
+        let eye = self.eye();
+        self.yaw -= delta.x * sensitivity;
+        self.pitch = (self.pitch + delta.y * sensitivity).clamp(-1.55, 1.55);
+        let (sy, cy) = self.yaw.sin_cos();
+        let (sp, cp) = self.pitch.sin_cos();
+        let forward = Vec3::new(-cp * sy, -sp, -cp * cy);
+        self.target = eye + forward * self.dist;
+    }
+
+    /// Move in first-person mode: WASD on the horizontal plane, E/Q vertically.
+    pub fn walk_move(&mut self, forward: f32, right: f32, vertical: f32, dt: f32, speed: f32) {
+        let look = (self.target - self.eye()).normalize_or_zero();
+        let forward_dir = Vec3::new(look.x, 0.0, look.z).normalize_or_zero();
+        let right_dir = forward_dir.cross(Vec3::Y).normalize_or_zero();
+        let mut movement = forward_dir * forward + right_dir * right + Vec3::Y * vertical;
+        if movement.length_squared() > 1.0 {
+            movement = movement.normalize();
+        }
+        self.target += movement * (speed * dt.max(0.0));
+    }
+
     /// World-space ray through a pixel of a viewport of `size` pixels.
     pub fn ray(&self, px: Vec2, size: Vec2) -> (Vec3, Vec3) {
         let ndc = Vec2::new(px.x / size.x * 2.0 - 1.0, 1.0 - px.y / size.y * 2.0);
@@ -1179,6 +1203,41 @@ fn make_shadow_cache_key(
         key.extend([set as u32, range.start, range.end]);
     }
     key
+}
+
+#[cfg(test)]
+mod walk_navigation_tests {
+    use super::*;
+
+    #[test]
+    fn walk_look_rotates_without_moving_the_camera() {
+        let mut cam = OrbitCam::default();
+        let eye_before = cam.eye();
+        let forward_before = (cam.target - eye_before).normalize();
+        cam.walk_look(Vec2::new(120.0, -30.0), 0.0025);
+        let eye_after = cam.eye();
+        let forward_after = (cam.target - eye_after).normalize();
+
+        assert!(eye_before.distance(eye_after) < 1e-5);
+        assert!(forward_before.distance(forward_after) > 0.05);
+        assert!((forward_after.length() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn walk_move_translates_camera_and_target_together() {
+        let mut cam = OrbitCam::default();
+        let eye_before = cam.eye();
+        let target_before = cam.target;
+        let forward_before = (cam.target - eye_before).normalize();
+
+        cam.walk_move(1.0, 0.0, 0.0, 1.0, 3.0);
+
+        let eye_after = cam.eye();
+        let forward_after = (cam.target - eye_after).normalize();
+        assert!(eye_before.distance(eye_after) > 2.9);
+        assert!(target_before.distance(cam.target) > 2.9);
+        assert!(forward_before.distance(forward_after) < 1e-5);
+    }
 }
 
 #[cfg(test)]
