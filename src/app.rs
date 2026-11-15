@@ -641,6 +641,9 @@ pub struct PainterApp {
     /// The running bake only makes the ID map (from vertex colors).
     bake_id_only: bool,
     cam: OrbitCam,
+    /// Blender-style first-person navigation, active only over the 3D viewport.
+    walk_navigation: bool,
+    walk_speed: f32,
     cam2d: Cam2d,
     layout: Layout,
     view: ViewSettings,
@@ -2094,6 +2097,8 @@ impl PainterApp {
             engine_epoch: 0,
             bake_id_only: false,
             cam: OrbitCam::default(),
+            walk_navigation: false,
+            walk_speed: 3.5,
             cam2d: Cam2d::default(),
             layout: Layout::Split,
             view: ViewSettings::default(),
