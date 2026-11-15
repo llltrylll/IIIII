@@ -3321,26 +3321,6 @@ impl Engine {
         }
     }
 
-    /// Commits a deliberate, irreversible property change without adding it
-    /// to undo history (used when a project channel is permanently removed).
-    pub fn commit_props_without_undo(&mut self) {
-        self.mark_dirty();
-        self.committed = self.doc_props();
-    }
-
-    /// Refreshes cached layer thumbnails after a project-wide channel is discarded.
-    /// Paint-layer thumbnails display Base Color directly; fill/mask thumbnails
-    /// are invalidated and rebuilt by the next composite.
-    pub fn refresh_project_channel_thumbnails(&mut self, channel: usize) {
-        if channel == 0 {
-            for layer in &mut self.layers {
-                Self::release_thumb(&self.rs, layer);
-                Self::attach_thumb(&self.rs, layer);
-            }
-        }
-        self.invalidate_thumbs();
-    }
-
     /// Applies a swap edit (see [`Edit`]): afterwards `edit` holds the state it replaced.
     fn apply_edit(&mut self, edit: &mut Edit, undoing: bool) {
         match edit {
