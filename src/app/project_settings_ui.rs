@@ -40,7 +40,7 @@ pub(super) fn disabled_map_flags(
     })
 }
 
-/// Converts the fixed channel mask to labels only when a tooltip is requested.
+/// Converts the fixed channel mask into the labels shown in the warning tooltip.
 pub(super) fn disabled_map_names(
     flags: &[bool; crate::engine::CHANNELS],
 ) -> Vec<&'static str> {
