@@ -406,18 +406,12 @@ impl PainterApp {
         for l in &engine.layers {
             let content = match &l.content {
                 Content::Paint(ch) => {
-                    let channels: Vec<Value> = ch.iter().enumerate().map(|(i, t)| {
-                        if self.active_channels[i] { t.as_ref().map_or(Value::Null, |t| self.tex_json(w, t)) } else { Value::Null }
+                    let channels: Vec<Value> = ch.iter().map(|t| {
+                        t.as_ref().map_or(Value::Null, |t| self.tex_json(w, t))
                     }).collect();
                     json!({"kind": "paint", "channels": channels})
                 }
-                Content::Fill(p) => {
-                    let mut filtered = p.clone();
-                    for ch in 0..crate::engine::CHANNELS {
-                        if !self.active_channels[ch] { filtered.mat.enabled[ch] = false; }
-                    }
-                    json!({"kind": "fill", "fill": fill_json(&filtered)})
-                },
+                Content::Fill(p) => json!({"kind": "fill", "fill": fill_json(p)}),
                 Content::Folder(fo) => json!({"kind": "folder", "open": fo.open, "graph": fo.graph}),
             };
             let mask = l.mask.as_ref().map(|m| {
@@ -435,7 +429,7 @@ impl PainterApp {
                 .images
                 .iter()
                 .enumerate()
-                .map(|(ch, im)| im.as_ref().filter(|_| !from_graph && self.active_channels[ch]))
+                .map(|(_ch, im)| im.as_ref().filter(|_| !from_graph))
                 .map(|im| im.map_or(Value::Null, |im| json!({"name": im.name, "data": w.blob(&im.encoded)})))
                 .collect();
             layers.push(json!({
@@ -777,17 +771,13 @@ impl PainterApp {
                         let ch = c["channels"].as_array().ok_or_else(bad)?;
                         let mut out: [Option<Tex>; crate::engine::CHANNELS] = Default::default();
                         for (k, t) in ch.iter().enumerate().take(crate::engine::CHANNELS) {
-                            if self.active_channels[k] && !t.is_null() {
+                            if !t.is_null() {
                                 out[k] = Some(self.tex_from(&r, t, "layer")?);
                             }
                         }
                         Content::Paint(out)
                     }
-                    Some("fill") => {
-                        let mut fill = fill_from(&c["fill"]);
-                        self.filter_fill_channels(&mut fill);
-                        Content::Fill(fill)
-                    },
+                    Some("fill") => Content::Fill(fill_from(&c["fill"])),
                     Some("folder") => Content::Folder(Folder { open: b(c, "open", true), graph: c["graph"].as_u64() }),
                     _ => return Err(bad()),
                 };
@@ -810,7 +800,7 @@ impl PainterApp {
                 };
                 let mut images: [Option<crate::engine::FillImage>; crate::engine::CHANNELS] = Default::default();
                 for (k, iv) in lv["images"].as_array().into_iter().flatten().enumerate().take(crate::engine::CHANNELS) {
-                    if self.active_channels[k] && !iv.is_null() {
+                    if !iv.is_null() {
                         let data = std::sync::Arc::new(r.blob(&iv["data"])?);
                         images[k] = Some(self.engine.decode_channel_image(k, s(iv, "name").unwrap_or("image").to_string(), data)?);
                     }
