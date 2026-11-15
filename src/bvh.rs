@@ -266,6 +266,22 @@ impl Bvh {
     }
 
     pub fn raycast(&self, o: Vec3, d: Vec3) -> Option<Hit> {
+        self.raycast_filtered(o, d, None)
+    }
+
+    /// Finds the nearest hit whose original mesh-triangle index belongs to
+    /// the requested range. The full BVH remains shared; other sets are
+    /// skipped before their triangles can become the nearest hit.
+    pub fn raycast_range(&self, o: Vec3, d: Vec3, triangles: &std::ops::Range<u32>) -> Option<Hit> {
+        self.raycast_filtered(o, d, Some(triangles))
+    }
+
+    fn raycast_filtered(
+        &self,
+        o: Vec3,
+        d: Vec3,
+        triangles: Option<&std::ops::Range<u32>>,
+    ) -> Option<Hit> {
         let inv = d.recip();
         let mut tmax = f32::MAX;
         let mut best = None;
@@ -278,6 +294,10 @@ impl Bvh {
             if node.count > 0 {
                 let first = node.first as usize;
                 for (k, tri) in self.tris[first..first + node.count as usize].iter().enumerate() {
+                    let mesh_triangle = self.order[first + k];
+                    if triangles.is_some_and(|range| !range.contains(&mesh_triangle)) {
+                        continue;
+                    }
                     if let Some((t, u, v)) = Self::tri_hit(tri, o, d, tmax) {
                         tmax = t;
                         best = Some((t, first + k, u, v));
