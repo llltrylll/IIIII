@@ -276,7 +276,6 @@ impl PainterApp {
             let content = match c["kind"].as_str() {
                 Some("fill") => {
                     let mut f = fill_from(&c["fill"]);
-                    self.filter_fill_channels(&mut f);
                     f.graph = f.graph.and_then(|g| graph_map.get(&g).copied());
                     Content::Fill(f)
                 }
@@ -285,7 +284,6 @@ impl PainterApp {
             };
             let mut images: [Option<crate::engine::FillImage>; crate::engine::CHANNELS] = Default::default();
             for (ch, iv) in lv["images"].as_array().into_iter().flatten().enumerate().take(crate::engine::CHANNELS) {
-                if !self.active_channels[ch] { continue; }
                 let Some(file) = iv["file"].as_str() else { continue };
                 let data = Arc::new(read(file)?);
                 images[ch] = Some(self.engine.decode_channel_image(ch, iv["name"].as_str().unwrap_or("image").to_string(), data)?);
@@ -297,6 +295,23 @@ impl PainterApp {
                 filters: mask_filters_from(&mv["filters"]),
                 layers: mask_layers_from(&mv["layers"]),
             }));
+            let mut disabled_channels: [bool; crate::engine::CHANNELS] = std::array::from_fn(|ch| {
+                lv["disabled_channels"]
+                    .as_array()
+                    .and_then(|channels| channels.get(ch))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+            });
+            for ch in 0..crate::engine::CHANNELS {
+                let has_data = match &content {
+                    Content::Fill(fill) => fill.mat.enabled[ch] || images[ch].is_some(),
+                    Content::Folder(_) => false,
+                    Content::Paint(_) => false,
+                };
+                if !self.active_channels[ch] && has_data {
+                    disabled_channels[ch] = true;
+                }
+            }
             let blend = lv["blend"].as_str().unwrap_or("Normal");
             layers.push(Layer {
                 id: lv["id"].as_u64().ok_or("a layer has no id")?,
@@ -306,13 +321,7 @@ impl PainterApp {
                 blend: Blend::ALL.into_iter().find(|b| b.name() == blend).unwrap_or(Blend::Normal),
                 content,
                 mask: None,
-                disabled_channels: std::array::from_fn(|ch| {
-                    lv["disabled_channels"]
-                        .as_array()
-                        .and_then(|channels| channels.get(ch))
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false)
-                }),
+                disabled_channels,
                 parent: lv["parent"].as_u64(),
                 images,
                 thumb: None,
