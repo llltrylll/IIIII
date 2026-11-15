@@ -29,30 +29,16 @@ pub fn channel_outputs<T: Clone>(outs: &[Option<T>; USAGES.len()]) -> [Option<T>
     CHANNEL_USAGE.map(|u| outs[u].clone())
 }
 
-/// Returns only graph outputs enabled by the project. Disabled channel outputs
-/// are not attached to Fill Layers and their graph images can be released.
-pub fn channel_outputs_enabled<T: Clone>(
-    outs: &[Option<T>; USAGES.len()],
-    enabled: &[bool; crate::engine::CHANNELS],
-) -> [Option<T>; crate::engine::CHANNELS] {
-    std::array::from_fn(|ch| if enabled[ch] { outs[CHANNEL_USAGE[ch]].clone() } else { None })
-}
-
 #[cfg(test)]
 mod channel_output_tests {
     use super::*;
 
     #[test]
-    fn disabled_project_channel_has_no_graph_output() {
+    fn every_source_graph_output_is_retained_in_its_channel_slot() {
         let outs: [Option<u8>; USAGES.len()] = std::array::from_fn(|i| Some(i as u8));
-        let mut enabled = [true; crate::engine::CHANNELS];
-        enabled[crate::engine::HEIGHT] = false;
-        let filtered = channel_outputs_enabled(&outs, &enabled);
-        assert!(filtered[crate::engine::HEIGHT].is_none());
+        let channels = channel_outputs(&outs);
         for ch in 0..crate::engine::CHANNELS {
-            if ch != crate::engine::HEIGHT {
-                assert_eq!(filtered[ch], Some(outs[CHANNEL_USAGE[ch]].unwrap()));
-            }
+            assert_eq!(channels[ch], Some(outs[CHANNEL_USAGE[ch]].unwrap()));
         }
     }
 }
