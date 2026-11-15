@@ -201,15 +201,17 @@ impl PainterApp {
                 vec2(20.0, 20.0),
             );
             let marker = ui.interact(marker_rect, base_id.with("disabled_map_warning"), Sense::hover());
+            let warning = Color32::from_rgb(238, 171, 67);
+            painter.circle_filled(marker_rect.center(), 7.0, warning);
             painter.text(
-                marker_rect.center(),
+                marker_rect.center() + vec2(0.0, -0.3),
                 egui::Align2::CENTER_CENTER,
-                icons::INFO,
-                egui::FontId::proportional(14.0),
-                Color32::from_rgb(238, 171, 67),
+                "!",
+                egui::FontId::proportional(11.0),
+                Color32::from_gray(28),
             );
             marker.on_hover_text(format!(
-                "This layer contains data in disabled channels: {}",
+                "Source material includes channels disabled in Project: {}",
                 inactive_map_names.join(", ")
             ));
         }
