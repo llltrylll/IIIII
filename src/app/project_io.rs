@@ -806,13 +806,25 @@ impl PainterApp {
                     }
                 }
                 let blend_name = s(lv, "blend").unwrap_or("Normal");
-                let disabled_channels = std::array::from_fn(|ch| {
+                let mut disabled_channels: [bool; crate::engine::CHANNELS] = std::array::from_fn(|ch| {
                     lv["disabled_channels"]
                         .as_array()
                         .and_then(|channels| channels.get(ch))
                         .and_then(Value::as_bool)
                         .unwrap_or(false)
                 });
+                for ch in 0..crate::engine::CHANNELS {
+                    if !self.active_channels[ch] {
+                        let has_data = match &content {
+                            Content::Paint(channels) => channels[ch].is_some(),
+                            Content::Fill(fill) => fill.mat.enabled[ch] || images[ch].is_some(),
+                            Content::Folder(_) => false,
+                        };
+                        if has_data {
+                            disabled_channels[ch] = true;
+                        }
+                    }
+                }
                 layers.push(Layer {
                     id: lv["id"].as_u64().ok_or_else(bad)?,
                     name,
