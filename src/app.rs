@@ -2581,6 +2581,12 @@ impl PainterApp {
     fn run_unchecked(&mut self, action: Action, ctx: &egui::Context) {
         match action {
             Action::NewProject(p) => {
+                self.active_channels = [true; crate::engine::CHANNELS];
+                self.hidden_objects.clear();
+                self.pending_channel_remove = None;
+                self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
+                self.saved_project_settings_serial = self.project_settings_serial;
+                self.autosaved_project_settings_serial = self.project_settings_serial;
                 // The first set is the one cleared below and kept for the new mesh.
                 self.switch_set(0);
                 while !self.engine.layers.is_empty() {
