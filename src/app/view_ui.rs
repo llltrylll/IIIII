@@ -24,7 +24,7 @@ impl PainterApp {
         // keyboard motion is routed exclusively to the camera.
         let toggle_walk = kind == ViewKind::V3d
             && (self.walk_navigation || resp.hovered())
-            && !ui.ctx().wants_keyboard_input()
+            && !ui.ctx().egui_wants_keyboard_input()
             && ui.input_mut(|i| {
                 i.consume_shortcut(&egui::KeyboardShortcut::new(
                     egui::Modifiers::CTRL,
