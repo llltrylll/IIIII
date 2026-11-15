@@ -1753,6 +1753,7 @@ fn add_smart_material_inner(
         // Each layer goes on top of the folder's contents, right below the folder.
         // Excluded channels are removed before the layer enters the Engine.
         let mut fill = l.fill();
+        let mut disabled_channels = std::array::from_fn(|ch| !active_channels[ch] && fill.mat.enabled[ch]);
         for ch in 0..crate::engine::CHANNELS {
             if !active_channels[ch] {
                 fill.mat.enabled[ch] = false;
@@ -1765,8 +1766,14 @@ fn add_smart_material_inner(
             // material's own values in place.
             if let Some(dir) = crate::environment::asset_dir("pbr").map(|d| d.join(scan.id)) {
                 for (ch, file) in presets::Scan::FILES {
-                    if !active_channels[ch] { continue; }
                     let path = dir.join(file);
+                    if !active_channels[ch] {
+                        let exists = cached_images.is_some_and(|images| images.contains_key(&path)) || path.is_file();
+                        if exists {
+                            disabled_channels[ch] = true;
+                        }
+                        continue;
+                    }
                     if let Some(images) = cached_images {
                         if let Some(img) = images.get(&path) {
                             engine.set_fill_image(idx, ch, Some(img.clone()), undo);
@@ -1779,6 +1786,7 @@ fn add_smart_material_inner(
                 }
             }
         }
+        engine.layers[idx].disabled_channels = disabled_channels;
         let layer = &mut engine.layers[idx];
         layer.opacity = l.opacity;
         layer.blend = l.blend;
@@ -2466,8 +2474,11 @@ impl PainterApp {
                     ShelfItem::Material(i) => {
                         let m = &presets::MATERIALS[i];
                         let mut fill = m.fill();
+                        let source_channels = fill.mat.enabled;
                         self.filter_fill_channels(&mut fill);
                         self.selected = self.engine.add_fill_layer(at, parent, m.name.to_string(), fill, &mut self.undo);
+                        self.engine.layers[self.selected].disabled_channels =
+                            std::array::from_fn(|ch| !self.active_channels[ch] && source_channels[ch]);
                         self.target = StrokeTarget::Content;
                     }
                     ShelfItem::Generator(g) => self.pending.push(Action::AddGenerator(g)),
