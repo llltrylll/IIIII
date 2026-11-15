@@ -45,7 +45,7 @@ pub(super) fn filter_layer_channels(
 #[cfg(test)]
 mod channel_mask_tests {
     use super::apply_project_channel_mask;
-    use crate::engine::{FillParams, CHANNELS};
+    use crate::engine::{Blend, Content, FillParams, Layer, CHANNELS};
     use super::HEIGHT_CHANNEL;
 
     #[test]
@@ -76,6 +76,34 @@ mod channel_mask_tests {
         assert!(!filtered[crate::engine::HEIGHT]);
         assert!(filtered[0]);
         assert!(brush[crate::engine::HEIGHT], "filtering must not mutate brush preferences");
+    }
+
+    #[test]
+    fn clipboard_filter_strips_disabled_fill_outputs() {
+        use super::filter_layer_channels;
+
+        let mut fill = FillParams::default();
+        fill.mat.enabled = [true; CHANNELS];
+        let mut layer = Layer {
+            id: 1,
+            name: "Copied fill".into(),
+            visible: true,
+            opacity: 1.0,
+            blend: Blend::Normal,
+            content: Content::Fill(fill),
+            mask: None,
+            parent: None,
+            images: Default::default(),
+            thumb: None,
+        };
+        let mut active = [true; CHANNELS];
+        active[HEIGHT_CHANNEL] = false;
+
+        filter_layer_channels(std::slice::from_mut(&mut layer), &active);
+
+        let Content::Fill(fill) = &layer.content else { panic!("expected fill layer") };
+        assert!(!fill.mat.enabled[HEIGHT_CHANNEL]);
+        assert!(fill.mat.enabled[0]);
     }
 
     #[test]
