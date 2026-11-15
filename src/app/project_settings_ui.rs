@@ -32,7 +32,7 @@ pub(super) fn disabled_map_flags(
         if active[ch] {
             return false;
         }
-        layer.disabled_channels[ch] || match &layer.content {
+        match &layer.content {
             Content::Paint(channels) => channels[ch].is_some(),
             Content::Fill(fill) => fill.mat.enabled[ch] || layer.images[ch].is_some(),
             Content::Folder(_) => false,
