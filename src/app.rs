@@ -711,7 +711,7 @@ pub struct PainterApp {
     mcp: Option<crate::mcp::McpServer>,
     /// MCP calls answered when the running bake completes.
     mcp_bake_waiters: Vec<mpsc::Sender<crate::mcp::ToolResult>>,
-    /// Project-wide channels accepted by materials, saves and layer processing.
+    /// Project-wide channel output switches; source maps remain stored while disabled.
     active_channels: [bool; crate::engine::CHANNELS],
     /// Imported mesh objects hidden from the 3D view and picking.
     hidden_objects: Vec<bool>,
@@ -2422,7 +2422,7 @@ impl PainterApp {
                 }
                 Action::PasteLayer => {
                     if let Some(mut layers) = self.layer_clipboard.take() {
-                        project_settings_ui::filter_layer_channels(&mut layers, &self.active_channels);
+                        project_settings_ui::mark_inactive_layer_channels(&mut layers, &self.active_channels);
                         if layers.is_empty() {
                             self.status = "The layer clipboard is empty.".into();
                         } else {
