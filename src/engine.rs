@@ -2352,11 +2352,21 @@ impl Engine {
     pub fn set_graph_images(&mut self, idx: usize, outputs: [Option<Arc<Tex>>; CHANNELS], name: &str) {
         let Some(layer) = self.layers.get_mut(idx) else { return };
         // A channel the graph has no output for keeps the layer's value.
+        // A newly connected output enables that channel's source material slot;
+        // the project-specific mask decides whether it currently contributes.
         let mut images: [Option<FillImage>; CHANNELS] = Default::default();
-        for (slot, o) in images.iter_mut().zip(outputs) {
-            *slot = o.map(|tex| FillImage { tex, name: name.to_string(), encoded: Arc::new(Vec::new()) });
+        if let Content::Fill(fill) = &mut layer.content {
+            for (ch, (slot, output)) in images.iter_mut().zip(outputs).enumerate() {
+                if output.is_some() {
+                    fill.mat.enabled[ch] = true;
+                }
+                *slot = output.map(|tex| FillImage {
+                    tex,
+                    name: name.to_string(),
+                    encoded: Arc::new(Vec::new()),
+                });
+            }
         }
-        layer.images = images;
         self.mark_dirty();
     }
 
