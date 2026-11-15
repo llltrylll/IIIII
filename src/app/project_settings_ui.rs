@@ -5,14 +5,50 @@ const CHANNEL_LABELS: [&str; crate::engine::CHANNELS] =
     ["Base Color", "Roughness", "Metallic", "Height", "Opacity", "Emission", "Normal", "Specular"];
 const CHANNEL_ORDER: [usize; crate::engine::CHANNELS] = [0, 6, 1, 2, 3, 4, 5, 7];
 
+fn apply_project_channel_mask(fill: &mut FillParams, active: &[bool; crate::engine::CHANNELS]) {
+    for ch in 0..crate::engine::CHANNELS {
+        if !active[ch] {
+            fill.mat.enabled[ch] = false;
+        }
+    }
+}
+
+#[cfg(test)]
+mod channel_mask_tests {
+    use super::apply_project_channel_mask;
+    use crate::engine::{FillParams, CHANNELS, HEIGHT};
+
+    #[test]
+    fn disabled_height_is_removed_from_a_shelf_fill_material() {
+        let mut fill = FillParams::default();
+        fill.mat.enabled = [true; CHANNELS];
+        let mut active = [true; CHANNELS];
+        active[HEIGHT] = false;
+
+        apply_project_channel_mask(&mut fill, &active);
+
+        assert!(!fill.mat.enabled[HEIGHT]);
+        for ch in 0..CHANNELS {
+            if ch != HEIGHT {
+                assert!(fill.mat.enabled[ch], "active channel {ch} was unexpectedly removed");
+            }
+        }
+    }
+
+    #[test]
+    fn enabled_channels_keep_their_material_flags() {
+        let mut fill = FillParams::default();
+        fill.mat.enabled = [false; CHANNELS];
+        fill.mat.enabled[HEIGHT] = true;
+        apply_project_channel_mask(&mut fill, &[true; CHANNELS]);
+        assert!(fill.mat.enabled[HEIGHT]);
+    }
+}
+
 impl PainterApp {
     /// Keeps a material preset from introducing channels excluded by the project.
     pub(super) fn filter_fill_channels(&self, fill: &mut FillParams) {
-        for ch in 0..crate::engine::CHANNELS {
-            if !self.active_channels[ch] {
-                fill.mat.enabled[ch] = false;
-            }
-        }
+        apply_project_channel_mask(fill, &self.active_channels);
     }
 
     pub(super) fn project_settings_panel(&mut self, ui: &mut egui::Ui) {
