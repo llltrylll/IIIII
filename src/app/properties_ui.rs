@@ -128,11 +128,12 @@ impl PainterApp {
                     }
                     if let Content::Fill(f) = &mut self.engine.layers[idx].content {
                         section(ui, "Fill material");
-                        dirty |= material_controls(ui, &mut f.mat, true);
+                        dirty |= material_controls(ui, &mut f.mat, true, &self.active_channels);
                         if graph_name.is_none() {
                         section(ui, "Images");
                         let shelf_textures = &self.shelf.textures;
                         for (ch, label) in ["Color", "Roughness", "Metallic", "Height", "Opacity", "Emission", "Normal", "Specular"].into_iter().enumerate() {
+                            if !self.active_channels[ch] { continue; }
                             // A shelf texture dropped on the row feeds the channel.
                             let row = ui.scope(|ui| labeled(ui, label, |ui| {
                                 match &names[ch] {
@@ -208,7 +209,9 @@ impl PainterApp {
                         section(ui, "Procedural variation");
                         dirty |= slider(ui, "Color var.", &mut f.color_var, 0.0..=1.0);
                         dirty |= slider(ui, "Rough var.", &mut f.rough_var, 0.0..=1.0);
-                        dirty |= slider(ui, "Height var.", &mut f.height_var, 0.0..=1.0);
+                        if self.active_channels[crate::engine::HEIGHT] {
+                            dirty |= slider(ui, "Height var.", &mut f.height_var, 0.0..=1.0);
+                        }
                         dirty |= slider(ui, "Scale", &mut f.var_scale, 0.5..=60.0);
                         dirty |= slider(ui, "Seed", &mut f.seed, 0.0..=100.0);
                         dirty |= slider(ui, "Per-part var.", &mut f.part_var, 0.0..=1.0);
@@ -395,7 +398,7 @@ impl PainterApp {
 
         if content {
             section(ui, if self.tool == Tool::Eraser { "Erase channels" } else { "Material" });
-            material_controls(ui, &mut self.brush.mat, self.tool != Tool::Eraser);
+            material_controls(ui, &mut self.brush.mat, self.tool != Tool::Eraser, &self.active_channels);
             if self.tool != Tool::Eraser {
                 ui.label(egui::RichText::new("Tip: right-click a material in the shelf → Use as brush material.").small().color(theme::TEXT_DIM));
             }
