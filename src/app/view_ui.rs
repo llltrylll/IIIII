@@ -53,7 +53,10 @@ impl PainterApp {
         if self.walk_navigation && kind == ViewKind::V3d {
             let (look_delta, dt, forward, backward, left, right, up, down, fast, slow, exit, scroll) =
                 ui.input(|i| (
-                    i.pointer.delta(),
+                    // Locked cursors do not change their screen position. Use
+                    // egui's raw mouse motion for first-person look, falling
+                    // back to pointer delta on integrations without raw motion.
+                    i.pointer.motion().unwrap_or_else(|| i.pointer.delta()),
                     i.stable_dt.clamp(0.0, 0.05),
                     i.key_down(egui::Key::W),
                     i.key_down(egui::Key::S),
