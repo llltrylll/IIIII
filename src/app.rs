@@ -51,6 +51,7 @@ mod color_ui;
 mod bake_jobs;
 mod mask_ui;
 mod properties_ui;
+mod project_settings_ui;
 mod layers_ui;
 mod shelf_ui;
 mod view_ui;
@@ -708,6 +709,16 @@ pub struct PainterApp {
     mcp: Option<crate::mcp::McpServer>,
     /// MCP calls answered when the running bake completes.
     mcp_bake_waiters: Vec<mpsc::Sender<crate::mcp::ToolResult>>,
+    /// Project-wide channels accepted by materials, saves and layer processing.
+    active_channels: [bool; crate::engine::CHANNELS],
+    /// Imported mesh objects hidden from the 3D view and picking.
+    hidden_objects: Vec<bool>,
+    /// Independent revision for project settings that are not layer-history edits.
+    project_settings_serial: u64,
+    saved_project_settings_serial: u64,
+    autosaved_project_settings_serial: u64,
+    /// Channel awaiting confirmation before its data is discarded.
+    pending_channel_remove: Option<usize>,
     /// The open project file, if it has been saved or opened.
     project_path: Option<std::path::PathBuf>,
     /// Undo state at the last save (see `UndoStack::state_serial`).
@@ -2149,6 +2160,12 @@ impl PainterApp {
             mcp: None,
             mcp_bake_waiters: Vec::new(),
             mcp_env_waiters: Vec::new(),
+            active_channels: [true; crate::engine::CHANNELS],
+            hidden_objects: Vec::new(),
+            project_settings_serial: 0,
+            saved_project_settings_serial: 0,
+            autosaved_project_settings_serial: 0,
+            pending_channel_remove: None,
             project_path: None,
             saved_serial: 0,
             confirm: None,
@@ -2225,6 +2242,8 @@ impl PainterApp {
         };
         let old_names: Vec<String> = self.mesh.sets.iter().map(|s| s.name.clone()).collect();
         self.mesh = Arc::new(mesh);
+        self.hidden_objects = vec![false; self.mesh.objects.len()];
+        self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
         self.rebuild_sets(&old_names, sizes);
         // Mesh-dependent helpers rebuild for the new mesh on demand.
         self.poly.topo = None;
@@ -2290,7 +2309,8 @@ impl PainterApp {
                     self.selected = self.engine.add_paint_layer(at, parent, None, &mut self.undo);
                     self.target = StrokeTarget::Content;
                 }
-                Action::AddFill(fill, name) => {
+                Action::AddFill(mut fill, name) => {
+                    self.filter_fill_channels(&mut fill);
                     self.selected = self.engine.add_fill_layer(at, parent, name, fill, &mut self.undo);
                     self.target = StrokeTarget::Content;
                 }
@@ -2402,7 +2422,7 @@ impl PainterApp {
                 Action::ShelfDrop { item, at, parent } => match item {
                     ShelfItem::Smart(i) => {
                         let smart = &presets::SMART_MATERIALS[i];
-                        self.selected = add_smart_material(&mut self.engine, &mut self.undo, smart, at, parent);
+                        self.selected = add_smart_material_with_channels(&mut self.engine, &mut self.undo, smart, at, parent, &self.active_channels);
                         self.target = StrokeTarget::Content;
                         self.status = format!("Added smart material '{}'. Edit its layers, or the folder's graph (Ctrl+G).", smart.name);
                     }
@@ -2413,7 +2433,9 @@ impl PainterApp {
                     }
                     ShelfItem::Material(i) => {
                         let m = &presets::MATERIALS[i];
-                        self.selected = self.engine.add_fill_layer(at, parent, m.name.to_string(), m.fill(), &mut self.undo);
+                        let mut fill = m.fill();
+                        self.filter_fill_channels(&mut fill);
+                        self.selected = self.engine.add_fill_layer(at, parent, m.name.to_string(), fill, &mut self.undo);
                         self.target = StrokeTarget::Content;
                     }
                     ShelfItem::Generator(g) => self.pending.push(Action::AddGenerator(g)),
@@ -2454,6 +2476,10 @@ impl PainterApp {
                     self.status = format!("Brush tip: {name}.");
                 }
                 Action::TextureToChannel { texture, ch } => {
+                    if !self.active_channels.get(ch).copied().unwrap_or(false) {
+                        self.status = "Enable this channel in Project Settings before adding an image to it.".into();
+                        continue;
+                    }
                     let is_fill = self.engine.layers.get(self.selected).is_some_and(|l| l.is_fill());
                     if !is_fill {
                         self.status = "Select a fill layer to put the texture on.".into();
@@ -2472,6 +2498,9 @@ impl PainterApp {
                 }
                 Action::SetFillImage { idx, ch, path } => match path {
                     None => self.engine.set_fill_image(idx, ch, None, &mut self.undo),
+                    Some(_path) if !self.active_channels.get(ch).copied().unwrap_or(false) => {
+                        self.status = "Enable this channel in Project Settings before loading an image.".into();
+                    }
                     Some(path) => {
                         let name = path.file_name().map_or("image".into(), |n| n.to_string_lossy().into_owned());
                         let loaded = std::fs::read(&path)
