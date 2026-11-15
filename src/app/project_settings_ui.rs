@@ -4,7 +4,7 @@ use super::*;
 const CHANNEL_LABELS: [&str; crate::engine::CHANNELS] =
     ["Base Color", "Roughness", "Metallic", "Height", "Opacity", "Emission", "Normal", "Specular"];
 const CHANNEL_ORDER: [usize; crate::engine::CHANNELS] = [0, 6, 1, 2, HEIGHT_CHANNEL, 4, 5, 7];
-const HEIGHT_CHANNEL: usize = 3;
+const HEIGHT_CHANNEL: usize = crate::engine::HEIGHT;
 
 fn apply_project_channel_mask(fill: &mut FillParams, active: &[bool; crate::engine::CHANNELS]) {
     for ch in 0..crate::engine::CHANNELS {
