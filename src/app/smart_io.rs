@@ -276,6 +276,7 @@ impl PainterApp {
             let content = match c["kind"].as_str() {
                 Some("fill") => {
                     let mut f = fill_from(&c["fill"]);
+                    self.filter_fill_channels(&mut f);
                     f.graph = f.graph.and_then(|g| graph_map.get(&g).copied());
                     Content::Fill(f)
                 }
@@ -284,6 +285,7 @@ impl PainterApp {
             };
             let mut images: [Option<crate::engine::FillImage>; crate::engine::CHANNELS] = Default::default();
             for (ch, iv) in lv["images"].as_array().into_iter().flatten().enumerate().take(crate::engine::CHANNELS) {
+                if !self.active_channels[ch] { continue; }
                 let Some(file) = iv["file"].as_str() else { continue };
                 let data = Arc::new(read(file)?);
                 images[ch] = Some(self.engine.decode_channel_image(ch, iv["name"].as_str().unwrap_or("image").to_string(), data)?);
