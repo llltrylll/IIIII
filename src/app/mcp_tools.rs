@@ -589,7 +589,18 @@ impl PainterApp {
                 }
                 let views = self.mcp_views.get_or_insert_with(|| ViewRenderer::new(&self.rs));
                 let engines = super::texture_sets::engines(&self.engine, &self.sets, self.mesh.sets.len());
-                views.render_3d(&self.rs, [w, h], &engines, &self.env, &self.gpu_mesh, &cam, &self.view, Some(&self.overlays));
+                views.render_3d_with_object_visibility(
+                    &self.rs,
+                    [w, h],
+                    &engines,
+                    &self.env,
+                    &self.gpu_mesh,
+                    self.mesh.as_ref(),
+                    &cam,
+                    &self.view,
+                    Some(&self.overlays),
+                    &self.hidden_objects,
+                );
                 if !self.engine.begin_stroke(i, target, mat.enabled, erase) {
                     return Err("nothing to paint: check the channels (or, erasing, that the layer has paint)".into());
                 }
@@ -852,7 +863,18 @@ impl PainterApp {
                 // A separate renderer, so the app's own viewport keeps its size.
                 let views = self.mcp_views.get_or_insert_with(|| ViewRenderer::new(&self.rs));
                 let engines = super::texture_sets::engines(&self.engine, &self.sets, self.mesh.sets.len());
-                views.render_3d(&self.rs, [w, h], &engines, &self.env, &self.gpu_mesh, &cam, &settings, Some(&self.overlays));
+                views.render_3d_with_object_visibility(
+                    &self.rs,
+                    [w, h],
+                    &engines,
+                    &self.env,
+                    &self.gpu_mesh,
+                    self.mesh.as_ref(),
+                    &cam,
+                    &settings,
+                    Some(&self.overlays),
+                    &self.hidden_objects,
+                );
                 let img = views.view3d.image();
                 let rgba = crate::gpu::read_texture(&self.rs.device, &self.rs.queue, img);
                 Reply::Now(png(&rgba, img.width, img.height).map(|p| vec![Out::Png(p)]))
