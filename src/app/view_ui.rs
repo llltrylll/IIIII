@@ -471,7 +471,7 @@ impl PainterApp {
         if !self.drew_3d {
             let size = self.views.view3d.size;
             let engines = texture_sets::engines(&self.engine, &self.sets, self.mesh.sets.len());
-            self.views.render_3d_with_object_visibility(&self.rs, size, &engines, &self.env, &self.gpu_mesh, &self.cam, &self.view, Some(&self.overlays), &self.hidden_objects);
+            self.views.render_3d_with_object_visibility(&self.rs, size, &engines, &self.env, &self.gpu_mesh, self.mesh.as_ref(), &self.cam, &self.view, Some(&self.overlays), &self.hidden_objects);
         }
         self.drew_3d = false;
     }
