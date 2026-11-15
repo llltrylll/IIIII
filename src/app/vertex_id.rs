@@ -89,7 +89,7 @@ pub enum Shown {
 }
 
 /// The overlay triangles for `shown` (three corners a triangle).
-pub fn overlay(mesh: &Mesh, shown: &Shown) -> Vec<OverlayVertex> {
+pub fn overlay(mesh: &Mesh, shown: &Shown, hidden_objects: &[bool]) -> Vec<OverlayVertex> {
     let Some(colors) = &mesh.tri_vertex_color else { return Vec::new() };
     let ids: Vec<[f32; 3]> = match shown {
         Shown::Colors => Vec::new(),
@@ -100,7 +100,11 @@ pub fn overlay(mesh: &Mesh, shown: &Shown) -> Vec<OverlayVertex> {
         Shown::Mask(_, t) => f32::from_bits(*t),
     };
     let mut out = Vec::with_capacity(mesh.indices.len());
-    for (tri, corners) in mesh.indices.chunks_exact(3).zip(colors) {
+    for (tri_index, (tri, corners)) in mesh.indices.chunks_exact(3).zip(colors).enumerate() {
+        let object = mesh.tri_object.get(tri_index).copied().unwrap_or(u32::MAX) as usize;
+        if hidden_objects.get(object).copied().unwrap_or(false) {
+            continue;
+        }
         for k in 0..3 {
             let Some(v) = mesh.vertices.get(tri[k] as usize) else { continue };
             let rgb = match shown {
@@ -332,6 +336,22 @@ pub fn panel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vertex_color_overlay_excludes_hidden_imported_objects() {
+        use crate::mesh::Primitive;
+
+        let mut mesh = Primitive::Plane.build();
+        let triangles = mesh.triangle_count();
+        mesh.tri_vertex_color = Some(vec![[[255, 0, 0]; 3]; triangles]);
+        mesh.objects = vec!["Hidden".into(), "Visible".into()];
+        mesh.tri_object = (0..triangles).map(|tri| (tri % 2) as u32).collect();
+
+        let visible_triangles = mesh.tri_object.iter().filter(|&&object| object == 1).count();
+        let overlay = super::overlay(&mesh, &Shown::Colors, &[true, false]);
+
+        assert_eq!(overlay.len(), visible_triangles * 3);
+    }
 
     #[test]
     fn palette_counts_corners_most_used_first() {
