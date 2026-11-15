@@ -4879,7 +4879,7 @@ impl PainterApp {
         if let Some(set) = self.mesh.sets.get(self.sets.active) {
             tris.retain(|t| set.tris.contains(t));
         }
-        tris.retain(|&t| !self.tri_hidden(t));
+        tris.retain(|&t| !self.tri_hidden(t, kind));
         if tris.is_empty() {
             return;
         }
