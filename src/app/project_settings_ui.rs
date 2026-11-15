@@ -119,11 +119,17 @@ mod channel_mask_tests {
 
         mark_inactive_layer_channels(std::slice::from_mut(&mut layer), &active);
 
-        let Content::Fill(fill) = &layer.content else { panic!("expected fill layer") };
-        assert!(fill.mat.enabled[HEIGHT_CHANNEL], "clipboard must retain the source map flag");
-        assert!(fill.mat.enabled[0]);
+        {
+            let Content::Fill(fill) = &layer.content else { panic!("expected fill layer") };
+            assert!(fill.mat.enabled[HEIGHT_CHANNEL], "clipboard must retain the source map flag");
+            assert!(fill.mat.enabled[0]);
+        }
         assert!(layer.disabled_channels[HEIGHT_CHANNEL]);
         assert!(!layer.disabled_channels[0]);
+
+        active[HEIGHT_CHANNEL] = true;
+        mark_inactive_layer_channels(std::slice::from_mut(&mut layer), &active);
+        assert!(!layer.disabled_channels[HEIGHT_CHANNEL], "re-enabled channels must be restored in clipboard layers");
     }
 
     #[test]
@@ -131,7 +137,7 @@ mod channel_mask_tests {
         use super::disabled_map_names;
 
         let mut fill = FillParams::default();
-        fill.mat.enabled[HEIGHT_CHANNEL] = false;
+        fill.mat.enabled[HEIGHT_CHANNEL] = true;
         let mut disabled_channels = [false; CHANNELS];
         disabled_channels[HEIGHT_CHANNEL] = true;
         let layer = Layer {
