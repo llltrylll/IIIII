@@ -3313,6 +3313,13 @@ impl Engine {
         }
     }
 
+    /// Commits a deliberate, irreversible property change without adding it
+    /// to undo history (used when a project channel is permanently removed).
+    pub fn commit_props_without_undo(&mut self) {
+        self.mark_dirty();
+        self.committed = self.doc_props();
+    }
+
     /// Applies a swap edit (see [`Edit`]): afterwards `edit` holds the state it replaced.
     fn apply_edit(&mut self, edit: &mut Edit, undoing: bool) {
         match edit {
