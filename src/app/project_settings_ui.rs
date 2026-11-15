@@ -14,6 +14,14 @@ fn apply_project_channel_mask(fill: &mut FillParams, active: &[bool; crate::engi
     }
 }
 
+/// Intersects a brush's own channel choices with the channels this project permits.
+pub(super) fn effective_channel_mask(
+    brush_enabled: [bool; crate::engine::CHANNELS],
+    active: &[bool; crate::engine::CHANNELS],
+) -> [bool; crate::engine::CHANNELS] {
+    std::array::from_fn(|ch| brush_enabled[ch] && active[ch])
+}
+
 /// Removes disabled-channel data from layer blocks before they enter the project.
 pub(super) fn filter_layer_channels(
     layers: &mut [Layer],
@@ -58,6 +66,19 @@ mod channel_mask_tests {
     }
 
     #[test]
+    fn project_mask_blocks_disabled_channels_without_changing_brush_preferences() {
+        use super::effective_channel_mask;
+
+        let brush = [true; CHANNELS];
+        let active = [true, true, true, false, true, true, true, true];
+        let filtered = effective_channel_mask(brush, &active);
+
+        assert!(!filtered[crate::engine::HEIGHT]);
+        assert!(filtered[0]);
+        assert!(brush[crate::engine::HEIGHT], "filtering must not mutate brush preferences");
+    }
+
+    #[test]
     fn enabled_channels_keep_their_material_flags() {
         let mut fill = FillParams::default();
         fill.mat.enabled = [false; CHANNELS];
@@ -95,10 +116,6 @@ impl PainterApp {
                 }
                 if let Some(ch) = added {
                     self.active_channels[ch] = true;
-                    // A removed channel also disables both brush material
-                    // masks. Re-enable it for the newly added empty channel.
-                    self.brush.mat.enabled[ch] = true;
-                    self.other_brush.mat.enabled[ch] = true;
                     self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
                     self.status = format!("Added {} channel. It starts empty; shelf materials can now provide it.", CHANNEL_LABELS[ch]);
                 }
@@ -247,8 +264,6 @@ impl PainterApp {
         if let Some(layers) = self.layer_clipboard.as_mut() {
             filter_layer_channels(layers, &self.active_channels);
         }
-        self.brush.mat.enabled[ch] = false;
-        self.other_brush.mat.enabled[ch] = false;
         self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
         self.status = format!("Removed {} channel and discarded its data from all texture sets.", CHANNEL_LABELS[ch]);
     }
