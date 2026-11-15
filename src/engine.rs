@@ -1006,6 +1006,9 @@ pub struct Layer {
     pub blend: Blend,
     pub content: Content,
     pub mask: Option<Mask>,
+    /// Channels present in the source material but disabled by project settings.
+    /// This is a display hint only; those channels are not evaluated or exported.
+    pub disabled_channels: [bool; CHANNELS],
     /// The folder this layer is in. A folder's layers sit directly below it.
     pub parent: Option<u64>,
     /// Fill layers: images replacing color, roughness, metallic, height, opacity.
@@ -2764,6 +2767,7 @@ impl Engine {
             content: Content::Folder(Folder { open: true, graph: None }),
             mask: None,
             parent,
+            disabled_channels: [false; CHANNELS],
             images: Default::default(),
             thumb: None,
         };
@@ -2829,6 +2833,7 @@ impl Engine {
             content: Content::Paint(Default::default()),
             mask: None,
             parent,
+            disabled_channels: [false; CHANNELS],
             images: Default::default(),
             thumb: None,
         };
@@ -2869,6 +2874,7 @@ impl Engine {
             content: Content::Paint(chans),
             mask: None,
             parent,
+            disabled_channels: [false; CHANNELS],
             images: Default::default(),
             thumb,
         };
@@ -2894,6 +2900,7 @@ impl Engine {
             content: Content::Fill(fill),
             mask: None,
             parent,
+            disabled_channels: [false; CHANNELS],
             images: Default::default(),
             thumb: None,
         };
@@ -3046,10 +3053,11 @@ impl Engine {
             layers: m.layers.clone(),
         });
         let (name, visible, opacity, blend, parent) = (src.name.clone(), src.visible, src.opacity, src.blend, src.parent);
+        let disabled_channels = src.disabled_channels;
         let images = src.images.clone();
         self.queue.submit([encoder.finish()]);
         let id = self.new_id();
-        let mut layer = Layer { id, name, visible, opacity, blend, content, mask, parent, images, thumb: None };
+        let mut layer = Layer { id, name, visible, opacity, blend, content, mask, disabled_channels, parent, images, thumb: None };
         Self::attach_thumb(&self.rs, &mut layer);
         layer
     }
@@ -4990,6 +4998,7 @@ mod composite_pass_tests {
             blend: Blend::Normal,
             content,
             mask: None,
+            disabled_channels: [false; CHANNELS],
             parent,
             images: std::array::from_fn(|_| None),
             thumb: None,
