@@ -233,61 +233,6 @@ impl Edit {
         }
     }
 
-    /// Prevents this channel's data from being resurrected by an older edit.
-    /// Returns false when the whole edit is channel-specific and can be dropped.
-    fn discard_channel(&mut self, ch: usize) -> bool {
-        match self {
-            Edit::Stroke(stroke) => {
-                !(stroke.target == StrokeTarget::Content && stroke.channels.contains(&ch))
-            }
-            Edit::Layer { layer, .. } => {
-                if let Some(layer) = layer {
-                    Self::discard_layer_channel(layer, ch);
-                }
-                true
-            }
-            Edit::Content { content, .. } => {
-                Self::discard_content_channel(content, ch);
-                true
-            }
-            Edit::Images { images, .. } => {
-                images[ch] = None;
-                true
-            }
-            Edit::Props(props) => {
-                for (_, layer) in &mut props.layers {
-                    if let Some(fill) = &mut layer.fill {
-                        fill.mat.enabled[ch] = false;
-                    }
-                }
-                true
-            }
-            Edit::Group(edits) => {
-                edits.retain_mut(|edit| edit.discard_channel(ch));
-                !edits.is_empty()
-            }
-            Edit::Order(_) | Edit::Parent { .. } | Edit::Mask { .. } | Edit::Fix { .. } => true,
-        }
-    }
-
-    fn discard_content_channel(content: &mut Content, ch: usize) {
-        match content {
-            Content::Paint(channels) => channels[ch] = None,
-            Content::Fill(fill) => fill.mat.enabled[ch] = false,
-            Content::Folder(_) => {}
-        }
-    }
-
-    fn discard_layer_channel(layer: &mut Layer, ch: usize) {
-        Self::discard_content_channel(&mut layer.content, ch);
-        layer.images[ch] = None;
-        // A Base Color layer thumbnail is a registered GPU texture handle.
-        // Historical layer snapshots must not keep the handle freed by removal.
-        if ch == 0 {
-            layer.thumb = None;
-        }
-    }
-
     fn bytes(&self) -> usize {
         match self {
             Edit::Stroke(e) => e.bytes(),
@@ -383,21 +328,6 @@ impl UndoStack {
         self.redo.clear();
         self.group = None;
         self.group_depth = 0;
-    }
-
-    /// Removes only one channel's data from undo/redo history. Other edits
-    /// remain available, but can no longer restore deleted channel content.
-    pub fn discard_channel(&mut self, ch: usize) {
-        if ch >= crate::engine::CHANNELS {
-            return;
-        }
-        self.undo.retain_mut(|entry| entry.edit.discard_channel(ch));
-        self.redo.retain_mut(|entry| entry.edit.discard_channel(ch));
-        let empty_group = self.group.as_mut().is_some_and(|entry| !entry.edit.discard_channel(ch));
-        if empty_group {
-            self.group = None;
-            self.group_depth = 0;
-        }
     }
 
     pub fn ram_bytes(&self) -> usize {
