@@ -814,16 +814,15 @@ impl PainterApp {
                         .unwrap_or(false)
                 });
                 for ch in 0..crate::engine::CHANNELS {
-                    if !self.active_channels[ch] {
-                        let has_data = match &content {
-                            Content::Paint(channels) => channels[ch].is_some(),
-                            Content::Fill(fill) => fill.mat.enabled[ch] || images[ch].is_some(),
-                            Content::Folder(_) => false,
-                        };
-                        if has_data {
-                            disabled_channels[ch] = true;
-                        }
-                    }
+                    let has_data = match &content {
+                        Content::Paint(channels) => channels[ch].is_some(),
+                        Content::Fill(fill) => fill.mat.enabled[ch] || images[ch].is_some(),
+                        Content::Folder(_) => false,
+                    };
+                    // The project-wide setting is authoritative when a saved per-layer
+                    // mask comes from an older or partially migrated project.
+                    disabled_channels[ch] =
+                        !self.active_channels[ch] && (disabled_channels[ch] || has_data);
                 }
                 layers.push(Layer {
                     id: lv["id"].as_u64().ok_or_else(bad)?,
