@@ -1030,6 +1030,7 @@ fn uv_aliases_at(mesh: &Mesh, source_tri: u32, source_pos: Vec3, uv_point: Vec2,
 pub(crate) fn resolve_stamps(
     mesh: &Mesh,
     bvh: &Bvh,
+    triangle_range: std::ops::Range<u32>,
     cam: &OrbitCam,
     size: Vec2,
     projection: BrushProjection,
@@ -1051,7 +1052,7 @@ pub(crate) fn resolve_stamps(
             continue;
         }
         let (o, d) = cam.ray(Vec2::new(s[0], s[1]), size);
-        let Some(hit) = bvh.raycast(o, d) else { continue };
+        let Some(hit) = bvh.raycast_range(o, d, &triangle_range) else { continue };
         let r = radius * s[2] * (hit.pos - eye).dot(fwd).max(1e-4) * px_world;
         let (n, uv, uv_scale) = surface_at(mesh, hit.tri, hit.bary);
         let x = tangent(n, right);
@@ -1070,7 +1071,7 @@ pub(crate) fn resolve_stamps(
             m[3] = (x * flip).extend(0.0).to_array();
             if projection == BrushProjection::Uv {
                 // The mirror image's UV: the surface at the mirrored point.
-                match bvh.raycast(c + n * r, -n) {
+                match bvh.raycast_range(c + n * r, -n, &triangle_range) {
                     Some(h) if h.pos.distance(c) < 2.0 * r => {
                         let (_, uv, scale) = surface_at(mesh, h.tri, h.bary);
                         m[2][3] = r * scale;
@@ -5087,10 +5088,10 @@ impl PainterApp {
             ViewKind::V3d => {
                 let [w, h] = self.views.view3d.size;
                 let radius = self.brush.size * 0.5 * self.ppp;
-                resolve_stamps(&self.mesh, &self.bvh, &self.cam, Vec2::new(w as f32, h as f32), self.brush.projection, self.brush.symmetry, radius, raw)
+                resolve_stamps(&self.mesh, &self.bvh, self.engine.triangles(), &self.cam, Vec2::new(w as f32, h as f32), self.brush.projection, self.brush.symmetry, radius, raw)
             }
             // The 2D view is the texture: stamps land where they are drawn.
-            ViewKind::V2d => resolve_stamps(&self.mesh, &self.bvh, &self.cam, Vec2::ONE, BrushProjection::Screen, 0, 0.0, raw),
+            ViewKind::V2d => resolve_stamps(&self.mesh, &self.bvh, self.engine.triangles(), &self.cam, Vec2::ONE, BrushProjection::Screen, 0, 0.0, raw),
         };
         if let Some(started) = resolve_started {
             self.meter.resolve_cpu.add(started.elapsed().as_secs_f64() * 1000.0);
