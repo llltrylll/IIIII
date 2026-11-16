@@ -75,7 +75,7 @@ fn surface_projection_paints_partial_overlapped_uvs_on_hit_face() {
         ..Default::default()
     };
     let view_size = Vec2::splat(512.0);
-    let raw = [([256.0, 256.0, 1.0, 0.0], 1.0)];
+    let raw = [([300.0, 230.0, 1.0, 0.0], 1.0)];
     let stamps = resolve_stamps(
         &mesh,
         &bvh,
@@ -110,15 +110,81 @@ fn surface_projection_paints_partial_overlapped_uvs_on_hit_face() {
     expected.sort_unstable();
     assert_eq!(actual, expected, "only the hit face belongs to this Surface stroke");
 
+    let mut undo = UndoStack::default();
+    let layer = engine.add_paint_layer(0, None, Some("Surface regression".into()), &mut undo);
     engine.composite();
     let before = read_texture(&rs.device, &rs.queue, engine.final_tex(0));
 
-    let layer = engine.add_paint_layer(0, None, Some("Surface regression".into()), &mut UndoStack::default());
-    let mut undo = UndoStack::default();
-    // Insert into the already-empty document; the second stack is intentionally
-    // used only for this test's layer creation and is otherwise not observed.
-    let _ = layer;
-    let layer = engine.layers_len_for_test_placeholder();
-    let _ = layer;
-    drop(undo);
+    assert!(engine.begin_stroke(
+        layer,
+        StrokeTarget::Content,
+        [true, false, false, false, false, false, false, false],
+        false,
+    ));
+
+    let uniform = StampUniform {
+        view_proj: camera.view_proj(1.0).to_cols_array_2d(),
+        cam_pos: camera.eye().extend(1.0).to_array(),
+        view: [512.0, 512.0, 0.0, 0.0],
+        view2d: [0.0; 4],
+        brush: [20.0, 0.5, 1.0, 0.0],
+        clip: [NEAR, FAR, 0.0, 0.0],
+        proj: [1.0, 0.0, 85.0f32.to_radians().cos(), 0.0],
+    };
+    let paint = BrushPaint {
+        mat: MatValues { color: [1.0, 0.05, 0.02], ..Default::default() },
+        mask_value: 1.0,
+        opacity: 1.0,
+        erase: false,
+        grain: [0.0; 4],
+    };
+    // The Surface fragment path does not sample depth, but the shared bind
+    // layout still requires the multisampled depth view used by Screen paint.
+    let depth = rs.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Surface projection test depth"),
+        size: wgpu::Extent3d { width: 512, height: 512, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 4,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+    engine.stroke_step_screen_culled(
+        &gpu_mesh,
+        &candidate_indices,
+        &stamps,
+        uniform,
+        &depth_view,
+        &paint,
+        regions,
+    );
+    let _ = engine.end_stroke();
+    engine.composite();
+    let after = read_texture(&rs.device, &rs.queue, engine.final_tex(0));
+
+    let uv = Vec2::new(stamps[0][4][0], stamps[0][4][1]);
+    let center_x = (uv.x * resolution as f32).floor() as usize;
+    let center_y = (uv.y * resolution as f32).floor() as usize;
+    let changed_near_center = (-2isize..=2).any(|dy| {
+        (-2isize..=2).any(|dx| {
+            let x = (center_x as isize + dx).clamp(0, resolution as isize - 1) as usize;
+            let y = (center_y as isize + dy).clamp(0, resolution as isize - 1) as usize;
+            let offset = (y * resolution as usize + x) * 4;
+            before[offset..offset + 4] != after[offset..offset + 4]
+        })
+    });
+    assert!(changed_near_center, "the hit Surface must change its own UV texels");
+
+    // The rear chart's non-overlapping area is outside the front hit face's
+    // UV bounds and must remain untouched by this Surface stamp.
+    let outside_x = (0.74 * resolution as f32).floor() as usize;
+    let outside_y = (0.74 * resolution as f32).floor() as usize;
+    let outside = (outside_y * resolution as usize + outside_x) * 4;
+    assert_eq!(
+        &after[outside..outside + 4],
+        &before[outside..outside + 4],
+        "the unhit rear-only UV region must remain unchanged",
+    );
 }
