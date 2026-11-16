@@ -334,25 +334,35 @@ fn screen_face_normal(p: vec3<f32>, shading_normal: vec3<f32>, geometric_normal:
 // depending on whichever overlapping face won the UV bake.
 @fragment
 fn fs_stamp_uv(in: StampUvOut) -> @location(0) vec4<f32> {
-    let world_dx = dpdx(in.world_pos);
-    let world_dy = dpdy(in.world_pos);
-    let geometric_normal = cross(world_dx, world_dy);
-    let n = screen_face_normal(in.world_pos, in.normal, geometric_normal);
-
     var a = 0.0;
-    let s = project_uv(in.world_pos, n, world_dx, world_dy);
-    if (s.z > 0.0) {
-        a = coverage_screen(s.xy) * s.z;
-    }
+    if (u.proj.x > 0.5 && u.proj.x < 1.5) {
+        // Surface projection is evaluated from this triangle's own interpolated
+        // world position and normal. Mirrored Surface stamps were already
+        // resolved on the CPU, so they need no screen-space mirror here.
+        a = coverage_surface(in.world_pos, normalize(in.normal));
+    } else {
+        // Screen projection evaluates every triangle at its own UV coordinates.
+        // The viewport depth test selects the visible surface, rather than
+        // depending on whichever overlapping face won the UV bake.
+        let world_dx = dpdx(in.world_pos);
+        let world_dy = dpdy(in.world_pos);
+        let geometric_normal = cross(world_dx, world_dy);
+        let n = screen_face_normal(in.world_pos, in.normal, geometric_normal);
 
-    let axis = i32(u.brush.w);
-    if (axis > 0) {
-        let flip = select(vec3<f32>(1.0), vec3<f32>(-1.0), vec3<i32>(1, 2, 3) == vec3<i32>(axis));
-        let mirrored_pos = in.world_pos * flip;
-        let mirrored_normal = screen_face_normal(mirrored_pos, n * flip, geometric_normal * flip);
-        let mirrored = project_uv(mirrored_pos, mirrored_normal, world_dx * flip, world_dy * flip);
-        if (mirrored.z > 0.0) {
-            a = max(a, coverage_screen(mirrored.xy) * mirrored.z);
+        let s = project_uv(in.world_pos, n, world_dx, world_dy);
+        if (s.z > 0.0) {
+            a = coverage_screen(s.xy) * s.z;
+        }
+
+        let axis = i32(u.brush.w);
+        if (axis > 0) {
+            let flip = select(vec3<f32>(1.0), vec3<f32>(-1.0), vec3<i32>(1, 2, 3) == vec3<i32>(axis));
+            let mirrored_pos = in.world_pos * flip;
+            let mirrored_normal = screen_face_normal(mirrored_pos, n * flip, geometric_normal * flip);
+            let mirrored = project_uv(mirrored_pos, mirrored_normal, world_dx * flip, world_dy * flip);
+            if (mirrored.z > 0.0) {
+                a = max(a, coverage_screen(mirrored.xy) * mirrored.z);
+            }
         }
     }
     if (a <= 0.0) {
