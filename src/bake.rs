@@ -1471,6 +1471,8 @@ pub struct BakeRun {
     segs: wgpu::Buffer,
     /// Ray-traced tiles: x, y and the pass (0 occlusion, 1 custom maps).
     tiles: Vec<[u32; 3]>,
+    /// Three uniform buffers are recycled in queue order with the in-flight tile slots.
+    tile_uniforms: [wgpu::Buffer; MAX_IN_FLIGHT],
     next_tile: usize,
     done_tiles: Arc<AtomicUsize>,
     in_flight: Arc<AtomicUsize>,
@@ -2033,6 +2035,12 @@ impl GpuBaker {
             seg_nodes,
             segs,
             tiles,
+            tile_uniforms: std::array::from_fn(|_| device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("bake tile uniform ring"),
+                size: std::mem::size_of::<BakeUniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })),
             next_tile: 0,
             done_tiles: Arc::new(AtomicUsize::new(0)),
             in_flight: Arc::new(AtomicUsize::new(0)),
@@ -2053,13 +2061,15 @@ impl GpuBaker {
     ) -> Option<BakedMaps> {
         let tile_cursor_before = run.next_tile;
         while run.next_tile < run.tiles.len() && run.in_flight.load(Ordering::Acquire) < MAX_IN_FLIGHT {
+            let slot = run.next_tile % MAX_IN_FLIGHT;
             let [x, y, pass] = run.tiles[run.next_tile];
             run.next_tile += 1;
             let mut u = run.uniform;
             u.e = [x as f32, y as f32, 0.0, run.next_tile as f32];
-            let ubuf = Self::uniform_buffer(device, &u);
+            let ubuf = &run.tile_uniforms[slot];
             let mut encoder = device.create_command_encoder(&Default::default());
             if pass == 0 {
+                queue.write_buffer(ubuf, 0, bytemuck::bytes_of(&u));
                 let group = Self::group(
                     device,
                     &self.occlusion.1,
@@ -2081,7 +2091,7 @@ impl GpuBaker {
             } else {
                 let (target, settings) = &run.custom[pass as usize - 1];
                 u.cust = *settings;
-                let ubuf = Self::uniform_buffer(device, &u);
+                queue.write_buffer(ubuf, 0, bytemuck::bytes_of(&u));
                 let group = Self::group(
                     device,
                     &self.custom.1,
