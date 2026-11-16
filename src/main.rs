@@ -23,6 +23,8 @@ mod post;
 mod presets;
 #[cfg(test)]
 mod preview_test;
+#[cfg(test)]
+mod surface_projection_test;
 mod raytrace;
 mod select;
 mod spp;
