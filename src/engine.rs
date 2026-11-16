@@ -1274,6 +1274,8 @@ pub struct Engine {
     active_gpu_profile: Option<GpuStrokeProfileResources>,
     /// Shared by the texture sets of a document.
     p: Arc<Pipelines>,
+    /// Shared bounded pool for undo snapshot staging buffers across texture sets.
+    snapshot_buffer_pool: Arc<crate::undo::SnapshotBufferPool>,
     pub res: u32,
     /// The texture set's range in the mesh's index buffer: only these
     /// triangles get position and normal maps, so only they take paint.
@@ -1549,13 +1551,21 @@ impl Engine {
             let _s = crate::startup_trace::span("Engine::create_pipelines");
             Arc::new(Self::create_pipelines(&rs.device))
         };
-        Self::with_pipelines(rs, p, mesh, 0..mesh.index_count, bounds, res)
+        Self::with_pipelines(
+            rs,
+            p,
+            mesh,
+            0..mesh.index_count,
+            bounds,
+            res,
+            Arc::new(crate::undo::SnapshotBufferPool::default()),
+        )
     }
 
     /// Another texture set of the same document: `tris` is its range in the
     /// mesh's index buffer. Shares this engine's pipelines and document bounds.
     pub fn sibling(&self, mesh: &GpuMesh, tris: std::ops::Range<u32>, res: u32) -> Engine {
-        Self::with_pipelines(&self.rs, self.p.clone(), mesh, tris, self.bounds, res)
+        Self::with_pipelines(&self.rs, self.p.clone(), mesh, tris, self.bounds, res, self.snapshot_buffer_pool.clone())
     }
 
     /// Creates an engine for another mesh while reusing immutable GPU pipelines.
@@ -1567,7 +1577,7 @@ impl Engine {
         bounds: (Vec3, Vec3),
         res: u32,
     ) -> Engine {
-        Self::with_pipelines(&self.rs, self.p.clone(), mesh, tris, bounds, res)
+        Self::with_pipelines(&self.rs, self.p.clone(), mesh, tris, bounds, res, self.snapshot_buffer_pool.clone())
     }
 
     fn with_pipelines(
@@ -1577,6 +1587,7 @@ impl Engine {
         tris: std::ops::Range<u32>,
         bounds: (Vec3, Vec3),
         res: u32,
+        snapshot_buffer_pool: Arc<crate::undo::SnapshotBufferPool>,
     ) -> Engine {
         let _allocation = crate::startup_trace::span("Engine::with_pipelines GPU allocations");
         let device = rs.device.clone();
@@ -1615,6 +1626,7 @@ impl Engine {
             rs: rs.clone(),
             gpu_profiler,
             active_gpu_profile: None,
+            snapshot_buffer_pool,
             pos: Tex::new(&device, "position map", res, res, POS_FORMAT, LAYER_USAGE),
             nrm: Tex::new(&device, "normal map", res, res, NRM_FORMAT, LAYER_USAGE),
             tan: Tex::new(&device, "tangent map", res, res, TAN_FORMAT, LAYER_USAGE),
@@ -3150,7 +3162,7 @@ impl Engine {
         crate::select::write_mask(mesh, selected, self.res, &mut texels, mode);
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        let before = Snapshot::encode(&self.device, &mut encoder, &[tex]);
+        let before = Snapshot::encode(&self.device, &mut encoder, &[tex], self.snapshot_buffer_pool.clone());
         self.queue.submit([encoder.finish()]);
         before.request_map();
         // Queue writes run at the start of the next submission, after the "before" copy.
@@ -3161,7 +3173,7 @@ impl Engine {
             tex.extent(),
         );
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        let after = Snapshot::encode(&self.device, &mut encoder, &[tex]);
+        let after = Snapshot::encode(&self.device, &mut encoder, &[tex], self.snapshot_buffer_pool.clone());
         self.queue.submit([encoder.finish()]);
         after.request_map();
         self.invalidate_mask_cache(layer_id);
@@ -3547,7 +3559,7 @@ impl Engine {
         for (src, dst) in textures.iter().zip(&snaps) {
             encoder.copy_texture_to_texture(src.copy_info(), dst.copy_info(), src.extent());
         }
-        let before = Snapshot::encode(&self.device, &mut encoder, &textures);
+        let before = Snapshot::encode(&self.device, &mut encoder, &textures, self.snapshot_buffer_pool.clone());
         self.queue.submit([encoder.finish()]);
         before.request_map();
         self.apply_bg = None;
@@ -4147,7 +4159,7 @@ impl Engine {
         };
         let textures = self.target_textures(active.layer_id, active.target, &active.channels)?;
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        let after = Snapshot::encode(&self.device, &mut encoder, &textures);
+        let after = Snapshot::encode(&self.device, &mut encoder, &textures, self.snapshot_buffer_pool.clone());
         self.queue.submit([encoder.finish()]);
         after.request_map();
         // Content strokes do not invalidate thumbnails; avoid traversing the
