@@ -116,10 +116,208 @@ struct Reader {
 
 impl Reader {
     fn blob(&self, v: &Value) -> Result<Vec<u8>, String> {
-        let i = v.as_u64().ok_or("missing blob reference")? as usize;
+        let index = v.as_u64().ok_or("missing blob reference")?;
+        let i = usize::try_from(index).map_err(|_| "blob index exceeds this platform")?;
         let packed = self.blobs.get(i).ok_or(format!("blob {i} is missing"))?;
         lz4_flex::decompress_size_prepended(packed).map_err(|e| format!("blob {i} is damaged: {e}"))
     }
+}
+
+/// Reads the project container without unchecked length arithmetic or
+/// allocations based on untrusted counts. Trailing bytes are rejected too.
+fn parse_project_container(data: &[u8]) -> Result<(Value, Reader), String> {
+    let bad = || "project container is truncated or damaged".to_string();
+    if data.len() < 24 || data.get(..8) != Some(MAGIC.as_slice()) {
+        return Err(bad());
+    }
+
+    fn take<'a>(data: &'a [u8], at: &mut usize, len: usize) -> Result<&'a [u8], String> {
+        let end = at.checked_add(len).filter(|end| *end <= data.len())
+            .ok_or_else(|| "project container is truncated or damaged".to_string())?;
+        let bytes = &data[*at..end];
+        *at = end;
+        Ok(bytes)
+    }
+    fn read_len(data: &[u8], at: &mut usize) -> Result<usize, String> {
+        let bytes = take(data, at, 8)?;
+        let value = u64::from_le_bytes(bytes.try_into().expect("eight bytes"));
+        usize::try_from(value).map_err(|_| "project container length exceeds this platform".to_string())
+    }
+
+    let mut at = 8usize;
+    let manifest_len = read_len(data, &mut at)?;
+    let manifest: Value = serde_json::from_slice(take(data, &mut at, manifest_len)?)
+        .map_err(|e| format!("project manifest is damaged: {e}"))?;
+    let count = read_len(data, &mut at)?;
+    // Every blob needs at least its 8-byte length prefix. This also prevents
+    // a tiny malicious file from requesting an enormous Vec capacity.
+    if count > data.len().saturating_sub(at) / 8 {
+        return Err(bad());
+    }
+    let mut blobs = Vec::with_capacity(count);
+    for _ in 0..count {
+        let len = read_len(data, &mut at)?;
+        blobs.push(take(data, &mut at, len)?.to_vec());
+    }
+    if at != data.len() {
+        return Err("project container has unexpected trailing bytes".into());
+    }
+    Ok((manifest, Reader { blobs }))
+}
+
+fn validate_texture_blob(reader: &Reader, value: &Value, label: &str, max_dimension: u32) -> Result<(), String> {
+    let format_name = s(value, "format").ok_or_else(|| format!("{label} texture has no format"))?;
+    let format = FORMATS.into_iter().find(|format| format!("{format:?}") == format_name)
+        .ok_or_else(|| format!("{label} texture has an unknown format '{format_name}'"))?;
+    let width = value["width"].as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0)
+        .ok_or_else(|| format!("{label} texture has an invalid width"))?;
+    let height = value["height"].as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0)
+        .ok_or_else(|| format!("{label} texture has an invalid height"))?;
+    if width > max_dimension || height > max_dimension {
+        return Err(format!("{label} texture exceeds the device's 2D texture limit ({max_dimension})"));
+    }
+    let bytes = reader.blob(&value["blob"]).map_err(|e| format!("{label}: {e}"))?;
+    // tex_from() calculates this in u32 before converting to usize. Reject
+    // values that would overflow there, rather than failing after document swap.
+    let expected_u32 = width.checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(crate::gpu::bytes_per_texel(format)))
+        .ok_or_else(|| format!("{label} texture dimensions overflow"))?;
+    let expected = expected_u32 as usize;
+    if bytes.len() != expected {
+        return Err(format!("{label} texture has {} bytes; expected {expected}", bytes.len()));
+    }
+    Ok(())
+}
+
+fn validate_project_payload(manifest: &Value, reader: &Reader, max_dimension: u32) -> Result<(), String> {
+    let mesh = &manifest["mesh"];
+    let vertex_bytes = reader.blob(&mesh["vertices"]).map_err(|e| format!("mesh vertices: {e}"))?;
+    if vertex_bytes.is_empty() || vertex_bytes.len() % std::mem::size_of::<Vertex>() != 0 {
+        return Err("mesh vertex data has an invalid byte length".into());
+    }
+    let vertex_count = vertex_bytes.len() / std::mem::size_of::<Vertex>();
+    let index_bytes = reader.blob(&mesh["indices"]).map_err(|e| format!("mesh indices: {e}"))?;
+    if index_bytes.is_empty() || index_bytes.len() % std::mem::size_of::<u32>() != 0 {
+        return Err("mesh index data has an invalid byte length".into());
+    }
+    let indices: Vec<u32> = bytemuck::pod_collect_to_vec(&index_bytes);
+    if indices.len() % 3 != 0 || indices.iter().any(|&index| index as usize >= vertex_count) {
+        return Err("mesh indices do not describe valid triangles".into());
+    }
+    let triangle_count = indices.len() / 3;
+
+    if mesh["objects"].as_array().is_some() {
+        let bytes = reader.blob(&mesh["tri_object"]).map_err(|e| format!("mesh object map: {e}"))?;
+        if bytes.len() % std::mem::size_of::<u32>() != 0 {
+            return Err("mesh object map has an invalid byte length".into());
+        }
+    }
+    if !mesh["tri_color"].is_null() {
+        let bytes = reader.blob(&mesh["tri_color"]).map_err(|e| format!("mesh triangle colors: {e}"))?;
+        if bytes.len() % 3 != 0 {
+            return Err("mesh triangle colors have an invalid byte length".into());
+        }
+    }
+    if !mesh["tri_vertex_color"].is_null() {
+        let bytes = reader.blob(&mesh["tri_vertex_color"]).map_err(|e| format!("mesh corner colors: {e}"))?;
+        if corner_colors_from_bytes(&bytes, triangle_count).is_none() {
+            return Err("mesh corner colors do not match the triangle count".into());
+        }
+    }
+
+    let set_values: Vec<&Value> = match manifest["texture_sets"].as_array() {
+        Some(sets) if !sets.is_empty() => sets.iter().collect(),
+        _ => vec![manifest],
+    };
+    // Validate resolution for both current multi-set projects and legacy
+    // single-set projects that store their stack at the manifest root.
+    for (set_index, set) in set_values.iter().enumerate() {
+        let resolution = set["resolution"].as_u64().unwrap_or(2048);
+        if resolution == 0 || resolution > u64::from(max_dimension) {
+            return Err(format!("texture set {set_index} resolution {resolution} exceeds the device's 2D texture limit ({max_dimension})"));
+        }
+    }
+
+    if set_values.len() > 1 || manifest["texture_sets"].as_array().is_some_and(|sets| !sets.is_empty()) {
+        let mut next_triangle = 0u32;
+        for set in &set_values {
+            let tris = set["tris"].as_array().filter(|range| range.len() == 2)
+                .ok_or_else(|| "a texture set has no valid triangle range".to_string())?;
+            let start = tris[0].as_u64().and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| "a texture set has an invalid start triangle".to_string())?;
+            let end = tris[1].as_u64().and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| "a texture set has an invalid end triangle".to_string())?;
+            if start != next_triangle || end <= start || end as usize > triangle_count {
+                return Err("texture-set triangle ranges are not contiguous or do not cover the mesh".into());
+            }
+            next_triangle = end;
+        }
+        if next_triangle as usize != triangle_count {
+            return Err("texture-set triangle ranges do not cover the whole mesh".into());
+        }
+    }
+
+    for (set_index, set) in set_values.iter().enumerate() {
+        let layers = set["layers_bottom_to_top"].as_array()
+            .ok_or_else(|| format!("texture set {set_index} has no layer list"))?;
+        for (layer_index, layer) in layers.iter().enumerate() {
+            if layer["id"].as_u64().is_none() {
+                return Err(format!("texture set {set_index}, layer {layer_index} has no valid id"));
+            }
+            let label = format!("texture set {set_index}, layer {layer_index}");
+            match s(&layer["content"], "kind") {
+                Some("paint") => {
+                    let channels = layer["content"]["channels"].as_array()
+                        .ok_or_else(|| format!("{label} has no paint-channel list"))?;
+                    for (channel, texture) in channels.iter().enumerate().take(crate::engine::CHANNELS) {
+                        if !texture.is_null() {
+                            validate_texture_blob(reader, texture, &format!("{label}, channel {channel}"), max_dimension)?;
+                        }
+                    }
+                }
+                Some("fill") | Some("folder") => {}
+                _ => return Err(format!("{label} has an unknown content kind")),
+            }
+
+            if let Some(mask) = layer.get("mask").filter(|mask| !mask.is_null()) {
+                if let Some(texture) = mask.get("paint").filter(|texture| !texture.is_null()) {
+                    validate_texture_blob(reader, texture, &format!("{label}, mask"), max_dimension)?;
+                }
+                if let Some(generator) = mask.get("generator").filter(|generator| !generator.is_null()) {
+                    generator_from(generator).map_err(|e| format!("{label}, mask generator: {e}"))?;
+                }
+                if let Some(mask_layers) = mask.get("layers").and_then(Value::as_array) {
+                    for (mask_layer_index, mask_layer) in mask_layers.iter().enumerate() {
+                        if let Some(generator) = mask_layer["source"].get("generator") {
+                            generator_from(generator).map_err(|e| format!("{label}, mask layer {mask_layer_index}: {e}"))?;
+                        }
+                    }
+                }
+            }
+
+            if let Some(images) = layer.get("images").and_then(Value::as_array) {
+                for (channel, image) in images.iter().enumerate().take(crate::engine::CHANNELS) {
+                    if image.is_null() {
+                        continue;
+                    }
+                    let bytes = reader.blob(&image["data"])
+                        .map_err(|e| format!("{label}, fill image channel {channel}: {e}"))?;
+                    image::load_from_memory(&bytes)
+                        .map_err(|e| format!("{label}, fill image channel {channel} is damaged: {e}"))?;
+                }
+            }
+        }
+
+        if let Some(fixes) = set.get("map_fixes").and_then(Value::as_array) {
+            for fix in fixes {
+                let map_index = fix["map"].as_u64().unwrap_or(u64::MAX);
+                if map_index < crate::engine::MAP_COUNT as u64 {
+                    validate_texture_blob(reader, &fix["texture"], &format!("texture set {set_index}, map fix {map_index}"), max_dimension)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn f(v: &Value, key: &str, default: f32) -> f32 {
@@ -618,30 +816,17 @@ impl PainterApp {
     pub(super) fn open_project(&mut self, path: &Path, ctx: &egui::Context) -> Result<(), String> {
         let data = std::fs::read(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
         let bad = || format!("{} isn't a Material Painter project (or is damaged)", path.display());
-        if data.len() < 24 || &data[..8] != MAGIC {
-            return Err(bad());
-        }
-        let mut at = 8;
-        let mut take = |n: usize| -> Result<&[u8], String> {
-            let slice = data.get(at..at + n).ok_or_else(bad)?;
-            at += n;
-            Ok(slice)
-        };
-        let u64_at = |b: &[u8]| u64::from_le_bytes(b.try_into().unwrap()) as usize;
-        let len = u64_at(take(8)?);
-        let manifest: Value = serde_json::from_slice(take(len)?).map_err(|e| format!("{}: {e}", bad()))?;
+        let (manifest, r) = parse_project_container(&data).map_err(|e| format!("{}: {e}", bad()))?;
+        // Validate every fallible mesh, texture, generator and image decode
+        // before changing the live document. A damaged late layer must not
+        // leave the project that was open before this call half-replaced.
+        validate_project_payload(&manifest, &r, self.rs.device.limits().max_texture_dimension_2d)
+            .map_err(|e| format!("{}: {e}", bad()))?;
         self.active_channels = std::array::from_fn(|i| {
             manifest["active_channels"].as_array().and_then(|channels| channels.get(i)).and_then(Value::as_bool).unwrap_or(true)
         });
-        let count = u64_at(take(8)?);
-        let mut blobs = Vec::with_capacity(count);
-        for _ in 0..count {
-            let n = u64_at(take(8)?);
-            blobs.push(take(n)?.to_vec());
-        }
-        let r = Reader { blobs };
 
-        // Everything is decoded before the open document is touched.
+        // The payload has passed preflight; only now may the live document change.
         let m = &manifest["mesh"];
         let vertices: Vec<Vertex> = bytemuck::pod_collect_to_vec(&r.blob(&m["vertices"])?);
         let indices: Vec<u32> = bytemuck::pod_collect_to_vec(&r.blob(&m["indices"])?);
@@ -962,6 +1147,116 @@ impl PainterApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_container(manifest: &Value, raw_blobs: &[Vec<u8>]) -> Vec<u8> {
+        let json = serde_json::to_vec(manifest).unwrap();
+        let mut out = MAGIC.to_vec();
+        out.extend_from_slice(&(json.len() as u64).to_le_bytes());
+        out.extend_from_slice(&json);
+        out.extend_from_slice(&(raw_blobs.len() as u64).to_le_bytes());
+        for raw in raw_blobs {
+            let packed = lz4_flex::compress_prepend_size(raw);
+            out.extend_from_slice(&(packed.len() as u64).to_le_bytes());
+            out.extend_from_slice(&packed);
+        }
+        out
+    }
+
+    fn test_project(image_blob: Option<u64>) -> (Value, Vec<Vec<u8>>) {
+        let vertices = [
+            Vertex { pos: [-1.0, -1.0, 0.0], normal: [0.0, 0.0, 1.0], uv: [0.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+            Vertex { pos: [1.0, -1.0, 0.0], normal: [0.0, 0.0, 1.0], uv: [1.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+            Vertex { pos: [1.0, 1.0, 0.0], normal: [0.0, 0.0, 1.0], uv: [1.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+            Vertex { pos: [-1.0, 1.0, 0.0], normal: [0.0, 0.0, 1.0], uv: [0.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+        ];
+        let indices = [0u32, 1, 2, 0, 2, 3];
+        let mut blobs = vec![
+            bytemuck::cast_slice(&vertices).to_vec(),
+            bytemuck::cast_slice(&indices).to_vec(),
+        ];
+        let images = image_blob.map_or_else(|| json!([]), |blob| {
+            json!([{"name": "late-corrupt-image.png", "data": blob}])
+        });
+        if image_blob.is_some() {
+            blobs.push(b"not a decodable image".to_vec());
+        }
+        let layer = |id: u64, images: Value| json!({
+            "id": id,
+            "content": {"kind": "fill", "fill": {}},
+            "images": images,
+        });
+        let manifest = json!({
+            "version": 4,
+            "mesh": {"name": "Two sets", "vertices": 0, "indices": 1},
+            "texture_sets": [
+                {
+                    "name": "Front",
+                    "tris": [0, 1],
+                    "resolution": 128,
+                    "layers_bottom_to_top": [layer(10, json!([]))]
+                },
+                {
+                    "name": "Back",
+                    "tris": [1, 2],
+                    "resolution": 128,
+                    "layers_bottom_to_top": [layer(20, images)]
+                }
+            ]
+        });
+        (manifest, blobs)
+    }
+
+    #[test]
+    fn project_container_rejects_truncation_and_trailing_data() {
+        let (manifest, blobs) = test_project(None);
+        let valid = test_container(&manifest, &blobs);
+        assert!(parse_project_container(&valid).is_ok());
+
+        let mut truncated = valid.clone();
+        truncated.pop();
+        assert!(parse_project_container(&truncated).is_err());
+
+        let mut trailing = valid;
+        trailing.push(0);
+        assert!(parse_project_container(&trailing).is_err());
+
+        let mut overflow = MAGIC.to_vec();
+        overflow.extend_from_slice(&u64::MAX.to_le_bytes());
+        assert!(parse_project_container(&overflow).is_err());
+    }
+
+    #[test]
+    fn valid_multi_texture_set_project_passes_preflight() {
+        let (manifest, blobs) = test_project(None);
+        let encoded = test_container(&manifest, &blobs);
+        let (decoded, reader) = parse_project_container(&encoded).unwrap();
+        validate_project_payload(&decoded, &reader, 16384).unwrap();
+    }
+
+    #[test]
+    fn legacy_single_set_resolution_is_checked_against_device_limit() {
+        let (mut manifest, blobs) = test_project(None);
+        let first_set = manifest["texture_sets"][0].clone();
+        manifest.as_object_mut().unwrap().remove("texture_sets");
+        manifest["resolution"] = json!(32768);
+        manifest["layers_bottom_to_top"] = first_set["layers_bottom_to_top"].clone();
+        let reader = Reader {
+            blobs: blobs.iter().map(|bytes| lz4_flex::compress_prepend_size(bytes)).collect(),
+        };
+        let error = validate_project_payload(&manifest, &reader, 16384).unwrap_err();
+        assert!(error.contains("resolution"), "{error}");
+    }
+
+    #[test]
+    fn corrupt_image_in_later_texture_set_fails_preflight() {
+        let (manifest, blobs) = test_project(Some(2));
+        let reader = Reader {
+            blobs: blobs.iter().map(|bytes| lz4_flex::compress_prepend_size(bytes)).collect(),
+        };
+        let error = validate_project_payload(&manifest, &reader, 16384).unwrap_err();
+        assert!(error.contains("fill image channel 0"), "{error}");
+        assert!(error.contains("damaged"), "{error}");
+    }
 
     /// Projects from the four fixed custom slots load as maps with ids 1-4
     /// (empty slots skipped), and their masks' extra weights as inputs on
