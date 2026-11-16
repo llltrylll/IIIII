@@ -93,6 +93,8 @@ jobs:
 
       - name: GPU parity - brush projections
         run: "cargo test --locked --bin material_painter preview_test::paint_projections -- --ignored --exact --nocapture --test-threads 1"
+      - name: GPU parity - Surface projection with overlapping UV charts
+        run: "cargo test --locked --bin material_painter surface_projection_test::surface_projection_paints_partial_overlapped_uvs_on_hit_face -- --ignored --exact --nocapture --test-threads 1"
 
       - name: GPU parity - scissored mask stroke
         run: "cargo test --locked --bin material_painter preview_test::scissored_mask_stroke_matches_full_frame -- --ignored --exact --nocapture --test-threads 1"
