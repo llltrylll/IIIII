@@ -1252,7 +1252,20 @@ fn stroke_region_impl(
             let spheres = &spheres[..sphere_count];
             bvh.query(
                 |lo, hi| spheres.iter().any(|&(c, r)| c.clamp(lo, hi).distance_squared(c) <= r * r),
-                |t| needs_full_region |= !mark_candidate_triangle_uv(&mut tiles, mesh, &triangle_indices, t),
+                |t| {
+                    // Surface stamps are rasterized on each candidate triangle
+                    // in its own UV coordinates. Keep the same active-set
+                    // filtering as the Screen path before uploading indices.
+                    let first_index = t * 3;
+                    if let Some(indices) = candidate_indices.as_deref_mut()
+                        && first_index >= triangle_indices.start
+                        && first_index + 3 <= triangle_indices.end
+                    {
+                        let first = first_index as usize;
+                        indices.extend_from_slice(&mesh.indices[first..first + 3]);
+                    }
+                    needs_full_region |= !mark_candidate_triangle_uv(&mut tiles, mesh, &triangle_indices, t);
+                },
             );
         }
         _ => {
@@ -1327,6 +1340,34 @@ fn stroke_region_impl(
     } else {
         Some(uv_tile_rectangles_or_empty(&tiles))
     }
+}
+
+/// Conservative paint bounds and candidate triangles for a Surface stroke.
+/// Each candidate is rasterized in its own UV coordinates so overlapping UV
+/// charts do not depend on the single world-position record in the UV bake.
+pub(crate) fn surface_stroke_plan_into(
+    mesh: &Mesh,
+    bvh: &Bvh,
+    triangle_indices: std::ops::Range<u32>,
+    cam: &OrbitCam,
+    size: Vec2,
+    radius: f32,
+    stamps: &[Stamp],
+    candidate_indices: &mut Vec<u32>,
+) -> Option<Vec<[f32; 4]>> {
+    candidate_indices.clear();
+    stroke_region_impl(
+        mesh,
+        bvh,
+        triangle_indices,
+        cam,
+        size,
+        BrushProjection::Surface,
+        0,
+        radius,
+        stamps,
+        Some(candidate_indices),
+    )
 }
 
 /// Conservative paint bounds plus only the mesh index entries whose triangles
@@ -5132,6 +5173,18 @@ impl PainterApp {
                         self.meter.screen_total_triangles = (active_triangles.end - active_triangles.start) / 3;
                     }
                     regions
+                } else if self.brush.projection == BrushProjection::Surface {
+                    let active_triangles = self.engine.triangles();
+                    surface_stroke_plan_into(
+                        &self.mesh,
+                        &self.bvh,
+                        active_triangles,
+                        &self.cam,
+                        size,
+                        radius,
+                        &stamps,
+                        &mut self.screen_candidate_indices,
+                    )
                 } else {
                     stroke_region(&self.mesh, &self.bvh, self.engine.triangles(), &self.cam, size, self.brush.projection, self.brush.symmetry, radius, &stamps)
                 }
@@ -5156,7 +5209,9 @@ impl PainterApp {
             self.meter.region_cpu.add(started.elapsed().as_secs_f64() * 1000.0);
         }
         let stamp_started = Instant::now();
-        if kind == ViewKind::V3d && self.brush.projection == BrushProjection::Screen {
+        if kind == ViewKind::V3d
+            && matches!(self.brush.projection, BrushProjection::Screen | BrushProjection::Surface)
+        {
             let indices = &self.screen_candidate_indices;
             if self.meter.on {
                 self.engine.stroke_step_screen_culled_profiled(
