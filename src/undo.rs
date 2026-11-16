@@ -9,7 +9,8 @@
 use crate::engine::{Blend, Content, FillParams, Generator, Layer, Levels, Mask};
 use crate::gpu::{Tex, bytes_per_texel};
 use eframe::wgpu;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 
@@ -26,27 +27,81 @@ enum SnapState {
     Ready(Vec<Vec<u8>>),
 }
 
+/// Reuses mapped staging buffers after snapshot data has been copied to CPU RAM.
+/// Both per-size and global byte limits prevent old texture resolutions from
+/// accumulating indefinitely after the document is resized.
+#[derive(Default)]
+pub struct SnapshotBufferPool {
+    state: Mutex<SnapshotBufferPoolState>,
+}
+
+#[derive(Default)]
+struct SnapshotBufferPoolState {
+    buffers: HashMap<u64, Vec<wgpu::Buffer>>,
+    cached_bytes: u64,
+}
+
+impl SnapshotBufferPool {
+    const MAX_PER_SIZE: usize = 2;
+    const MAX_CACHED_BYTES: u64 = 128 * 1024 * 1024;
+
+    fn can_recycle(size: u64, per_size: usize, cached_bytes: u64) -> bool {
+        per_size < Self::MAX_PER_SIZE
+            && size <= Self::MAX_CACHED_BYTES.saturating_sub(cached_bytes)
+    }
+
+    fn take(&self, device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let buffer = state.buffers.get_mut(&size).and_then(Vec::pop);
+        if let Some(buffer) = buffer {
+            state.cached_bytes = state.cached_bytes.saturating_sub(size);
+            if state.buffers.get(&size).is_some_and(Vec::is_empty) {
+                state.buffers.remove(&size);
+            }
+            return buffer;
+        }
+        drop(state);
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("undo staging"),
+            size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        })
+    }
+
+    fn recycle(&self, buffer: wgpu::Buffer) {
+        let size = buffer.size();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let per_size = state.buffers.get(&size).map_or(0, Vec::len);
+        if Self::can_recycle(size, per_size, state.cached_bytes) {
+            state.buffers.entry(size).or_default().push(buffer);
+            state.cached_bytes += size;
+        }
+    }
+}
+
 pub struct Snapshot {
     infos: Vec<TexInfo>,
     state: SnapState,
+    pool: Arc<SnapshotBufferPool>,
 }
 
 impl Snapshot {
-    /// Encodes copies of `textures` into fresh staging buffers. Call
+    /// Encodes copies of `textures` into pooled staging buffers. Call
     /// [`Snapshot::request_map`] after the encoder has been submitted.
-    pub fn encode(device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, textures: &[&Tex]) -> Snapshot {
+    pub fn encode(
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        textures: &[&Tex],
+        pool: Arc<SnapshotBufferPool>,
+    ) -> Snapshot {
         let mut infos = Vec::new();
         let mut buffers = Vec::new();
         for tex in textures {
             let bpp = bytes_per_texel(tex.format);
             let row = tex.width * bpp;
             debug_assert!(row.is_multiple_of(256), "texture rows must be 256-byte aligned for readback");
-            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("undo staging"),
-                size: (row * tex.height) as u64,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
+            let buffer = pool.take(device, (row * tex.height) as u64);
             encoder.copy_texture_to_buffer(
                 tex.copy_info(),
                 wgpu::TexelCopyBufferInfo {
@@ -63,7 +118,7 @@ impl Snapshot {
             buffers.push(buffer);
         }
         let remaining = Arc::new(AtomicUsize::new(buffers.len()));
-        Snapshot { infos, state: SnapState::Mapping { buffers, remaining } }
+        Snapshot { infos, state: SnapState::Mapping { buffers, remaining }, pool }
     }
 
     pub fn request_map(&self) {
@@ -79,19 +134,21 @@ impl Snapshot {
 
     /// Advances the state machine without blocking.
     pub fn update(&mut self) {
+        let pool = self.pool.clone();
         match &mut self.state {
             SnapState::Mapping { buffers, remaining } => {
                 if remaining.load(Ordering::Acquire) != 0 {
                     return;
                 }
-                let raw: Vec<Vec<u8>> = buffers
-                    .iter()
-                    .map(|b| {
-                        let data = b.slice(..).get_mapped_range().expect("staging buffer is mapped").to_vec();
-                        b.unmap();
-                        data
-                    })
-                    .collect();
+                let mut raw = Vec::with_capacity(buffers.len());
+                for buffer in buffers.drain(..) {
+                    let data = buffer.slice(..).get_mapped_range().expect("staging buffer is mapped").to_vec();
+                    buffer.unmap();
+                    // The GPU readback is now safely in CPU memory; return the
+                    // large MAP_READ allocation before compression runs.
+                    pool.recycle(buffer);
+                    raw.push(data);
+                }
                 let (tx, rx) = mpsc::channel();
                 rayon::spawn(move || {
                     let packed = raw.iter().map(|d| lz4_flex::compress_prepend_size(d)).collect();
@@ -337,7 +394,76 @@ impl UndoStack {
 
 #[cfg(test)]
 mod tests {
-    use super::{Edit, UndoStack};
+    use super::{Edit, Snapshot, SnapshotBufferPool, UndoStack};
+    use crate::gpu::{Tex, LAYER_USAGE};
+    use eframe::wgpu;
+    use std::sync::Arc;
+
+    /// A completed MAP_READ buffer returns to the pool and is removed from
+    /// the pool again when the next snapshot of the same size is encoded.
+    #[test]
+    #[ignore]
+    fn snapshot_pool_reuses_completed_readback_buffers() {
+        fn ready<F: std::future::Future>(future: F) -> F::Output {
+            let mut future = std::pin::pin!(future);
+            let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+            match future.as_mut().poll(&mut context) {
+                std::task::Poll::Ready(value) => value,
+                std::task::Poll::Pending => panic!("native wgpu requests resolve immediately"),
+            }
+        }
+
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let adapter = ready(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            ..Default::default()
+        })).expect("a GPU adapter");
+        let (device, queue) = ready(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_limits: adapter.limits(),
+            ..Default::default()
+        })).expect("a GPU device");
+
+        // 64 * 4 = 256 bytes per row, satisfying the copy-buffer alignment.
+        let texture = Tex::new(&device, "snapshot pool test", 64, 64, wgpu::TextureFormat::Rgba8Unorm, crate::gpu::LAYER_USAGE);
+        let pool = Arc::new(SnapshotBufferPool::default());
+        let expected_bytes = 64u64 * 64 * 4;
+
+        let capture = || {
+            let mut encoder = device.create_command_encoder(&Default::default());
+            let snapshot = Snapshot::encode(&device, &mut encoder, &[&texture], pool.clone());
+            queue.submit([encoder.finish()]);
+            snapshot.request_map();
+            snapshot
+        };
+
+        let mut first = capture();
+        assert_eq!(pool.state.lock().unwrap().cached_bytes, 0);
+        first.wait(&device);
+        assert_eq!(pool.state.lock().unwrap().cached_bytes, expected_bytes);
+
+        let mut second = capture();
+        assert_eq!(
+            pool.state.lock().unwrap().cached_bytes,
+            0,
+            "encoding the next snapshot must take the cached buffer instead of allocating another",
+        );
+        second.wait(&device);
+        assert_eq!(pool.state.lock().unwrap().cached_bytes, expected_bytes);
+    }
+
+    #[test]
+    fn snapshot_pool_obeys_per_size_and_global_byte_limits() {
+        let cap = SnapshotBufferPool::MAX_CACHED_BYTES;
+        let half = cap / 2;
+
+        assert!(SnapshotBufferPool::can_recycle(half, 0, 0));
+        assert!(SnapshotBufferPool::can_recycle(half, 1, half));
+        assert!(!SnapshotBufferPool::can_recycle(half, 2, 0), "a size bucket keeps at most two buffers");
+        assert!(!SnapshotBufferPool::can_recycle(1, 0, cap), "the total pool cannot exceed its byte budget");
+        assert!(!SnapshotBufferPool::can_recycle(half + 1, 0, half), "a new size must fit the remaining budget");
+        assert!(SnapshotBufferPool::can_recycle(half, 0, half), "a different size may use the remaining budget");
+        assert!(!SnapshotBufferPool::can_recycle(cap + 1, 0, 0), "one oversized staging buffer is not retained");
+    }
 
     #[test]
     fn clearing_history_also_resets_open_groups() {

@@ -12,7 +12,7 @@ use eframe::{egui, wgpu};
 use glam::Vec3;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::Instant;
 use wgpu::TextureFormat as F;
@@ -1476,8 +1476,9 @@ pub struct BakeRun {
     next_tile: usize,
     done_tiles: Arc<AtomicUsize>,
     in_flight: Arc<AtomicUsize>,
-    /// At most one background device-poller per bake run; never one per tile.
-    poller_active: Arc<AtomicBool>,
+    /// One persistent background poller, notified once per submitted batch.
+    /// Dropping the run closes the channel and lets the worker exit.
+    poller_tx: mpsc::Sender<()>,
     pub report: Arc<BakeReport>,
 }
 
@@ -2017,6 +2018,19 @@ impl GpuBaker {
                 }
             }
         }
+        // A single worker services every submission in this bake. The UI
+        // also polls each frame; this worker keeps callbacks flowing when the
+        // window is minimized without spawning a thread per tile.
+        let (poller_tx, poller_rx) = mpsc::channel();
+        let poll_device = device.clone();
+        std::thread::Builder::new()
+            .name("bake-device-poller".into())
+            .spawn(move || {
+                while poller_rx.recv().is_ok() {
+                    let _ = poll_device.poll(wgpu::PollType::wait_indefinitely());
+                }
+            })
+            .expect("could not start bake device poller");
         BakeRun {
             res,
             uniform,
@@ -2044,7 +2058,7 @@ impl GpuBaker {
             next_tile: 0,
             done_tiles: Arc::new(AtomicUsize::new(0)),
             in_flight: Arc::new(AtomicUsize::new(0)),
-            poller_active: Arc::new(AtomicBool::new(false)),
+            poller_tx,
             report,
         }
     }
@@ -2122,7 +2136,7 @@ impl GpuBaker {
         // Poll once after filling this frame's in-flight batch. The old call
         // spawned a fresh OS thread for every tile (hundreds or thousands per bake).
         if run.next_tile > tile_cursor_before {
-            Self::poll_until_done(device, &run.poller_active);
+            let _ = run.poller_tx.send(());
         }
         if run.next_tile < run.tiles.len() || run.maps.is_none() {
             return None;
@@ -2291,29 +2305,10 @@ impl GpuBaker {
             report.finished.store(true, Ordering::Release);
             ctx.request_repaint();
         });
-        Self::poll_until_done(device, &run.poller_active);
+        let _ = run.poller_tx.send(());
         Some(BakedMaps { maps, custom: run.custom.iter().map(|(t, _)| t.clone()).collect() })
     }
 
-    /// wgpu runs completion callbacks only while the device is polled. The UI
-    /// normally polls each frame; one fallback worker handles a hidden/minimized
-    /// window. Never spawn a separate poller for every tile or every frame.
-    fn poll_until_done(device: &wgpu::Device, active: &Arc<AtomicBool>) {
-        if active.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
-            return;
-        }
-        let device = device.clone();
-        let active = active.clone();
-        let spawned = std::thread::Builder::new()
-            .name("bake-device-poller".into())
-            .spawn(move || {
-                let _ = device.poll(wgpu::PollType::wait_indefinitely());
-                active.store(false, Ordering::Release);
-            });
-        if spawned.is_err() {
-            active.store(false, Ordering::Release);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -2721,6 +2716,38 @@ pub(crate) mod tests {
             assert!((half(&b, i, 0) - 1.0).abs() < 1e-3, "sky neutral");
             assert!((half(&b, i, 1) - 1.0).abs() < 1e-3 && (half(&b, i, 2) - 1.0).abs() < 1e-3, "edges neutral");
         }
+    }
+
+    /// Exercises more tiles than the three in-flight slots, including custom-map
+    /// tiles that share the same uniform-buffer ring.
+    #[test]
+    #[ignore]
+    fn bake_tile_ring_completes_across_batches() {
+        let (device, queue) = gpu();
+        let mesh = Primitive::RoundedCube.build();
+        let gpu_mesh = GpuMesh::new(&device, &mesh);
+        let mut settings = BakeSettings::default();
+        settings.apply_quality(Quality::Draft);
+        settings.maps = 0;
+        settings.custom.push(CustomMap {
+            id: 7,
+            name: "Tile ring smoke".into(),
+            kind: CustomKind::Exposure,
+            azimuth: 0.0,
+            elevation: 45.0,
+            spread: 30.0,
+            distance: 1.0,
+            strength: 1.0,
+            wander: 0.0,
+            point: [0.0; 3],
+        });
+
+        let (maps, report, _) = run_bake(&device, &queue, &mesh, &gpu_mesh, &settings, 512);
+
+        assert!(report.finished(), "the multi-batch bake must reach its completion callback");
+        assert_eq!(report.resolution, 512);
+        assert_eq!(report.custom, vec![7]);
+        assert_eq!(maps.custom.len(), 1, "the custom map tile pass must produce one texture");
     }
 
     /// Low-poly-only bakes of the built-in meshes plus any in MP_BAKE_TEST.

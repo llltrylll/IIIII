@@ -1935,7 +1935,7 @@ fn content_stroke_patch_ignores_current_filtered_masks() {
 
     // The same stack and strokes, once with a strongly filtered mask above the
     // painted layer and once without any mask: (patch pixels per step, full recomps).
-    let run = |filtered: bool| -> (Vec<u64>, u32, Vec<String>) {
+    let run = |filtered: bool| -> (Vec<u64>, u32, u32, Vec<String>) {
         let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
         let mut undo = UndoStack::default();
         let p = engine.add_paint_layer(0, None, None, &mut undo);
@@ -1971,6 +1971,25 @@ fn content_stroke_patch_ignores_current_filtered_masks() {
         let recomps = engine.full_recomps - recomps_before;
         engine.end_stroke();
         engine.composite();
+
+        // A separate drag on the same layer must reuse the prefix from the first
+        // drag. End before compositing this one to also verify the release path
+        // preserves a pending dirty region instead of forcing a full recomposite.
+        let second_recomps_before = engine.full_recomps;
+        assert!(engine.begin_stroke(layer, StrokeTarget::Content, [true, true, true, false, false, false, false, false], false));
+        let raw: Vec<([f32; 4], f32)> = (0..5)
+            .map(|i| {
+                let k = (30 + i) as f32;
+                ([215.0 + k * 8.0, 250.0 + 85.0 * (k * 0.09).sin(), 1.0, 0.0], 1.0)
+            })
+            .collect();
+        let stamps = resolve_stamps(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+        let region = crate::app::stroke_region(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps);
+        engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, region);
+        engine.end_stroke();
+        engine.composite();
+        let second_recomps = engine.full_recomps - second_recomps_before;
+
         // Final textures after the incremental patches vs a from-scratch composite.
         let partial: Vec<Vec<u8>> = (0..ACCUM).map(|c| read_texture(&rs.device, &rs.queue, engine.final_tex(c))).collect();
         engine.mark_dirty();
@@ -1983,15 +2002,17 @@ fn content_stroke_patch_ignores_current_filtered_masks() {
                 diffs.push(format!("channel {c}: {n} bytes differ"));
             }
         }
-        (patches, recomps, diffs)
+        (patches, recomps, second_recomps, diffs)
     };
-    let (plain, plain_recomps, plain_diffs) = run(false);
-    let (filtered, filtered_recomps, filtered_diffs) = run(true);
-    println!("  patch pixels per step: no mask {plain:?}, filtered mask {filtered:?}; full recomps {plain_recomps} vs {filtered_recomps}");
+    let (plain, plain_recomps, plain_second_recomps, plain_diffs) = run(false);
+    let (filtered, filtered_recomps, filtered_second_recomps, filtered_diffs) = run(true);
+    println!("  patch pixels per step: no mask {plain:?}, filtered mask {filtered:?}; full recomps first/second drag {plain_recomps}/{plain_second_recomps} vs {filtered_recomps}/{filtered_second_recomps}");
     // The first step builds the prefix cache with a full composite.
     assert!(plain[1..].iter().all(|&p| p < u64::from(res) * u64::from(res)), "the plain stroke must stay a patch");
     assert_eq!(plain, filtered, "a current filtered mask must not widen a content stroke's patch");
     assert_eq!(plain_recomps, filtered_recomps);
+    assert_eq!(plain_second_recomps, 0, "a second drag on the same layer must reuse the composite prefix");
+    assert_eq!(filtered_second_recomps, 0, "the same prefix reuse must work with a current filtered mask");
     // The patch size alone proves nothing about the pixels: compare the textures.
     println!("  final textures incremental vs full: no mask {plain_diffs:?}, filtered mask {filtered_diffs:?}");
     assert!(plain_diffs.is_empty(), "no mask: incremental != full: {plain_diffs:?}");

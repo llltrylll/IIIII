@@ -118,6 +118,12 @@ jobs:
       - name: GPU parity - mask filters
         run: "cargo test --locked --bin material_painter preview_test::mask_filters_apply -- --ignored --exact --nocapture --test-threads 1"
 
+      - name: GPU bake - multi-batch tile uniform ring
+        run: "cargo test --locked --bin material_painter bake::tests::bake_tile_ring_completes_across_batches -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU undo - snapshot staging buffer reuse
+        run: "cargo test --locked --bin material_painter undo::tests::snapshot_pool_reuses_completed_readback_buffers -- --ignored --exact --nocapture --test-threads 1"
+
       - name: Upload GPU regression images
         if: always()
         uses: actions/upload-artifact@v4
