@@ -395,7 +395,7 @@ impl UndoStack {
 #[cfg(test)]
 mod tests {
     use super::{Edit, Snapshot, SnapshotBufferPool, UndoStack};
-    use crate::gpu::{Tex, LAYER_USAGE};
+    use crate::gpu::Tex;
     use eframe::wgpu;
     use std::sync::Arc;
 
