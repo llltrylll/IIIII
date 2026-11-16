@@ -23,6 +23,8 @@ mod post;
 mod presets;
 #[cfg(test)]
 mod preview_test;
+#[cfg(test)]
+mod mask_cache_regression_test;
 mod raytrace;
 mod select;
 mod spp;
