@@ -6,6 +6,7 @@ on:
     branches:
       - gpt/stacked-uv-visible-pass
       - gpt/integrated-three-fronts
+      - gpt/phase1-thumbnail-regression
   workflow_dispatch:
 
 permissions:
@@ -105,8 +106,26 @@ jobs:
       - name: GPU parity - multi-scissor composite
         run: "cargo test --locked --bin material_painter preview_test::multi_scissor_matches_full_composite -- --ignored --exact --nocapture --test-threads 1"
 
+      - name: GPU parity - content stroke keeps unrelated thumbnails
+        run: "cargo test --locked --bin material_painter preview_test::content_stroke_keeps_unrelated_thumbnails -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU parity - mask stroke refreshes only its thumbnail on release
+        run: "cargo test --locked --bin material_painter preview_test::mask_stroke_redoes_only_the_mask_thumbnail -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU parity - content stroke patch under current filtered mask
+        run: "cargo test --locked --bin material_painter preview_test::content_stroke_patch_ignores_current_filtered_masks -- --ignored --exact --nocapture --test-threads 1"
+
       - name: GPU parity - mask filters
         run: "cargo test --locked --bin material_painter preview_test::mask_filters_apply -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU bake - multi-batch tile uniform ring
+        run: "cargo test --locked --bin material_painter bake::tests::bake_tile_ring_completes_across_batches -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU undo - snapshot staging buffer reuse
+        run: "cargo test --locked --bin material_painter undo::tests::snapshot_pool_reuses_completed_readback_buffers -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU readback - batch multiple textures
+        run: "cargo test --locked --bin material_painter gpu::readback_row_tests::batched_readback_captures_multiple_textures -- --ignored --exact --nocapture --test-threads 1"
 
       - name: Upload GPU regression images
         if: always()

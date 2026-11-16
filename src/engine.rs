@@ -1274,6 +1274,8 @@ pub struct Engine {
     active_gpu_profile: Option<GpuStrokeProfileResources>,
     /// Shared by the texture sets of a document.
     p: Arc<Pipelines>,
+    /// Shared bounded pool for undo snapshot staging buffers across texture sets.
+    snapshot_buffer_pool: Arc<crate::undo::SnapshotBufferPool>,
     pub res: u32,
     /// The texture set's range in the mesh's index buffer: only these
     /// triangles get position and normal maps, so only they take paint.
@@ -1356,14 +1358,16 @@ pub struct Engine {
     active: Option<ActiveStroke>,
     /// Apply bindings are stable for a stroke; reuse them across its frames.
     apply_bg: Option<wgpu::BindGroup>,
+    /// Stamp bindings are stable for one stroke. Screen/Surface and UV/2D use
+    /// different depth views, so keep one cached group for each depth target.
+    stamp_bg: [Option<Arc<wgpu::BindGroup>>; 2],
     /// Set whenever the layer stack changes; cleared by [`Engine::composite`].
     pub dirty: bool,
     /// Something besides the painted layer changed since the last composite.
     full_dirty: bool,
-    /// The layer the current stroke paints (content or mask).
+    /// The layer whose composite prefix can be reused for further strokes.
     stroke_layer: Option<u64>,
-    /// The stack below the painted layer, kept so stroke frames only
-    /// recomposite from that layer up.
+    /// The stack below that layer, kept so painting it only recomposites its patch.
     prefix: Option<Prefix>,
     /// Holds the stack below the painted layer when more passes follow it.
     prefix_cache: Option<[Tex; ACCUM]>,
@@ -1549,13 +1553,21 @@ impl Engine {
             let _s = crate::startup_trace::span("Engine::create_pipelines");
             Arc::new(Self::create_pipelines(&rs.device))
         };
-        Self::with_pipelines(rs, p, mesh, 0..mesh.index_count, bounds, res)
+        Self::with_pipelines(
+            rs,
+            p,
+            mesh,
+            0..mesh.index_count,
+            bounds,
+            res,
+            Arc::new(crate::undo::SnapshotBufferPool::default()),
+        )
     }
 
     /// Another texture set of the same document: `tris` is its range in the
     /// mesh's index buffer. Shares this engine's pipelines and document bounds.
     pub fn sibling(&self, mesh: &GpuMesh, tris: std::ops::Range<u32>, res: u32) -> Engine {
-        Self::with_pipelines(&self.rs, self.p.clone(), mesh, tris, self.bounds, res)
+        Self::with_pipelines(&self.rs, self.p.clone(), mesh, tris, self.bounds, res, self.snapshot_buffer_pool.clone())
     }
 
     /// Creates an engine for another mesh while reusing immutable GPU pipelines.
@@ -1567,7 +1579,7 @@ impl Engine {
         bounds: (Vec3, Vec3),
         res: u32,
     ) -> Engine {
-        Self::with_pipelines(&self.rs, self.p.clone(), mesh, tris, bounds, res)
+        Self::with_pipelines(&self.rs, self.p.clone(), mesh, tris, bounds, res, self.snapshot_buffer_pool.clone())
     }
 
     fn with_pipelines(
@@ -1577,6 +1589,7 @@ impl Engine {
         tris: std::ops::Range<u32>,
         bounds: (Vec3, Vec3),
         res: u32,
+        snapshot_buffer_pool: Arc<crate::undo::SnapshotBufferPool>,
     ) -> Engine {
         let _allocation = crate::startup_trace::span("Engine::with_pipelines GPU allocations");
         let device = rs.device.clone();
@@ -1615,6 +1628,7 @@ impl Engine {
             rs: rs.clone(),
             gpu_profiler,
             active_gpu_profile: None,
+            snapshot_buffer_pool,
             pos: Tex::new(&device, "position map", res, res, POS_FORMAT, LAYER_USAGE),
             nrm: Tex::new(&device, "normal map", res, res, NRM_FORMAT, LAYER_USAGE),
             tan: Tex::new(&device, "tangent map", res, res, TAN_FORMAT, LAYER_USAGE),
@@ -1676,6 +1690,7 @@ impl Engine {
             bounds,
             active: None,
             apply_bg: None,
+            stamp_bg: [None, None],
             dirty: true,
             full_dirty: true,
             stroke_layer: None,
@@ -3150,7 +3165,7 @@ impl Engine {
         crate::select::write_mask(mesh, selected, self.res, &mut texels, mode);
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        let before = Snapshot::encode(&self.device, &mut encoder, &[tex]);
+        let before = Snapshot::encode(&self.device, &mut encoder, &[tex], self.snapshot_buffer_pool.clone());
         self.queue.submit([encoder.finish()]);
         before.request_map();
         // Queue writes run at the start of the next submission, after the "before" copy.
@@ -3161,7 +3176,7 @@ impl Engine {
             tex.extent(),
         );
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        let after = Snapshot::encode(&self.device, &mut encoder, &[tex]);
+        let after = Snapshot::encode(&self.device, &mut encoder, &[tex], self.snapshot_buffer_pool.clone());
         self.queue.submit([encoder.finish()]);
         after.request_map();
         self.invalidate_mask_cache(layer_id);
@@ -3537,6 +3552,7 @@ impl Engine {
 
     /// Snapshots the stroke target (stroke base + undo "before") and clears the stroke mask.
     fn encode_stroke_start(&mut self, layer_id: u64, target: StrokeTarget, channels: Vec<usize>) -> bool {
+        self.stamp_bg = [None, None];
         let mut encoder = self.device.create_command_encoder(&Default::default());
         gpu::clear_texture(&mut encoder, &self.stroke, wgpu::Color::TRANSPARENT);
         let textures = self.target_textures(layer_id, target, &channels).expect("stroke target exists");
@@ -3547,7 +3563,7 @@ impl Engine {
         for (src, dst) in textures.iter().zip(&snaps) {
             encoder.copy_texture_to_texture(src.copy_info(), dst.copy_info(), src.extent());
         }
-        let before = Snapshot::encode(&self.device, &mut encoder, &textures);
+        let before = Snapshot::encode(&self.device, &mut encoder, &textures, self.snapshot_buffer_pool.clone());
         self.queue.submit([encoder.finish()]);
         before.request_map();
         self.apply_bg = None;
@@ -3670,19 +3686,24 @@ impl Engine {
         self.queue.write_buffer(&self.stamp_sbuf, 0, bytemuck::cast_slice(stamps));
 
         let device = &self.device;
-        let stamp_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("stamp"),
-            layout: &self.p.stamp_bgl,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.stamp_ubuf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: self.stamp_sbuf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.pos.view) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.nrm.view) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(depth) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.brush_alpha.view) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-            ],
-        });
+        let stamp_bg_slot = usize::from(screen_mesh.is_some());
+        if self.stamp_bg[stamp_bg_slot].is_none() {
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("stamp"),
+                layout: &self.p.stamp_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.stamp_ubuf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: self.stamp_sbuf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.pos.view) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.nrm.view) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(depth) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.brush_alpha.view) },
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                ],
+            });
+            self.stamp_bg[stamp_bg_slot] = Some(Arc::new(group));
+        }
+        let stamp_bg = self.stamp_bg[stamp_bg_slot].as_ref().expect("created above").clone();
         let profile = if profile_gpu && self.active_gpu_profile.is_none() {
             self.gpu_profiler.as_ref().and_then(GpuStrokeProfiler::resources)
         } else {
@@ -3713,7 +3734,7 @@ impl Engine {
 
             // First rasterize every face at its own UV coordinates.
             pass.set_pipeline(&self.p.stamp_uv);
-            pass.set_bind_group(0, &stamp_bg, &[]);
+            pass.set_bind_group(0, &*stamp_bg, &[]);
             pass.set_vertex_buffer(0, mesh.vertices.slice(..));
             let draw_range = if let Some(indices) = candidate_indices {
                 pass.set_index_buffer(self.screen_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -3755,7 +3776,7 @@ impl Engine {
                 multiview_mask: None,
             }).forget_lifetime();
             pass.set_pipeline(&self.p.stamp);
-            pass.set_bind_group(0, &stamp_bg, &[]);
+            pass.set_bind_group(0, &*stamp_bg, &[]);
             if let Some(rects) = &frame_scissors {
                 for &[x0, y0, x1, y1] in rects {
                     pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
@@ -3844,6 +3865,7 @@ impl Engine {
     pub fn set_brush_alpha(&mut self, alpha: Option<(&[u8], u32)>) {
         let (pixels, size) = alpha.unwrap_or((&[255], 1));
         if self.brush_alpha.width != size {
+            self.stamp_bg = [None, None];
             self.brush_alpha = Tex::new(&self.device, "brush alpha", size, size, F::R8Unorm, LAYER_USAGE);
         }
         self.queue.write_texture(
@@ -4121,32 +4143,42 @@ impl Engine {
     /// Finishes the stroke and returns its undo record.
     pub fn end_stroke(&mut self) -> Option<UndoEntry> {
         self.apply_bg = None;
-        self.stroke_layer = None;
-        self.prefix = None;
-        self.prefix_cache = None;
-        self.stroke_regions.clear();
-        self.region_unknown = false;
+        self.stamp_bg = [None, None];
+        // Keep the previous composite prefix and any uncomposited stroke regions
+        // across release. The prefix is the stack below the last painted layer,
+        // so another stroke on that layer can still use partial recomposition.
+        // A different target layer sets full_dirty in stroke_step; any external
+        // layer/stack/map edit sets it through mark_dirty. Composite also checks
+        // the pass list before accepting this cached prefix.
         let Some(active) = self.active.take() else {
             self.invalidate_thumbs();
             return None;
         };
         // A stroke on a mask changes only that mask's thumbnail; a fill's
         // content thumbnail (a full composite) stays as it was.
-        match active.target {
-            StrokeTarget::Mask => self.invalidate_mask_thumb(active.layer_id),
-            StrokeTarget::BakeFix(_) => self.invalidate_thumbs(),
+        let refresh_thumbnails = match active.target {
+            StrokeTarget::Mask => {
+                self.invalidate_mask_thumb(active.layer_id);
+                true
+            }
+            StrokeTarget::BakeFix(_) => {
+                self.invalidate_thumbs();
+                true
+            }
             // Content strokes only target Paint layers. Their contents are not
             // shown in layer thumbnails, and they do not change mask sources.
-            StrokeTarget::Content => {}
-        }
+            StrokeTarget::Content => false,
+        };
         let textures = self.target_textures(active.layer_id, active.target, &active.channels)?;
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        let after = Snapshot::encode(&self.device, &mut encoder, &textures);
+        let after = Snapshot::encode(&self.device, &mut encoder, &textures, self.snapshot_buffer_pool.clone());
         self.queue.submit([encoder.finish()]);
         after.request_map();
-        // Refresh invalidated mask/fill thumbnails once after painting, not
-        // once per composite frame while the stroke is active.
-        self.update_thumbs();
+        // Content strokes do not invalidate thumbnails; avoid traversing the
+        // thumbnail stack at stroke end when there is nothing to refresh.
+        if refresh_thumbnails {
+            self.update_thumbs();
+        }
         Some(UndoEntry {
             layer_id: active.layer_id,
             target: active.target,
@@ -4887,6 +4919,7 @@ impl Engine {
                 }
         }
         self.apply_bg = None;
+        self.stamp_bg = [None, None];
         self.res = res;
         self.uv_version += 1;
         self.pos = Tex::new(&self.device, "position map", res, res, POS_FORMAT, LAYER_USAGE);

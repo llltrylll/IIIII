@@ -1,7 +1,8 @@
 # Codebase Audit — 2026-11-15
 
-Branch reviewed: gpt/integrated-three-fronts  
-Audit base: a9c8879cb3c7f2a359ae311c88551b5d02160075
+Initial deep-review branch: gpt/integrated-three-fronts  
+Initial audit base: a9c8879cb3c7f2a359ae311c88551b5d02160075  
+Follow-up source branch checked: gpt/project-sidebar-map-indicators at 365e1918757dede70ce55beb234dc454e2922439
 
 ## Executive summary
 
@@ -14,7 +15,7 @@ The highest-confidence performance candidates from source review are:
 2. GPU resources replicated for every texture-set Engine.
 3. Blocking GPU readback in export and one-pixel sampling.
 4. Synchronous project save/open/autosave and startup Smart Material thumbnail loading.
-5. All stale layer thumbnails being rendered together after a stroke.
+5. Bulk thumbnail refresh on broad invalidations (bake fixes/history), not ordinary paint or mask stroke releases.
 6. Rebuilding graph evaluation plans and formatting parameter values into strings on each evaluation.
 
 These are code-based candidates, not claimed benchmark wins. Measure them on the user's real 50k–100k triangle / approximately 6-set workload before broad changes.
@@ -112,13 +113,23 @@ smart_io::list reads the Smart Material directory, opens each ZIP, decompresses 
 
 Next action: enumerate paths and decode thumbnails on a worker; send decoded pixel buffers back; create egui textures on the UI thread. Show placeholders until results arrive. Measure against the user's actual Smart Material directory.
 
-### PERF-06 — Stale layer thumbnails can create a release-time GPU spike
+### PERF-06 — Bulk thumbnail refresh on broad invalidation paths (narrowed finding)
 
-Location: src/engine/thumbs.rs::Engine::update_thumbs, called from end_stroke.
+The earlier wording that every stroke release can rebuild all stale thumbnails is no longer accurate for ordinary paint and mask strokes on the current follow-up branch.
 
-Rebuilding is skipped during a stroke, which is good. On release, the method collects every stale Fill/masked-layer thumbnail and records all those render passes in one encoder. Fill thumbnails are 512x512 composites.
+Evidence in the current code:
+- `Engine::end_stroke` handles `StrokeTarget::Mask` by invalidating only that layer's mask thumbnail.
+- `StrokeTarget::Content` does not invalidate thumbnails: content strokes target Paint layers, whose painted contents are not displayed as Fill thumbnails.
+- `StrokeTarget::BakeFix` still calls `invalidate_thumbs()`, which marks every existing thumbnail stale.
+- `Thumbs::update_thumbs` still batches every stale entry found by one update into a single encoder. It skips work while a stroke is active.
 
-Next action: schedule a small number of thumbnails per frame after the stroke. Prioritize selected/visible layers and mask previews; keep a pending queue so all stale thumbnails eventually update. Measure maximum post-stroke frame time.
+The previous mask-paint stall has a focused GPU regression, `mask_stroke_redoes_only_the_mask_thumbnail`, which checks that no thumbnail is rebuilt during the held stroke and that only the mask thumbnail is redone on release. The companion `content_stroke_keeps_unrelated_thumbnails` checks the content-stroke invalidation contract.
+
+Residual risk:
+- Broad invalidations such as BakeFix and history operations can still rebuild many thumbnails together.
+- The remaining concern is not the normal brush/mask release path. Measure broad invalidation scenarios with realistic layer counts before adding a deferred queue.
+
+Next action: run the two thumbnail GPU regressions in the Lavapipe workflow, then measure BakeFix/undo/redo with a representative stack. Only add incremental thumbnail scheduling if those operations show a material frame-time spike.
 
 ### PERF-07 — Graph runtime rebuilds plans and allocates debug strings during evaluation
 
@@ -183,5 +194,5 @@ Follow AGENTS.md and PROJECT_SCOPE.md: Phase 1 before broad Phase 2 optimization
 1. Normal parity: reproduce the actual model's shading error from captured geometry/tangent/UV data. No global flips. This is the single focused, high-difficulty Claude assignment.
 2. Owner-machine baseline: use the same representative project and F6 before/after each optimization. Capture startup trace and per-set VRAM on the actual GPU.
 3. Phase 1 closure: verify 3D and UV strokes, Vertex ID, painted masks, nested folders/filters, cache invalidation, undo/redo and save/reopen in realistic stacks.
-4. Only then Phase 2: prioritize by measured impact — viewport bind-group cache, batched async readback, per-set resource memory, post-stroke thumbnail scheduling, async project I/O and startup Smart Material loading.
+4. Only then Phase 2: prioritize by measured impact — viewport bind-group cache, batched async readback, per-set resource memory, bulk thumbnail scheduling for broad invalidations (only if measured), async project I/O and startup Smart Material loading.
 5. Leave PR #3 and PR #4 untouched unless the owner explicitly authorizes a change.
