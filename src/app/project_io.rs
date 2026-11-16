@@ -229,6 +229,15 @@ fn validate_project_payload(manifest: &Value, reader: &Reader, max_dimension: u3
         Some(sets) if !sets.is_empty() => sets.iter().collect(),
         _ => vec![manifest],
     };
+    // Validate resolution for both current multi-set projects and legacy
+    // single-set projects that store their stack at the manifest root.
+    for (set_index, set) in set_values.iter().enumerate() {
+        let resolution = set["resolution"].as_u64().unwrap_or(2048);
+        if resolution == 0 || resolution > u64::from(max_dimension) {
+            return Err(format!("texture set {set_index} resolution {resolution} exceeds the device's 2D texture limit ({max_dimension})"));
+        }
+    }
+
     if set_values.len() > 1 || manifest["texture_sets"].as_array().is_some_and(|sets| !sets.is_empty()) {
         let mut next_triangle = 0u32;
         for set in &set_values {
@@ -242,10 +251,6 @@ fn validate_project_payload(manifest: &Value, reader: &Reader, max_dimension: u3
                 return Err("texture-set triangle ranges are not contiguous or do not cover the mesh".into());
             }
             next_triangle = end;
-            let resolution = set["resolution"].as_u64().unwrap_or(2048);
-            if resolution == 0 || resolution > u64::from(max_dimension) {
-                return Err(format!("texture set resolution {resolution} exceeds the device's 2D texture limit ({max_dimension})"));
-            }
         }
         if next_triangle as usize != triangle_count {
             return Err("texture-set triangle ranges do not cover the whole mesh".into());
@@ -1226,6 +1231,20 @@ mod tests {
         let encoded = test_container(&manifest, &blobs);
         let (decoded, reader) = parse_project_container(&encoded).unwrap();
         validate_project_payload(&decoded, &reader, 16384).unwrap();
+    }
+
+    #[test]
+    fn legacy_single_set_resolution_is_checked_against_device_limit() {
+        let (mut manifest, blobs) = test_project(None);
+        let first_set = manifest["texture_sets"][0].clone();
+        manifest.as_object_mut().unwrap().remove("texture_sets");
+        manifest["resolution"] = json!(32768);
+        manifest["layers_bottom_to_top"] = first_set["layers_bottom_to_top"].clone();
+        let reader = Reader {
+            blobs: blobs.iter().map(|bytes| lz4_flex::compress_prepend_size(bytes)).collect(),
+        };
+        let error = validate_project_payload(&manifest, &reader, 16384).unwrap_err();
+        assert!(error.contains("resolution"), "{error}");
     }
 
     #[test]
