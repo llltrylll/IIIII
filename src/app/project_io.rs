@@ -1135,6 +1135,102 @@ impl PainterApp {
 mod tests {
     use super::*;
 
+    fn test_container(manifest: &Value, raw_blobs: &[Vec<u8>]) -> Vec<u8> {
+        let json = serde_json::to_vec(manifest).unwrap();
+        let mut out = MAGIC.to_vec();
+        out.extend_from_slice(&(json.len() as u64).to_le_bytes());
+        out.extend_from_slice(&json);
+        out.extend_from_slice(&(raw_blobs.len() as u64).to_le_bytes());
+        for raw in raw_blobs {
+            let packed = lz4_flex::compress_prepend_size(raw);
+            out.extend_from_slice(&(packed.len() as u64).to_le_bytes());
+            out.extend_from_slice(&packed);
+        }
+        out
+    }
+
+    fn test_project(image_blob: Option<u64>) -> (Value, Vec<Vec<u8>>) {
+        let vertices = [
+            Vertex { pos: [-1.0, -1.0, 0.0], normal: [0.0, 0.0, 1.0], uv: [0.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+            Vertex { pos: [1.0, -1.0, 0.0], normal: [0.0, 0.0, 1.0], uv: [1.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+            Vertex { pos: [1.0, 1.0, 0.0], normal: [0.0, 0.0, 1.0], uv: [1.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+            Vertex { pos: [-1.0, 1.0, 0.0], normal: [0.0, 0.0, 1.0], uv: [0.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+        ];
+        let indices = [0u32, 1, 2, 0, 2, 3];
+        let mut blobs = vec![
+            bytemuck::cast_slice(&vertices).to_vec(),
+            bytemuck::cast_slice(&indices).to_vec(),
+        ];
+        let images = image_blob.map_or_else(|| json!([]), |blob| {
+            json!([{"name": "late-corrupt-image.png", "data": blob}])
+        });
+        if image_blob.is_some() {
+            blobs.push(b"not a decodable image".to_vec());
+        }
+        let layer = |id: u64, images: Value| json!({
+            "id": id,
+            "content": {"kind": "fill", "fill": {}},
+            "images": images,
+        });
+        let manifest = json!({
+            "version": 4,
+            "mesh": {"name": "Two sets", "vertices": 0, "indices": 1},
+            "texture_sets": [
+                {
+                    "name": "Front",
+                    "tris": [0, 1],
+                    "resolution": 128,
+                    "layers_bottom_to_top": [layer(10, json!([]))]
+                },
+                {
+                    "name": "Back",
+                    "tris": [1, 2],
+                    "resolution": 128,
+                    "layers_bottom_to_top": [layer(20, images)]
+                }
+            ]
+        });
+        (manifest, blobs)
+    }
+
+    #[test]
+    fn project_container_rejects_truncation_and_trailing_data() {
+        let (manifest, blobs) = test_project(None);
+        let valid = test_container(&manifest, &blobs);
+        assert!(parse_project_container(&valid).is_ok());
+
+        let mut truncated = valid.clone();
+        truncated.pop();
+        assert!(parse_project_container(&truncated).is_err());
+
+        let mut trailing = valid;
+        trailing.push(0);
+        assert!(parse_project_container(&trailing).is_err());
+
+        let mut overflow = MAGIC.to_vec();
+        overflow.extend_from_slice(&u64::MAX.to_le_bytes());
+        assert!(parse_project_container(&overflow).is_err());
+    }
+
+    #[test]
+    fn valid_multi_texture_set_project_passes_preflight() {
+        let (manifest, blobs) = test_project(None);
+        let encoded = test_container(&manifest, &blobs);
+        let (decoded, reader) = parse_project_container(&encoded).unwrap();
+        validate_project_payload(&decoded, &reader).unwrap();
+    }
+
+    #[test]
+    fn corrupt_image_in_later_texture_set_fails_preflight() {
+        let (manifest, blobs) = test_project(Some(2));
+        let reader = Reader {
+            blobs: blobs.iter().map(|bytes| lz4_flex::compress_prepend_size(bytes)).collect(),
+        };
+        let error = validate_project_payload(&manifest, &reader).unwrap_err();
+        assert!(error.contains("fill image channel 0"), "{error}");
+        assert!(error.contains("damaged"), "{error}");
+    }
+
     /// Projects from the four fixed custom slots load as maps with ids 1-4
     /// (empty slots skipped), and their masks' extra weights as inputs on
     /// those ids.
