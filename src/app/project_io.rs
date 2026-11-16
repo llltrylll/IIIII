@@ -116,7 +116,8 @@ struct Reader {
 
 impl Reader {
     fn blob(&self, v: &Value) -> Result<Vec<u8>, String> {
-        let i = v.as_u64().ok_or("missing blob reference")? as usize;
+        let index = v.as_u64().ok_or("missing blob reference")?;
+        let i = usize::try_from(index).map_err(|_| "blob index exceeds this platform")?;
         let packed = self.blobs.get(i).ok_or(format!("blob {i} is missing"))?;
         lz4_flex::decompress_size_prepended(packed).map_err(|e| format!("blob {i} is damaged: {e}"))
     }
@@ -164,7 +165,7 @@ fn parse_project_container(data: &[u8]) -> Result<(Value, Reader), String> {
     Ok((manifest, Reader { blobs }))
 }
 
-fn validate_texture_blob(reader: &Reader, value: &Value, label: &str) -> Result<(), String> {
+fn validate_texture_blob(reader: &Reader, value: &Value, label: &str, max_dimension: u32) -> Result<(), String> {
     let format_name = s(value, "format").ok_or_else(|| format!("{label} texture has no format"))?;
     let format = FORMATS.into_iter().find(|format| format!("{format:?}") == format_name)
         .ok_or_else(|| format!("{label} texture has an unknown format '{format_name}'"))?;
@@ -172,18 +173,23 @@ fn validate_texture_blob(reader: &Reader, value: &Value, label: &str) -> Result<
         .ok_or_else(|| format!("{label} texture has an invalid width"))?;
     let height = value["height"].as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0)
         .ok_or_else(|| format!("{label} texture has an invalid height"))?;
+    if width > max_dimension || height > max_dimension {
+        return Err(format!("{label} texture exceeds the device's 2D texture limit ({max_dimension})"));
+    }
     let bytes = reader.blob(&value["blob"]).map_err(|e| format!("{label}: {e}"))?;
-    let expected = (width as usize)
-        .checked_mul(height as usize)
-        .and_then(|pixels| pixels.checked_mul(crate::gpu::bytes_per_texel(format) as usize))
+    // tex_from() calculates this in u32 before converting to usize. Reject
+    // values that would overflow there, rather than failing after document swap.
+    let expected_u32 = width.checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(crate::gpu::bytes_per_texel(format)))
         .ok_or_else(|| format!("{label} texture dimensions overflow"))?;
+    let expected = expected_u32 as usize;
     if bytes.len() != expected {
         return Err(format!("{label} texture has {} bytes; expected {expected}", bytes.len()));
     }
     Ok(())
 }
 
-fn validate_project_payload(manifest: &Value, reader: &Reader) -> Result<(), String> {
+fn validate_project_payload(manifest: &Value, reader: &Reader, max_dimension: u32) -> Result<(), String> {
     let mesh = &manifest["mesh"];
     let vertex_bytes = reader.blob(&mesh["vertices"]).map_err(|e| format!("mesh vertices: {e}"))?;
     if vertex_bytes.is_empty() || vertex_bytes.len() % std::mem::size_of::<Vertex>() != 0 {
@@ -236,8 +242,9 @@ fn validate_project_payload(manifest: &Value, reader: &Reader) -> Result<(), Str
                 return Err("texture-set triangle ranges are not contiguous or do not cover the mesh".into());
             }
             next_triangle = end;
-            if set["resolution"].as_u64() == Some(0) {
-                return Err("a texture set has an invalid zero resolution".into());
+            let resolution = set["resolution"].as_u64().unwrap_or(2048);
+            if resolution == 0 || resolution > u64::from(max_dimension) {
+                return Err(format!("texture set resolution {resolution} exceeds the device's 2D texture limit ({max_dimension})"));
             }
         }
         if next_triangle as usize != triangle_count {
@@ -259,7 +266,7 @@ fn validate_project_payload(manifest: &Value, reader: &Reader) -> Result<(), Str
                         .ok_or_else(|| format!("{label} has no paint-channel list"))?;
                     for (channel, texture) in channels.iter().enumerate().take(crate::engine::CHANNELS) {
                         if !texture.is_null() {
-                            validate_texture_blob(reader, texture, &format!("{label}, channel {channel}"))?;
+                            validate_texture_blob(reader, texture, &format!("{label}, channel {channel}"), max_dimension)?;
                         }
                     }
                 }
@@ -269,7 +276,7 @@ fn validate_project_payload(manifest: &Value, reader: &Reader) -> Result<(), Str
 
             if let Some(mask) = layer.get("mask").filter(|mask| !mask.is_null()) {
                 if let Some(texture) = mask.get("paint").filter(|texture| !texture.is_null()) {
-                    validate_texture_blob(reader, texture, &format!("{label}, mask"))?;
+                    validate_texture_blob(reader, texture, &format!("{label}, mask"), max_dimension)?;
                 }
                 if let Some(generator) = mask.get("generator").filter(|generator| !generator.is_null()) {
                     generator_from(generator).map_err(|e| format!("{label}, mask generator: {e}"))?;
@@ -300,7 +307,7 @@ fn validate_project_payload(manifest: &Value, reader: &Reader) -> Result<(), Str
             for fix in fixes {
                 let map_index = fix["map"].as_u64().unwrap_or(u64::MAX);
                 if map_index < crate::engine::MAP_COUNT as u64 {
-                    validate_texture_blob(reader, &fix["texture"], &format!("texture set {set_index}, map fix {map_index}"))?;
+                    validate_texture_blob(reader, &fix["texture"], &format!("texture set {set_index}, map fix {map_index}"), max_dimension)?;
                 }
             }
         }
@@ -808,7 +815,8 @@ impl PainterApp {
         // Validate every fallible mesh, texture, generator and image decode
         // before changing the live document. A damaged late layer must not
         // leave the project that was open before this call half-replaced.
-        validate_project_payload(&manifest, &r).map_err(|e| format!("{}: {e}", bad()))?;
+        validate_project_payload(&manifest, &r, self.rs.device.limits().max_texture_dimension_2d)
+            .map_err(|e| format!("{}: {e}", bad()))?;
         self.active_channels = std::array::from_fn(|i| {
             manifest["active_channels"].as_array().and_then(|channels| channels.get(i)).and_then(Value::as_bool).unwrap_or(true)
         });
@@ -1217,7 +1225,7 @@ mod tests {
         let (manifest, blobs) = test_project(None);
         let encoded = test_container(&manifest, &blobs);
         let (decoded, reader) = parse_project_container(&encoded).unwrap();
-        validate_project_payload(&decoded, &reader).unwrap();
+        validate_project_payload(&decoded, &reader, 16384).unwrap();
     }
 
     #[test]
@@ -1226,7 +1234,7 @@ mod tests {
         let reader = Reader {
             blobs: blobs.iter().map(|bytes| lz4_flex::compress_prepend_size(bytes)).collect(),
         };
-        let error = validate_project_payload(&manifest, &reader).unwrap_err();
+        let error = validate_project_payload(&manifest, &reader, 16384).unwrap_err();
         assert!(error.contains("fill image channel 0"), "{error}");
         assert!(error.contains("damaged"), "{error}");
     }
