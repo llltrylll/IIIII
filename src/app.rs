@@ -644,6 +644,8 @@ pub struct PainterApp {
     cam: OrbitCam,
     /// Blender-style first-person navigation, active only over the 3D viewport.
     walk_navigation: bool,
+    /// Orbit focus saved while first-person navigation temporarily repurposes cam.target.
+    walk_orbit_target: Option<Vec3>,
     walk_speed: f32,
     cam2d: Cam2d,
     layout: Layout,
@@ -2200,6 +2202,7 @@ impl PainterApp {
             bake_id_only: false,
             cam: OrbitCam::default(),
             walk_navigation: false,
+            walk_orbit_target: None,
             walk_speed: 1.5,
             cam2d: Cam2d::default(),
             layout: Layout::Split,
