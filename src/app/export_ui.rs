@@ -226,35 +226,58 @@ impl PainterApp {
         }
     }
 
-    /// Every texture set's maps, read back now (after compositing), with
-    /// the settings that name its files.
-    fn export_snapshots(&mut self, settings: &export::Settings) -> Vec<(export::Snapshot, export::Settings)> {
+    /// Submits one immutable GPU readback snapshot per texture set.
+    fn export_snapshots(&mut self, settings: &export::Settings) -> Result<Vec<(export::SnapshotSource, export::Settings)>, String> {
         if self.engine.dirty {
             self.engine.composite();
         }
         self.composite_parked();
         let engines = self.set_engines();
+
+        // Check the aggregate staging budget before allocating any readback buffers.
+        let total_bytes = engines.iter().try_fold(0u64, |total, engine| {
+            total.checked_add(export::snapshot_readback_bytes(engine)?)
+                .ok_or_else(|| "Total export staging memory overflow.".to_string())
+        })?;
+        if total_bytes > export::MAX_EXPORT_READBACK_BYTES {
+            return Err(format!(
+                "Export snapshots need {:.0} MiB of temporary GPU staging memory; the limit is {:.0} MiB. Export fewer texture sets or lower their resolution.",
+                total_bytes as f64 / (1024.0 * 1024.0),
+                export::MAX_EXPORT_READBACK_BYTES as f64 / (1024.0 * 1024.0),
+            ));
+        }
+
         self.mesh
             .sets
             .iter()
             .zip(engines)
             .map(|(set, engine)| {
-                let snapshot = export::snapshot(engine, &self.rs.device, &self.rs.queue, self.mesh.clone());
-                (snapshot, export::Settings { set_name: set.name.replace(' ', ""), ..settings.clone() })
+                let source = export::snapshot_source(engine, &self.rs.device, &self.rs.queue, self.mesh.clone())?;
+                Ok((source, export::Settings { set_name: set.name.replace(' ', ""), ..settings.clone() }))
             })
             .collect()
     }
 
-    /// Reads the maps back now and writes the files on a worker thread.
+    /// Reads the GPU snapshots and writes the files on a worker thread.
     fn start_export(&mut self, template: Template, ctx: &egui::Context) {
         let settings = self.export_settings();
-        let jobs = self.export_snapshots(&settings);
+        let jobs = match self.export_snapshots(&settings) {
+            Ok(jobs) => jobs,
+            Err(error) => {
+                self.status = format!("Export failed: {error}");
+                self.export.job = None;
+                self.export.result = Some(Err(error));
+                return;
+            }
+        };
+        let device = self.rs.device.clone();
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let mut files = Vec::new();
-            let result = jobs.iter().try_for_each(|(snapshot, settings)| {
-                files.extend(export::export(snapshot, &template, settings)?);
+            let result = jobs.into_iter().try_for_each(|(source, settings)| {
+                let snapshot = source.read(&device)?;
+                files.extend(export::export(&snapshot, &template, &settings)?);
                 Ok::<_, String>(())
             });
             let _ = tx.send(result.map(|_| files));
@@ -264,10 +287,11 @@ impl PainterApp {
         self.export.result = None;
     }
 
-    /// Exports synchronously (agents wait for the files).
+    /// Exports synchronously for agents that wait for the resulting files.
     pub(super) fn export_now(&mut self, template: usize, settings: &export::Settings) -> Result<Vec<PathBuf>, String> {
         let mut files = Vec::new();
-        for (snapshot, settings) in self.export_snapshots(settings) {
+        for (source, settings) in self.export_snapshots(settings)? {
+            let snapshot = source.read(&self.rs.device)?;
             files.extend(export::export(&snapshot, &self.export.templates[template], &settings)?);
         }
         Ok(files)

@@ -446,6 +446,231 @@ impl GpuMesh {
     }
 }
 
+/// Upper bound for the temporary GPU staging memory of one batched readback.
+pub const MAX_BATCHED_READBACK_BYTES: u64 = 1 << 30;
+
+struct ReadbackLayout {
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+    row_bytes: u32,
+    padded_row_bytes: u32,
+    buffer_size: u64,
+}
+
+struct ReadbackItem {
+    buffer: wgpu::Buffer,
+    format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+    row_bytes: u32,
+    padded_row_bytes: u32,
+}
+
+/// Copies already submitted for a consistent snapshot. Mapping and decoding can run on a worker.
+pub struct ReadbackBatch {
+    items: Vec<ReadbackItem>,
+}
+
+fn unpad_readback_rows(data: &[u8], row_bytes: u32, padded_row_bytes: u32, height: u32) -> Result<Vec<u8>, String> {
+    if row_bytes == 0 || padded_row_bytes < row_bytes || padded_row_bytes % 256 != 0 || height == 0 {
+        return Err("Invalid GPU texture readback row layout.".into());
+    }
+    let mapped_size = (padded_row_bytes as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| "GPU mapped readback size overflow.".to_string())?;
+    if data.len() != mapped_size {
+        return Err("GPU mapped readback has an unexpected size.".into());
+    }
+    let output_size = (row_bytes as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| "GPU output readback size overflow.".to_string())?;
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_size)
+        .map_err(|_| "Cannot allocate the GPU texture readback buffer.".to_string())?;
+    for y in 0..height as usize {
+        let start = y * padded_row_bytes as usize;
+        output.extend_from_slice(&data[start..start + row_bytes as usize]);
+    }
+    Ok(output)
+}
+
+/// Estimates staging memory without allocating it. This lets multi-set export enforce
+/// one aggregate budget before it creates any readback buffers.
+pub fn wgpu_textures_readback_bytes(textures: &[&wgpu::Texture]) -> Result<u64, String> {
+    let mut total = 0u64;
+    for texture in textures {
+        let width = texture.width();
+        let height = texture.height();
+        if width == 0 || height == 0 {
+            return Err("Cannot read an empty GPU texture.".into());
+        }
+        let row_bytes = width.checked_mul(bytes_per_texel(texture.format()))
+            .ok_or_else(|| "GPU texture readback row size overflow.".to_string())?;
+        let padded_row_bytes = row_bytes.div_ceil(256).checked_mul(256)
+            .ok_or_else(|| "GPU texture readback alignment overflow.".to_string())?;
+        let size = (padded_row_bytes as u64).checked_mul(height as u64)
+            .ok_or_else(|| "GPU texture readback buffer size overflow.".to_string())?;
+        total = total.checked_add(size)
+            .ok_or_else(|| "GPU texture readback total size overflow.".to_string())?;
+    }
+    Ok(total)
+}
+
+/// Records and submits copies of all requested texture mip-zero levels before the source can change.
+pub fn prepare_wgpu_textures(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    textures: &[&wgpu::Texture],
+) -> Result<ReadbackBatch, String> {
+    let total_bytes = wgpu_textures_readback_bytes(textures)?;
+    if total_bytes > MAX_BATCHED_READBACK_BYTES {
+        return Err(format!(
+            "Export snapshot needs {:.0} MiB of GPU staging memory; the per-batch limit is {:.0} MiB.",
+            total_bytes as f64 / (1024.0 * 1024.0),
+            MAX_BATCHED_READBACK_BYTES as f64 / (1024.0 * 1024.0),
+        ));
+    }
+
+    let mut layouts = Vec::with_capacity(textures.len());
+    for texture in textures {
+        let width = texture.width();
+        let height = texture.height();
+        let row_bytes = width.checked_mul(bytes_per_texel(texture.format()))
+            .ok_or_else(|| "GPU texture readback row size overflow.".to_string())?;
+        let padded_row_bytes = row_bytes.div_ceil(256).checked_mul(256)
+            .ok_or_else(|| "GPU texture readback alignment overflow.".to_string())?;
+        let buffer_size = (padded_row_bytes as u64).checked_mul(height as u64)
+            .ok_or_else(|| "GPU texture readback buffer size overflow.".to_string())?;
+        layouts.push(ReadbackLayout {
+            width, height, format: texture.format(), row_bytes, padded_row_bytes, buffer_size,
+        });
+    }
+
+    let mut encoder = device.create_command_encoder(&Default::default());
+    let mut items = Vec::with_capacity(textures.len());
+    for (texture, layout) in textures.iter().zip(layouts) {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("batched texture readback"),
+            size: layout.buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(layout.padded_row_bytes),
+                    rows_per_image: Some(layout.height),
+                },
+            },
+            wgpu::Extent3d { width: layout.width, height: layout.height, depth_or_array_layers: 1 },
+        );
+        items.push(ReadbackItem {
+            buffer, format: layout.format, width: layout.width, height: layout.height,
+            row_bytes: layout.row_bytes, padded_row_bytes: layout.padded_row_bytes,
+        });
+    }
+    if !items.is_empty() {
+        queue.submit([encoder.finish()]);
+    }
+    Ok(ReadbackBatch { items })
+}
+
+impl ReadbackBatch {
+    /// Maps the submitted copies with one device poll, then decodes one texture at a time.
+    pub fn decode<T>(
+        self,
+        device: &wgpu::Device,
+        mut decode: impl FnMut(wgpu::TextureFormat, u32, u32, &[u8]) -> Result<T, String>,
+    ) -> Result<Vec<T>, String> {
+        if self.items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        for (index, item) in self.items.iter().enumerate() {
+            let tx = tx.clone();
+            item.buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+                let result = result.map_err(|error| format!("{error:?}"));
+                let _ = tx.send((index, result));
+            });
+        }
+        drop(tx);
+
+        if let Err(error) = device.poll(wgpu::PollType::wait_indefinitely()) {
+            for item in &self.items {
+                item.buffer.unmap();
+            }
+            return Err(format!("GPU texture readback did not complete: {error:?}"));
+        }
+
+        let mut mapped = vec![false; self.items.len()];
+        let mut failure = None;
+        for _ in 0..self.items.len() {
+            match rx.recv() {
+                Ok((index, Ok(()))) if index < mapped.len() => mapped[index] = true,
+                Ok((_, Err(error))) => {
+                    if failure.is_none() {
+                        failure = Some(format!("GPU texture mapping failed: {error}"));
+                    }
+                }
+                Ok(_) => {
+                    if failure.is_none() {
+                        failure = Some("GPU texture mapping returned an invalid result.".into());
+                    }
+                }
+                Err(error) => {
+                    if failure.is_none() {
+                        failure = Some(format!("GPU texture mapping callback stopped: {error}"));
+                    }
+                    break;
+                }
+            }
+        }
+        if let Some(error) = failure {
+            for (item, is_mapped) in self.items.iter().zip(mapped) {
+                if is_mapped {
+                    item.buffer.unmap();
+                }
+            }
+            return Err(error);
+        }
+
+        let mut output = Vec::with_capacity(self.items.len());
+        let mut decode_error = None;
+        for item in &self.items {
+            let view = match item.buffer.slice(..).get_mapped_range() {
+                Ok(view) => view,
+                Err(error) => {
+                    item.buffer.unmap();
+                    if decode_error.is_none() {
+                        decode_error = Some(format!("GPU texture mapping could not be read: {error:?}"));
+                    }
+                    continue;
+                }
+            };
+            let raw = unpad_readback_rows(&view, item.row_bytes, item.padded_row_bytes, item.height);
+            drop(view);
+            item.buffer.unmap();
+            match raw.and_then(|bytes| decode(item.format, item.width, item.height, &bytes)) {
+                Ok(value) => output.push(value),
+                Err(error) if decode_error.is_none() => decode_error = Some(error),
+                Err(_) => {}
+            }
+        }
+
+        if let Some(error) = decode_error {
+            Err(error)
+        } else if output.len() == self.items.len() {
+            Ok(output)
+        } else {
+            Err("GPU texture readback returned an incomplete result.".into())
+        }
+    }
+}
+
 /// Blocking texture readback, used for export (an explicit user action).
 pub fn read_texture(device: &wgpu::Device, queue: &wgpu::Queue, tex: &Tex) -> Vec<u8> {
     read_wgpu_texture(device, queue, &tex.texture)
@@ -615,3 +840,55 @@ mod mip_preparation_tests {
         assert_eq!(chain.levels.last().map(|m| (m.width, m.height)), Some((1, 1)));
     }
 }
+
+#[cfg(test)]
+mod readback_row_tests {
+    use super::{unpad_readback_rows, wgpu};
+
+    #[test]
+    fn removes_padding_without_shifting_rows() {
+        let mut mapped = vec![0u8; 512];
+        mapped[..4].copy_from_slice(&[1, 2, 3, 4]);
+        mapped[256..260].copy_from_slice(&[5, 6, 7, 8]);
+        assert_eq!(unpad_readback_rows(&mapped, 4, 256, 2).unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn rejects_invalid_or_truncated_row_layouts() {
+        assert!(unpad_readback_rows(&[0; 8], 4, 4, 2).is_err());
+        assert!(unpad_readback_rows(&[0; 256], 4, 256, 2).is_err());
+        assert!(unpad_readback_rows(&[0; 256], 257, 256, 1).is_err());
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn batched_readback_captures_multiple_textures() {
+        let (device, queue) = crate::bake::tests::gpu();
+        let a = super::Tex::new(&device, "readback test A", 64, 64, wgpu::TextureFormat::Rgba8Unorm, super::LAYER_USAGE);
+        let b = super::Tex::new(&device, "readback test B", 64, 64, wgpu::TextureFormat::Rgba8Unorm, super::LAYER_USAGE);
+        let a_bytes = vec![17u8; 64 * 64 * 4];
+        let b_bytes = vec![219u8; 64 * 64 * 4];
+        for (texture, bytes) in [(&a, &a_bytes), (&b, &b_bytes)] {
+            queue.write_texture(
+                texture.copy_info(),
+                bytes,
+                super::wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256), rows_per_image: Some(64) },
+                texture.extent(),
+            );
+        }
+        let batch = super::prepare_wgpu_textures(&device, &queue, &[&a.texture, &b.texture]).expect("readback preparation");
+        assert_eq!(
+            super::wgpu_textures_readback_bytes(&[&a.texture, &b.texture]).unwrap(),
+            256u64 * 64 * 2,
+        );
+        let values = batch.decode(&device, |format, width, height, bytes| {
+            assert_eq!(format, wgpu::TextureFormat::Rgba8Unorm);
+            assert_eq!((width, height), (64, 64));
+            Ok(bytes.to_vec())
+        }).expect("both textures map");
+        assert_eq!(values.len(), 2);
+        assert!(values[0].iter().all(|&v| v == 17));
+        assert!(values[1].iter().all(|&v| v == 219));
+    }
+}
+

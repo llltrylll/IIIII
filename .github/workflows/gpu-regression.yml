@@ -124,6 +124,9 @@ jobs:
       - name: GPU undo - snapshot staging buffer reuse
         run: "cargo test --locked --bin material_painter undo::tests::snapshot_pool_reuses_completed_readback_buffers -- --ignored --exact --nocapture --test-threads 1"
 
+      - name: GPU readback - batch multiple textures
+        run: "cargo test --locked --bin material_painter gpu::readback_row_tests::batched_readback_captures_multiple_textures -- --ignored --exact --nocapture --test-threads 1"
+
       - name: Upload GPU regression images
         if: always()
         uses: actions/upload-artifact@v4

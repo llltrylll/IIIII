@@ -567,14 +567,42 @@ struct Plane {
     data: Vec<[f32; 4]>,
 }
 
-fn read_plane(device: &wgpu::Device, queue: &wgpu::Queue, tex: &Tex) -> Plane {
-    let raw = gpu::read_texture(device, queue, tex);
-    let data = match tex.format {
+fn decode_plane(format: wgpu::TextureFormat, width: u32, height: u32, raw: &[u8]) -> Result<Plane, String> {
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(gpu::bytes_per_texel(format) as usize))
+        .ok_or_else(|| "Export texture dimensions overflow.".to_string())?;
+    if raw.len() != expected {
+        return Err("GPU texture readback returned an unexpected byte count.".into());
+    }
+    let data = match format {
         wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba8UnormSrgb => {
             raw.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]].map(|v| v as f32 / 255.0)).collect()
         }
-        wgpu::TextureFormat::R8Unorm => raw.iter().map(|&v| [v as f32 / 255.0, 0.0, 0.0, 1.0]).collect(),
-        wgpu::TextureFormat::R16Float => raw.chunks_exact(2).map(|b| [f16_to_f32(u16::from_le_bytes([b[0], b[1]])), 0.0, 0.0, 1.0]).collect(),
+        wgpu::TextureFormat::R8Unorm => {
+            raw.iter().map(|&v| [v as f32 / 255.0, 0.0, 0.0, 1.0]).collect()
+        }
+        wgpu::TextureFormat::Rg8Unorm => raw
+            .chunks_exact(2)
+            .map(|b| [b[0] as f32 / 255.0, b[1] as f32 / 255.0, 0.0, 1.0])
+            .collect(),
+        wgpu::TextureFormat::R16Float => raw
+            .chunks_exact(2)
+            .map(|b| [f16_to_f32(u16::from_le_bytes([b[0], b[1]])), 0.0, 0.0, 1.0])
+            .collect(),
+        wgpu::TextureFormat::Rg16Float => raw
+            .chunks_exact(4)
+            .map(|b| [
+                f16_to_f32(u16::from_le_bytes([b[0], b[1]])),
+                f16_to_f32(u16::from_le_bytes([b[2], b[3]])),
+                0.0,
+                1.0,
+            ])
+            .collect(),
+        wgpu::TextureFormat::R32Float => raw
+            .chunks_exact(4)
+            .map(|b| [f32::from_le_bytes([b[0], b[1], b[2], b[3]]), 0.0, 0.0, 1.0])
+            .collect(),
         wgpu::TextureFormat::Rgba16Float => raw
             .chunks_exact(8)
             .map(|b| [0, 1, 2, 3].map(|k| f16_to_f32(u16::from_le_bytes([b[k * 2], b[k * 2 + 1]]))))
@@ -583,9 +611,9 @@ fn read_plane(device: &wgpu::Device, queue: &wgpu::Queue, tex: &Tex) -> Plane {
             .chunks_exact(16)
             .map(|b| [0, 1, 2, 3].map(|k| f32::from_le_bytes([b[k * 4], b[k * 4 + 1], b[k * 4 + 2], b[k * 4 + 3]])))
             .collect(),
-        other => panic!("unsupported export format {other:?}"),
+        other => return Err(format!("Unsupported export texture format {other:?}.")),
     };
-    Plane { data }
+    Ok(Plane { data })
 }
 
 /// Bilinear resample of a square plane to `res` (mesh maps can differ from
@@ -615,8 +643,7 @@ fn resample(p: Plane, w: u32, res: u32) -> Plane {
     Plane { data }
 }
 
-/// Everything an export reads from the GPU, owned so the rest can run on a
-/// worker thread.
+/// Everything an export needs after the GPU textures have been read back.
 pub struct Snapshot {
     res: u32,
     /// Base color, with opacity in alpha.
@@ -647,33 +674,142 @@ pub struct Snapshot {
     tris: std::ops::Range<u32>,
 }
 
-/// Reads the document's maps back from the GPU (call after compositing).
-pub fn snapshot(engine: &Engine, device: &wgpu::Device, queue: &wgpu::Queue, mesh: Arc<Mesh>) -> Snapshot {
-    let res = engine.res;
-    let mesh_maps = std::array::from_fn(|t| {
-        let tex = engine.map_tex(t);
-        resample(read_plane(device, queue, tex), tex.width, res)
-    });
+/// Returns the texture handles and the source dimensions for one texture-set snapshot.
+fn snapshot_textures(engine: &Engine) -> (Vec<&wgpu::Texture>, [u32; crate::bake::MAP_TEXTURES], u32, u32) {
+    let map_textures: Vec<&Tex> = (0..crate::bake::MAP_TEXTURES)
+        .map(|index| engine.map_tex(index))
+        .collect();
     let (pos, nrm) = engine.surface_maps();
-    Snapshot {
-        res,
-        color: read_plane(device, queue, engine.final_tex(0)),
+
+    let mut textures = Vec::with_capacity(map_textures.len() + 9);
+    textures.extend(map_textures.iter().map(|texture| &texture.texture));
+    textures.push(&engine.final_tex(0).texture);
+    textures.push(&engine.final_tex(crate::engine::FINAL_EMISSION).texture);
+    textures.push(&engine.final_tex(crate::engine::FINAL_NORMAL).texture);
+    textures.push(&engine.final_tex(crate::engine::FINAL_SPECULAR).texture);
+    textures.push(&engine.final_tex(1).texture);
+    textures.push(&engine.final_tex(2).texture);
+    textures.push(&engine.final_tex(3).texture);
+    textures.push(&nrm.texture);
+    textures.push(&pos.texture);
+
+    let map_widths = std::array::from_fn(|index| map_textures[index].width);
+    (textures, map_widths, nrm.width, pos.width)
+}
+
+pub const MAX_EXPORT_READBACK_BYTES: u64 = gpu::MAX_BATCHED_READBACK_BYTES;
+
+/// Preflights one texture set without allocating staging buffers.
+pub fn snapshot_readback_bytes(engine: &Engine) -> Result<u64, String> {
+    let (textures, _, _, _) = snapshot_textures(engine);
+    gpu::wgpu_textures_readback_bytes(&textures)
+}
+
+/// GPU snapshot with all copy commands submitted on the UI thread. Mapping/decoding
+/// is deferred to a worker, after the captured pixels are immutable in staging buffers.
+pub struct SnapshotSource {
+    res: u32,
+    readback: gpu::ReadbackBatch,
+    map_widths: [u32; crate::bake::MAP_TEXTURES],
+    normal_width: u32,
+    position_width: u32,
+    opaque: bool,
+    emissive: bool,
+    specular: bool,
+    bounds: (Vec3, Vec3),
+    has_bake: bool,
+    uvs: Arc<Mesh>,
+    tris: std::ops::Range<u32>,
+}
+
+pub fn snapshot_source(
+    engine: &Engine,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    mesh: Arc<Mesh>,
+) -> Result<SnapshotSource, String> {
+    let (textures, map_widths, normal_width, position_width) = snapshot_textures(engine);
+    let readback = gpu::prepare_wgpu_textures(device, queue, &textures)?;
+    Ok(SnapshotSource {
+        res: engine.res,
+        readback,
+        map_widths,
+        normal_width,
+        position_width,
         opaque: !engine.uses_opacity(),
-        emission: read_plane(device, queue, engine.final_tex(crate::engine::FINAL_EMISSION)),
         emissive: engine.uses_emission(),
-        normal: read_plane(device, queue, engine.final_tex(crate::engine::FINAL_NORMAL)),
-        spec: read_plane(device, queue, engine.final_tex(crate::engine::FINAL_SPECULAR)),
         specular: engine.uses_channel(crate::engine::SPECULAR),
-        rough: read_plane(device, queue, engine.final_tex(1)),
-        metal: read_plane(device, queue, engine.final_tex(2)),
-        height: read_plane(device, queue, engine.final_tex(3)),
-        mesh: mesh_maps,
-        world_normal: resample(read_plane(device, queue, nrm), nrm.width, res),
-        position: resample(read_plane(device, queue, pos), pos.width, res),
         bounds: engine.bounds(),
         has_bake: engine.has_bake,
         uvs: mesh,
         tris: engine.triangles(),
+    })
+}
+
+/// Synchronous snapshot adapter kept for GPU/preview tests.
+#[cfg(test)]
+pub fn snapshot(engine: &Engine, device: &wgpu::Device, queue: &wgpu::Queue, mesh: Arc<Mesh>) -> Snapshot {
+    snapshot_source(engine, device, queue, mesh)
+        .and_then(|source| source.read(device))
+        .expect("export GPU snapshot succeeds")
+}
+
+impl SnapshotSource {
+    /// Maps the previously submitted copies and converts them on the worker.
+    pub fn read(self, device: &wgpu::Device) -> Result<Snapshot, String> {
+        let decoded = self.readback.decode(device, decode_plane)?;
+        let mut planes = decoded.into_iter();
+
+        let mut mesh_planes = Vec::with_capacity(crate::bake::MAP_TEXTURES);
+        for width in self.map_widths {
+            let plane = planes.next().ok_or_else(|| "Missing baked mesh map in export readback.".to_string())?;
+            mesh_planes.push(resample(plane, width, self.res));
+        }
+        let mesh_maps: [Plane; crate::bake::MAP_TEXTURES] = mesh_planes
+            .try_into()
+            .map_err(|_| "Export readback returned the wrong number of mesh maps.".to_string())?;
+
+        let color = planes.next().ok_or_else(|| "Missing color map in export readback.".to_string())?;
+        let emission = planes.next().ok_or_else(|| "Missing emission map in export readback.".to_string())?;
+        let normal = planes.next().ok_or_else(|| "Missing normal map in export readback.".to_string())?;
+        let spec = planes.next().ok_or_else(|| "Missing specular map in export readback.".to_string())?;
+        let rough = planes.next().ok_or_else(|| "Missing roughness map in export readback.".to_string())?;
+        let metal = planes.next().ok_or_else(|| "Missing metallic map in export readback.".to_string())?;
+        let height = planes.next().ok_or_else(|| "Missing height map in export readback.".to_string())?;
+        let world_normal = resample(
+            planes.next().ok_or_else(|| "Missing world normal map in export readback.".to_string())?,
+            self.normal_width,
+            self.res,
+        );
+        let position = resample(
+            planes.next().ok_or_else(|| "Missing position map in export readback.".to_string())?,
+            self.position_width,
+            self.res,
+        );
+        if planes.next().is_some() {
+            return Err("Export readback returned unexpected extra textures.".into());
+        }
+
+        Ok(Snapshot {
+            res: self.res,
+            color,
+            opaque: self.opaque,
+            emission,
+            emissive: self.emissive,
+            normal,
+            spec,
+            specular: self.specular,
+            rough,
+            metal,
+            height,
+            mesh: mesh_maps,
+            world_normal,
+            position,
+            bounds: self.bounds,
+            has_bake: self.has_bake,
+            uvs: self.uvs,
+            tris: self.tris,
+        })
     }
 }
 
