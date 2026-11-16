@@ -37,6 +37,7 @@ fn material_edits_reuse_filtered_id_mask_but_mask_edits_rebuild_it() {
     let mask = engine.layers[layer].mask.as_mut().expect("ID mask exists");
     mask.filters = vec![MaskFilter::new(FilterKind::Blur), MaskFilter::new(FilterKind::Warp)];
     engine.mark_dirty();
+    engine.commit_props(&mut undo);
     engine.composite();
 
     assert!(engine.last_mask_cache_misses > 0, "the initial composite must build the filtered mask");
@@ -53,6 +54,7 @@ fn material_edits_reuse_filtered_id_mask_but_mask_edits_rebuild_it() {
         panic!("the test layer must remain a Fill layer");
     }
     engine.mark_dirty();
+    engine.commit_props(&mut undo);
     engine.composite();
 
     assert!(engine.last_mask_cache_hits > 0, "material-only changes must reuse the filtered ID mask");
@@ -63,6 +65,7 @@ fn material_edits_reuse_filtered_id_mask_but_mask_edits_rebuild_it() {
     // previous cached result for this layer.
     engine.layers[layer].mask.as_mut().unwrap().generator.as_mut().unwrap().level += 0.1;
     engine.mark_dirty();
+    engine.commit_props(&mut undo);
     engine.composite();
     assert!(engine.last_mask_cache_misses > 0, "changing generator parameters must invalidate the mask cache");
     assert!(engine.last_mask_gpu_passes > 0, "an invalidated generator must rebuild its GPU result");
@@ -70,6 +73,7 @@ fn material_edits_reuse_filtered_id_mask_but_mask_edits_rebuild_it() {
     // Filter edits must independently invalidate the same mask result.
     engine.layers[layer].mask.as_mut().unwrap().filters[0].a += 2.0;
     engine.mark_dirty();
+    engine.commit_props(&mut undo);
     engine.composite();
     assert!(engine.last_mask_cache_misses > 0, "changing filter parameters must invalidate the mask cache");
     assert!(engine.last_mask_gpu_passes > 0, "an invalidated filter stack must rebuild its GPU result");
