@@ -1474,6 +1474,8 @@ pub struct BakeRun {
     next_tile: usize,
     done_tiles: Arc<AtomicUsize>,
     in_flight: Arc<AtomicUsize>,
+    /// At most one background device-poller per bake run; never one per tile.
+    poller_active: Arc<AtomicBool>,
     pub report: Arc<BakeReport>,
 }
 
@@ -2034,6 +2036,7 @@ impl GpuBaker {
             next_tile: 0,
             done_tiles: Arc::new(AtomicUsize::new(0)),
             in_flight: Arc::new(AtomicUsize::new(0)),
+            poller_active: Arc::new(AtomicBool::new(false)),
             report,
         }
     }
@@ -2048,6 +2051,7 @@ impl GpuBaker {
         queue: &wgpu::Queue,
         ctx: &egui::Context,
     ) -> Option<BakedMaps> {
+        let tile_cursor_before = run.next_tile;
         while run.next_tile < run.tiles.len() && run.in_flight.load(Ordering::Acquire) < MAX_IN_FLIGHT {
             let [x, y, pass] = run.tiles[run.next_tile];
             run.next_tile += 1;
@@ -2104,7 +2108,11 @@ impl GpuBaker {
                 done.fetch_add(1, Ordering::AcqRel);
                 ctx.request_repaint();
             });
-            Self::poll_until_done(device);
+        }
+        // Poll once after filling this frame's in-flight batch. The old call
+        // spawned a fresh OS thread for every tile (hundreds or thousands per bake).
+        if run.next_tile > tile_cursor_before {
+            Self::poll_until_done(device, &run.poller_active);
         }
         if run.next_tile < run.tiles.len() || run.maps.is_none() {
             return None;
@@ -2273,18 +2281,28 @@ impl GpuBaker {
             report.finished.store(true, Ordering::Release);
             ctx.request_repaint();
         });
-        Self::poll_until_done(device);
+        Self::poll_until_done(device, &run.poller_active);
         Some(BakedMaps { maps, custom: run.custom.iter().map(|(t, _)| t.clone()).collect() })
     }
 
-    /// wgpu runs completion callbacks only while the device is polled, which
-    /// the UI does when it draws a frame. A hidden or minimized window draws
-    /// none, so a worker waits on the GPU to deliver the callbacks that wake it.
-    fn poll_until_done(device: &wgpu::Device) {
+    /// wgpu runs completion callbacks only while the device is polled. The UI
+    /// normally polls each frame; one fallback worker handles a hidden/minimized
+    /// window. Never spawn a separate poller for every tile or every frame.
+    fn poll_until_done(device: &wgpu::Device, active: &Arc<AtomicBool>) {
+        if active.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            return;
+        }
         let device = device.clone();
-        std::thread::spawn(move || {
-            let _ = device.poll(wgpu::PollType::wait_indefinitely());
-        });
+        let active = active.clone();
+        let spawned = std::thread::Builder::new()
+            .name("bake-device-poller".into())
+            .spawn(move || {
+                let _ = device.poll(wgpu::PollType::wait_indefinitely());
+                active.store(false, Ordering::Release);
+            });
+        if spawned.is_err() {
+            active.store(false, Ordering::Release);
+        }
     }
 }
 
