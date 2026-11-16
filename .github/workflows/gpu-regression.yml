@@ -105,6 +105,8 @@ jobs:
 
       - name: GPU parity - mask filters
         run: "cargo test --locked --bin material_painter preview_test::mask_filters_apply -- --ignored --exact --nocapture --test-threads 1"
+      - name: GPU parity - material edits preserve filtered mask cache
+        run: "cargo test --locked --bin material_painter mask_cache_regression_test::material_edits_reuse_filtered_id_mask_but_mask_edits_rebuild_it -- --ignored --exact --nocapture --test-threads 1"
 
       - name: Upload GPU regression images
         if: always()
