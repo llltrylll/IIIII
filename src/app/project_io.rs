@@ -110,11 +110,12 @@ impl Writer {
     }
 }
 
-struct Reader {
-    blobs: Vec<Vec<u8>>,
+struct Reader<'a> {
+    /// Borrow compressed blob slices from the project file instead of copying the entire blob table.
+    blobs: Vec<&'a [u8]>,
 }
 
-impl Reader {
+impl Reader<'_> {
     fn blob(&self, v: &Value) -> Result<Vec<u8>, String> {
         let i = v.as_u64().ok_or("missing blob reference")? as usize;
         let packed = self.blobs.get(i).ok_or(format!("blob {i} is missing"))?;
@@ -388,7 +389,7 @@ impl PainterApp {
         })
     }
 
-    fn tex_from(&self, r: &Reader, v: &Value, label: &str) -> Result<Tex, String> {
+    fn tex_from(&self, r: &Reader<'_>, v: &Value, label: &str) -> Result<Tex, String> {
         let name = s(v, "format").ok_or("texture without a format")?;
         let format = FORMATS.into_iter().find(|x| format!("{x:?}") == name).ok_or(format!("unknown texture format '{name}'"))?;
         let (w, h) = (v["width"].as_u64().unwrap_or(0) as u32, v["height"].as_u64().unwrap_or(0) as u32);
@@ -634,11 +635,12 @@ impl PainterApp {
             manifest["active_channels"].as_array().and_then(|channels| channels.get(i)).and_then(Value::as_bool).unwrap_or(true)
         });
         let count = u64_at(take(8)?);
-        let mut blobs = Vec::with_capacity(count);
+        let mut blobs: Vec<&[u8]> = Vec::with_capacity(count);
         for _ in 0..count {
             let n = u64_at(take(8)?);
-            blobs.push(take(n)?.to_vec());
+            blobs.push(take(n)?);
         }
+        drop(take);
         let r = Reader { blobs };
 
         // Everything is decoded before the open document is touched.
