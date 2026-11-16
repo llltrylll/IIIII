@@ -1,0 +1,3 @@
+Temporary build marker for the isolated Claude normal/shading test package.
+
+This file intentionally has no runtime effect. It exists only to trigger the repository's Portable Windows RAR workflow for the unchanged source snapshot from claude/normal-shading-parity.
