@@ -9,7 +9,8 @@
 use crate::engine::{Blend, Content, FillParams, Generator, Layer, Levels, Mask};
 use crate::gpu::{Tex, bytes_per_texel};
 use eframe::wgpu;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 
@@ -26,27 +27,60 @@ enum SnapState {
     Ready(Vec<Vec<u8>>),
 }
 
+/// Reuses mapped staging buffers after snapshot data has been copied to CPU RAM.
+/// The per-size cap bounds retained GPU readback memory.
+#[derive(Default)]
+pub struct SnapshotBufferPool {
+    buffers: Mutex<HashMap<u64, Vec<wgpu::Buffer>>>,
+}
+
+impl SnapshotBufferPool {
+    const MAX_PER_SIZE: usize = 2;
+
+    fn take(&self, device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+        if let Some(buffer) = self.buffers.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&size).and_then(Vec::pop) {
+            return buffer;
+        }
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("undo staging"),
+            size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        })
+    }
+
+    fn recycle(&self, buffer: wgpu::Buffer) {
+        let size = buffer.size();
+        let mut buffers = self.buffers.lock().unwrap_or_else(|e| e.into_inner());
+        let bucket = buffers.entry(size).or_default();
+        if bucket.len() < Self::MAX_PER_SIZE {
+            bucket.push(buffer);
+        }
+    }
+}
+
 pub struct Snapshot {
     infos: Vec<TexInfo>,
     state: SnapState,
+    pool: Arc<SnapshotBufferPool>,
 }
 
 impl Snapshot {
-    /// Encodes copies of `textures` into fresh staging buffers. Call
+    /// Encodes copies of `textures` into pooled staging buffers. Call
     /// [`Snapshot::request_map`] after the encoder has been submitted.
-    pub fn encode(device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, textures: &[&Tex]) -> Snapshot {
+    pub fn encode(
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        textures: &[&Tex],
+        pool: Arc<SnapshotBufferPool>,
+    ) -> Snapshot {
         let mut infos = Vec::new();
         let mut buffers = Vec::new();
         for tex in textures {
             let bpp = bytes_per_texel(tex.format);
             let row = tex.width * bpp;
             debug_assert!(row.is_multiple_of(256), "texture rows must be 256-byte aligned for readback");
-            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("undo staging"),
-                size: (row * tex.height) as u64,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
+            let buffer = pool.take(device, (row * tex.height) as u64);
             encoder.copy_texture_to_buffer(
                 tex.copy_info(),
                 wgpu::TexelCopyBufferInfo {
@@ -63,7 +97,7 @@ impl Snapshot {
             buffers.push(buffer);
         }
         let remaining = Arc::new(AtomicUsize::new(buffers.len()));
-        Snapshot { infos, state: SnapState::Mapping { buffers, remaining } }
+        Snapshot { infos, state: SnapState::Mapping { buffers, remaining }, pool }
     }
 
     pub fn request_map(&self) {
@@ -79,19 +113,21 @@ impl Snapshot {
 
     /// Advances the state machine without blocking.
     pub fn update(&mut self) {
+        let pool = self.pool.clone();
         match &mut self.state {
             SnapState::Mapping { buffers, remaining } => {
                 if remaining.load(Ordering::Acquire) != 0 {
                     return;
                 }
-                let raw: Vec<Vec<u8>> = buffers
-                    .iter()
-                    .map(|b| {
-                        let data = b.slice(..).get_mapped_range().expect("staging buffer is mapped").to_vec();
-                        b.unmap();
-                        data
-                    })
-                    .collect();
+                let mut raw = Vec::with_capacity(buffers.len());
+                for buffer in buffers.drain(..) {
+                    let data = buffer.slice(..).get_mapped_range().expect("staging buffer is mapped").to_vec();
+                    buffer.unmap();
+                    // The GPU readback is now safely in CPU memory; return the
+                    // large MAP_READ allocation before compression runs.
+                    pool.recycle(buffer);
+                    raw.push(data);
+                }
                 let (tx, rx) = mpsc::channel();
                 rayon::spawn(move || {
                     let packed = raw.iter().map(|d| lz4_flex::compress_prepend_size(d)).collect();
