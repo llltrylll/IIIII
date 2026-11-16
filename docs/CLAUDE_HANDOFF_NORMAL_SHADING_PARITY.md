@@ -20,6 +20,9 @@ Compared against Blender 4.0.2 (Cycles) reference data (`src/test_data/*.json`, 
 - Non-ignored suite: 139 passed.
 - `preview_test::cage_paint_and_auto_fix` fails identically on the base branch (pre-existing, unrelated).
 
+## Step 1 (FBX importer) checked
+`import.rs` uses `ufbx::matrix_for_normals` (|det|-scaled inverse transpose, i.e. no extra flip) plus one winding swap when node determinant parity XOR `mesh.reversed_winding` is odd. Existing tests over real generated FBX files pass: `mirrored_fbx_node_shades_as_the_mirror_image` and `imported_winding_agrees_with_vertex_normals_for_any_node_scale` (scales +/-1 on each axis, with and without file normals). No importer bug found with synthetic assets; the real Airfox FBX was not available here.
+
 ## Unresolved / limitations
 - Path-tracer patch is NOT executed under test: the path-tracer compute shader segfaults Lavapipe (even on a stock cube). `raster_and_path_tracer_lighting_follow_blender_normals` is `#[ignore]` and needs a real GPU.
 - Fix affects only back-facing fragments (cables, thin parts, open edges); it does not explain a global look difference vs Blender/InstaMAT. Remaining candidates (lighting/env/tonemap/BRDF differences, FBX import with negative determinant, real Airfox asset) are unverified.
