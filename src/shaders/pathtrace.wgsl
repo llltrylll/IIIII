@@ -84,6 +84,12 @@ fn intersect(o: vec3<f32>, d: vec3<f32>, tmax: f32, any_hit: bool) -> Hit {
     var h: Hit;
     h.t = tmax;
     h.tri = NONE;
+    // Hidden Texture Sets can leave the visible acceleration structure empty.
+    // The CPU keeps a one-element fallback storage buffer for empty uploads,
+    // so fewer than three positions means the scene contains no triangles.
+    if (arrayLength(&tri_pos) < 3u) {
+        return h;
+    }
     let dd = select(d, vec3<f32>(1e-9), abs(d) < vec3<f32>(1e-9));
     let inv = 1.0 / dd;
     if (box_entry(0u, o, inv, h.t) == MISS) {

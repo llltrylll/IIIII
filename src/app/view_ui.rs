@@ -34,12 +34,16 @@ impl PainterApp {
         if toggle_walk {
             self.walk_navigation = !self.walk_navigation;
             if self.walk_navigation {
+                self.walk_orbit_target = Some(self.cam.target);
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorGrab(
                     egui::viewport::CursorGrab::Locked,
                 ));
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorVisible(false));
                 self.status = "First-person navigation: WASD move, mouse look, E/Q vertical, Shift faster, Esc exit.".into();
             } else {
+                if let Some(target) = self.walk_orbit_target.take() {
+                    self.cam.restore_orbit_target(target);
+                }
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorGrab(
                     egui::viewport::CursorGrab::None,
                 ));
@@ -71,6 +75,9 @@ impl PainterApp {
                 ));
             if exit {
                 self.walk_navigation = false;
+                if let Some(target) = self.walk_orbit_target.take() {
+                    self.cam.restore_orbit_target(target);
+                }
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorGrab(
                     egui::viewport::CursorGrab::None,
                 ));
