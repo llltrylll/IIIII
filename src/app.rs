@@ -638,6 +638,10 @@ pub struct PainterApp {
     /// The picture of an environment that just loaded.
     hdri_new_thumb: Option<(String, Vec<u8>)>,
     stroke: Option<StrokeInput>,
+    /// Reused raw cursor samples built while interpolating an active stroke.
+    stroke_raw_stamps: Vec<([f32; 4], f32)>,
+    /// Reused resolved GPU stamps, including symmetry copies.
+    resolved_stamps: Vec<Stamp>,
     bake_settings: BakeSettings,
     bake_job: Option<BakeJob>,
     baker: GpuBaker,
@@ -800,7 +804,26 @@ pub(crate) fn resolve_stamps(
     radius: f32,
     raw: &[([f32; 4], f32)],
 ) -> Vec<Stamp> {
-    let mut out = Vec::with_capacity(raw.len() * if symmetry > 0 { 2 } else { 1 });
+    let mut out = Vec::new();
+    resolve_stamps_into(mesh, bvh, cam, size, projection, symmetry, radius, raw, &mut out);
+    out
+}
+
+/// Resolves cursor samples into a caller-owned buffer. The editor reuses this
+/// allocation across stroke steps; the returning wrapper stays for test callers.
+fn resolve_stamps_into(
+    mesh: &Mesh,
+    bvh: &Bvh,
+    cam: &OrbitCam,
+    size: Vec2,
+    projection: BrushProjection,
+    symmetry: u8,
+    radius: f32,
+    raw: &[([f32; 4], f32)],
+    out: &mut Vec<Stamp>,
+) {
+    out.clear();
+    out.reserve(raw.len().saturating_mul(if symmetry > 0 { 2 } else { 1 }));
     let eye = cam.eye();
     let fwd = (cam.target - eye).normalize();
     let (right, _) = cam.basis();
@@ -846,7 +869,6 @@ pub(crate) fn resolve_stamps(
             out.push(m);
         }
     }
-    out
 }
 
 fn grow(acc: Option<[f32; 4]>, lo: Vec2, hi: Vec2) -> [f32; 4] {
@@ -1773,6 +1795,8 @@ impl PainterApp {
             hdri_thumb_rx: Some(start_hdri_thumbs(&cc.egui_ctx, environment::available_builtins())),
             hdri_new_thumb: None,
             stroke: None,
+            stroke_raw_stamps: Vec::new(),
+            resolved_stamps: Vec::new(),
             bake_settings: BakeSettings::default(),
             bake_job: None,
             baker,
@@ -4078,15 +4102,21 @@ impl PainterApp {
     fn paint_stamps(&mut self, kind: ViewKind, raw: &[([f32; 4], f32)]) {
         let su = self.stamp_uniform(kind);
         let resolve_started = self.meter.on.then(Instant::now);
-        let stamps = match kind {
+        let mut stamps = std::mem::take(&mut self.resolved_stamps);
+        match kind {
             ViewKind::V3d => {
                 let [w, h] = self.views.view3d.size;
                 let radius = self.brush.size * 0.5 * self.ppp;
-                resolve_stamps(&self.mesh, &self.bvh, &self.cam, Vec2::new(w as f32, h as f32), self.brush.projection, self.brush.symmetry, radius, raw)
+                resolve_stamps_into(
+                    &self.mesh, &self.bvh, &self.cam, Vec2::new(w as f32, h as f32),
+                    self.brush.projection, self.brush.symmetry, radius, raw, &mut stamps,
+                );
             }
             // The 2D view is the texture: stamps land where they are drawn.
-            ViewKind::V2d => resolve_stamps(&self.mesh, &self.bvh, &self.cam, Vec2::ONE, BrushProjection::Screen, 0, 0.0, raw),
-        };
+            ViewKind::V2d => resolve_stamps_into(
+                &self.mesh, &self.bvh, &self.cam, Vec2::ONE, BrushProjection::Screen, 0, 0.0, raw, &mut stamps,
+            ),
+        }
         if let Some(started) = resolve_started {
             self.meter.resolve_cpu.add(started.elapsed().as_secs_f64() * 1000.0);
         }
@@ -4138,45 +4168,53 @@ impl PainterApp {
             self.meter.steps_now += 1;
             self.meter.step_cpu.add(stamp_started.elapsed().as_secs_f64() * 1000.0);
         }
+        self.resolved_stamps = stamps;
     }
 
     fn continue_stroke(&mut self, at: Vec2) {
-        let Some(s) = &mut self.stroke else { return };
-        // Stabilizer: the brush follows the cursor on a string, only moving
-        // once the cursor pulls the string tight.
-        let string = self.brush.stabilize * self.ppp;
-        let pull = at - s.lazy;
-        if pull.length() > string {
-            s.lazy += pull * (1.0 - string / pull.length());
-        }
-        let at = s.lazy;
         let pressure = self.pressure;
-        let radius = self.brush.size * 0.5 * self.ppp * if self.brush.pressure_size { pressure.max(0.1) } else { 1.0 };
-        let mut step = (self.brush.spacing * radius * 2.0).max(1.0);
-        let delta = at - s.last;
-        let dist = delta.length();
-        if dist < step {
-            return;
-        }
-        // Keep each frame's stamp list bounded on very fast strokes.
-        let max = crate::engine::MAX_STAMPS as f32;
-        if dist / step > max {
-            step = dist / max;
-        }
-        let dir = delta / dist;
-        let mut points = Vec::new();
+        let (last, p0, kind, step, dist, dir) = {
+            let Some(s) = &mut self.stroke else { return };
+            // Stabilizer: the brush follows the cursor on a string, only moving
+            // once the cursor pulls the string tight.
+            let string = self.brush.stabilize * self.ppp;
+            let pull = at - s.lazy;
+            if pull.length() > string {
+                s.lazy += pull * (1.0 - string / pull.length());
+            }
+            let at = s.lazy;
+            let radius = self.brush.size * 0.5 * self.ppp * if self.brush.pressure_size { pressure.max(0.1) } else { 1.0 };
+            let mut step = (self.brush.spacing * radius * 2.0).max(1.0);
+            let delta = at - s.last;
+            let dist = delta.length();
+            if dist < step {
+                return;
+            }
+            // Keep each frame's stamp list bounded on very fast strokes.
+            let max = crate::engine::MAX_STAMPS as f32;
+            if dist / step > max {
+                step = dist / max;
+            }
+            (s.last, s.pressure, s.view, step, dist, delta / dist)
+        };
+
+        let mut raw = std::mem::take(&mut self.stroke_raw_stamps);
+        raw.clear();
+        raw.reserve((dist / step).floor().max(1.0) as usize);
         let mut travelled = step;
-        let p0 = s.pressure;
+        let mut last_pressure = p0;
         while travelled <= dist {
             // Pressure eases from the last stamp's to the current one.
-            points.push((s.last + dir * travelled, p0 + (pressure - p0) * travelled / dist));
+            last_pressure = p0 + (pressure - p0) * travelled / dist;
+            raw.push(self.make_stamp(last + dir * travelled, Some(dir), last_pressure));
             travelled += step;
         }
-        s.last += dir * (travelled - step);
-        s.pressure = points.last().map_or(p0, |p| p.1);
-        let kind = s.view;
-        let stamps: Vec<([f32; 4], f32)> = points.into_iter().map(|(p, pr)| self.make_stamp(p, Some(dir), pr)).collect();
-        self.paint_stamps(kind, &stamps);
+        if let Some(s) = self.stroke.as_mut() {
+            s.last = last + dir * (travelled - step);
+            s.pressure = last_pressure;
+        }
+        self.paint_stamps(kind, &raw);
+        self.stroke_raw_stamps = raw;
     }
 
     fn end_stroke(&mut self) {
@@ -4316,6 +4354,38 @@ impl eframe::App for PainterApp {
 }
 
 
+
+#[cfg(test)]
+mod resolved_stamp_buffer_tests {
+    use super::*;
+    use crate::mesh::Primitive;
+
+    #[test]
+    fn caller_owned_stamp_buffer_matches_wrapper_and_reuses_capacity() {
+        let mesh = Primitive::RoundedCube.build();
+        let bvh = Bvh::from_mesh(&mesh);
+        let cam = OrbitCam::default();
+        let size = Vec2::splat(256.0);
+        let raw = [
+            ([128.0, 128.0, 1.0, 0.0], 0.75),
+            ([133.0, 129.0, 0.8, 0.2], 1.0),
+        ];
+        let mut scratch = Vec::new();
+
+        for projection in [BrushProjection::Screen, BrushProjection::Surface, BrushProjection::Uv] {
+            let expected = resolve_stamps(&mesh, &bvh, &cam, size, projection, 1, 24.0, &raw);
+            assert!(!expected.is_empty(), "{projection:?} should resolve the center hit");
+            resolve_stamps_into(&mesh, &bvh, &cam, size, projection, 1, 24.0, &raw, &mut scratch);
+            assert_eq!(scratch, expected, "{projection:?} must preserve stamp output");
+
+            let capacity = scratch.capacity();
+            let expected_small = resolve_stamps(&mesh, &bvh, &cam, size, projection, 0, 24.0, &raw[..1]);
+            resolve_stamps_into(&mesh, &bvh, &cam, size, projection, 0, 24.0, &raw[..1], &mut scratch);
+            assert_eq!(scratch, expected_small, "{projection:?} must clear stale stamps");
+            assert_eq!(scratch.capacity(), capacity, "{projection:?} should reuse the existing allocation");
+        }
+    }
+}
 
 #[cfg(test)]
 mod stroke_region_tile_tests {
