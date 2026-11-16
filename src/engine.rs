@@ -4132,21 +4132,29 @@ impl Engine {
         };
         // A stroke on a mask changes only that mask's thumbnail; a fill's
         // content thumbnail (a full composite) stays as it was.
-        match active.target {
-            StrokeTarget::Mask => self.invalidate_mask_thumb(active.layer_id),
-            StrokeTarget::BakeFix(_) => self.invalidate_thumbs(),
+        let refresh_thumbnails = match active.target {
+            StrokeTarget::Mask => {
+                self.invalidate_mask_thumb(active.layer_id);
+                true
+            }
+            StrokeTarget::BakeFix(_) => {
+                self.invalidate_thumbs();
+                true
+            }
             // Content strokes only target Paint layers. Their contents are not
             // shown in layer thumbnails, and they do not change mask sources.
-            StrokeTarget::Content => {}
-        }
+            StrokeTarget::Content => false,
+        };
         let textures = self.target_textures(active.layer_id, active.target, &active.channels)?;
         let mut encoder = self.device.create_command_encoder(&Default::default());
         let after = Snapshot::encode(&self.device, &mut encoder, &textures);
         self.queue.submit([encoder.finish()]);
         after.request_map();
-        // Refresh invalidated mask/fill thumbnails once after painting, not
-        // once per composite frame while the stroke is active.
-        self.update_thumbs();
+        // Content strokes do not invalidate thumbnails; avoid traversing the
+        // thumbnail stack at stroke end when there is nothing to refresh.
+        if refresh_thumbnails {
+            self.update_thumbs();
+        }
         Some(UndoEntry {
             layer_id: active.layer_id,
             target: active.target,
