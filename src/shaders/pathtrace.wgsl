@@ -84,6 +84,12 @@ fn intersect(o: vec3<f32>, d: vec3<f32>, tmax: f32, any_hit: bool) -> Hit {
     var h: Hit;
     h.t = tmax;
     h.tri = NONE;
+    // Hidden texture sets can leave the visible BVH with no triangles. The
+    // CPU uploads a one-element fallback storage buffer for empty arrays, so
+    // fewer than three vertices means there is no scene geometry to traverse.
+    if (arrayLength(&tri_pos) < 3u) {
+        return h;
+    }
     let dd = select(d, vec3<f32>(1e-9), abs(d) < vec3<f32>(1e-9));
     let inv = 1.0 / dd;
     if (box_entry(0u, o, inv, h.t) == MISS) {

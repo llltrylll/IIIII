@@ -245,6 +245,9 @@ impl Bvh {
     /// Calls `each` with every triangle whose bounds pass `overlaps` (given
     /// min and max corners), skipping subtrees whose bounds fail it.
     pub fn query(&self, overlaps: impl Fn(Vec3, Vec3) -> bool, mut each: impl FnMut(u32)) {
+        if self.order.is_empty() {
+            return;
+        }
         let mut stack = TraversalStack::root(0);
         while let Some(ni) = stack.pop() {
             let node = &self.nodes[ni as usize];
@@ -266,6 +269,9 @@ impl Bvh {
     }
 
     pub fn raycast(&self, o: Vec3, d: Vec3) -> Option<Hit> {
+        if self.order.is_empty() {
+            return None;
+        }
         let inv = d.recip();
         let mut tmax = f32::MAX;
         let mut best = None;
@@ -295,6 +301,9 @@ impl Bvh {
     /// (t, triangle), in no particular order.
     pub fn all_hits(&self, o: Vec3, d: Vec3, tmax: f32, out: &mut Vec<(f32, u32)>) {
         out.clear();
+        if self.order.is_empty() {
+            return;
+        }
         let inv = d.recip();
         let mut stack = TraversalStack::root(0);
         while let Some(ni) = stack.pop() {
@@ -333,6 +342,29 @@ mod tests {
         }
         assert_eq!(stack.pop(), Some(0));
         assert_eq!(stack.pop(), None);
+    }
+
+    #[test]
+    fn empty_bvh_queries_and_raycasts_return_no_hits() {
+        let empty = Bvh::build(Vec::new());
+        let mut called = false;
+        empty.query(|_, _| true, |_| called = true);
+        assert!(!called, "an empty BVH must not report phantom child nodes");
+        assert!(empty.raycast(Vec3::ZERO, Vec3::Z).is_none());
+        let mut hits = vec![(1.0, 7)];
+        empty.all_hits(Vec3::ZERO, Vec3::Z, 10.0, &mut hits);
+        assert!(hits.is_empty(), "all_hits must clear stale results for an empty BVH");
+    }
+
+    #[test]
+    fn filtered_bvh_can_be_empty_without_traversal() {
+        let mesh = Primitive::RoundedCube.build();
+        let empty = Bvh::from_mesh_where(&mesh, |_| false);
+        assert!(empty.order.is_empty());
+        assert!(empty.raycast(Vec3::new(0.0, 0.0, 5.0), -Vec3::Z).is_none());
+        let mut called = false;
+        empty.query(|_, _| true, |_| called = true);
+        assert!(!called);
     }
 
     #[test]
