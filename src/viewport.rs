@@ -160,6 +160,27 @@ impl OrbitCam {
         self.target = eye + forward * self.dist;
     }
 
+    /// Resume orbit navigation around the focus saved before first-person mode.
+    /// The camera position is kept; yaw, pitch and distance are rebuilt around the saved pivot.
+    pub fn restore_orbit_target(&mut self, target: Vec3) {
+        let eye = self.eye();
+        let offset = eye - target;
+        let distance = offset.length();
+        if !distance.is_finite() {
+            return;
+        }
+
+        self.target = target;
+        if distance > 1e-4 {
+            self.dist = distance;
+            self.yaw = offset.x.atan2(offset.z);
+            self.pitch = (offset.y / distance).clamp(-1.0, 1.0).asin().clamp(-1.55, 1.55);
+        } else {
+            // A pivot coincident with the camera has no meaningful orbit radius.
+            self.dist = 0.05;
+        }
+    }
+
     /// Move in first-person mode: WASD on the horizontal plane, E/Q vertically.
     pub fn walk_move(&mut self, forward: f32, right: f32, vertical: f32, dt: f32, speed: f32) {
         let look = (self.target - self.eye()).normalize_or_zero();
@@ -1483,6 +1504,25 @@ mod walk_navigation_tests {
         assert!(eye_before.distance(eye_after) < 1e-5);
         assert!(forward_before.distance(forward_after) > 0.05);
         assert!((forward_after.length() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn returning_from_walk_restores_orbit_pivot_without_moving_camera() {
+        let mut cam = OrbitCam::default();
+        let saved_pivot = cam.target;
+
+        cam.walk_look(Vec2::new(180.0, -55.0), 0.0025);
+        cam.walk_move(1.0, 0.25, 0.0, 1.5, 3.0);
+        let eye_before_return = cam.eye();
+
+        cam.restore_orbit_target(saved_pivot);
+
+        assert!(cam.target.distance(saved_pivot) < 1e-6, "the original orbit pivot must be restored");
+        assert!(cam.eye().distance(eye_before_return) < 1e-4, "returning to orbit must not teleport the camera");
+        assert!((cam.dist - eye_before_return.distance(saved_pivot)).abs() < 1e-4);
+        let direction = (cam.target - cam.eye()).normalize();
+        let expected = (saved_pivot - eye_before_return).normalize();
+        assert!(direction.distance(expected) < 1e-5);
     }
 
     #[test]
