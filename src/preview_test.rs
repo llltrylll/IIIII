@@ -1962,7 +1962,7 @@ fn content_stroke_patch_ignores_current_filtered_masks() {
                     ([215.0 + k * 8.0, 250.0 + 85.0 * (k * 0.09).sin(), 1.0, 0.0], 1.0)
                 })
                 .collect();
-            let stamps = resolve_stamps(&mesh, &bvh, &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+            let stamps = resolve_stamps(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
             let region = crate::app::stroke_region(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps);
             engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, region);
             engine.composite();
