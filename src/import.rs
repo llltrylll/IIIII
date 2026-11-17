@@ -130,8 +130,8 @@ fn load_obj(path: &Path, keep_uvs: bool) -> Result<RawMesh, String> {
         // Bake never reads them. Release those parsed arrays before building
         // the high-poly geometry and its welding table.
         for model in &mut models {
-            model.mesh.texcoords.clear();
-            model.mesh.texcoord_indices.clear();
+            drop(std::mem::take(&mut model.mesh.texcoords));
+            drop(std::mem::take(&mut model.mesh.texcoord_indices));
         }
     }
     let expected_corners: usize = models.iter().map(|m| m.mesh.indices.len()).sum();
