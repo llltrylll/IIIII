@@ -2221,7 +2221,7 @@ impl PainterApp {
             welcome_tex: None,
             library: Default::default(),
             user_smarts: Vec::new(),
-            user_smarts_job: Some({ let _s = crate::startup_trace::span("new: smart_io::list_async"); smart_io::list_async() }),
+            user_smarts_job: Some({ let _s = crate::startup_trace::span("new: smart_io::list_async"); smart_io::list_async(&cc.egui_ctx) }),
             path: Default::default(),
             bake_preview: Default::default(),
             custom_ui: Default::default(),
