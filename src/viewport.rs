@@ -622,11 +622,14 @@ pub struct ViewRenderer {
     /// Key-light shadows depend on the mesh, visible texture sets and light transform,
     /// not on the camera or material textures. Reuse the map until one of those changes.
     shadow_key: Option<Vec<u32>>,
+    shadow_key_scratch: Vec<u32>,
     /// Cached inputs for the normal-aware screen-paint depth pass.
     paint_depth_key: Option<Vec<u32>>,
+    paint_depth_key_scratch: Vec<u32>,
     /// Cached compact draw indices for per-object visibility.
     object_draw: Option<ObjectDrawBuffers>,
     object_draw_key: Option<Vec<u32>>,
+    object_draw_key_scratch: Vec<u32>,
     bgl: wgpu::BindGroupLayout,
     /// Per-draw uniforms: the 2D view's, then one per texture set in the 3D
     /// view (each set has its own resolution, bake and custom maps).
@@ -879,9 +882,12 @@ impl ViewRenderer {
             shadow_map,
             shadow_sampler,
             shadow_key: None,
+            shadow_key_scratch: Vec::new(),
             paint_depth_key: None,
+            paint_depth_key_scratch: Vec::new(),
             object_draw: None,
             object_draw_key: None,
+            object_draw_key_scratch: Vec::new(),
             bgl,
             globals,
             view_bind_groups: Vec::new(),
@@ -1054,14 +1060,14 @@ impl ViewRenderer {
         self.paint_depth_key = None;
     }
 
-    fn screen_paint_depth_key(vp: Mat4, size: [u32; 2], mesh: &GpuMesh, shown: &[usize]) -> Vec<u32> {
-        let mut key: Vec<u32> = vp.to_cols_array().into_iter().map(f32::to_bits).collect();
+    fn screen_paint_depth_key(vp: Mat4, size: [u32; 2], mesh: &GpuMesh, shown: &[usize], key: &mut Vec<u32>) {
+        key.clear();
+        key.extend(vp.to_cols_array().into_iter().map(f32::to_bits));
         key.extend([size[0], size[1], mesh.index_count, mesh.sets.len() as u32, shown.len() as u32]);
         for &set in shown {
             let range = mesh.sets[set].index_range();
             key.extend([set as u32, range.start, range.end]);
         }
-        key
     }
 
     /// Stable key for the shadow map. The light view-projection includes its
@@ -1073,11 +1079,11 @@ impl ViewRenderer {
         shown: &[usize],
         settings: &ViewSettings,
         hidden_objects: &[bool],
-    ) -> Vec<u32> {
-        let mut key = make_shadow_cache_key(Self::light_view_proj(engine, settings), mesh.index_count, &mesh.sets, shown);
+        key: &mut Vec<u32>,
+    ) {
+        make_shadow_cache_key(Self::light_view_proj(engine, settings), mesh.index_count, &mesh.sets, shown, key);
         key.extend([mesh.mesh_id as u32, (mesh.mesh_id >> 32) as u32]);
         key.extend(hidden_objects.iter().map(|hidden| if *hidden { 1 } else { 0 }));
-        key
     }
 
     fn ensure_object_draw_buffers(
@@ -1087,8 +1093,10 @@ impl ViewRenderer {
         source: Option<&crate::mesh::Mesh>,
         hidden: &[bool],
     ) {
-        let mut key = vec![mesh.mesh_id as u32, (mesh.mesh_id >> 32) as u32, hidden.len() as u32];
-        key.extend(hidden.iter().map(|value| if *value { 1 } else { 0 }));
+        self.object_draw_key_scratch.clear();
+        self.object_draw_key_scratch.extend([mesh.mesh_id as u32, (mesh.mesh_id >> 32) as u32, hidden.len() as u32]);
+        self.object_draw_key_scratch.extend(hidden.iter().map(|value| if *value { 1 } else { 0 }));
+        let key_changed = self.object_draw_key.as_ref() != Some(&self.object_draw_key_scratch);
         let valid_object_map = source.is_some_and(|source| {
             source.tri_object.len() == mesh.index_count as usize / 3 && !source.tri_object.is_empty()
         });
@@ -1099,14 +1107,14 @@ impl ViewRenderer {
                 self.paint_depth_key = None;
                 self.shadow_key = None;
             }
-            self.object_draw_key = Some(key);
+            self.object_draw_key.get_or_insert_with(Vec::new).clone_from(&self.object_draw_key_scratch);
             return;
         }
-        if self.object_draw_key.as_ref() == Some(&key) {
+        if !key_changed {
             return;
         }
         self.object_draw = Some(ObjectDrawBuffers::new(device, mesh, source.expect("validated object map"), hidden));
-        self.object_draw_key = Some(key);
+        self.object_draw_key.get_or_insert_with(Vec::new).clone_from(&self.object_draw_key_scratch);
         self.paint_depth_key = None;
         self.shadow_key = None;
     }
@@ -1210,10 +1218,11 @@ impl ViewRenderer {
         // This buffer is separate from viewport depth: a surface whose imported
         // normal points away from the camera must not block screen painting.
         // Camera, mesh and visibility changes invalidate it; material edits do not.
-        let mut paint_depth_key = Self::screen_paint_depth_key(vp, size, mesh, &shown);
-        paint_depth_key.extend([mesh.mesh_id as u32, (mesh.mesh_id >> 32) as u32]);
-        paint_depth_key.extend(hidden_objects.iter().map(|hidden| if *hidden { 1 } else { 0 }));
-        if self.paint_depth_key.as_ref() != Some(&paint_depth_key) {
+        Self::screen_paint_depth_key(vp, size, mesh, shown, &mut self.paint_depth_key_scratch);
+        self.paint_depth_key_scratch.extend([mesh.mesh_id as u32, (mesh.mesh_id >> 32) as u32]);
+        self.paint_depth_key_scratch.extend(hidden_objects.iter().map(|hidden| if *hidden { 1 } else { 0 }));
+        if self.paint_depth_key.as_ref() != Some(&self.paint_depth_key_scratch) {
+            self.paint_depth_key.get_or_insert_with(Vec::new).clone_from(&self.paint_depth_key_scratch);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("screen paint depth"),
                 color_attachments: &[],
@@ -1247,12 +1256,12 @@ impl ViewRenderer {
                 }
             }
             drop(pass);
-            self.paint_depth_key = Some(paint_depth_key);
         }
 
         if settings.key.on {
-            let shadow_key = Self::shadow_cache_key(engines[0], mesh, &shown, settings, hidden_objects);
-            if self.shadow_key.as_ref() != Some(&shadow_key) {
+            Self::shadow_cache_key(engines[0], mesh, shown, settings, hidden_objects, &mut self.shadow_key_scratch);
+            if self.shadow_key.as_ref() != Some(&self.shadow_key_scratch) {
+                self.shadow_key.get_or_insert_with(Vec::new).clone_from(&self.shadow_key_scratch);
                 let shadow_bg = rs.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("key shadow"),
                     layout: &self.shadow_bgl,
@@ -1287,7 +1296,6 @@ impl ViewRenderer {
                     }
                 }
                 drop(pass);
-                self.shadow_key = Some(shadow_key);
             }
         }
         {
@@ -1497,14 +1505,15 @@ fn make_shadow_cache_key(
     index_count: u32,
     sets: &[crate::mesh::MeshSet],
     shown: &[usize],
-) -> Vec<u32> {
-    let mut key: Vec<u32> = light_view_proj.to_cols_array().into_iter().map(f32::to_bits).collect();
+    key: &mut Vec<u32>,
+) {
+    key.clear();
+    key.extend(light_view_proj.to_cols_array().into_iter().map(f32::to_bits));
     key.extend([index_count, sets.len() as u32, shown.len() as u32]);
     for &set in shown {
         let range = sets[set].index_range();
         key.extend([set as u32, range.start, range.end]);
     }
-    key
 }
 
 #[cfg(test)]
@@ -1555,8 +1564,10 @@ mod shadow_cache_tests {
     fn shadow_cache_key_is_stable_for_unchanged_inputs() {
         let sets = [set("Body", 0, 2), set("Rotor", 2, 4)];
         let shown = [0, 1];
-        let first = make_shadow_cache_key(Mat4::IDENTITY, 12, &sets, &shown);
-        let second = make_shadow_cache_key(Mat4::IDENTITY, 12, &sets, &shown);
+        let mut first = Vec::new();
+        let mut second = Vec::new();
+        make_shadow_cache_key(Mat4::IDENTITY, 12, &sets, &shown, &mut first);
+        make_shadow_cache_key(Mat4::IDENTITY, 12, &sets, &shown, &mut second);
         assert_eq!(first, second);
     }
 
@@ -1565,11 +1576,15 @@ mod shadow_cache_tests {
         let sets = [set("Body", 0, 2), set("Rotor", 2, 4)];
         let both = [0, 1];
         let body_only = [0];
-        let original = make_shadow_cache_key(Mat4::IDENTITY, 12, &sets, &both);
-        let moved_light = make_shadow_cache_key(Mat4::from_translation(Vec3::X), 12, &sets, &both);
-        let hidden_set = make_shadow_cache_key(Mat4::IDENTITY, 12, &sets, &body_only);
+        let mut original = Vec::new();
+        let mut moved_light = Vec::new();
+        let mut hidden_set = Vec::new();
+        let mut changed_ranges = Vec::new();
+        make_shadow_cache_key(Mat4::IDENTITY, 12, &sets, &both, &mut original);
+        make_shadow_cache_key(Mat4::from_translation(Vec3::X), 12, &sets, &both, &mut moved_light);
+        make_shadow_cache_key(Mat4::IDENTITY, 12, &sets, &body_only, &mut hidden_set);
         let changed_mesh_ranges = [set("Body", 0, 3), set("Rotor", 3, 4)];
-        let changed_ranges = make_shadow_cache_key(Mat4::IDENTITY, 12, &changed_mesh_ranges, &both);
+        make_shadow_cache_key(Mat4::IDENTITY, 12, &changed_mesh_ranges, &both, &mut changed_ranges);
         assert_ne!(original, moved_light);
         assert_ne!(original, hidden_set);
         assert_ne!(original, changed_ranges);
