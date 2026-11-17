@@ -338,7 +338,6 @@ impl Runtime {
         // values and what feeds it.
         struct Plan<'a> {
             def: &'a NodeDef,
-            values: [Option<&'a Value>; def::MAX_PARAMS],
             inputs: [Option<u64>; MAX_INPUTS],
             hash: u64,
         }
@@ -380,7 +379,9 @@ impl Runtime {
             }
             if uses_maps { maps_key } else { 0 }.hash(&mut hasher);
             let hash = hasher.finish();
-            plans.insert(id, Plan { def, values, inputs, hash });
+            // Parameter references are needed only if this node is actually
+            // rendered. Do not retain a pointer array for every node in the plan.
+            plans.insert(id, Plan { def, inputs, hash });
         }
 
         // Nodes to render: those that changed or failed, the outputs a lean
@@ -431,7 +432,12 @@ impl Runtime {
             // again once that input is there.
             let partial = p.inputs.iter().flatten().any(|f| missing.contains(f));
             let was = self.rendered.get(&id).map(|r| r.hash);
-            let result = self.render(device, &mut encoder, p.def, &p.values, &p.inputs, res, maps, surface, reuse);
+            let node = graph.node(id).expect("ordered from the graph");
+            let mut values = [None; def::MAX_PARAMS];
+            for (i, param) in p.def.params.iter().take(def::MAX_PARAMS).enumerate() {
+                values[i] = Some(lib.value_ref(node, &param.name).unwrap_or(&param.default));
+            }
+            let result = self.render(device, &mut encoder, p.def, &values, &p.inputs, res, maps, surface, reuse);
             if lean {
                 for f in p.inputs.iter().flatten() {
                     let left = readers.get_mut(f).map(|n| {
