@@ -4,7 +4,7 @@
 use crate::bake::{self, BakeRun, BakeSettings, GpuBaker, IdSource, PreparedScene, Quality};
 use crate::bake_cache;
 use crate::bvh::Bvh;
-use crate::cage::{CageProbe, CageStats, ProbeKey};
+use crate::cage::{CageMesh, CageProbe, CageStats, ProbeKey};
 use crate::environment::{self, EnvBaker, EnvImage, EnvSource, Environment};
 use crate::engine::{Drop, FillImage, Folder, Layer, Projection};
 use crate::engine::{
