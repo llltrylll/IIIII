@@ -1098,4 +1098,47 @@ mod tests {
         assert_eq!(corner_colors_from_bytes(&bytes, 3), None);
         assert_eq!(corner_colors_from_bytes(&bytes[..17], 2), None);
     }
+
+    #[test]
+    fn disk_spool_and_file_backed_reader_round_trip_multiple_blobs() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let project = std::env::temp_dir().join(format!("material-painter-{}-{unique}.mpp", std::process::id()));
+        let spool = project.with_extension("mpp.blobs.tmp");
+        let numbers = vec![0x1122_3344u32, 7, 99, u32::MAX];
+        let image_bytes = b"encoded fill image source bytes".to_vec();
+        let packed_numbers = lz4_flex::compress_prepend_size(bytemuck::cast_slice(&numbers));
+        let packed_image = lz4_flex::compress_prepend_size(&image_bytes);
+
+        {
+            let mut writer = Writer::new(&project).expect("create spool");
+            assert_eq!(writer.blob(bytemuck::cast_slice(&numbers)), json!(0));
+            assert_eq!(writer.blob(&image_bytes), json!(1));
+
+            // Header with an empty manifest, followed by the exact spool data.
+            let mut file = std::fs::File::create(&project).expect("create test project");
+            file.write_all(MAGIC).unwrap();
+            file.write_all(&0u64.to_le_bytes()).unwrap();
+            file.write_all(&2u64.to_le_bytes()).unwrap();
+            writer.copy_to(&mut file).expect("copy compressed blobs");
+            file.flush().unwrap();
+
+            let first_offset = 8 + 8 + 0 + 8 + 8;
+            let second_offset = first_offset + packed_numbers.len() as u64 + 8;
+            let reader = Reader {
+                file: std::sync::Mutex::new(std::fs::File::open(&project).unwrap()),
+                blobs: vec![
+                    (first_offset, packed_numbers.len()),
+                    (second_offset, packed_image.len()),
+                ],
+            };
+            assert_eq!(reader.blob_pod_vec::<u32>(&json!(0)).unwrap(), numbers);
+            assert_eq!(reader.blob(&json!(1)).unwrap(), image_bytes);
+        }
+
+        assert!(!spool.exists(), "the temporary blob spool must be removed");
+        let _ = std::fs::remove_file(project);
+    }
 }
