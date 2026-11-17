@@ -2611,6 +2611,11 @@ pub(crate) mod tests {
         // Indexed payload: one 28-byte record per vertex and 24 bytes per triangle.
         let expanded = scene.bake_triangles.len() * 96;
         let indexed = scene.bake_vertices.len() * 28 + scene.bake_triangles.len() * 24;
+        println!(
+            "  indexed Bake payload: {} vertices, {} triangles; {indexed} bytes vs {expanded} expanded bytes ({:.1}% less)",
+            scene.bake_vertices.len(), scene.bake_triangles.len(),
+            (1.0 - indexed as f64 / expanded.max(1) as f64) * 100.0,
+        );
         assert!(indexed < expanded, "sphere source should benefit from shared vertex indexing ({indexed} >= {expanded})");
     }
 

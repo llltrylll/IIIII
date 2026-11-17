@@ -91,6 +91,9 @@ jobs:
       - name: GPU bake - flat mesh-part IDs use palette without per-corner color storage
         run: "cargo test --locked --bin material_painter bake::tests::mesh_part_ids_use_palette_without_corner_colors -- --ignored --exact --nocapture --test-threads 1"
 
+      - name: GPU bake - indexed high-poly source and self-projection parity
+        run: "cargo test --locked --bin material_painter bake::tests::bake_self_projection_is_flat -- --ignored --exact --nocapture --test-threads 1"
+
       - name: GPU parity - screen painting follows imported normal facing
         run: "cargo test --locked --bin material_painter preview_test::screen_projection_respects_imported_normal_facing -- --ignored --exact --nocapture --test-threads 1"
 
