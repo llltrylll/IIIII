@@ -61,8 +61,8 @@ pub fn load_bake_source(path: &Path) -> Result<RawMesh, String> {
 fn load_with_uvs(path: &Path, keep_uvs: bool) -> Result<RawMesh, String> {
     let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     let mut mesh = match ext.as_str() {
-        "obj" => load_obj(path, keep_uvs)?,
-        "fbx" => load_fbx(path, keep_uvs)?,
+        "obj" => load_obj_with_uvs(path, keep_uvs)?,
+        "fbx" => load_fbx_with_uvs(path, keep_uvs)?,
         _ => return Err(format!("Unsupported mesh format '.{ext}'. Use OBJ or FBX.")),
     };
     if mesh.indices.is_empty() {
@@ -112,7 +112,11 @@ fn obj_corner_attribute_presence(path: &Path, keep_uvs: bool) -> Result<Vec<(boo
     Ok(result)
 }
 
-fn load_obj(path: &Path, keep_uvs: bool) -> Result<RawMesh, String> {
+fn load_obj(path: &Path) -> Result<RawMesh, String> {
+    load_obj_with_uvs(path, true)
+}
+
+fn load_obj_with_uvs(path: &Path, keep_uvs: bool) -> Result<RawMesh, String> {
     // Keep OBJ position indices separate from UV/normal indices. The position
     // index is the logical vertex identity used to generate normals across UV
     // seams without welding distinct coincident shells together.
@@ -206,7 +210,11 @@ fn load_obj(path: &Path, keep_uvs: bool) -> Result<RawMesh, String> {
     Ok(out.finish())
 }
 
-fn load_fbx(path: &Path, keep_uvs: bool) -> Result<RawMesh, String> {
+fn load_fbx(path: &Path) -> Result<RawMesh, String> {
+    load_fbx_with_uvs(path, true)
+}
+
+fn load_fbx_with_uvs(path: &Path, keep_uvs: bool) -> Result<RawMesh, String> {
     let opts = ufbx::LoadOpts {
         ignore_animation: true,
         ignore_embedded: true,
@@ -498,11 +506,12 @@ impl Builder {
             }
         }
 
+        let keep_uvs = self.keeps_uvs() && self.all_uvs;
         RawMesh {
             name: String::new(),
             normals: (!self.positions.is_empty()).then_some(self.normals),
             positions: self.positions,
-            uvs: (self.keeps_uvs() && self.all_uvs).then_some(self.uvs),
+            uvs: keep_uvs.then_some(self.uvs),
             indices: self.indices,
             tri_material: self.tri_material,
             material_count: self.max_material + 1,
