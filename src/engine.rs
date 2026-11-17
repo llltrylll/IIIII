@@ -1576,8 +1576,12 @@ impl Engine {
             return;
         }
         let scratch = 1 - self.final_idx;
-        self.accum[scratch] = accum_set(&self.device, 1, "parked composite scratch");
-        self.stroke = Tex::new(&self.device, "parked stroke mask", 1, 1, STROKE_FORMAT, LAYER_USAGE);
+        if self.accum[scratch][0].width != 1 {
+            self.accum[scratch] = accum_set(&self.device, 1, "parked composite scratch");
+        }
+        if self.stroke.width != 1 {
+            self.stroke = Tex::new(&self.device, "parked stroke mask", 1, 1, STROKE_FORMAT, LAYER_USAGE);
+        }
         self.snap = Default::default();
         self.snap_mask = None;
         self.folder_below.clear();
