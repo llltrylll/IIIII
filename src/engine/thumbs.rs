@@ -183,20 +183,29 @@ impl Engine {
         if self.active.is_some() {
             return;
         }
-        let todo: Vec<(usize, u64, bool)> = (0..self.layers.len())
-            .filter_map(|li| {
-                let layer = &self.layers[li];
-                let wants = matches!(layer.content, Content::Fill(_)) || layer.mask.is_some();
-                if !wants {
-                    return None;
+        // After a broad edit (load, undo, delete, map change), many entries
+        // can be stale at once. Render only a small batch per UI update so
+        // temporary bind groups/command encoding stay bounded; the remaining
+        // entries remain stale and are picked up on later frames.
+        const MAX_THUMBNAILS_PER_UPDATE: usize = 2;
+        let mut todo: Vec<(usize, u64, bool)> = Vec::with_capacity(MAX_THUMBNAILS_PER_UPDATE);
+        for li in 0..self.layers.len() {
+            let layer = &self.layers[li];
+            let wants = matches!(layer.content, Content::Fill(_)) || layer.mask.is_some();
+            if !wants {
+                continue;
+            }
+            let key = self.thumb_key(li);
+            let entry = self.thumbs.entries.get(&layer.id);
+            let current = entry.is_some_and(|e| e.key == key);
+            let mask_only = current && entry.is_some_and(|e| e.mask_stale);
+            if !current || mask_only {
+                todo.push((li, key, mask_only));
+                if todo.len() == MAX_THUMBNAILS_PER_UPDATE {
+                    break;
                 }
-                let key = self.thumb_key(li);
-                let entry = self.thumbs.entries.get(&layer.id);
-                let current = entry.is_some_and(|e| e.key == key);
-                let mask_only = current && entry.is_some_and(|e| e.mask_stale);
-                (!current || mask_only).then_some((li, key, mask_only))
-            })
-            .collect();
+            }
+        }
         if todo.is_empty() {
             return;
         }

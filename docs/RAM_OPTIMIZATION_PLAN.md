@@ -59,6 +59,10 @@ Scope: reduce **system RAM and transient CPU-memory peaks** in the existing appl
 - Build per-probe shell positions and colors directly into one compact overlay-vertex array instead of retaining separate scale, color and shell vectors during UI updates.
 - Drop object mapping, source IDs/colors, curvature, and source geometry arrays immediately after their final CPU use in preparation, before later edge packing.
 
+### P1 — Schedule thumbnail rebuilds incrementally
+- Rebuild at most two stale layer/mask thumbnails per UI update. The rest remain invalidated and are processed on subsequent frames, avoiding a single large post-edit command-encoding and scratch-allocation batch.
+- Deleted-layer thumbnails are still released immediately; the limit applies to rendering replacements, not to retained/stale resource cleanup.
+
 ### P1 — Bound asynchronous CPU image queues
 - Bound CPU shelf-preview results and graph-image decode results.
 - Use a bounded number of worker threads and back-pressure so a large shelf or graph cannot queue an arbitrary number of decoded images in RAM.
@@ -105,6 +109,7 @@ A candidate is not considered a measured win until this protocol is run on the o
 - [x] Deduplicate shared Fill image blobs in project save/open.
 - [x] Bound the HDRI thumbnail decode queue to two pending CPU images.
 - [x] Bounded CPU shelf-preview and graph-image decode queues.
+- [x] Limit stale layer/mask thumbnail rendering to two per UI update after broad changes.
 - [x] Decompress project triangle ID and per-corner vertex-color arrays directly into final typed vectors.
 - [x] Cancel superseded Bake preparation workers and release their large scratch arrays at bounded checkpoints.
 - [x] Remove redundant Bake BVH triangle arrays and avoid unused ID/material/object copies during CPU preparation.
