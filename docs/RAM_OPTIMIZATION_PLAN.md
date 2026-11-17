@@ -23,8 +23,9 @@ Scope: reduce **system RAM and transient CPU-memory peaks** in the existing appl
 3. Add a configurable memory budget for painted snapshot history, alongside the existing step-count limit. Evict the oldest history entries first; never evict the newest entry while older entries remain. Keep the limit visible and adjustable in Preferences.
 4. Keep structural Undo edits and GPU-resident layer ownership semantics unchanged.
 
-### P1 — Release unused source-image bytes
-- Engine::image_cache must not keep original encoded image bytes alive after the last FillImage referencing them has been dropped. Cache weak references to both the GPU texture and its encoded CPU bytes.
+### P1 — Release and deduplicate source-image bytes
+- `Engine::image_cache` uses weak references to both texture and encoded bytes, and is shared by sibling Texture Set Engines. A source image remains cached only while a layer/history reference owns it.
+- Project serialization deduplicates Fill images by exact `Arc` pointer identity; opening repeated references uses one weakly cached `Arc<Vec<u8>>` per blob.
 
 ### P1 — Bound asynchronous CPU image queues
 - Bound CPU shelf-preview results and graph-image decode results.
@@ -63,7 +64,8 @@ A candidate is not considered a measured win until this protocol is run on the o
 - [x] Stream compressed blobs through a disk spool and buffered atomic project save.
 - [x] Incremental Undo compression and pending-memory accounting.
 - [x] Configurable Undo snapshot RAM budget, including Preferences and status-bar usage.
-- [x] Weak encoded-image cache for Fill source bytes.
+- [x] Weak encoded-image cache shared across sibling Texture Sets.
+- [x] Deduplicate shared Fill image blobs in project save/open.
 - [x] Bounded CPU shelf-preview and graph-image decode queues.
-- [ ] Verify project spool/file-backed typed readback tests and Undo budget tests on the latest HEAD; finish CI/GPU/Windows package workflows.
+- [x] Verify project spool/file-backed typed reads, shared-blob reuse and Undo RAM-budget tests; latest CI, unit tests, GPU regression and Windows portable package workflows pass.
 - [ ] Capture before/after owner-machine measurements.
