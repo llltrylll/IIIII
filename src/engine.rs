@@ -3381,6 +3381,26 @@ impl Engine {
 
     /// Returns whether a property edit changes every mask input, and the layer
     /// IDs whose own mask source/filter configuration changed.
+    // Kept only for the focused unit tests that assert the invalidation diff.
+    // Production invalidation below removes IDs in place without allocating this Vec.
+    #[cfg(test)]
+    fn mask_cache_changes(before: &DocProps, after: &DocProps) -> (bool, Vec<u64>) {
+        if before.levels != after.levels
+            || before.layers.len() != after.layers.len()
+            || before.layers.iter().zip(&after.layers).any(|(a, b)| a.0 != b.0) {
+            return (true, Vec::new());
+        }
+        let changed = before.layers.iter().zip(&after.layers)
+            .filter(|(a, b)| {
+                a.1.generator != b.1.generator
+                    || a.1.mask_filters != b.1.mask_filters
+                    || a.1.mask_layers != b.1.mask_layers
+            })
+            .map(|(a, _)| a.0)
+            .collect();
+        (false, changed)
+    }
+
     fn apply_mask_cache_changes(mask_final: &mut HashSet<u64>, before: &DocProps, after: &DocProps) {
         if before.levels != after.levels
             || before.layers.len() != after.layers.len()
