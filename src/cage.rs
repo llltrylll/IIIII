@@ -475,38 +475,49 @@ impl CageProbe {
     pub fn overlay(&self, reach: &Reach) -> (Vec<OverlayVertex>, Vec<OverlayVertex>, CageStats) {
         let mut stats = CageStats::default();
         let paint = reach.paint.as_deref().filter(|p| p.fits(self.weld.len()));
-        let scales: Vec<f32> = self.probes.iter().map(|p| self.scale(p, paint)).collect();
-        let colors: Vec<[u8; 3]> = self
-            .probes
-            .iter()
-            .zip(&scales)
-            .map(|(p, &s)| {
-                if !self.has_high {
-                    return [90, 160, 255];
-                }
-                let st = self.status(p, (reach.front * s).min(REACH), (reach.rear * s).min(REACH));
-                match st {
+
+        // Derive the final overlay vertex once per probe. This replaces three
+        // full-size temporary arrays (scale, color and shell position).
+        let mut probe_vertices = Vec::with_capacity(self.probes.len());
+        for p in &self.probes {
+            let scale = self.scale(p, paint);
+            let color = if !self.has_high {
+                [90, 160, 255]
+            } else {
+                let status = self.status(
+                    p,
+                    (reach.front * scale).min(REACH),
+                    (reach.rear * scale).min(REACH),
+                );
+                match status {
                     Status::Ok => stats.ok += 1.0,
                     Status::Tight => stats.tight += 1.0,
                     Status::Missed => stats.missed += 1.0,
                     Status::Overlap => stats.overlap += 1.0,
                 }
-                st.color()
-            })
-            .collect();
+                status.color()
+            };
+            let distance = p.cage_len.unwrap_or((reach.front * scale).min(REACH));
+            probe_vertices.push(OverlayVertex {
+                pos: (p.pos + p.dir * distance).to_array(),
+                color: [color[0], color[1], color[2], 0],
+            });
+        }
         let n = self.probes.len().max(1) as f32;
-        stats = CageStats { ok: stats.ok / n, tight: stats.tight / n, missed: stats.missed / n, overlap: stats.overlap / n };
-        let shell: Vec<Vec3> =
-            self.probes.iter().zip(&scales).map(|(p, &s)| p.pos + p.dir * p.cage_len.unwrap_or((reach.front * s).min(REACH))).collect();
+        stats = CageStats {
+            ok: stats.ok / n,
+            tight: stats.tight / n,
+            missed: stats.missed / n,
+            overlap: stats.overlap / n,
+        };
         let vertex = |i: u32, alpha: u8| {
-            let c = colors[i as usize];
-            OverlayVertex { pos: shell[i as usize].to_array(), color: [c[0], c[1], c[2], alpha] }
+            let v = probe_vertices[i as usize];
+            OverlayVertex { pos: v.pos, color: [v.color[0], v.color[1], v.color[2], alpha] }
         };
         let tris = self.indices.iter().map(|&i| vertex(i, 46)).collect();
         let lines = self.edges.iter().map(|&i| vertex(i, 120)).collect();
         (tris, lines, stats)
     }
-
     /// Fits the cage to the high poly: per vertex, the multiplier that lets
     /// its ray reach its own surface (with a margin) without first reaching
     /// another part's. Vertices that are fine keep their multiplier; copies
