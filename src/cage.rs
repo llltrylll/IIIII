@@ -194,7 +194,15 @@ struct Probe {
     bary: [f32; 3],
     /// High-poly crossings as (offset along `dir` from `pos`, part), filtered
     /// to the parts the bake lets this vertex see.
-    hits: Vec<(f32, u32)>,
+    /// Empty hit lists need only a nullable pointer, not a Vec header per probe.
+    hits: Option<Box<[(f32, u32)]>>,
+}
+
+impl Probe {
+    #[inline]
+    fn hits(&self) -> &[(f32, u32)] {
+        self.hits.as_deref().unwrap_or(&[])
+    }
 }
 
 /// Probe results for one scene.
@@ -322,7 +330,7 @@ impl CageProbe {
                 None => (mix(&normals).normalize_or_zero(), None),
             };
             let corners = [corner(t, 0), corner(t, 1), corner(t, 2)].map(|v| v as u32);
-            Probe { pos, dir, cage_len, tri: t as u32, corners, bary: b, hits: Vec::new() }
+            Probe { pos, dir, cage_len, tri: t as u32, corners, bary: b, hits: None }
         };
         let mut probes: Vec<Probe> = Vec::new();
         let mut at_vertex: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
@@ -420,7 +428,7 @@ impl CageProbe {
                 let origin = p.pos + p.dir * start;
                 bvh.all_hits(origin, -p.dir, start + REACH, found);
                 let g = low_tri_group[p.tri as usize];
-                p.hits = found
+                let hits: Vec<(f32, u32)> = found
                     .iter()
                     .filter(|&&(_, t)| {
                         let tg = high_tri_group[t as usize];
@@ -428,6 +436,7 @@ impl CageProbe {
                     })
                     .map(|&(t, tri)| (start - t, tri_part[tri as usize]))
                     .collect();
+                p.hits = (!hits.is_empty()).then(|| hits.into_boxed_slice());
             });
         }
         check_cancelled(cancel)?;
@@ -446,12 +455,12 @@ impl CageProbe {
     fn status(&self, p: &Probe, front: f32, rear: f32) -> Status {
         let front = p.cage_len.unwrap_or(front);
         // The bake ray starts on the cage and keeps the first surface it meets.
-        let first = p.hits.iter().filter(|h| h.0 <= front && h.0 >= -rear).max_by(|a, b| a.0.total_cmp(&b.0));
+        let first = p.hits().iter().filter(|h| h.0 <= front && h.0 >= -rear).max_by(|a, b| a.0.total_cmp(&b.0));
         let Some(&(h, part)) = first else {
             return Status::Missed;
         };
         // The surface the vertex really belongs to is the nearest one.
-        let own = p.hits.iter().min_by(|a, b| a.0.abs().total_cmp(&b.0.abs())).map(|o| o.1);
+        let own = p.hits().iter().min_by(|a, b| a.0.abs().total_cmp(&b.0.abs())).map(|o| o.1);
         if own != Some(part) {
             Status::Overlap
         } else if h > front * 0.85 || h < -rear * 0.85 {
@@ -518,14 +527,14 @@ impl CageProbe {
         for v in 0..n {
             let Some(p) = self.probes.get(self.vertex_probe[v] as usize) else { continue };
             let w = self.weld[v];
-            let Some(&(o, part)) = p.hits.iter().min_by(|a, b| a.0.abs().total_cmp(&b.0.abs())) else { continue };
+            let Some(&(o, part)) = p.hits().iter().min_by(|a, b| a.0.abs().total_cmp(&b.0.abs())) else { continue };
             found[w] = true;
             // 15% margin past the surface, so the ray starts clear of it.
             let reach_out = if o > 0.0 { o * 1.15 / front } else { 0.0 };
             let reach_in = if o < 0.0 { -o * 1.15 / rear } else { 0.0 };
             need[w] = need[w].max(reach_out).max(reach_in);
             // Another part outside this surface: the cage must start below it.
-            let foreign = p.hits.iter().filter(|h| h.1 != part && h.0 > o).map(|h| h.0).fold(f32::MAX, f32::min);
+            let foreign = p.hits().iter().filter(|h| h.1 != part && h.0 > o).map(|h| h.0).fold(f32::MAX, f32::min);
             if foreign < f32::MAX {
                 allow[w] = allow[w].min(((o + foreign) * 0.5).max(0.0) / front);
             }
