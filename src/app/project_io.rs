@@ -452,18 +452,20 @@ impl Reader {
         Ok(data)
     }
 
-    /// Decompresses directly into the final typed allocation. Mesh arrays no
-    /// longer need a second full-size Vec<u8> followed by a typed Vec copy.
+    /// Reads directly into the final typed allocation. Raw worker spools avoid
+    /// a second temporary byte vector; legacy compressed readers keep the LZ4 path.
     fn blob_pod_vec<T: bytemuck::Pod>(&self, v: &Value) -> Result<Vec<T>, String> {
         let i = v.as_u64().ok_or("missing blob reference")? as usize;
-        let (_, len) = self.blobs.get(i).ok_or(format!("blob {i} is missing"))?;
+        let (offset, len) = *self.blobs.get(i).ok_or(format!("blob {i} is missing"))?;
         let element_size = std::mem::size_of::<T>();
-        if element_size == 0 || !len.is_multiple_of(element_size) {
-            return Err(format!("blob {i} has an invalid typed-array size"));
+        if element_size == 0 {
+            return Err(format!("blob {i} has an invalid typed-array element size"));
         }
-        let mut output = vec![T::zeroed(); len / element_size];
         if self.raw {
-            let (offset, _) = self.blobs[i];
+            if !len.is_multiple_of(element_size) {
+                return Err(format!("blob {i} has an invalid typed-array size"));
+            }
+            let mut output = vec![T::zeroed(); len / element_size];
             let mut file = self.file.lock().map_err(|_| "project reader lock is poisoned")?;
             let file = file.as_mut().ok_or("project reader file is closed")?;
             file.seek(SeekFrom::Start(offset)).map_err(|e| format!("can't seek to blob {i}: {e}"))?;
@@ -475,9 +477,10 @@ impl Reader {
             return Err(format!("blob {i} is damaged: missing decompressed size"));
         }
         let byte_len = u32::from_le_bytes(packed[..4].try_into().expect("four-byte size")) as usize;
-        if byte_len != *len {
-            return Err(format!("blob {i} has an inconsistent indexed size"));
+        if !byte_len.is_multiple_of(element_size) {
+            return Err(format!("blob {i} has an invalid typed-array size"));
         }
+        let mut output = vec![T::zeroed(); byte_len / element_size];
         let written = lz4_flex::block::decompress_into(&packed[4..], bytemuck::cast_slice_mut(&mut output))
             .map_err(|e| format!("blob {i} is damaged: {e}"))?;
         if written != byte_len {
@@ -490,19 +493,18 @@ impl Reader {
     /// element count. Its final Vec<T> is the only decompressed allocation.
     fn blob_pod_vec_exact<T: bytemuck::Pod>(&self, v: &Value, expected_len: usize) -> Result<Option<Vec<T>>, String> {
         let i = v.as_u64().ok_or("missing blob reference")? as usize;
-        let (_, len) = self.blobs.get(i).ok_or(format!("blob {i} is missing"))?;
+        let (offset, len) = *self.blobs.get(i).ok_or(format!("blob {i} is missing"))?;
         let element_size = std::mem::size_of::<T>();
         if element_size == 0 {
             return Err(format!("blob {i} has an invalid typed-array element size"));
         }
         let expected_bytes = expected_len.checked_mul(element_size)
             .ok_or_else(|| format!("blob {i} typed-array size overflows"))?;
-        if *len != expected_bytes {
-            return Ok(None);
-        }
-        let mut output = vec![T::zeroed(); expected_len];
         if self.raw {
-            let (offset, _) = self.blobs[i];
+            if len != expected_bytes {
+                return Ok(None);
+            }
+            let mut output = vec![T::zeroed(); expected_len];
             let mut file = self.file.lock().map_err(|_| "project reader lock is poisoned")?;
             let file = file.as_mut().ok_or("project reader file is closed")?;
             file.seek(SeekFrom::Start(offset)).map_err(|e| format!("can't seek to blob {i}: {e}"))?;
@@ -517,6 +519,7 @@ impl Reader {
         if byte_len != expected_bytes {
             return Ok(None);
         }
+        let mut output = vec![T::zeroed(); expected_len];
         let written = lz4_flex::block::decompress_into(&packed[4..], bytemuck::cast_slice_mut(&mut output))
             .map_err(|e| format!("blob {i} is damaged: {e}"))?;
         if written != byte_len {
@@ -1433,7 +1436,7 @@ mod tests {
         let vertices = writer.blob(bytemuck::cast_slice(&mesh.vertices));
         let indices = writer.blob(bytemuck::cast_slice(&mesh.indices));
         let manifest = json!({
-            "active_channels": [true; crate::engine::CHANNELS],
+            "active_channels": vec![true; crate::engine::CHANNELS],
             "version": 4,
             "mesh": {
                 "name": mesh.name,
@@ -1475,8 +1478,9 @@ mod tests {
         assert_eq!(prepared.mesh.vertices.len(), mesh.vertices.len());
         assert_eq!(prepared.bvh.order.len(), mesh.triangle_count());
         assert_eq!(prepared.mesh.sets.len(), 1);
+        let spool_path = prepared.reader.cleanup_path.clone().expect("temporary spool path");
         drop(prepared);
-        assert!(!project.with_extension("mpp.load.tmp").exists());
+        assert!(!spool_path.exists(), "the raw spool is deleted after the prepared project is dropped");
         let _ = std::fs::remove_file(project);
     }
 
