@@ -23,12 +23,17 @@ const REACH: f32 = MAX_CAGE_REACH;
 /// Averaged: the angle-weighted normals of every face at the vertex's
 /// position, so split copies (hard edges, UV seams) share one direction and
 /// the cage stays closed. Otherwise the vertex's own normal.
-fn projection_dirs_from_data(positions: &[Vec3], vertex_normals: &[Vec3], indices: &[u32], average: bool) -> Vec<Vec3> {
+fn projection_dirs_from_data(
+    positions: &[Vec3],
+    vertex_normals: &[Vec3],
+    indices: &[u32],
+    weld: &[usize],
+    average: bool,
+) -> Vec<Vec3> {
     let own: Vec<Vec3> = vertex_normals.iter().map(|n| n.normalize_or_zero()).collect();
     if !average {
         return own;
     }
-    let weld = weld_positions(positions);
     let mut sum = vec![Vec3::ZERO; positions.len()];
     for t in indices.chunks_exact(3) {
         let p = [0, 1, 2].map(|k| positions[t[k] as usize]);
@@ -52,7 +57,8 @@ fn projection_dirs_from_data(positions: &[Vec3], vertex_normals: &[Vec3], indice
 pub fn projection_dirs(mesh: &Mesh, average: bool) -> Vec<Vec3> {
     let positions: Vec<Vec3> = mesh.vertices.iter().map(|v| Vec3::from_array(v.pos)).collect();
     let normals: Vec<Vec3> = mesh.vertices.iter().map(|v| Vec3::from_array(v.normal)).collect();
-    projection_dirs_from_data(&positions, &normals, &mesh.indices, average)
+    let weld = if average { weld_positions(&positions) } else { Vec::new() };
+    projection_dirs_from_data(&positions, &normals, &mesh.indices, &weld, average)
 }
 
 /// The minimum low-poly data required for a cage-probe worker. Unlike cloning
@@ -239,12 +245,14 @@ impl CageProbe {
             tri_object: low_tri_object,
             objects: low_objects,
         } = mesh;
-        // Reuse the compact snapshot's arrays; don't materialize a second set
-        // of positions and normals after cloning the full render mesh.
+        // Reuse the compact snapshot's arrays. The welded-vertex map is
+        // retained by the probe and also drives averaged projection normals.
+        let weld = weld_positions(&positions);
         let normals = projection_dirs_from_data(
             &positions,
             &vertex_normals,
             &low_indices,
+            &weld,
             key.average_normals && key.cage.is_none(),
         );
 
@@ -345,7 +353,6 @@ impl CageProbe {
         // The wireframe follows the low poly's own edges, through its corners.
         let edges: Vec<u32> = unique_edges(&low_indices).into_iter().map(|v| at_vertex[&(v as usize)]).collect();
         let vertex_probe: Vec<u32> = (0..positions.len()).map(|v| at_vertex.get(&v).copied().unwrap_or(u32::MAX)).collect();
-        let weld = weld_positions(&positions);
 
         let has_high = key.high_poly.is_some();
         if let Some(path) = &key.high_poly {
