@@ -1260,6 +1260,8 @@ impl GpuStrokeProfiler {
 }
 
 pub struct Engine {
+    /// Stable identity used by renderer-side caches across Engine moves/swaps.
+    id: u64,
     /// Tiling, mipmapped sampler for fill images.
     repeat_sampler: wgpu::Sampler,
     /// The stack below each open faded/masked folder while its layers are
@@ -1543,6 +1545,14 @@ fn fit_fill_image<P: image::Pixel<Subpixel = u8> + 'static>(
 }
 
 impl Engine {
+    /// Identity and texture-view generations used by the 3D viewport bind-group cache.
+    /// Final composites swap ping-pong targets; UV bakes and map changes replace
+    /// bound views. Keeping these generations explicit avoids rebuilding bind
+    /// groups on every frame while still invalidating them when a view changes.
+    pub(crate) fn viewport_binding_identity(&self) -> (u64, u32, usize, u64, u64) {
+        (self.id, self.res, self.final_idx, self.uv_version, self.maps_version)
+    }
+
     /// A document of one texture set covering the whole mesh.
     pub fn new(rs: &egui_wgpu::RenderState, mesh: &GpuMesh, bounds: (Vec3, Vec3), res: u32) -> Engine {
         let p = {
@@ -1578,6 +1588,8 @@ impl Engine {
         bounds: (Vec3, Vec3),
         res: u32,
     ) -> Engine {
+        static NEXT_ENGINE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let id = NEXT_ENGINE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let _allocation = crate::startup_trace::span("Engine::with_pipelines GPU allocations");
         let device = rs.device.clone();
         let queue = rs.queue.clone();
@@ -1612,6 +1624,7 @@ impl Engine {
         let mut engine = {
             let _textures = crate::startup_trace::span("Engine::with_pipelines texture/buffer allocation");
             Engine {
+            id,
             rs: rs.clone(),
             gpu_profiler,
             active_gpu_profile: None,
@@ -2296,6 +2309,7 @@ impl Engine {
         self.custom_ids.clear();
         self.custom_array = Self::custom_array_texture(&self.device, 1, 1);
         self.maps = Self::default_maps(&self.device, &self.queue);
+        self.maps_version = self.maps_version.wrapping_add(1);
         self.bake_report = None;
         self.has_bake = false;
         self.maps_dirty = true;
@@ -2316,6 +2330,7 @@ impl Engine {
         let id = if id.width != self.res { self.resample(&mut encoder, &id, self.res) } else { id };
         self.queue.submit([encoder.finish()]);
         self.maps[4] = id;
+        self.maps_version = self.maps_version.wrapping_add(1);
         self.map_fix = Default::default();
         self.maps_dirty = true;
         self.mark_dirty();
@@ -2341,6 +2356,7 @@ impl Engine {
         }
         self.edge_max = report.edge_max_distance;
         self.maps = maps;
+        self.maps_version = self.maps_version.wrapping_add(1);
         self.bake_report = Some(report);
         self.has_bake = true;
         self.maps_dirty = true;
