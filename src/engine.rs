@@ -1590,7 +1590,6 @@ impl Engine {
         self.mask_out.clear();
         self.mask_final.clear();
         self.apply_bg = None;
-        self.stamp_bg = [None, None];
     }
 
     fn ensure_composite_working_set(&mut self) {
