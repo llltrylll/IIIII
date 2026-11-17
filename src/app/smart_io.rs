@@ -85,29 +85,36 @@ pub(super) fn list_async(ctx: &egui::Context) -> mpsc::Receiver<Vec<UserSmartDat
 
 impl PainterApp {
     pub(super) fn poll_user_smarts(&mut self, ctx: &egui::Context) {
-        let Some(rx) = self.user_smarts_job.as_ref() else { return };
-        match rx.try_recv() {
-            Ok(items) => {
-                self.user_smarts = items
-                    .into_iter()
-                    .map(|item| {
-                        let thumb = item.thumb.map(|(size, rgba)| {
-                            ctx.load_texture(
-                                format!("smart {}", item.path.display()),
-                                egui::ColorImage::from_rgba_unmultiplied(size, &rgba),
-                                Default::default(),
-                            )
-                        });
-                        UserSmart { path: item.path, name: item.name, thumb }
-                    })
-                    .collect();
-                self.user_smarts_job = None;
-                ctx.request_repaint();
+        if let Some(rx) = self.user_smarts_job.as_ref() {
+            match rx.try_recv() {
+                Ok(items) => {
+                    self.user_smarts.clear();
+                    self.user_smarts_pending = items.into();
+                    self.user_smarts_job = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.user_smarts_job = None;
+                }
             }
-            Err(mpsc::TryRecvError::Empty) => {}
-            Err(mpsc::TryRecvError::Disconnected) => {
-                self.user_smarts_job = None;
-            }
+        }
+
+        // Creating egui texture handles uploads images to the GPU. Spread
+        // this across frames so a large shelf cannot stall the first frame
+        // after its worker finishes decoding the ZIP thumbnails.
+        for _ in 0..4 {
+            let Some(item) = self.user_smarts_pending.pop_front() else { break };
+            let thumb = item.thumb.map(|(size, rgba)| {
+                ctx.load_texture(
+                    format!("smart {}", item.path.display()),
+                    egui::ColorImage::from_rgba_unmultiplied(size, &rgba),
+                    Default::default(),
+                )
+            });
+            self.user_smarts.push(UserSmart { path: item.path, name: item.name, thumb });
+        }
+        if !self.user_smarts_pending.is_empty() {
+            ctx.request_repaint();
         }
     }
 }
