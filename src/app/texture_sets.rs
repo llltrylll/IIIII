@@ -79,6 +79,8 @@ impl PainterApp {
         self.end_preview(true);
         self.engine.commit_props(&mut self.undo);
         std::mem::swap(&mut self.engine, &mut p.engine);
+        self.engine.restore_active_working_set();
+        p.engine.release_inactive_working_set();
         self.engine_epoch = self.engine_epoch.wrapping_add(1);
         std::mem::swap(&mut self.selected, &mut p.selected);
         std::mem::swap(&mut self.target, &mut p.target);
@@ -111,6 +113,7 @@ impl PainterApp {
             if p.engine.dirty {
                 p.engine.composite();
             }
+            p.engine.release_inactive_working_set();
         }
     }
 
