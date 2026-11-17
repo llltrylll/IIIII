@@ -23,6 +23,31 @@ use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 8] = b"MPPROJ\x00\x01";
 
+/// Counts serialized bytes without retaining a second copy of the manifest.
+#[derive(Default)]
+struct CountingWriter {
+    bytes: u64,
+}
+
+impl Write for CountingWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let len = u64::try_from(buffer.len())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "manifest length overflow"))?;
+        self.bytes = self.bytes.checked_add(len)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "manifest length overflow"))?;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Parses only the declared manifest range directly from the project file.
+fn read_manifest<R: Read>(reader: &mut R, len: u64) -> Result<Value, serde_json::Error> {
+    serde_json::from_reader(Read::take(reader, len))
+}
+
 /// Per-user app data: recent projects and the autosave.
 pub(super) fn data_dir() -> Option<PathBuf> {
     crate::crash::data_dir()
@@ -728,16 +753,24 @@ impl PainterApp {
             "bake": bake,
             "view": view,
         });
-        let text = serde_json::to_vec(&manifest).map_err(|e| e.to_string())?;
-        // Only the manifest and one compressed blob at a time are held in
-        // RAM. The blob spool already contains each length prefix + payload.
-        let total_bytes = MAGIC.len() + 8 + text.len() + 8 + w.spool_bytes;
+        // Count once, then stream the manifest to the final writer. This
+        // avoids a second full-size Vec<u8> containing serialized metadata.
+        let mut counter = CountingWriter::default();
+        serde_json::to_writer(&mut counter, &manifest).map_err(|e| e.to_string())?;
+        let manifest_len = counter.bytes;
+        let manifest_len_usize = usize::try_from(manifest_len).map_err(|_| "project manifest is too large")?;
+        let total_bytes = MAGIC.len()
+            .checked_add(8)
+            .and_then(|n| n.checked_add(manifest_len_usize))
+            .and_then(|n| n.checked_add(8))
+            .and_then(|n| n.checked_add(w.spool_bytes))
+            .ok_or("project file size overflows address space")?;
         let tmp = path.with_extension("mpp.tmp");
         let file = std::fs::File::create(&tmp).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
         let mut out = std::io::BufWriter::new(file);
         out.write_all(MAGIC).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
-        out.write_all(&(text.len() as u64).to_le_bytes()).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
-        out.write_all(&text).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
+        out.write_all(&manifest_len.to_le_bytes()).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
+        serde_json::to_writer(&mut out, &manifest).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
         out.write_all(&(w.count as u64).to_le_bytes()).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
         w.copy_to(&mut out)?;
         out.flush().map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
@@ -775,14 +808,11 @@ impl PainterApp {
         let mut number = [0u8; 8];
         file.read_exact(&mut number).map_err(|_| bad())?;
         let manifest_len = u64::from_le_bytes(number);
-        let manifest_len_usize = usize::try_from(manifest_len).map_err(|_| bad())?;
-        if 16u64.checked_add(manifest_len).is_none_or(|end| end > file_len.saturating_sub(8)) {
-            return Err(bad());
-        }
-        let mut manifest_bytes = vec![0u8; manifest_len_usize];
-        file.read_exact(&mut manifest_bytes).map_err(|_| bad())?;
-        let manifest: Value = serde_json::from_slice(&manifest_bytes).map_err(|e| format!("{}: {e}", bad()))?;
-        drop(manifest_bytes);
+        let manifest_end = 16u64.checked_add(manifest_len)
+            .filter(|&end| end <= file_len.saturating_sub(8))
+            .ok_or_else(bad)?;
+        let manifest = read_manifest(&mut file, manifest_len).map_err(|e| format!("{}: {e}", bad()))?;
+        file.seek(SeekFrom::Start(manifest_end)).map_err(|_| bad())?;
         self.active_channels = std::array::from_fn(|i| {
             manifest["active_channels"].as_array().and_then(|channels| channels.get(i)).and_then(Value::as_bool).unwrap_or(true)
         });
@@ -1151,6 +1181,32 @@ mod tests {
         // And the new format round-trips.
         let back = generator_from(&generator_json(&g)).unwrap();
         assert_eq!(back, g);
+    }
+
+    #[test]
+    fn manifest_count_matches_streamed_json_serialization() {
+        let manifest = json!({
+            "active_channels": [true, false, true],
+            "layers": ["paint", "fill", "folder"],
+            "metadata": "stream without a full output Vec"
+        });
+        let mut counter = CountingWriter::default();
+        serde_json::to_writer(&mut counter, &manifest).unwrap();
+        let expected = serde_json::to_vec(&manifest).unwrap();
+        assert_eq!(counter.bytes, expected.len() as u64);
+    }
+
+    #[test]
+    fn manifest_reader_does_not_consume_the_blob_table() {
+        let manifest_bytes = br#"{"version":4,"active_channels":[true,false]}"#;
+        let mut input = std::io::Cursor::new([manifest_bytes.as_slice(), b"BLOBTABLE"].concat());
+        let manifest = read_manifest(&mut input, manifest_bytes.len() as u64).unwrap();
+        assert_eq!(manifest["version"], 4);
+        assert_eq!(manifest["active_channels"][1], false);
+        assert_eq!(input.position(), manifest_bytes.len() as u64);
+        let mut following = [0u8; 9];
+        input.read_exact(&mut following).unwrap();
+        assert_eq!(&following, b"BLOBTABLE");
     }
 
     #[test]

@@ -14,6 +14,7 @@ Scope: reduce **system RAM and transient CPU-memory peaks** in the existing appl
 
 ### P0 — Project I/O peak memory
 1. **Read compressed project blobs on demand.** The parser now stores file offsets and lengths instead of loading the entire project into RAM or copying all compressed blobs. The Reader seeks to and decodes one blob when requested. Mesh vertex/index/object arrays are decompressed directly into their final typed allocations.
+4. **Stream the JSON manifest.** Opening parses the declared manifest range directly from the file instead of allocating a same-sized byte Vec. Saving counts serialized bytes, then writes the manifest directly to the buffered output instead of retaining the complete serialized JSON copy.
 2. **Spool compressed blobs to disk during save.** The Writer compresses and writes each blob to a temporary spool, then copies that spool into the final buffered `.mpp.tmp` before the existing atomic rename. It no longer retains all compressed blobs or builds a second full-size output Vec<u8>.
 3. Later: split CPU parsing/decompression from GPU resource creation, with explicit peak-memory accounting. This is a separate change because loading must remain transactional and preserve the current document on failure.
 - Triangle ID colors and per-corner vertex colors decompress directly into their final typed vectors when counts match the mesh, without an intermediate full-size byte vector.
@@ -85,6 +86,7 @@ A candidate is not considered a measured win until this protocol is run on the o
 ## Status
 
 - [x] Source audit of project blobs, Undo snapshots, fill-image cache and asynchronous preview/decode queues.
+- [x] Stream project manifest parsing and serialization without a full-size intermediate byte Vec.
 - [x] File-backed project blob index and on-demand blob reads.
 - [x] Stream compressed blobs through a disk spool and buffered atomic project save.
 - [x] Incremental Undo compression and pending-memory accounting.
