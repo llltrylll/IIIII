@@ -9,7 +9,8 @@
 use crate::engine::{Blend, Content, FillParams, Generator, Layer, Levels, Mask};
 use crate::gpu::{Tex, bytes_per_texel};
 use eframe::wgpu;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 
@@ -18,6 +19,63 @@ pub struct TexInfo {
     pub width: u32,
     pub height: u32,
     pub bpp: u32,
+}
+
+/// Reuses completed Undo readback buffers. The cache is deliberately small:
+/// it is shared across a document's Texture Sets and cannot retain more than
+/// 32 MiB of staging allocations after the compression worker releases them.
+#[derive(Default)]
+pub struct SnapshotBufferPool {
+    state: Mutex<SnapshotBufferPoolState>,
+}
+
+#[derive(Default)]
+struct SnapshotBufferPoolState {
+    buffers: HashMap<u64, Vec<wgpu::Buffer>>,
+    cached_bytes: u64,
+}
+
+impl SnapshotBufferPool {
+    const MAX_PER_SIZE: usize = 2;
+    const MAX_CACHED_BYTES: u64 = 32 * 1024 * 1024;
+
+    fn can_recycle(size: u64, per_size: usize, cached_bytes: u64) -> bool {
+        per_size < Self::MAX_PER_SIZE
+            && size <= Self::MAX_CACHED_BYTES.saturating_sub(cached_bytes)
+    }
+
+    fn take(&self, device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+        let cached = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let buffer = state.buffers.get_mut(&size).and_then(Vec::pop);
+            if buffer.is_some() {
+                state.cached_bytes = state.cached_bytes.saturating_sub(size);
+                if state.buffers.get(&size).is_some_and(Vec::is_empty) {
+                    state.buffers.remove(&size);
+                }
+            }
+            buffer
+        };
+        cached.unwrap_or_else(|| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("undo staging"),
+                size,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            })
+        })
+    }
+
+    /// The caller must unmap the buffer before returning it to the pool.
+    fn recycle(&self, buffer: wgpu::Buffer) {
+        let size = buffer.size();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let per_size = state.buffers.get(&size).map_or(0, Vec::len);
+        if Self::can_recycle(size, per_size, state.cached_bytes) {
+            state.buffers.entry(size).or_default().push(buffer);
+            state.cached_bytes += size;
+        }
+    }
 }
 
 enum SnapState {
@@ -34,24 +92,25 @@ enum SnapState {
 pub struct Snapshot {
     infos: Vec<TexInfo>,
     state: SnapState,
+    pool: Arc<SnapshotBufferPool>,
 }
 
 impl Snapshot {
     /// Encodes copies of `textures` into fresh staging buffers. Call
     /// [`Snapshot::request_map`] after the encoder has been submitted.
-    pub fn encode(device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, textures: &[&Tex]) -> Snapshot {
+    pub fn encode(
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        textures: &[&Tex],
+        pool: Arc<SnapshotBufferPool>,
+    ) -> Snapshot {
         let mut infos = Vec::new();
         let mut buffers = Vec::new();
         for tex in textures {
             let bpp = bytes_per_texel(tex.format);
             let row = tex.width * bpp;
             debug_assert!(row.is_multiple_of(256), "texture rows must be 256-byte aligned for readback");
-            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("undo staging"),
-                size: (row * tex.height) as u64,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
+            let buffer = pool.take(device, (row * tex.height) as u64);
             encoder.copy_texture_to_buffer(
                 tex.copy_info(),
                 wgpu::TexelCopyBufferInfo {
@@ -68,7 +127,7 @@ impl Snapshot {
             buffers.push(buffer);
         }
         let remaining = Arc::new(AtomicUsize::new(buffers.len()));
-        Snapshot { infos, state: SnapState::Mapping { buffers, remaining } }
+        Snapshot { infos, state: SnapState::Mapping { buffers, remaining }, pool }
     }
 
     pub fn request_map(&self) {
@@ -103,6 +162,7 @@ impl Snapshot {
             let total = buffers.len();
             let pending_raw_bytes = self.uncompressed_bytes();
             let (tx, receiver) = mpsc::sync_channel(1);
+            let pool = self.pool.clone();
             rayon::spawn(move || {
                 for buffer in buffers {
                     // Compress directly from the mapped staging memory. A
@@ -113,6 +173,7 @@ impl Snapshot {
                         lz4_flex::compress_prepend_size(&mapped)
                     };
                     buffer.unmap();
+                    pool.recycle(buffer);
                     if tx.send(compressed).is_err() {
                         break;
                     }
@@ -440,11 +501,15 @@ impl UndoStack {
 
 #[cfg(test)]
 mod tests {
-    use super::{Edit, SnapState, Snapshot, StrokeTarget, TexInfo, UndoEntry, UndoStack};
+    use super::{Edit, SnapState, Snapshot, SnapshotBufferPool, StrokeTarget, TexInfo, UndoEntry, UndoStack};
     use std::sync::mpsc;
 
     fn stroke_with_snapshot_bytes(bytes: usize) -> Edit {
-        let snapshot = || Snapshot { infos: Vec::new(), state: SnapState::Ready(vec![vec![0; bytes]]) };
+        let snapshot = || Snapshot {
+            infos: Vec::new(),
+            state: SnapState::Ready(vec![vec![0; bytes]]),
+            pool: Arc::new(SnapshotBufferPool::default()),
+        };
         Edit::Stroke(UndoEntry {
             layer_id: 1,
             target: StrokeTarget::Content,
@@ -452,6 +517,14 @@ mod tests {
             before: snapshot(),
             after: snapshot(),
         })
+    }
+
+    #[test]
+    fn staging_buffer_pool_retention_is_bounded() {
+        assert!(SnapshotBufferPool::can_recycle(1024, 0, 0));
+        assert!(!SnapshotBufferPool::can_recycle(1024, SnapshotBufferPool::MAX_PER_SIZE, 0));
+        assert!(!SnapshotBufferPool::can_recycle(1024, 0, SnapshotBufferPool::MAX_CACHED_BYTES));
+        assert!(!SnapshotBufferPool::can_recycle(SnapshotBufferPool::MAX_CACHED_BYTES + 1, 0, 0));
     }
 
     #[test]
@@ -506,6 +579,7 @@ mod tests {
                 pending_raw_bytes: 64,
                 total: 2,
             },
+            pool: Arc::new(SnapshotBufferPool::default()),
         };
         assert_eq!(snapshot.ram_bytes(), 67);
     }
