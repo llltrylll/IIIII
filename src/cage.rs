@@ -23,16 +23,15 @@ const REACH: f32 = MAX_CAGE_REACH;
 /// Averaged: the angle-weighted normals of every face at the vertex's
 /// position, so split copies (hard edges, UV seams) share one direction and
 /// the cage stays closed. Otherwise the vertex's own normal.
-pub fn projection_dirs(mesh: &Mesh, average: bool) -> Vec<Vec3> {
-    let own: Vec<Vec3> = mesh.vertices.iter().map(|v| Vec3::from_array(v.normal).normalize_or_zero()).collect();
+fn projection_dirs_from_data(positions: &[Vec3], vertex_normals: &[Vec3], indices: &[u32], average: bool) -> Vec<Vec3> {
+    let own: Vec<Vec3> = vertex_normals.iter().map(|n| n.normalize_or_zero()).collect();
     if !average {
         return own;
     }
-    let pos: Vec<Vec3> = mesh.vertices.iter().map(|v| Vec3::from_array(v.pos)).collect();
-    let weld = weld_positions(&pos);
-    let mut sum = vec![Vec3::ZERO; pos.len()];
-    for t in mesh.indices.chunks_exact(3) {
-        let p = [0, 1, 2].map(|k| pos[t[k] as usize]);
+    let weld = weld_positions(positions);
+    let mut sum = vec![Vec3::ZERO; positions.len()];
+    for t in indices.chunks_exact(3) {
+        let p = [0, 1, 2].map(|k| positions[t[k] as usize]);
         let n = (p[1] - p[0]).cross(p[2] - p[0]).normalize_or_zero();
         for k in 0..3 {
             // Weighted by the corner's angle, so how a face is split into
@@ -41,13 +40,50 @@ pub fn projection_dirs(mesh: &Mesh, average: bool) -> Vec<Vec3> {
             sum[weld[t[k] as usize]] += n * a.dot(b).clamp(-1.0, 1.0).acos();
         }
     }
-    (0..pos.len())
+    (0..positions.len())
         .map(|v| {
             let d = sum[weld[v]].normalize_or_zero();
             // A degenerate spot (faces cancelling out) keeps its own normal.
             if d == Vec3::ZERO { own[v] } else { d }
         })
         .collect()
+}
+
+pub fn projection_dirs(mesh: &Mesh, average: bool) -> Vec<Vec3> {
+    let positions: Vec<Vec3> = mesh.vertices.iter().map(|v| Vec3::from_array(v.pos)).collect();
+    let normals: Vec<Vec3> = mesh.vertices.iter().map(|v| Vec3::from_array(v.normal)).collect();
+    projection_dirs_from_data(&positions, &normals, &mesh.indices, average)
+}
+
+/// The minimum low-poly data required for a cage-probe worker. Unlike cloning
+/// Mesh, this does not copy UVs, tangents, display edges, material sets or
+/// import provenance that the probe never reads.
+pub(crate) struct CageMesh {
+    positions: Vec<Vec3>,
+    normals: Vec<Vec3>,
+    indices: Vec<u32>,
+    bounds_min: Vec3,
+    bounds_max: Vec3,
+    center: Vec3,
+    scale: f32,
+    tri_object: Vec<u32>,
+    objects: Vec<String>,
+}
+
+impl CageMesh {
+    pub(crate) fn snapshot(mesh: &Mesh, include_object_mapping: bool) -> CageMesh {
+        CageMesh {
+            positions: mesh.vertices.iter().map(|v| Vec3::from_array(v.pos)).collect(),
+            normals: mesh.vertices.iter().map(|v| Vec3::from_array(v.normal)).collect(),
+            indices: mesh.indices.clone(),
+            bounds_min: mesh.bounds_min,
+            bounds_max: mesh.bounds_max,
+            center: mesh.center,
+            scale: mesh.scale,
+            tri_object: if include_object_mapping { mesh.tri_object.clone() } else { Vec::new() },
+            objects: if include_object_mapping { mesh.objects.clone() } else { Vec::new() },
+        }
+    }
 }
 
 /// What the bake ray from one low-poly vertex finds.
@@ -167,24 +203,40 @@ pub struct FixReport {
 impl CageProbe {
     /// Probes the high poly from sample points across the low poly. Runs on
     /// a worker thread.
-    pub fn build(mesh: &Mesh, key: ProbeKey) -> Result<CageProbe, String> {
-        let positions: Vec<Vec3> = mesh.vertices.iter().map(|v| Vec3::from_array(v.pos)).collect();
-        // The bake's directions: averaged unless a cage file gives them.
-        let normals = projection_dirs(mesh, key.average_normals && key.cage.is_none());
+    pub fn build(mesh: CageMesh, key: ProbeKey) -> Result<CageProbe, String> {
+        let CageMesh {
+            positions,
+            normals: vertex_normals,
+            indices: low_indices,
+            bounds_min,
+            bounds_max,
+            center,
+            scale,
+            tri_object: low_tri_object,
+            objects: low_objects,
+        } = mesh;
+        // Reuse the compact snapshot's arrays; don't materialize a second set
+        // of positions and normals after cloning the full render mesh.
+        let normals = projection_dirs_from_data(
+            &positions,
+            &vertex_normals,
+            &low_indices,
+            key.average_normals && key.cage.is_none(),
+        );
 
         // A loaded cage gives each low vertex its own ray start.
         let mut cage_pos: Option<Vec<Vec3>> = None;
         if let Some(path) = &key.cage {
-            let cage = HighPoly::load(path, mesh.center, mesh.scale)?;
-            if cage.indices.len() != mesh.indices.len() {
+            let cage = HighPoly::load(path, center, scale)?;
+            if cage.indices.len() != low_indices.len() {
                 return Err(format!(
                     "The cage has {} triangles but the low poly has {}; a cage must be the low poly with its vertices moved.",
                     cage.indices.len() / 3,
-                    mesh.indices.len() / 3
+                    low_indices.len() / 3
                 ));
             }
             let mut c = positions.clone();
-            for (&l, &k) in mesh.indices.iter().zip(&cage.indices) {
+            for (&l, &k) in low_indices.iter().zip(&cage.indices) {
                 c[l as usize] = cage.positions[k as usize];
             }
             cage_pos = Some(c);
@@ -193,12 +245,12 @@ impl CageProbe {
         // Sample points: corners, plus a grid across triangles that are large
         // next to the mesh, so big faces are judged over their area rather
         // than at their corners (where rays tend to skim past edges).
-        let tri_count = mesh.indices.len() / 3;
-        let corner = |t: usize, k: usize| mesh.indices[t * 3 + k] as usize;
+        let tri_count = low_indices.len() / 3;
+        let corner = |t: usize, k: usize| low_indices[t * 3 + k] as usize;
         let longest = |t: usize| {
             (0..3).map(|k| positions[corner(t, k)].distance(positions[corner(t, (k + 1) % 3)])).fold(0.0f32, f32::max)
         };
-        let mut spacing = (mesh.bounds_max - mesh.bounds_min).length() / 48.0;
+        let mut spacing = (bounds_max - bounds_min).length() / 48.0;
         let grid = |t: usize, spacing: f32| ((longest(t) / spacing).ceil() as usize).clamp(1, 12);
         // Keep the sample count bounded on huge meshes.
         while (0..tri_count).map(|t| grid(t, spacing).pow(2)).sum::<usize>() > 400_000 {
@@ -222,7 +274,7 @@ impl CageProbe {
         };
         let mut probes: Vec<Probe> = Vec::new();
         let mut at_vertex: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
-        let mut indices = Vec::with_capacity(mesh.indices.len());
+        let mut indices = Vec::with_capacity(low_indices.len());
         for t in 0..tri_count {
             let k = grid(t, spacing);
             // Grid point (i, j): barycentrics (1 - (i + j)/k, i/k, j/k).
@@ -267,13 +319,13 @@ impl CageProbe {
             }
         }
         // The wireframe follows the low poly's own edges, through its corners.
-        let edges: Vec<u32> = unique_edges(&mesh.indices).into_iter().map(|v| at_vertex[&(v as usize)]).collect();
-        let vertex_probe: Vec<u32> = (0..mesh.vertices.len()).map(|v| at_vertex.get(&v).copied().unwrap_or(u32::MAX)).collect();
+        let edges: Vec<u32> = unique_edges(&low_indices).into_iter().map(|v| at_vertex[&(v as usize)]).collect();
+        let vertex_probe: Vec<u32> = (0..positions.len()).map(|v| at_vertex.get(&v).copied().unwrap_or(u32::MAX)).collect();
         let weld = weld_positions(&positions);
 
         let has_high = key.high_poly.is_some();
         if let Some(path) = &key.high_poly {
-            let high = HighPoly::load(path, mesh.center, mesh.scale)?;
+            let high = HighPoly::load(path, center, scale)?;
             let tris: Vec<[Vec3; 3]> = high.indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]].map(|i| high.positions[i as usize])).collect();
             let bvh = Bvh::build(tris);
             let (tri_part, _) = components(&high.positions, &high.indices);
@@ -281,9 +333,9 @@ impl CageProbe {
             // Name groups, as the bake pairs them (0 = sees / is seen by all).
             let mut low_tri_group = vec![0u32; tri_count];
             let mut high_tri_group = vec![0u32; high.indices.len() / 3];
-            if key.match_by_name && !mesh.objects.is_empty() && !high.objects.is_empty() {
+            if key.match_by_name && !low_objects.is_empty() && !high.objects.is_empty() {
                 let mut groups = std::collections::HashMap::new();
-                for name in &mesh.objects {
+                for name in &low_objects {
                     let n = groups.len() as u32 + 1;
                     groups.entry(base_name(name)).or_insert(n);
                 }
@@ -294,7 +346,7 @@ impl CageProbe {
                         *g = high_group[o as usize];
                     }
                     for (t, g) in low_tri_group.iter_mut().enumerate() {
-                        let group = mesh.tri_object.get(t).map_or(0, |&o| groups[&base_name(&mesh.objects[o as usize])]);
+                        let group = low_tri_object.get(t).map_or(0, |&o| groups[&base_name(&low_objects[o as usize])]);
                         *g = if matched.contains(&group) { group } else { 0 };
                     }
                 }
@@ -477,7 +529,7 @@ mod tests {
             match_by_name: true,
             average_normals: true,
         };
-        (CageProbe::build(low, key).unwrap(), dir)
+        (CageProbe::build(CageMesh::snapshot(low, key.match_by_name), key).unwrap(), dir)
     }
 
     /// A sphere baked from a slightly larger sphere: covered when the front

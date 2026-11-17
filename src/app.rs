@@ -4848,9 +4848,13 @@ impl PainterApp {
             if !running && !failed {
                 c.failed = None;
                 let (tx, rx) = mpsc::channel();
-                let (mesh, k, ctx) = (self.mesh.clone(), key.clone(), ctx.clone());
+                let (mesh, k, ctx) = (
+                    CageMesh::snapshot(&self.mesh, key.match_by_name),
+                    key.clone(),
+                    ctx.clone(),
+                );
                 std::thread::spawn(move || {
-                    let _ = tx.send(CageProbe::build(&mesh, k));
+                    let _ = tx.send(CageProbe::build(mesh, k));
                     ctx.request_repaint();
                 });
                 c.job = Some((key, rx));
