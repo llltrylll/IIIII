@@ -638,7 +638,14 @@ fn id_color(i: u32) -> [f32; 4] {
 
 /// Connected components over welded positions; returns the part of each triangle.
 pub(crate) fn components(positions: &[Vec3], indices: &[u32]) -> (Vec<u32>, u32) {
+    components_cancellable(positions, indices, &AtomicBool::new(false))
+        .expect("uncancelled component traversal")
+}
+
+fn components_cancellable(positions: &[Vec3], indices: &[u32], cancel: &AtomicBool) -> Result<(Vec<u32>, u32), String> {
+    check_prepare_cancelled(cancel)?;
     let weld = weld_positions(positions);
+    check_prepare_cancelled(cancel)?;
     let mut parent: Vec<u32> = (0..positions.len() as u32).collect();
     fn find(p: &mut [u32], mut x: u32) -> u32 {
         while p[x as usize] != x {
@@ -647,28 +654,25 @@ pub(crate) fn components(positions: &[Vec3], indices: &[u32]) -> (Vec<u32>, u32)
         }
         x
     }
-    for tri in indices.chunks_exact(3) {
+    for (i, tri) in indices.chunks_exact(3).enumerate() {
+        if i.is_multiple_of(8192) { check_prepare_cancelled(cancel)?; }
         let a = find(&mut parent, weld[tri[0] as usize] as u32);
         for &v in &tri[1..] {
             let b = find(&mut parent, weld[v as usize] as u32);
-            if a != b {
-                parent[b as usize] = a;
-            }
+            if a != b { parent[b as usize] = a; }
         }
     }
     let mut remap = std::collections::HashMap::new();
-    let tri_part: Vec<u32> = indices
-        .chunks_exact(3)
-        .map(|tri| {
-            let root = find(&mut parent, weld[tri[0] as usize] as u32);
-            let next = remap.len() as u32;
-            *remap.entry(root).or_insert(next)
-        })
-        .collect();
+    let mut tri_part = Vec::with_capacity(indices.len() / 3);
+    for (i, tri) in indices.chunks_exact(3).enumerate() {
+        if i.is_multiple_of(8192) { check_prepare_cancelled(cancel)?; }
+        let root = find(&mut parent, weld[tri[0] as usize] as u32);
+        let next = remap.len() as u32;
+        tri_part.push(*remap.entry(root).or_insert(next));
+    }
     let count = remap.len() as u32;
-    (tri_part, count)
+    Ok((tri_part, count))
 }
-
 /// A feature for the edge-distance bake: a segment, or with `half_width > 0`
 /// a band around it (a bevel facet), so every point inside reads as distance 0.
 /// Hard edges have `half_width` [`HARD_EDGE`]; only they draw curvature lines.
@@ -705,12 +709,29 @@ pub(crate) fn feature_edges(
     bevel_curvature: Option<f32>,
     shading_normals: Option<&[Vec3]>,
 ) -> [Vec<EdgeSeg>; 2] {
+    feature_edges_cancellable(positions, indices, tri_part, min_angle_deg, bevel_curvature, shading_normals, &AtomicBool::new(false))
+        .expect("uncancelled feature-edge preparation")
+}
+
+fn feature_edges_cancellable(
+    positions: &[Vec3],
+    indices: &[u32],
+    tri_part: &[u32],
+    min_angle_deg: f32,
+    bevel_curvature: Option<f32>,
+    shading_normals: Option<&[Vec3]>,
+    cancel: &AtomicBool,
+) -> Result<[Vec<EdgeSeg>; 2], String> {
+    check_prepare_cancelled(cancel)?;
     const NONE: u32 = u32::MAX;
     let weld = weld_positions(positions);
+    check_prepare_cancelled(cancel)?;
     let smooth = if bevel_curvature.is_some() { smooth_normals(positions, indices) } else { Vec::new() };
+    check_prepare_cancelled(cancel)?;
     let mut face_n = Vec::with_capacity(indices.len() / 3);
     let mut center = Vec::with_capacity(indices.len() / 3);
-    for t in indices.chunks_exact(3) {
+    for (i, t) in indices.chunks_exact(3).enumerate() {
+        if i.is_multiple_of(8192) { check_prepare_cancelled(cancel)?; }
         let [a, b, c] = [t[0], t[1], t[2]].map(|i| positions[i as usize]);
         face_n.push((b - a).cross(c - a).normalize_or_zero());
         center.push((a + b + c) / 3.0);
@@ -727,6 +748,7 @@ pub(crate) fn feature_edges(
     let mut edges: std::collections::HashMap<(u32, u32), [Side; 2]> =
         std::collections::HashMap::with_capacity(indices.len());
     for (t, tri) in indices.chunks_exact(3).enumerate() {
+        if t.is_multiple_of(8192) { check_prepare_cancelled(cancel)?; }
         for k in 0..3 {
             let a = weld[tri[k] as usize] as u32;
             let b = weld[tri[(k + 1) % 3] as usize] as u32;
@@ -747,7 +769,8 @@ pub(crate) fn feature_edges(
     // Bevel edges with their convexity, and the bevel edges of each triangle.
     let mut bevel: std::collections::HashMap<(u32, u32), bool> = std::collections::HashMap::new();
     let mut tri_bevels: Vec<Vec<(u32, u32)>> = vec![Vec::new(); face_n.len()];
-    for (&(a, b), &[s0, s1]) in &edges {
+    for (edge_index, (&(a, b), &[s0, s1])) in edges.iter().enumerate() {
+        if edge_index.is_multiple_of(8192) { check_prepare_cancelled(cancel)?; }
         if s1.tri == NONE {
             continue;
         }
@@ -811,7 +834,8 @@ pub(crate) fn feature_edges(
     // Bevel facets: two triangles sharing a non-bevel edge (the quad
     // diagonal), each holding a different bevel edge, the two edges roughly
     // parallel and spanning the quad's four corners.
-    for (&(a, b), &[s0, s1]) in &edges {
+    for (edge_index, (&(a, b), &[s0, s1])) in edges.iter().enumerate() {
+        if edge_index.is_multiple_of(8192) { check_prepare_cancelled(cancel)?; }
         if s1.tri == NONE || bevel.contains_key(&(a, b)) {
             continue;
         }
@@ -841,9 +865,9 @@ pub(crate) fn feature_edges(
             }
         }
     }
-    out
+    check_prepare_cancelled(cancel)?;
+    Ok(out)
 }
-
 /// Mean curvature at each vertex of a mesh, from how its shading normals
 /// turn toward its neighbors: (n_j - n_i)·(p_j - p_i) / |p_j - p_i|²,
 /// averaged. Vertices that share a position and (within a degree) a normal
@@ -1190,7 +1214,7 @@ pub fn prepare_cancellable(
         None => 0.0,
     };
 
-    let (tri_part, part_count) = components(&positions, &indices);
+    let (tri_part, part_count) = components_cancellable(&positions, &indices, cancel)?;
     check_prepare_cancelled(cancel)?;
     let mut part_lo = vec![f32::MAX; part_count as usize];
     let mut part_hi = vec![f32::MIN; part_count as usize];
@@ -1311,7 +1335,10 @@ pub fn prepare_cancellable(
     // staircases and scalloped mask borders.
     let low_only = settings.high_poly.is_none();
     check_prepare_cancelled(cancel)?;
-    let [convex, concave] = feature_edges(&positions, &indices, &tri_part, settings.hard_edge_angle, None, low_only.then_some(&normals[..]));
+    let [convex, concave] = feature_edges_cancellable(
+        &positions, &indices, &tri_part, settings.hard_edge_angle, None,
+        low_only.then_some(&normals[..]), cancel,
+    )?;
     check_prepare_cancelled(cancel)?;
     // The remaining preparation stages use only packed data and the original low mesh.
     drop(tri_part);
@@ -2516,6 +2543,15 @@ pub(crate) mod tests {
                 (p.distance(a + e * t) - s.half_width.max(0.0)).max(0.0)
             })
             .fold(f32::MAX, f32::min)
+    }
+
+    #[test]
+    fn cancelled_bake_preparation_exits_before_work() {
+        let mesh = Primitive::RoundedCube.build();
+        let settings = BakeSettings::default();
+        let cancel = AtomicBool::new(true);
+        let result = prepare_cancellable(&mesh, &settings, 0, &cancel);
+        assert!(matches!(result, Err(message) if message == "Bake preparation cancelled"));
     }
 
     #[test]
