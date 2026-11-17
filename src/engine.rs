@@ -1349,7 +1349,8 @@ pub struct Engine {
     brush_grain: Tex,
     /// Image files already on the GPU, shared by every layer that uses them
     /// (scanned smart materials); entries die with their last user.
-    image_cache: HashMap<std::path::PathBuf, (std::sync::Weak<Tex>, std::sync::Weak<Vec<u8>>)>,
+    /// Weak cache shared by every Texture Set Engine in the same document.
+    image_cache: Arc<std::sync::Mutex<HashMap<std::path::PathBuf, (std::sync::Weak<Tex>, std::sync::Weak<Vec<u8>>)>>>,
     pub layers: Vec<Layer>,
     /// Properties as of the last recorded edit; see [`Engine::commit_props`].
     committed: DocProps,
@@ -1565,7 +1566,9 @@ impl Engine {
     /// Another texture set of the same document: `tris` is its range in the
     /// mesh's index buffer. Shares this engine's pipelines and document bounds.
     pub fn sibling(&self, mesh: &GpuMesh, tris: std::ops::Range<u32>, res: u32) -> Engine {
-        Self::with_pipelines(&self.rs, self.p.clone(), mesh, tris, self.bounds, res)
+        let mut sibling = Self::with_pipelines(&self.rs, self.p.clone(), mesh, tris, self.bounds, res);
+        sibling.image_cache = self.image_cache.clone();
+        sibling
     }
 
     /// Drops GPU resources used only while this Texture Set is being edited.
@@ -1718,7 +1721,7 @@ impl Engine {
             apply_ubuf,
             brush_alpha: Tex::new(&device, "brush alpha", 1, 1, F::R8Unorm, LAYER_USAGE),
             brush_grain: Tex::new(&device, "brush grain", 1, 1, F::R8Unorm, LAYER_USAGE),
-            image_cache: HashMap::new(),
+            image_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             layers: Vec::new(),
             folder_below: Vec::new(),
             repeat_sampler: device.create_sampler(&wgpu::SamplerDescriptor {
@@ -2697,17 +2700,22 @@ impl Engine {
     pub fn shared_fill_image(&mut self, path: &std::path::Path) -> Result<FillImage, String> {
         let dir = path.parent().and_then(|d| d.file_name()).map_or(String::new(), |d| format!("{}/", d.to_string_lossy()));
         let name = format!("{dir}{}", path.file_name().map_or("image".into(), |n| n.to_string_lossy()));
-        if let Some((tex, encoded)) = self.image_cache.get(path)
-            && let (Some(tex), Some(encoded)) = (tex.upgrade(), encoded.upgrade()) {
-                return Ok(FillImage { tex, name, encoded });
-            }
+        let cached = self
+            .image_cache
+            .lock()
+            .map_err(|_| "fill image cache lock is poisoned")?
+            .get(path)
+            .and_then(|(texture, bytes)| Some((texture.upgrade()?, bytes.upgrade()?)));
+        if let Some((tex, encoded)) = cached {
+            return Ok(FillImage { tex, name, encoded });
+        }
         let encoded = Arc::new(std::fs::read(path).map_err(|e| format!("can't read {}: {e}", path.display()))?);
         let img = self.decode_fill_image(name, encoded.clone())?;
-        self.image_cache.retain(|_, (texture, bytes)| texture.strong_count() > 0 && bytes.strong_count() > 0);
+        let mut cache = self.image_cache.lock().map_err(|_| "fill image cache lock is poisoned")?;
+        cache.retain(|_, (texture, bytes)| texture.strong_count() > 0 && bytes.strong_count() > 0);
         // The cache is not an owner: once the last layer/history reference is
         // dropped, both the GPU texture and original CPU file bytes can die.
-        self.image_cache
-            .insert(path.to_path_buf(), (Arc::downgrade(&img.tex), Arc::downgrade(&img.encoded)));
+        cache.insert(path.to_path_buf(), (Arc::downgrade(&img.tex), Arc::downgrade(&img.encoded)));
         Ok(img)
     }
 
