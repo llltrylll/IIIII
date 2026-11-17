@@ -102,7 +102,7 @@ impl PainterApp {
                     }
                     self.bake_next(ctx);
                 }
-                Ok(Ok(Prepared::Scene(scene, key))) => {
+                Ok(Ok(Prepared::Scene(mut scene, key))) => {
                     let res = self.set_engines().get(self.sets.baking).map_or(self.engine.res, |e| e.res);
                     let settings = self.job_bake_settings();
                     let (baker, rs, mesh) = (
@@ -110,7 +110,7 @@ impl PainterApp {
                         &self.rs,
                         &self.gpu_mesh,
                     );
-                    match out_of_memory_guard(&rs.device, || baker.start(&rs.device, &rs.queue, mesh, &scene, &settings, res)) {
+                    match out_of_memory_guard(&rs.device, || baker.start_owned(&rs.device, &rs.queue, mesh, &mut scene, &settings, res)) {
                         Ok(run) => {
                             self.bake_job = Some(BakeJob::Running(run, key));
                             ctx.request_repaint();

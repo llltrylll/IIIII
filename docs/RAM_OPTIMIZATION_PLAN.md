@@ -27,6 +27,12 @@ Scope: reduce **system RAM and transient CPU-memory peaks** in the existing appl
 - `Engine::image_cache` uses weak references to both texture and encoded bytes, and is shared by sibling Texture Set Engines. A source image remains cached only while a layer/history reference owns it.
 - Project serialization deduplicates Fill images by exact `Arc` pointer identity; opening repeated references uses one weakly cached `Arc<Vec<u8>>` per blob.
 
+### P1 — Release CPU Bake source data during GPU upload
+- The full Bake path moves each large prepared array into its GPU buffer one at a time; each CPU vector is freed immediately after its upload completes.
+- Low-poly corner vertices, name-group indices and cage vertices use the same consuming upload path.
+- Live preview deliberately keeps the borrowed upload path because its prepared scene is cached and reused across preview resolutions.
+- The scene metadata remains available for reporting and dispatch setup; only data already copied to GPU buffers is released.
+
 ### P1 — Avoid flat per-corner Bake colors
 - For Mesh Parts and Materials ID sources, keep only the small triangle ID palette and read the flat color from the ID index already carried in triangle metadata.
 - Allocate and upload per-corner colors only for Vertex Colors mode, where barycentric interpolation is required.
@@ -84,6 +90,7 @@ A candidate is not considered a measured win until this protocol is run on the o
 - [x] Remove redundant Bake BVH triangle arrays and avoid unused ID/material/object copies during CPU preparation.
 - [x] Normalize imported high-poly normals in place and verify indexed BVH output against the existing builder.
 - [x] Remove flat per-corner color storage for Mesh Parts/Materials modes; add a Vulkan GPU regression test for palette lookup.
+- [x] Consume and release prepared Bake CPU arrays incrementally during full-bake GPU upload; retain borrowed uploads for cached live previews.
 - [x] Replace per-node graph debug-string hash allocations with typed hashing and borrowed parameter values; pre-size transient evaluation maps.
 - [x] Verify project spool/file-backed typed reads, shared-blob reuse and Undo RAM-budget tests; latest CI, unit tests, GPU regression and Windows portable package workflows pass.
 - [ ] Capture before/after owner-machine measurements.

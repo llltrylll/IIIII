@@ -1459,6 +1459,92 @@ enum Entry {
     StorageTex(F),
 }
 
+struct SceneUploads {
+    nodes: wgpu::Buffer,
+    tri_pos: wgpu::Buffer,
+    tri_nrm: wgpu::Buffer,
+    tri_vcolor: wgpu::Buffer,
+    parts: wgpu::Buffer,
+    ids: wgpu::Buffer,
+    seg_nodes: wgpu::Buffer,
+    segs: wgpu::Buffer,
+    low_corners: Option<(wgpu::Buffer, usize)>,
+    low_draws: Option<(wgpu::Buffer, Vec<(u32, u32, u32)>)>,
+    cage: Option<wgpu::Buffer>,
+}
+
+impl SceneUploads {
+    fn vertex(device: &wgpu::Device, label: &str, vertices: &[crate::mesh::Vertex]) -> wgpu::Buffer {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::cast_slice(vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        })
+    }
+
+    fn vertex_owned(device: &wgpu::Device, label: &str, vertices: Vec<crate::mesh::Vertex>) -> wgpu::Buffer {
+        Self::vertex(device, label, &vertices)
+    }
+
+    fn indices(device: &wgpu::Device, label: &str, indices: &[u32]) -> wgpu::Buffer {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::cast_slice(indices),
+            usage: wgpu::BufferUsages::INDEX,
+        })
+    }
+
+    fn indices_owned(device: &wgpu::Device, label: &str, indices: Vec<u32>) -> wgpu::Buffer {
+        Self::indices(device, label, &indices)
+    }
+
+    fn borrowed(device: &wgpu::Device, scene: &PreparedScene) -> Self {
+        let low_corners = scene.low_corners.as_ref().map(|vertices| {
+            (Self::vertex(device, "bake low corners", vertices), vertices.len())
+        });
+        let low_draws = scene.low_draws.as_ref().map(|(sorted, draws)| {
+            (Self::indices(device, "bake low by group", sorted), draws.clone())
+        });
+        let cage = scene.cage.as_ref().map(|vertices| Self::vertex(device, "cage", vertices));
+        Self {
+            nodes: GpuBaker::storage(device, "bvh nodes", &scene.nodes),
+            tri_pos: GpuBaker::storage(device, "tri positions", &scene.tri_pos),
+            tri_nrm: GpuBaker::storage(device, "tri normals", &scene.tri_nrm),
+            tri_vcolor: GpuBaker::storage(device, "tri vertex colors", &scene.tri_vcolor),
+            parts: GpuBaker::storage(device, "parts", &scene.parts),
+            ids: GpuBaker::storage(device, "ids", &scene.ids),
+            seg_nodes: GpuBaker::storage(device, "edge bvh nodes", &scene.seg_nodes),
+            segs: GpuBaker::storage(device, "edge segments", &scene.segs),
+            low_corners,
+            low_draws,
+            cage,
+        }
+    }
+
+    /// Moves each large CPU array into a short-lived upload call. The source
+    /// vector is dropped as soon as its GPU buffer has been initialized, rather
+    /// than keeping every prepared array alive until the entire start pass ends.
+    fn owned(device: &wgpu::Device, scene: &mut PreparedScene) -> Self {
+        let nodes = GpuBaker::storage(device, "bvh nodes", &std::mem::take(&mut scene.nodes));
+        let tri_pos = GpuBaker::storage(device, "tri positions", &std::mem::take(&mut scene.tri_pos));
+        let tri_nrm = GpuBaker::storage(device, "tri normals", &std::mem::take(&mut scene.tri_nrm));
+        let tri_vcolor = GpuBaker::storage(device, "tri vertex colors", &std::mem::take(&mut scene.tri_vcolor));
+        let parts = GpuBaker::storage(device, "parts", &std::mem::take(&mut scene.parts));
+        let ids = GpuBaker::storage(device, "ids", &std::mem::take(&mut scene.ids));
+        let seg_nodes = GpuBaker::storage(device, "edge bvh nodes", &std::mem::take(&mut scene.seg_nodes));
+        let segs = GpuBaker::storage(device, "edge segments", &std::mem::take(&mut scene.segs));
+        let low_corners = scene.low_corners.take().map(|vertices| {
+            let count = vertices.len();
+            (Self::vertex_owned(device, "bake low corners", vertices), count)
+        });
+        let low_draws = scene.low_draws.take().map(|(sorted, draws)| {
+            (Self::indices_owned(device, "bake low by group", sorted), draws)
+        });
+        let cage = scene.cage.take().map(|vertices| Self::vertex_owned(device, "cage", vertices));
+        Self { nodes, tri_pos, tri_nrm, tri_vcolor, parts, ids, seg_nodes, segs, low_corners, low_draws, cage }
+    }
+}
+
 pub struct GpuBaker {
     uv: wgpu::RenderPipeline,
     dilate: wgpu::RenderPipeline,
@@ -1819,6 +1905,39 @@ impl GpuBaker {
         settings: &BakeSettings,
         res: u32,
     ) -> BakeRun {
+        let uploads = SceneUploads::borrowed(device, scene);
+        self.start_uploaded(device, queue, mesh, scene, settings, res, uploads)
+    }
+
+    /// Bake a prepared scene that can release its CPU arrays after each upload.
+    /// Live preview uses start because it keeps its prepared scene cached.
+    pub fn start_owned(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        mesh: &GpuMesh,
+        scene: &mut PreparedScene,
+        settings: &BakeSettings,
+        res: u32,
+    ) -> BakeRun {
+        let uploads = SceneUploads::owned(device, scene);
+        self.start_uploaded(device, queue, mesh, scene, settings, res, uploads)
+    }
+
+    fn start_uploaded(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        mesh: &GpuMesh,
+        scene: &PreparedScene,
+        settings: &BakeSettings,
+        res: u32,
+        uploads: SceneUploads,
+    ) -> BakeRun {
+        let SceneUploads {
+            nodes, tri_pos, tri_nrm, tri_vcolor, parts, ids, seg_nodes, segs,
+            low_corners, low_draws, cage: cage_vertices,
+        } = uploads;
         let res = res.min(MAX_BAKE_RES);
         let usage = LAYER_USAGE | wgpu::TextureUsages::STORAGE_BINDING;
         let t = |label: &str, f: F| Tex::new(device, label, res, res, f, usage);
@@ -1832,25 +1951,15 @@ impl GpuBaker {
             let mut pass = gpu::pass(&mut encoder, "bake uv", &att);
             pass.set_pipeline(&self.uv);
             pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-            match (&scene.low_corners, &scene.low_draws) {
+            match (&low_corners, &low_draws) {
                 // The low poly alone: one vertex per corner, carrying its triangle.
-                (Some(corners), _) => {
-                    let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("bake low corners"),
-                        contents: bytemuck::cast_slice(corners),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
+                (Some((vertices, count)), _) => {
                     pass.set_vertex_buffer(0, vertices.slice(..));
-                    pass.draw(0..corners.len() as u32, 0..1);
+                    pass.draw(0..*count as u32, 0..1);
                 }
-                // Each name group draws as instance `group`, which the shader
+                // Each name group draws as instance group, which the shader
                 // records per texel.
-                (None, Some((sorted, draws))) => {
-                    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("bake low by group"),
-                        contents: bytemuck::cast_slice(sorted),
-                        usage: wgpu::BufferUsages::INDEX,
-                    });
+                (None, Some((index_buffer, draws))) => {
                     pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                     for &(first, count, group) in draws {
                         pass.draw_indexed(first..first + count, 0, group..group + 1);
@@ -1878,13 +1987,8 @@ impl GpuBaker {
         }
 
         // The cage, rasterized at the low poly's UVs and dilated the same way.
-        let cage = scene.cage.as_ref().map(|corners| {
+        let cage = cage_vertices.as_ref().map(|vertices| {
             let set = [t("cage pos", F::Rgba32Float), t("cage nrm", F::Rgba16Float), t("cage tan", F::Rgba32Float)];
-            let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("cage"),
-                contents: bytemuck::cast_slice(corners),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
             {
                 let clear = wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT);
                 let att: Vec<_> = set.iter().map(|t| gpu::color_attachment(&t.view, clear)).collect();
@@ -1932,14 +2036,6 @@ impl GpuBaker {
             cust: [[0.0; 4]; CUSTOM_PER_TEXTURE * 3],
         };
         let ubuf = Self::uniform_buffer(device, &uniform);
-        let nodes = Self::storage(device, "bvh nodes", &scene.nodes);
-        let tri_pos = Self::storage(device, "tri positions", &scene.tri_pos);
-        let tri_nrm = Self::storage(device, "tri normals", &scene.tri_nrm);
-        let tri_vcolor = Self::storage(device, "tri vertex colors", &scene.tri_vcolor);
-        let parts = Self::storage(device, "parts", &scene.parts);
-        let ids = Self::storage(device, "ids", &scene.ids);
-        let seg_nodes = Self::storage(device, "edge bvh nodes", &scene.seg_nodes);
-        let segs = Self::storage(device, "edge segments", &scene.segs);
         let counters = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("bake counters"),
             contents: bytemuck::cast_slice(&[0u32, 0u32, 0u32]),
@@ -2006,7 +2102,7 @@ impl GpuBaker {
             edge_max_distance: scene.edge_max_distance,
             id_regions: scene.id_regions.clone(),
             matched_names: scene.matched_names,
-            used_cage: scene.cage.is_some(),
+            used_cage: cage_vertices.is_some(),
             baked: settings.baked_maps(),
             custom: settings.baked_custom().iter().map(|c| c.id).collect(),
             from_cache: false,
@@ -2543,10 +2639,10 @@ pub(crate) mod tests {
         settings: &BakeSettings,
         res: u32,
     ) -> (BakedMaps, Arc<BakeReport>, Tex) {
-        let scene = prepare(mesh, settings, 0).expect("bake source");
+        let mut scene = prepare(mesh, settings, 0).expect("bake source");
         let baker = GpuBaker::new(device);
         let ctx = egui::Context::default();
-        let mut run = baker.start(device, queue, gpu_mesh, &scene, settings, res);
+        let mut run = baker.start_owned(device, queue, gpu_mesh, &mut scene, settings, res);
         let maps = loop {
             if let Some(maps) = baker.pump(&mut run, device, queue, &ctx) {
                 break maps;
@@ -2771,10 +2867,10 @@ pub(crate) mod tests {
 
     fn project(device: &wgpu::Device, queue: &wgpu::Queue, mesh: &Mesh, settings: &BakeSettings, res: u32) -> Projected {
         let gpu_mesh = GpuMesh::new(device, mesh);
-        let scene = prepare(mesh, settings, 0).expect("bake source");
+        let mut scene = prepare(mesh, settings, 0).expect("bake source");
         let baker = GpuBaker::new(device);
         let ctx = egui::Context::default();
-        let mut run = baker.start(device, queue, &gpu_mesh, &scene, settings, res);
+        let mut run = baker.start_owned(device, queue, &gpu_mesh, &mut scene, settings, res);
         let maps = loop {
             if let Some(maps) = baker.pump(&mut run, device, queue, &ctx) {
                 break maps;
