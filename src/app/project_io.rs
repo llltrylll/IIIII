@@ -328,7 +328,8 @@ fn prepare_project_file(
         raw: true,
         cleanup_path: cleanup.0.take(),
         shared_blobs: std::sync::Mutex::new(std::collections::HashMap::new()),
-    };
+    }; 
+    validate_project_payloads(&manifest, &reader, cancelled)?;
 
     // Prepare the mesh, derived UV edges and picking BVH here rather than
     // rebuilding them synchronously after the UI has discarded its old mesh.
@@ -376,6 +377,9 @@ fn prepare_project_file(
         .map(|values| values.iter().map(|v| v.as_bool().unwrap_or(false)).take(mesh.objects.len()).collect())
         .unwrap_or_else(|| vec![false; mesh.objects.len()]);
     let any_hidden = hidden_objects.iter().any(|hidden| *hidden);
+    if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+        return Err("Project loading cancelled.".into());
+    }
     let bvh = std::sync::Arc::new(if any_hidden {
         crate::bvh::Bvh::from_mesh_where(&mesh, |tri| {
             let object = mesh.tri_object.get(tri).copied().unwrap_or(u32::MAX) as usize;
@@ -527,6 +531,107 @@ impl Reader {
         }
         Ok(Some(output))
     }
+}
+
+/// Validates every payload the UI-side project apply phase may touch. The
+/// worker checks texture sizes, image decodability and mask generators before
+/// the existing document is changed.
+fn validate_project_payloads(
+    manifest: &Value,
+    reader: &Reader,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<(), String> {
+    let bad = "project manifest is incomplete or damaged";
+    let texture = |value: &Value, label: &str| -> Result<(), String> {
+        if value.is_null() {
+            return Ok(());
+        }
+        let name = s(value, "format").ok_or_else(|| format!("{label}: texture without a format"))?;
+        let format = FORMATS.into_iter().find(|format| format!("{format:?}") == name)
+            .ok_or_else(|| format!("{label}: unknown texture format '{name}'"))?;
+        let width = value["width"].as_u64().ok_or_else(|| format!("{label}: missing width"))?;
+        let height = value["height"].as_u64().ok_or_else(|| format!("{label}: missing height"))?;
+        if width == 0 || height == 0 || width > u32::MAX as u64 || height > u32::MAX as u64 {
+            return Err(format!("{label}: invalid texture dimensions"));
+        }
+        let expected = width.checked_mul(height)
+            .and_then(|pixels| pixels.checked_mul(crate::gpu::bytes_per_texel(format) as u64))
+            .ok_or_else(|| format!("{label}: texture size overflows"))?;
+        let index = value["blob"].as_u64().ok_or_else(|| format!("{label}: missing texture blob"))? as usize;
+        let (_, actual) = reader.blobs.get(index).ok_or_else(|| format!("{label}: texture blob {index} is missing"))?;
+        if *actual as u64 != expected {
+            return Err(format!("{label}: texture payload has {} bytes; expected {expected}", actual));
+        }
+        Ok(())
+    };
+
+    let sets: Vec<&Value> = match manifest["texture_sets"].as_array() {
+        Some(values) if !values.is_empty() => values.iter().collect(),
+        _ => vec![manifest],
+    };
+    for (set_index, set) in sets.iter().enumerate() {
+        if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+            return Err("Project loading cancelled.".into());
+        }
+        let layers = set["layers_bottom_to_top"].as_array()
+            .ok_or_else(|| bad.to_string())?;
+        for (layer_index, layer) in layers.iter().enumerate() {
+            if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+                return Err("Project loading cancelled.".into());
+            }
+            let label = format!("texture set {set_index}, layer {layer_index}");
+            if layer["id"].as_u64().is_none() {
+                return Err(format!("{label}: layer without an ID"));
+            }
+            let content = &layer["content"];
+            match s(content, "kind") {
+                Some("paint") => {
+                    let channels = content["channels"].as_array()
+                        .ok_or_else(|| format!("{label}: paint layer has no channel list"))?;
+                    for (channel, value) in channels.iter().enumerate().take(crate::engine::CHANNELS) {
+                        texture(value, &format!("{label}, channel {channel}"))?;
+                    }
+                }
+                Some("fill" | "folder") => {}
+                _ => return Err(format!("{label}: unknown layer content")),
+            }
+
+            if let Some(mask) = layer.get("mask").filter(|mask| !mask.is_null()) {
+                if let Some(paint) = mask.get("paint").filter(|paint| !paint.is_null()) {
+                    texture(paint, &format!("{label}, mask"))?;
+                }
+                if let Some(generator) = mask.get("generator").filter(|generator| !generator.is_null()) {
+                    generator_from(generator).map_err(|error| format!("{label}, mask generator: {error}"))?;
+                }
+                for (mask_layer_index, mask_layer) in mask["layers"].as_array().into_iter().flatten().enumerate() {
+                    if let Some(generator) = mask_layer["source"].get("generator") {
+                        generator_from(generator).map_err(|error| {
+                            format!("{label}, mask layer {mask_layer_index}: {error}")
+                        })?;
+                    }
+                }
+            }
+
+            for (channel, image_value) in layer["images"].as_array().into_iter().flatten()
+                .enumerate().take(crate::engine::CHANNELS)
+            {
+                if image_value.is_null() {
+                    continue;
+                }
+                let bytes = reader.blob(&image_value["data"])
+                    .map_err(|error| format!("{label}, fill image channel {channel}: {error}"))?;
+                image::load_from_memory(&bytes).map_err(|error| {
+                    format!("{label}, fill image channel {channel}: {error}")
+                })?;
+                // The encoded bytes and decoded image are dropped before the next source.
+            }
+        }
+
+        for (fix_index, fix) in set["map_fixes"].as_array().into_iter().flatten().enumerate() {
+            texture(&fix["texture"], &format!("texture set {set_index}, map fix {fix_index}"))?;
+        }
+    }
+    Ok(())
 }
 
 fn f(v: &Value, key: &str, default: f32) -> f32 {
