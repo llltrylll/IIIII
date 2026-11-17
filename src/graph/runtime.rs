@@ -338,8 +338,8 @@ impl Runtime {
         // values and what feeds it.
         struct Plan<'a> {
             def: &'a NodeDef,
-            values: Vec<&'a Value>,
-            inputs: Vec<Option<u64>>,
+            values: [Option<&'a Value>; def::MAX_PARAMS],
+            inputs: [Option<u64>; MAX_INPUTS],
             hash: u64,
         }
         let mut plans: HashMap<u64, Plan> = HashMap::with_capacity(order.len());
@@ -350,21 +350,26 @@ impl Runtime {
                 self.rendered.remove(&id);
                 continue;
             };
-            // Values live in the graph or node definition. Borrow them instead
-            // of cloning each parameter (notably image paths) every evaluation.
-            let values: Vec<&Value> = def.params.iter().map(|p| lib.value_ref(node, &p.name).unwrap_or(&p.default)).collect();
-            let inputs: Vec<Option<u64>> =
-                def.inputs.iter().map(|i| node.links.get(&i.name).copied().filter(|from| plans.contains_key(from))).collect();
+            // Fixed-size scratch arrays keep per-node values and input slots
+            // inline in the plan instead of allocating two small Vecs per node.
+            let mut values = [None; def::MAX_PARAMS];
+            for (i, param) in def.params.iter().take(def::MAX_PARAMS).enumerate() {
+                values[i] = Some(lib.value_ref(node, &param.name).unwrap_or(&param.default));
+            }
+            let mut inputs = [None; MAX_INPUTS];
+            for (i, input) in def.inputs.iter().take(MAX_INPUTS).enumerate() {
+                inputs[i] = node.links.get(&input.name).copied().filter(|from| plans.contains_key(from));
+            }
             let uses_maps = def.surface || def.params.iter().any(|p| p.kind == ParamKind::MeshMap);
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             def.source.hash(&mut hasher);
-            values.len().hash(&mut hasher);
-            for value in &values {
+            def.params.len().hash(&mut hasher);
+            for value in values.iter().take(def.params.len()).flatten() {
                 hash_value(value, &mut hasher);
             }
             res.hash(&mut hasher);
-            inputs.len().hash(&mut hasher);
-            for input in &inputs {
+            def.inputs.len().hash(&mut hasher);
+            for input in inputs.iter().take(def.inputs.len()) {
                 match input {
                     Some(from) => {
                         1u8.hash(&mut hasher);
@@ -512,7 +517,7 @@ impl Runtime {
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         def: &NodeDef,
-        values: &[&Value],
+        values: &[Option<&Value>],
         inputs: &[Option<u64>],
         res: u32,
         maps: MeshMaps,
@@ -523,10 +528,11 @@ impl Runtime {
             return Err("needs a mesh: this node reads the model's surface".into());
         }
         // Image and mesh map slots.
-        let mut slots: Vec<Option<Arc<Tex>>> = vec![None; MAX_IMAGES];
-        let mut map_slots: Vec<Option<usize>> = vec![None; MAX_IMAGES];
+        let mut slots: [Option<Arc<Tex>>; MAX_IMAGES] = std::array::from_fn(|_| None);
+        let mut map_slots: [Option<usize>; MAX_IMAGES] = std::array::from_fn(|_| None);
         let mut comp_bits = 0u32;
-        for (pi, v) in values.iter().enumerate() {
+        for (pi, value) in values.iter().enumerate() {
+            let Some(v) = value else { continue };
             let Some(slot) = def.image_slot(pi) else { continue };
             match v {
                 Value::Image(Some(path)) => match self.image(path)? {
@@ -543,8 +549,10 @@ impl Runtime {
             }
         }
         let mut u = NodeUniform { p: [[0.0; 4]; def::MAX_PARAMS], defaults: [[0.0; 4]; MAX_INPUTS], info: [0.0; 4] };
-        for (i, v) in values.iter().enumerate() {
-            u.p[i] = def::pack(v);
+        for (i, value) in values.iter().enumerate() {
+            if let Some(v) = value {
+                u.p[i] = def::pack(v);
+            }
         }
         let mut bits = 0u32;
         for (i, inp) in def.inputs.iter().enumerate() {
@@ -564,15 +572,18 @@ impl Runtime {
                 usage: wgpu::BufferUsages::UNIFORM,
             })
         };
-        let input_tex: Vec<Option<Arc<Tex>>> = inputs.iter().map(|i| i.and_then(|f| self.rendered.get(&f).and_then(|r| r.tex.clone()))).collect();
+        let input_tex: [Option<Arc<Tex>>; MAX_INPUTS] = std::array::from_fn(|i| {
+            inputs.get(i).copied().flatten().and_then(|f| self.rendered.get(&f).and_then(|r| r.tex.clone()))
+        });
         // A fresh texture (layers may still hold the previous one), or one
         // a lean evaluation is done with.
         let out = reuse.unwrap_or_else(|| Arc::new(Tex::new(device, &def.id, res, res, FORMAT, LAYER_USAGE)));
         {
-            let mut entries = vec![
+            let mut entries = Vec::with_capacity(2 + MAX_INPUTS + MAX_IMAGES);
+            entries.extend([
                 wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-            ];
+            ]);
             for i in 0..MAX_INPUTS {
                 let view = input_tex.get(i).and_then(|t| t.as_ref()).map_or(&self.dummy.view, |t| &t.view);
                 entries.push(wgpu::BindGroupEntry { binding: 2 + i as u32, resource: wgpu::BindingResource::TextureView(view) });
