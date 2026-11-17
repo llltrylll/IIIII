@@ -18,6 +18,7 @@ use crate::post::Tonemap;
 use crate::viewport::{Background, OrbitCam};
 use eframe::{egui, wgpu};
 use serde_json::{Value, json};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 8] = b"MPPROJ\x00\x01";
@@ -588,19 +589,28 @@ impl PainterApp {
             "view": view,
         });
         let text = serde_json::to_vec(&manifest).map_err(|e| e.to_string())?;
-        let mut out = Vec::with_capacity(text.len() + w.blobs.iter().map(|b| b.len() + 8).sum::<usize>() + 32);
-        out.extend_from_slice(MAGIC);
-        out.extend_from_slice(&(text.len() as u64).to_le_bytes());
-        out.extend_from_slice(&text);
-        out.extend_from_slice(&(w.blobs.len() as u64).to_le_bytes());
-        for blob in &w.blobs {
-            out.extend_from_slice(&(blob.len() as u64).to_le_bytes());
-            out.extend_from_slice(blob);
-        }
+        // The compressed blobs are already held by Writer. Do not allocate
+        // a second Vec as large as the final project just to write it.
+        let total_bytes = MAGIC.len()
+            + 8
+            + text.len()
+            + 8
+            + w.blobs.iter().map(|blob| 8 + blob.len()).sum::<usize>();
         let tmp = path.with_extension("mpp.tmp");
-        std::fs::write(&tmp, &out).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
+        let file = std::fs::File::create(&tmp).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
+        let mut out = std::io::BufWriter::new(file);
+        out.write_all(MAGIC).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
+        out.write_all(&(text.len() as u64).to_le_bytes()).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
+        out.write_all(&text).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
+        out.write_all(&(w.blobs.len() as u64).to_le_bytes()).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
+        for blob in &w.blobs {
+            out.write_all(&(blob.len() as u64).to_le_bytes()).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
+            out.write_all(blob).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
+        }
+        out.flush().map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
+        drop(out);
         std::fs::rename(&tmp, path).map_err(|e| format!("can't replace {}: {e}", path.display()))?;
-        Ok(out.len())
+        Ok(total_bytes)
     }
 
     fn remember_recent(&mut self, path: &Path) {
