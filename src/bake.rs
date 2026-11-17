@@ -518,6 +518,26 @@ impl BakeSettings {
     }
 }
 
+/// A source vertex stored once for the indexed bake BVH.
+/// Position occupies xyz; normal_curvature stores the shading normal and
+/// vertex curvature in w. Both vectors are 16-byte WGSL storage values.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BakeVertex {
+    position: [f32; 4],
+    normal_curvature: [f32; 4],
+}
+
+/// One BVH-ordered triangle: three source vertex indices plus per-triangle
+/// part, ID and name-match group metadata. 32 bytes instead of three expanded
+/// position and normal pairs (96 bytes) for every triangle.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BakeTriangle {
+    indices: [u32; 4],
+    metadata: [u32; 4],
+}
+
 /// GPU-ready bake source.
 pub struct PreparedScene {
     /// Baking the low poly alone: the curvature (1/length) from which its
@@ -525,8 +545,8 @@ pub struct PreparedScene {
     /// threshold decide).
     edge_seed_curvature: f32,
     nodes: Vec<[f32; 4]>,
-    tri_pos: Vec<[f32; 4]>,
-    tri_nrm: Vec<[f32; 4]>,
+    bake_vertices: Vec<BakeVertex>,
+    bake_triangles: Vec<BakeTriangle>,
     /// Per-corner sRGB colors for Vertex Colors mode; empty for flat ID modes.
     tri_vcolor: Vec<[f32; 4]>,
     parts: Vec<[f32; 4]>,
@@ -1286,11 +1306,9 @@ pub fn prepare_cancellable(
     // `vertex_curvature`) and rides in the normal's w.
     let curvature = vertex_curvature(&positions, &normals, &indices, 1.0 / settings.curvature_scale_for(low).max(1e-6));
     check_prepare_cancelled(cancel)?;
-    let mut tri_pos = Vec::with_capacity(bvh_order.len() * 3);
-    let mut tri_nrm = Vec::with_capacity(bvh_order.len() * 3);
-    // Flat mesh-part/material IDs come from the compact `ids` palette in
-    // the shader. A per-corner buffer is needed only for interpolated vertex
-    // colors; leaving it empty avoids 48 bytes per triangle in the common modes.
+    let mut bake_triangles = Vec::with_capacity(bvh_order.len());
+    // Flat mesh-part/material IDs come from the compact palette. Only true
+    // vertex-color mode retains a separate per-corner color payload.
     let has_vertex_colors = settings.id_source == IdSource::VertexColors && tri_vertex_color.as_ref().is_some_and(|colors| !colors.is_empty());
     let mut tri_vcolor = if has_vertex_colors { Vec::with_capacity(bvh_order.len() * 3) } else { Vec::new() };
     for (i, &t) in bvh_order.iter().enumerate() {
@@ -1298,16 +1316,14 @@ pub fn prepare_cancellable(
             check_prepare_cancelled(cancel)?;
         }
         let t = t as usize;
-        // Per-triangle attributes ride in the w components: part index, ID
-        // index, name group.
-        let w = [f32::from_bits(tri_part[t]), f32::from_bits(tri_id[t]), f32::from_bits(src_group.get(t).copied().unwrap_or(0))];
-        let flat_id = ids.get(tri_id[t] as usize).copied().unwrap_or([0.5, 0.5, 0.5, 1.0]);
-        for (k, &v) in indices[t * 3..t * 3 + 3].iter().enumerate() {
-            let p = positions[v as usize];
-            let n = normals[v as usize];
-            tri_pos.push([p.x, p.y, p.z, w[k]]);
-            tri_nrm.push([n.x, n.y, n.z, curvature.get(v as usize).copied().unwrap_or(0.0)]);
-            if has_vertex_colors {
+        let tri = &indices[t * 3..t * 3 + 3];
+        bake_triangles.push(BakeTriangle {
+            indices: [tri[0], tri[1], tri[2], 0],
+            metadata: [tri_part[t], tri_id[t], src_group.get(t).copied().unwrap_or(0), 0],
+        });
+        if has_vertex_colors {
+            let flat_id = ids.get(tri_id[t] as usize).copied().unwrap_or([0.5, 0.5, 0.5, 1.0]);
+            for k in 0..3 {
                 let color = tri_vertex_color.as_ref().and_then(|colors| colors.get(t)).map(|tri| tri[k])
                     .map(|rgb| [rgb[0] as f32 / 255.0, rgb[1] as f32 / 255.0, rgb[2] as f32 / 255.0, 1.0])
                     .unwrap_or(flat_id);
@@ -1320,7 +1336,6 @@ pub fn prepare_cancellable(
     drop(tri_id);
     drop(tri_color);
     drop(tri_vertex_color);
-    drop(curvature);
     drop(src_group);
 
     // A low poly's interpolated normals give unreliable texel curvature, so
@@ -1343,12 +1358,28 @@ pub fn prepare_cancellable(
     check_prepare_cancelled(cancel)?;
     // The remaining preparation stages use only packed data and the original low mesh.
     drop(tri_part);
-    drop(positions);
-    drop(normals);
-    drop(indices);
     let edge_seed_curvature = bevels.unwrap_or(0.0);
     let hard_edge_count = convex.iter().chain(&concave).filter(|s| s.half_width <= 0.0).count();
     let (seg_nodes, segs, edge_roots) = pack_segments([convex, concave]);
+
+    // Materialize one packed record per source vertex, not one per triangle
+    // corner. Defer this until feature-edge preparation has released its
+    // scratch arrays, then discard the source CPU arrays immediately.
+    let mut bake_vertices = Vec::with_capacity(positions.len());
+    for (i, p) in positions.iter().enumerate() {
+        if i.is_multiple_of(16384) {
+            check_prepare_cancelled(cancel)?;
+        }
+        let n = normals.get(i).copied().unwrap_or(Vec3::ZERO);
+        bake_vertices.push(BakeVertex {
+            position: [p.x, p.y, p.z, 0.0],
+            normal_curvature: [n.x, n.y, n.z, curvature.get(i).copied().unwrap_or(0.0)],
+        });
+    }
+    drop(curvature);
+    drop(positions);
+    drop(normals);
+    drop(indices);
 
     // Baking the low poly alone, every texel already lies on a known low-poly
     // triangle. The raster records it (as the BVH slot, in the tangent w,
@@ -1385,8 +1416,8 @@ pub fn prepare_cancellable(
     check_prepare_cancelled(cancel)?;
     Ok(PreparedScene {
         nodes,
-        tri_pos,
-        tri_nrm,
+        bake_vertices,
+        bake_triangles,
         tri_vcolor,
         parts,
         ids,
@@ -1562,8 +1593,8 @@ enum Entry {
 
 struct SceneUploads {
     nodes: wgpu::Buffer,
-    tri_pos: wgpu::Buffer,
-    tri_nrm: wgpu::Buffer,
+    bake_vertices: wgpu::Buffer,
+    bake_triangles: wgpu::Buffer,
     tri_vcolor: wgpu::Buffer,
     parts: wgpu::Buffer,
     ids: wgpu::Buffer,
@@ -1609,8 +1640,8 @@ impl SceneUploads {
         let cage = scene.cage.as_ref().map(|vertices| Self::vertex(device, "cage", vertices));
         Self {
             nodes: GpuBaker::storage(device, "bvh nodes", &scene.nodes),
-            tri_pos: GpuBaker::storage(device, "tri positions", &scene.tri_pos),
-            tri_nrm: GpuBaker::storage(device, "tri normals", &scene.tri_nrm),
+            bake_vertices: GpuBaker::storage(device, "tri positions", &scene.bake_vertices),
+            bake_triangles: GpuBaker::storage(device, "tri normals", &scene.bake_triangles),
             tri_vcolor: GpuBaker::storage(device, "tri vertex colors", &scene.tri_vcolor),
             parts: GpuBaker::storage(device, "parts", &scene.parts),
             ids: GpuBaker::storage(device, "ids", &scene.ids),
@@ -1627,8 +1658,8 @@ impl SceneUploads {
     /// than keeping every prepared array alive until the entire start pass ends.
     fn owned(device: &wgpu::Device, scene: &mut PreparedScene) -> Self {
         let nodes = GpuBaker::storage(device, "bvh nodes", &std::mem::take(&mut scene.nodes));
-        let tri_pos = GpuBaker::storage(device, "tri positions", &std::mem::take(&mut scene.tri_pos));
-        let tri_nrm = GpuBaker::storage(device, "tri normals", &std::mem::take(&mut scene.tri_nrm));
+        let bake_vertices = GpuBaker::storage(device, "tri positions", &std::mem::take(&mut scene.bake_vertices));
+        let bake_triangles = GpuBaker::storage(device, "tri normals", &std::mem::take(&mut scene.bake_triangles));
         let tri_vcolor = GpuBaker::storage(device, "tri vertex colors", &std::mem::take(&mut scene.tri_vcolor));
         let parts = GpuBaker::storage(device, "parts", &std::mem::take(&mut scene.parts));
         let ids = GpuBaker::storage(device, "ids", &std::mem::take(&mut scene.ids));
@@ -1642,7 +1673,7 @@ impl SceneUploads {
             (Self::indices_owned(device, "bake low by group", sorted), draws)
         });
         let cage = scene.cage.take().map(|vertices| Self::vertex_owned(device, "cage", vertices));
-        Self { nodes, tri_pos, tri_nrm, tri_vcolor, parts, ids, seg_nodes, segs, low_corners, low_draws, cage }
+        Self { nodes, bake_vertices, bake_triangles, tri_vcolor, parts, ids, seg_nodes, segs, low_corners, low_draws, cage }
     }
 }
 
@@ -1686,8 +1717,8 @@ pub struct BakeRun {
     /// The custom map textures, four maps each, and each one's settings.
     custom: Vec<(Tex, [[f32; 4]; CUSTOM_PER_TEXTURE * 3])>,
     nodes: wgpu::Buffer,
-    tri_pos: wgpu::Buffer,
-    tri_nrm: wgpu::Buffer,
+    bake_vertices: wgpu::Buffer,
+    bake_triangles: wgpu::Buffer,
     seg_nodes: wgpu::Buffer,
     segs: wgpu::Buffer,
     /// Ray-traced tiles: x, y and the pass (0 occlusion, 1 custom maps).
@@ -1932,9 +1963,9 @@ impl GpuBaker {
         })
     }
 
-    fn storage(device: &wgpu::Device, label: &str, data: &[[f32; 4]]) -> wgpu::Buffer {
-        // Empty storage bindings are invalid; keep at least one element.
-        let fallback = [[0.0f32; 4]];
+    fn storage<T: bytemuck::Pod>(device: &wgpu::Device, label: &str, data: &[T]) -> wgpu::Buffer {
+        // Empty storage bindings are invalid; keep one zeroed element.
+        let fallback = [T::zeroed()];
         let data = if data.is_empty() { &fallback[..] } else { data };
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
@@ -2036,7 +2067,7 @@ impl GpuBaker {
         uploads: SceneUploads,
     ) -> BakeRun {
         let SceneUploads {
-            nodes, tri_pos, tri_nrm, tri_vcolor, parts, ids, seg_nodes, segs,
+            nodes, bake_vertices, bake_triangles, tri_vcolor, parts, ids, seg_nodes, segs,
             low_corners, low_draws, cage: cage_vertices,
         } = uploads;
         let res = res.min(MAX_BAKE_RES);
@@ -2165,8 +2196,8 @@ impl GpuBaker {
                 (2, v(&low[1])),
                 (3, v(&low[2])),
                 (4, nodes.as_entire_binding()),
-                (5, tri_pos.as_entire_binding()),
-                (6, tri_nrm.as_entire_binding()),
+                (5, bake_vertices.as_entire_binding()),
+                (6, bake_triangles.as_entire_binding()),
                 (7, parts.as_entire_binding()),
                 (39, tri_vcolor.as_entire_binding()),
                 (8, ids.as_entire_binding()),
@@ -2257,8 +2288,8 @@ impl GpuBaker {
             maps: Some(maps),
             custom,
             nodes,
-            tri_pos,
-            tri_nrm,
+            bake_vertices,
+            bake_triangles,
             seg_nodes,
             segs,
             tiles,
@@ -2294,8 +2325,8 @@ impl GpuBaker {
                         (0, ubuf.as_entire_binding()),
                         (1, v(&run.low[0])),
                         (4, run.nodes.as_entire_binding()),
-                        (5, run.tri_pos.as_entire_binding()),
-                        (6, run.tri_nrm.as_entire_binding()),
+                        (5, run.bake_vertices.as_entire_binding()),
+                        (6, run.bake_triangles.as_entire_binding()),
                         (13, v(&run.surf_pos)),
                         (14, v(&run.surf_nrm)),
                         (15, v(&run.occ)),
@@ -2316,8 +2347,8 @@ impl GpuBaker {
                         (0, ubuf.as_entire_binding()),
                         (1, v(&run.low[0])),
                         (4, run.nodes.as_entire_binding()),
-                        (5, run.tri_pos.as_entire_binding()),
-                        (6, run.tri_nrm.as_entire_binding()),
+                        (5, run.bake_vertices.as_entire_binding()),
+                        (6, run.bake_triangles.as_entire_binding()),
                         (13, v(&run.surf_pos)),
                         (14, v(&run.surf_nrm)),
                         (28, v(&run.surf_geo)),
@@ -2556,6 +2587,35 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn indexed_bake_payload_preserves_triangles_and_reduces_common_case_storage() {
+        let mesh = Primitive::Sphere.build();
+        let scene = prepare(&mesh, &BakeSettings::default(), 0).expect("prepare indexed source");
+        assert_eq!(scene.bake_vertices.len(), mesh.vertices.len());
+        assert_eq!(scene.bake_triangles.len(), mesh.indices.len() / 3);
+        assert_eq!(std::mem::size_of::<BakeVertex>(), 32);
+        assert_eq!(std::mem::size_of::<BakeTriangle>(), 32);
+
+        let mut source: Vec<[u32; 3]> = mesh.indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect();
+        let mut packed: Vec<[u32; 3]> = scene.bake_triangles.iter().map(|t| [t.indices[0], t.indices[1], t.indices[2]]).collect();
+        source.sort_unstable();
+        packed.sort_unstable();
+        assert_eq!(packed, source, "BVH ordering must preserve each source triangle exactly");
+
+        for (i, vertex) in scene.bake_vertices.iter().enumerate() {
+            assert_eq!(&vertex.position[..3], &mesh.vertices[i].pos);
+            assert_eq!(&vertex.normal_curvature[..3], &mesh.vertices[i].normal);
+            assert!(vertex.normal_curvature[3].is_finite());
+        }
+        assert!(scene.bake_triangles.iter().all(|t| t.indices[3] == 0 && t.metadata[3] == 0));
+
+        // Old payload: 3 corners * 2 vec4 values per triangle = 96 bytes/T.
+        // Indexed payload: one 32-byte record per vertex and per triangle.
+        let expanded = scene.bake_triangles.len() * 96;
+        let indexed = scene.bake_vertices.len() * 32 + scene.bake_triangles.len() * 32;
+        assert!(indexed < expanded, "sphere source should benefit from shared vertex indexing ({indexed} >= {expanded})");
+    }
+
+    #[test]
     fn bevels_read_as_one_edge_band() {
         let mesh = Primitive::RoundedCube.build();
         let positions: Vec<Vec3> = mesh.vertices.iter().map(|v| Vec3::from_array(v.pos)).collect();
@@ -2756,8 +2816,8 @@ pub(crate) mod tests {
         // The owned upload path must release every large CPU payload as soon
         // as its corresponding GPU buffer has been created.
         assert!(scene.nodes.is_empty());
-        assert!(scene.tri_pos.is_empty());
-        assert!(scene.tri_nrm.is_empty());
+        assert!(scene.bake_vertices.is_empty());
+        assert!(scene.bake_triangles.is_empty());
         assert!(scene.tri_vcolor.is_empty());
         assert!(scene.parts.is_empty());
         assert!(scene.ids.is_empty());
