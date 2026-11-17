@@ -1544,6 +1544,9 @@ mod tests {
         let mut writer = Writer::new(&project).expect("create project blob spool");
         let vertices = writer.blob(bytemuck::cast_slice(&mesh.vertices));
         let indices = writer.blob(bytemuck::cast_slice(&mesh.indices));
+        // Real project saves include this blob even when the mesh has no objects.
+        let empty_tri_object: Vec<u32> = Vec::new();
+        let tri_object = writer.blob(bytemuck::cast_slice(&empty_tri_object));
         let manifest = json!({
             "active_channels": vec![true; crate::engine::CHANNELS],
             "version": 4,
@@ -1554,6 +1557,7 @@ mod tests {
                 "vertices": vertices,
                 "indices": indices,
                 "objects": [],
+                "tri_object": tri_object,
                 "hidden_objects": []
             },
             "texture_sets": [{
