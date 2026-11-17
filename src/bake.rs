@@ -10,6 +10,7 @@ use crate::gpu::{self, GpuMesh, LAYER_USAGE, Tex};
 use crate::mesh::{HighPoly, Mesh, smooth_normals, weld_positions};
 use eframe::{egui, wgpu};
 use glam::Vec3;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1019,52 +1020,85 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
     let raster = low.sets.get(set).map_or(0..low_tris as u32, |s| s.tris.clone());
     let (positions, normals, indices, tri_material, material_count, source, src_objects, tri_color, tri_vertex_color) = match &settings.high_poly {
         Some(path) => {
-            let hp = HighPoly::load(path, low.center, low.scale)?;
-            let objects = (hp.tri_object, hp.objects);
-            // Imported normals need not be unit length; `vertex_curvature`
-            // measures how fast they turn, which only means curvature for unit ones.
-            let normals: Vec<Vec3> = hp.normals.iter().map(|n| n.normalize_or_zero()).collect();
-            (hp.positions, normals, hp.indices, hp.tri_material, hp.material_count, format!("{} (high poly)", hp.name), Some(objects), hp.tri_color, hp.tri_vertex_color)
+            let mut hp = HighPoly::load(path, low.center, low.scale)?;
+            // Normalize in place instead of retaining a second normal array.
+            for normal in &mut hp.normals {
+                *normal = normal.normalize_or_zero();
+            }
+            let objects = if settings.match_by_name && !low.objects.is_empty() && hp.tri_object.len() == hp.indices.len() / 3 {
+                Some((std::mem::take(&mut hp.tri_object), std::mem::take(&mut hp.objects)))
+            } else {
+                None
+            };
+            let tri_material = if settings.id_source == IdSource::Materials && hp.material_count > 1 {
+                hp.tri_material
+            } else {
+                Vec::new()
+            };
+            let (tri_color, tri_vertex_color) = if settings.id_source == IdSource::VertexColors {
+                (hp.tri_color, hp.tri_vertex_color)
+            } else {
+                (None, None)
+            };
+            (
+                hp.positions,
+                hp.normals,
+                hp.indices,
+                tri_material,
+                hp.material_count,
+                format!("{} (high poly)", hp.name),
+                objects,
+                tri_color,
+                tri_vertex_color,
+            )
         }
         None => {
             let positions: Vec<Vec3> = low.vertices.iter().map(|v| Vec3::from_array(v.pos)).collect();
             let normals: Vec<Vec3> = low.vertices.iter().map(|v| Vec3::from_array(v.normal)).collect();
-            // The low poly's materials are its texture sets.
-            let mut tri_material = vec![0; low_tris];
-            for (k, s) in low.sets.iter().enumerate() {
-                tri_material[s.tris.start as usize..s.tris.end as usize].fill(k as u32);
-            }
+            // Material IDs are only needed when explicitly selected. Vertex
+            // color payloads are copied only for Vertex Color ID mode.
             let count = low.sets.len().max(1) as u32;
-            (positions, normals, low.indices.clone(), tri_material, count, format!("{} (low poly)", low.name), None, low.tri_color.clone(), low.tri_vertex_color.clone())
+            let mut tri_material = if settings.id_source == IdSource::Materials && count > 1 {
+                vec![0; low_tris]
+            } else {
+                Vec::new()
+            };
+            if !tri_material.is_empty() {
+                for (k, s) in low.sets.iter().enumerate() {
+                    tri_material[s.tris.start as usize..s.tris.end as usize].fill(k as u32);
+                }
+            }
+            let (tri_color, tri_vertex_color) = if settings.id_source == IdSource::VertexColors {
+                (low.tri_color.clone(), low.tri_vertex_color.clone())
+            } else {
+                (None, None)
+            };
+            (positions, normals, low.indices.clone(), tri_material, count, format!("{} (low poly)", low.name), None, tri_color, tri_vertex_color)
         }
     };
 
     // Name groups: 1-based per distinct low-poly base name; 0 = unmatched
     // (an unmatched low part sees everything, an unmatched high part is seen
     // by everyone).
-    let mut src_group = vec![0u32; indices.len() / 3];
+    let mut src_group = Vec::new();
     let mut low_draws = None;
     let mut matched_names = 0;
     if let (true, Some((src_tri_object, src_names))) = (settings.match_by_name, &src_objects)
-        && !low.objects.is_empty() && low.tri_object.len() == low_tris && src_tri_object.len() == src_group.len() {
+        && !low.objects.is_empty() && low.tri_object.len() == low_tris && src_tri_object.len() == indices.len() / 3 {
             let mut groups: HashMap<String, u32> = HashMap::new();
             for name in &low.objects {
                 let n = groups.len() as u32 + 1;
                 groups.entry(base_name(name)).or_insert(n);
             }
             let src_by_object: Vec<u32> = src_names.iter().map(|n| groups.get(&base_name(n)).copied().unwrap_or(0)).collect();
-            for (g, &o) in src_group.iter_mut().zip(src_tri_object) {
-                *g = src_by_object[o as usize];
-            }
             let matched: std::collections::HashSet<u32> = src_by_object.iter().copied().filter(|&g| g > 0).collect();
             matched_names = matched.len();
             if matched_names > 0 {
+                src_group = src_tri_object.iter().map(|&o| src_by_object[o as usize]).collect();
                 let low_by_object: Vec<u32> =
                     low.objects.iter().map(|n| groups[&base_name(n)]).map(|g| if matched.contains(&g) { g } else { 0 }).collect();
                 let tris = raster.start as usize..raster.end as usize;
                 low_draws = Some(group_draws(&low.indices, tris, |t| low_by_object[low.tri_object[t] as usize]));
-            } else {
-                src_group.fill(0);
             }
         }
 
@@ -1151,14 +1185,10 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
         }
         _ => None,
     };
-    let tri_id: Vec<u32> = match &color_ids {
-        Some((per_tri, _)) => per_tri.clone(),
-        None if use_materials => tri_material.clone(),
-        None => tri_part.clone(),
-    };
-    let ids: Vec<[f32; 4]> = match color_ids {
-        Some((_, palette)) => palette,
-        None => (0..if use_materials { material_count } else { part_count }).map(id_color).collect(),
+    let (tri_id, ids): (Cow<'_, [u32]>, Vec<[f32; 4]>) = match color_ids {
+        Some((per_tri, palette)) => (Cow::Owned(per_tri), palette),
+        None if use_materials => (Cow::Owned(tri_material), (0..material_count).map(id_color).collect()),
+        None => (Cow::Borrowed(&tri_part), (0..part_count).map(id_color).collect()),
     };
     let mut id_regions: Vec<IdRegion> = ids
         .iter()
@@ -1176,21 +1206,21 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
         }
     }
 
-    let tris: Vec<[Vec3; 3]> =
-        indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]].map(|i| positions[i as usize])).collect();
-    let bvh = Bvh::build(tris);
+    // Baking needs node bounds and triangle order, not a second CPU triangle
+    // array. Build those directly from the source indices.
+    let (bvh_nodes, bvh_order) = Bvh::build_ordered(&positions, &indices);
 
     // Curvature comes from the source mesh's vertices (see
     // `vertex_curvature`) and rides in the normal's w.
     let curvature = vertex_curvature(&positions, &normals, &indices, 1.0 / settings.curvature_scale_for(low).max(1e-6));
-    let mut tri_pos = Vec::with_capacity(bvh.order.len() * 3);
-    let mut tri_nrm = Vec::with_capacity(bvh.order.len() * 3);
-    let mut tri_vcolor = Vec::with_capacity(bvh.order.len() * 3);
-    for &t in &bvh.order {
+    let mut tri_pos = Vec::with_capacity(bvh_order.len() * 3);
+    let mut tri_nrm = Vec::with_capacity(bvh_order.len() * 3);
+    let mut tri_vcolor = Vec::with_capacity(bvh_order.len() * 3);
+    for &t in &bvh_order {
         let t = t as usize;
         // Per-triangle attributes ride in the w components: part index, ID
         // index, name group.
-        let w = [f32::from_bits(tri_part[t]), f32::from_bits(tri_id[t]), f32::from_bits(src_group[t])];
+        let w = [f32::from_bits(tri_part[t]), f32::from_bits(tri_id[t]), f32::from_bits(src_group.get(t).copied().unwrap_or(0))];
         let flat_id = ids.get(tri_id[t] as usize).copied().unwrap_or([0.5, 0.5, 0.5, 1.0]);
         for (k, &v) in indices[t * 3..t * 3 + 3].iter().enumerate() {
             let p = positions[v as usize];
@@ -1227,9 +1257,9 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
     // whose sign stays the handedness) so the surface pass never has to search
     // for it: a search ray at a seam where parts intersect can land on the
     // other part. f32 holds slots exactly below 2^24.
-    let low_corners = (settings.high_poly.is_none() && bvh.order.len() < (1 << 24) - 2).then(|| {
-        let mut corners = Vec::with_capacity(bvh.order.len() * 3);
-        for (slot, &t) in bvh.order.iter().enumerate() {
+    let low_corners = (settings.high_poly.is_none() && bvh_order.len() < (1 << 24) - 2).then(|| {
+        let mut corners = Vec::with_capacity(bvh_order.len() * 3);
+        for (slot, &t) in bvh_order.iter().enumerate() {
             if !raster.contains(&t) {
                 continue;
             }
@@ -1242,8 +1272,8 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
         corners
     });
 
-    let mut nodes = Vec::with_capacity(bvh.nodes.len() * 2);
-    for n in &bvh.nodes {
+    let mut nodes = Vec::with_capacity(bvh_nodes.len() * 2);
+    for n in &bvh_nodes {
         nodes.push([n.min.x, n.min.y, n.min.z, f32::from_bits(n.first)]);
         nodes.push([n.max.x, n.max.y, n.max.z, f32::from_bits(n.count)]);
     }

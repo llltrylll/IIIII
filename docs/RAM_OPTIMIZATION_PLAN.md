@@ -27,6 +27,14 @@ Scope: reduce **system RAM and transient CPU-memory peaks** in the existing appl
 - `Engine::image_cache` uses weak references to both texture and encoded bytes, and is shared by sibling Texture Set Engines. A source image remains cached only while a layer/history reference owns it.
 - Project serialization deduplicates Fill images by exact `Arc` pointer identity; opening repeated references uses one weakly cached `Arc<Vec<u8>>` per blob.
 
+### P1 — Bake CPU preparation peak
+- Build the bake BVH directly from indexed positions, returning only node bounds and triangle order. The bake path no longer materializes a temporary triangle array or retains a reordered CPU triangle copy.
+- Normalize imported high-poly normals in place instead of allocating a second full normal array.
+- Allocate low-poly material IDs and copy vertex-color payloads only when the selected ID source needs them.
+- Keep source-object groups unallocated unless match-by-name finds actual matches.
+- Borrow the per-triangle ID array in the default Mesh Parts mode instead of cloning it.
+- Remaining large allocations: expanded per-corner position/normal/color arrays and BVH bounds scratch arrays. Further compaction requires shader/layout changes and separate parity tests.
+
 ### P1 — Bound asynchronous CPU image queues
 - Bound CPU shelf-preview results and graph-image decode results.
 - Use a bounded number of worker threads and back-pressure so a large shelf or graph cannot queue an arbitrary number of decoded images in RAM.
@@ -53,6 +61,7 @@ Record separately:
 - Undo snapshot bytes, including snapshots still mapping or compressing.
 - Peak RAM while a multi-channel stroke snapshot is compressed.
 - Peak RAM while generating/loading the Smart Material shelf and graph images.
+- Peak RAM during low-poly-only and high-to-low Bake preparation using fixed representative assets and settings.
 - GPU estimated bytes and VRAM separately; do not mix GPU allocation counts with process RAM.
 
 A candidate is not considered a measured win until this protocol is run on the owner's Windows machine. CI proves correctness/buildability, not owner-machine RAM savings.
@@ -67,5 +76,7 @@ A candidate is not considered a measured win until this protocol is run on the o
 - [x] Weak encoded-image cache shared across sibling Texture Sets.
 - [x] Deduplicate shared Fill image blobs in project save/open.
 - [x] Bounded CPU shelf-preview and graph-image decode queues.
+- [x] Remove redundant Bake BVH triangle arrays and avoid unused ID/material/object copies during CPU preparation.
+- [x] Normalize imported high-poly normals in place and verify indexed BVH output against the existing builder.
 - [x] Verify project spool/file-backed typed reads, shared-blob reuse and Undo RAM-budget tests; latest CI, unit tests, GPU regression and Windows portable package workflows pass.
 - [ ] Capture before/after owner-machine measurements.

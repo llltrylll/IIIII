@@ -108,6 +108,34 @@ impl Bvh {
         let bmin: Vec<Vec3> = tris.iter().map(|t| t[0].min(t[1]).min(t[2])).collect();
         let bmax: Vec<Vec3> = tris.iter().map(|t| t[0].max(t[1]).max(t[2])).collect();
         let cent: Vec<Vec3> = (0..n).map(|i| (bmin[i] + bmax[i]) * 0.5).collect();
+        let (nodes, order) = Self::build_bounds(bmin, bmax, cent);
+        let ordered_tris = order.iter().map(|&i| tris[i as usize]).collect();
+        Bvh { nodes, order, tris: ordered_tris }
+    }
+
+    /// Builds only the hierarchy and triangle order from indexed positions.
+    /// Baking needs these for GPU packing, not a second CPU copy of every
+    /// triangle in BVH order.
+    pub fn build_ordered(positions: &[Vec3], indices: &[u32]) -> (Vec<Node>, Vec<u32>) {
+        let n = indices.len() / 3;
+        let mut bmin = Vec::with_capacity(n);
+        let mut bmax = Vec::with_capacity(n);
+        let mut cent = Vec::with_capacity(n);
+        for tri in indices.chunks_exact(3) {
+            let p0 = positions[tri[0] as usize];
+            let p1 = positions[tri[1] as usize];
+            let p2 = positions[tri[2] as usize];
+            let lo = p0.min(p1).min(p2);
+            let hi = p0.max(p1).max(p2);
+            bmin.push(lo);
+            bmax.push(hi);
+            cent.push((lo + hi) * 0.5);
+        }
+        Self::build_bounds(bmin, bmax, cent)
+    }
+
+    fn build_bounds(bmin: Vec<Vec3>, bmax: Vec<Vec3>, cent: Vec<Vec3>) -> (Vec<Node>, Vec<u32>) {
+        let n = bmin.len();
         let mut order: Vec<u32> = (0..n as u32).collect();
         let mut nodes = Vec::with_capacity(2 * n / MAX_LEAF as usize + 1);
         nodes.push(Node { min: Vec3::ZERO, max: Vec3::ZERO, first: 0, count: n as u32 });
@@ -203,8 +231,7 @@ impl Bvh {
             stack.push(left + 1);
         }
 
-        let tris = order.iter().map(|&i| tris[i as usize]).collect();
-        Bvh { nodes, order, tris }
+        (nodes, order)
     }
 
     fn slab(min: Vec3, max: Vec3, o: Vec3, inv: Vec3, tmax: f32) -> bool {
@@ -353,6 +380,25 @@ mod tests {
         }
         assert_eq!(stack.pop(), Some(0));
         assert_eq!(stack.pop(), None);
+    }
+
+    #[test]
+    fn indexed_build_matches_triangle_build_without_materializing_triangles() {
+        let mesh = Primitive::Torus.build();
+        let positions: Vec<Vec3> = mesh.vertices.iter().map(|v| Vec3::from_array(v.pos)).collect();
+        let tris: Vec<[Vec3; 3]> = mesh.indices.chunks_exact(3)
+            .map(|t| [t[0], t[1], t[2]].map(|i| positions[i as usize]))
+            .collect();
+        let expected = Bvh::build(tris);
+        let (nodes, order) = Bvh::build_ordered(&positions, &mesh.indices);
+        assert_eq!(order, expected.order);
+        assert_eq!(nodes.len(), expected.nodes.len());
+        for (actual, expected) in nodes.iter().zip(&expected.nodes) {
+            assert_eq!(actual.min.to_array(), expected.min.to_array());
+            assert_eq!(actual.max.to_array(), expected.max.to_array());
+            assert_eq!(actual.first, expected.first);
+            assert_eq!(actual.count, expected.count);
+        }
     }
 
     #[test]
