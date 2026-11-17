@@ -707,6 +707,8 @@ pub struct PainterApp {
     bake_preview: bake_live::LivePreview,
     custom_ui: bake_live::CustomUi,
     spp: spp_open::SppOpen,
+    /// CPU-side project parsing/decompression running away from the UI thread.
+    project_open: Option<project_io::OpenJob>,
     preview: preview_shader::PreviewShader,
     /// A crash report the last run left, shown once.
     crash_report: Option<std::path::PathBuf>,
@@ -2231,6 +2233,7 @@ impl PainterApp {
             bake_preview: Default::default(),
             custom_ui: Default::default(),
             spp: Default::default(),
+            project_open: None,
             preview: Default::default(),
             crash_report: crate::crash::take_report(),
             frame_ms: 0.0,
@@ -2301,6 +2304,11 @@ impl PainterApp {
     /// Loads `mesh`, making its new texture sets at `sizes` (per set, in
     /// order) instead of the default size.
     fn load_mesh_sized(&mut self, mesh: Mesh, ctx: &egui::Context, sizes: &[u32]) {
+        let bvh = Arc::new(Bvh::from_mesh(&mesh));
+        self.load_mesh_sized_with_bvh(mesh, bvh, ctx, sizes);
+    }
+
+    fn load_mesh_sized_with_bvh(&mut self, mesh: Mesh, bvh: Arc<Bvh>, ctx: &egui::Context, sizes: &[u32]) {
         if self.stroke.is_some() {
             return;
         }
@@ -2310,7 +2318,7 @@ impl PainterApp {
         self.end_preview(false);
         self.gpu_mesh = GpuMesh::new(&self.rs.device, &mesh);
         self.views.invalidate_shadow();
-        self.bvh = Arc::new(Bvh::from_mesh(&mesh));
+        self.bvh = bvh;
         if let Some(raytracer) = self.raytracer.as_mut() {
             raytracer.set_mesh(&self.rs.device, &mesh, &self.bvh);
         }
@@ -2660,10 +2668,7 @@ impl PainterApp {
             Action::OpenSpp(path) => self.start_spp_open(path, ctx),
             Action::OpenProject(path) => {
                 if let Some(path) = path.or_else(Self::open_dialog) {
-                    if let Err(e) = self.open_project(&path, ctx) {
-                        self.status = e;
-                    }
-                    self.target = StrokeTarget::Content;
+                    self.start_open_project(&path, ctx);
                 }
             }
             Action::Exit => {
@@ -2702,9 +2707,7 @@ impl PainterApp {
         if let Some(recover) = choice {
             let path = self.recovery.take().expect("checked above");
             if recover {
-                if let Err(e) = self.open_project(&path, ctx) {
-                    self.status = e;
-                }
+                self.start_open_project(&path, ctx);
             } else {
                 project_io::remove_recovery(&path);
             }
@@ -5373,6 +5376,7 @@ impl eframe::App for PainterApp {
             self.poll_user_smarts(&ctx);
             self.poll_bake(&ctx);
             self.poll_spp_open(&ctx);
+            self.poll_open_project(&ctx);
             self.update_preview(&ctx);
             self.poll_env();
             self.poll_hdri_thumbs(&ctx);
