@@ -50,7 +50,7 @@ Scope: reduce **system RAM and transient CPU-memory peaks** in the existing appl
 - Borrow the low-poly index slice for low-only bakes instead of cloning the complete index array; high-poly imports remain owned.
 - Derive triangle centroids from compact bounds during BVH construction, removing the third per-triangle bounds vector (12 bytes per triangle when Vec3 is 12 bytes).
 - Transform imported high-poly positions in place, avoiding a second full position vector during source loading.
-- Cage preview workers receive only positions, normals, indices and optional name mapping instead of cloning the complete render mesh; the probe reuses those arrays without creating duplicate position/normal vectors.
+- Cage preview workers share the editor's existing immutable Arc<Mesh> and do not clone the mesh or its index/UV payload. The worker creates only the position/normal scratch it needs and reuses one welded-vertex map for averaged directions and the retained probe.
 - Cage preview high-poly inputs retain only positions, indices and optional object-name mapping; the probe builds its traversable BVH directly from indexed data instead of retaining an expanded source-triangle Vec.
 - A superseded or hidden cage-preview job is cancelled at bounded work checkpoints so abandoned mesh/BVH scratch is released rather than continuing to compete with the latest preview.
 - Store cage-probe hit lists as optional boxed slices; misses no longer carry a 24-byte empty Vec header for every sampled point.
@@ -107,7 +107,7 @@ A candidate is not considered a measured win until this protocol is run on the o
 - [x] Store optional cage-probe hit arrays without per-sample Vec headers for empty/missed probes.
 - [x] Cancel superseded cage-preview work at bounded CPU checkpoints to avoid concurrent obsolete mesh/BVH allocations.
 - [x] Load only the high-poly data used by cage preview and build its BVH directly from indexed positions.
-- [x] Give cage preview workers a compact mesh snapshot instead of cloning unused UV/tangent/display-edge payloads.
+- [x] Keep cage preview workers on the shared Arc<Mesh> and avoid duplicate own-normal/result/weld scratch arrays.
 - [x] Transform imported high-poly positions in place and release Bake preparation scratch payloads at their last use.
 - [x] Normalize imported high-poly normals in place and verify indexed BVH output against the existing builder.
 - [x] Remove flat per-corner color storage for Mesh Parts/Materials modes; add a Vulkan GPU regression test for palette lookup.

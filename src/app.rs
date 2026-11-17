@@ -4,7 +4,7 @@
 use crate::bake::{self, BakeRun, BakeSettings, GpuBaker, IdSource, PreparedScene, Quality};
 use crate::bake_cache;
 use crate::bvh::Bvh;
-use crate::cage::{CageMesh, CageProbe, CageStats, ProbeKey};
+use crate::cage::{CageProbe, CageStats, ProbeKey};
 use crate::environment::{self, EnvBaker, EnvImage, EnvSource, Environment};
 use crate::engine::{Drop, FillImage, Folder, Layer, Projection};
 use crate::engine::{
@@ -4859,13 +4859,11 @@ impl PainterApp {
                 let (tx, rx) = mpsc::channel();
                 let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let worker_cancel = Arc::clone(&cancel);
-                let (mesh, k, ctx) = (
-                    CageMesh::snapshot(&self.mesh, key.match_by_name),
-                    key.clone(),
-                    ctx.clone(),
-                );
+                // self.mesh is an Arc<Mesh>; the worker shares it without
+                // cloning vertex/index/UV data from the active document.
+                let (mesh, k, ctx) = (Arc::clone(&self.mesh), key.clone(), ctx.clone());
                 std::thread::spawn(move || {
-                    let _ = tx.send(CageProbe::build_cancellable(mesh, k, &worker_cancel));
+                    let _ = tx.send(CageProbe::build_cancellable(&mesh, k, &worker_cancel));
                     ctx.request_repaint();
                 });
                 c.job = Some((key, rx, cancel));
