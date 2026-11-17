@@ -1239,7 +1239,7 @@ impl ViewRenderer {
             pass.set_vertex_buffer(0, mesh.vertices.slice(..));
             if let Some(draw) = self.object_draw.as_ref() {
                 pass.set_index_buffer(draw.triangles.slice(..), wgpu::IndexFormat::Uint32);
-                for &k in &shown {
+                for &k in shown {
                     if let (Some(bg), Some(range)) = (self.view_bind_groups.get(k).and_then(Option::as_ref).map(|cached| &cached.bind_group), draw.triangle_ranges.get(k))
                         && range.start < range.end {
                         pass.set_bind_group(0, bg, &[]);
@@ -1248,7 +1248,7 @@ impl ViewRenderer {
                 }
             } else {
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                for &k in &shown {
+                for &k in shown {
                     if let Some(bg) = self.view_bind_groups.get(k).and_then(Option::as_ref).map(|cached| &cached.bind_group) {
                         pass.set_bind_group(0, bg, &[]);
                         pass.draw_indexed(mesh.sets[k].index_range(), 0, 0..1);
@@ -1284,14 +1284,14 @@ impl ViewRenderer {
                 pass.set_vertex_buffer(0, mesh.vertices.slice(..));
                 if let Some(draw) = self.object_draw.as_ref() {
                     pass.set_index_buffer(draw.triangles.slice(..), wgpu::IndexFormat::Uint32);
-                    for &k in &shown {
+                    for &k in shown {
                         if let Some(range) = draw.triangle_ranges.get(k).filter(|range| range.start < range.end) {
                             pass.draw_indexed(range.clone(), 0, 0..1);
                         }
                     }
                 } else {
                     pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    for &k in &shown {
+                    for &k in shown {
                         pass.draw_indexed(mesh.sets[k].index_range(), 0, 0..1);
                     }
                 }
@@ -1328,7 +1328,7 @@ impl ViewRenderer {
             pass.set_vertex_buffer(0, mesh.vertices.slice(..));
             if let Some(draw) = self.object_draw.as_ref() {
                 pass.set_index_buffer(draw.triangles.slice(..), wgpu::IndexFormat::Uint32);
-                for &k in &shown {
+                for &k in shown {
                     if let (Some(bg), Some(range)) = (self.view_bind_groups.get(k).and_then(Option::as_ref).map(|cached| &cached.bind_group), draw.triangle_ranges.get(k))
                         && range.start < range.end {
                         pass.set_bind_group(0, bg, &[]);
@@ -1337,7 +1337,7 @@ impl ViewRenderer {
                 }
             } else {
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                for &k in &shown {
+                for &k in shown {
                     if let Some(bg) = self.view_bind_groups.get(k).and_then(Option::as_ref).map(|cached| &cached.bind_group) {
                         pass.set_bind_group(0, bg, &[]);
                         pass.draw_indexed(mesh.sets[k].index_range(), 0, 0..1);
@@ -1350,7 +1350,7 @@ impl ViewRenderer {
                 pass.set_pipeline(&self.mesh_t);
                 if let Some(draw) = self.object_draw.as_ref() {
                     pass.set_index_buffer(draw.triangles.slice(..), wgpu::IndexFormat::Uint32);
-                    for &k in &shown {
+                    for &k in shown {
                         if let (Some(bg), Some(e), Some(range)) =
                             (self.view_bind_groups.get(k).and_then(Option::as_ref).map(|cached| &cached.bind_group), engines.get(k), draw.triangle_ranges.get(k))
                             && e.uses_opacity() && range.start < range.end {
@@ -1360,7 +1360,7 @@ impl ViewRenderer {
                     }
                 } else {
                     pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    for &k in &shown {
+                    for &k in shown {
                         if let (Some(bg), Some(e)) = (self.view_bind_groups.get(k).and_then(Option::as_ref).map(|cached| &cached.bind_group), engines.get(k))
                             && e.uses_opacity() {
                             pass.set_bind_group(0, bg, &[]);
@@ -1374,14 +1374,14 @@ impl ViewRenderer {
                 pass.set_pipeline(&self.wire3d);
                 if let Some(draw) = self.object_draw.as_ref() {
                     pass.set_index_buffer(draw.edges.slice(..), wgpu::IndexFormat::Uint32);
-                    for &k in &shown {
+                    for &k in shown {
                         if let Some(range) = draw.edge_ranges.get(k).filter(|range| range.start < range.end) {
                             pass.draw_indexed(range.clone(), 0, 0..1);
                         }
                     }
                 } else {
                     pass.set_index_buffer(mesh.edges.slice(..), wgpu::IndexFormat::Uint32);
-                    for &k in &shown {
+                    for &k in shown {
                         pass.draw_indexed(mesh.sets[k].edges.clone(), 0, 0..1);
                     }
                 }
@@ -1390,14 +1390,14 @@ impl ViewRenderer {
                 pass.set_pipeline(&self.seam3d);
                 if let Some(draw) = self.object_draw.as_ref() {
                     pass.set_index_buffer(draw.seams.slice(..), wgpu::IndexFormat::Uint32);
-                    for &k in &shown {
+                    for &k in shown {
                         if let Some(range) = draw.seam_ranges.get(k).filter(|range| range.start < range.end) {
                             pass.draw_indexed(range.clone(), 0, 0..1);
                         }
                     }
                 } else {
                     pass.set_index_buffer(mesh.seams.slice(..), wgpu::IndexFormat::Uint32);
-                    for &k in &shown {
+                    for &k in shown {
                         pass.draw_indexed(mesh.sets[k].seams.clone(), 0, 0..1);
                     }
                 }
