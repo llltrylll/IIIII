@@ -1349,7 +1349,7 @@ pub struct Engine {
     brush_grain: Tex,
     /// Image files already on the GPU, shared by every layer that uses them
     /// (scanned smart materials); entries die with their last user.
-    image_cache: HashMap<std::path::PathBuf, (std::sync::Weak<Tex>, Arc<Vec<u8>>)>,
+    image_cache: HashMap<std::path::PathBuf, (std::sync::Weak<Tex>, std::sync::Weak<Vec<u8>>)>,
     pub layers: Vec<Layer>,
     /// Properties as of the last recorded edit; see [`Engine::commit_props`].
     committed: DocProps,
@@ -2698,13 +2698,16 @@ impl Engine {
         let dir = path.parent().and_then(|d| d.file_name()).map_or(String::new(), |d| format!("{}/", d.to_string_lossy()));
         let name = format!("{dir}{}", path.file_name().map_or("image".into(), |n| n.to_string_lossy()));
         if let Some((tex, encoded)) = self.image_cache.get(path)
-            && let Some(tex) = tex.upgrade() {
-                return Ok(FillImage { tex, name, encoded: encoded.clone() });
+            && let (Some(tex), Some(encoded)) = (tex.upgrade(), encoded.upgrade()) {
+                return Ok(FillImage { tex, name, encoded });
             }
         let encoded = Arc::new(std::fs::read(path).map_err(|e| format!("can't read {}: {e}", path.display()))?);
         let img = self.decode_fill_image(name, encoded.clone())?;
-        self.image_cache.retain(|_, (t, _)| t.strong_count() > 0);
-        self.image_cache.insert(path.to_path_buf(), (Arc::downgrade(&img.tex), encoded));
+        self.image_cache.retain(|_, (texture, bytes)| texture.strong_count() > 0 && bytes.strong_count() > 0);
+        // The cache is not an owner: once the last layer/history reference is
+        // dropped, both the GPU texture and original CPU file bytes can die.
+        self.image_cache
+            .insert(path.to_path_buf(), (Arc::downgrade(&img.tex), Arc::downgrade(&img.encoded)));
         Ok(img)
     }
 
