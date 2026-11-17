@@ -123,6 +123,7 @@ fn obj_corner_attribute_presence(path: &Path, keep_uvs: bool) -> Result<Vec<(boo
     Ok(result)
 }
 
+#[cfg(test)]
 fn load_obj(path: &Path) -> Result<RawMesh, String> {
     load_obj_with_uvs(path, true)
 }
