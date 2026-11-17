@@ -85,7 +85,7 @@ enum Tool {
 struct CagePreview {
     show: bool,
     probe: Option<Arc<CageProbe>>,
-    job: Option<(ProbeKey, mpsc::Receiver<Result<CageProbe, String>>)>,
+    job: Option<(ProbeKey, mpsc::Receiver<Result<CageProbe, String>>, Arc<std::sync::atomic::AtomicBool>)>,
     /// A probe that failed, so it isn't retried until the inputs change.
     failed: Option<(ProbeKey, String)>,
     /// The distances (and painted cage) the overlay was built for.
@@ -4810,7 +4810,7 @@ impl PainterApp {
     fn update_cage_preview(&mut self, ctx: &egui::Context) {
         self.apply_cage_action();
         let c = &mut self.cage_preview;
-        if let Some((key, rx)) = &c.job {
+        if let Some((key, rx, _cancel)) = &c.job {
             match rx.try_recv() {
                 Ok(Ok(probe)) => {
                     c.probe = Some(Arc::new(probe));
@@ -4827,6 +4827,9 @@ impl PainterApp {
         }
         // A cage only exists for high-poly bakes.
         if !(self.show_bake && c.show && self.bake_settings.high_poly.is_some()) {
+            if let Some((_, _, cancel)) = c.job.take() {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             if self.overlays.is_set(OverlaySlot::Cage) {
                 self.overlays.clear(OverlaySlot::Cage);
                 ctx.request_repaint();
@@ -4835,6 +4838,12 @@ impl PainterApp {
             return;
         }
         let key = ProbeKey::new(&self.mesh, &self.bake_settings);
+        if c.job.as_ref().is_some_and(|(active, _, _)| *active != key) {
+            if let Some((_, _, cancel)) = c.job.take() {
+                // Superseded previews must release their imported mesh and hit-test scratch.
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
         let current = c.probe.as_ref().is_some_and(|p| p.key == key);
         if !current {
             if self.overlays.is_set(OverlaySlot::Cage) {
@@ -4843,21 +4852,23 @@ impl PainterApp {
             }
             c.drawn = None;
             c.stats = None;
-            let running = c.job.as_ref().is_some_and(|(k, _)| *k == key);
+            let running = c.job.as_ref().is_some_and(|(k, _, _)| *k == key);
             let failed = c.failed.as_ref().is_some_and(|(k, _)| *k == key);
             if !running && !failed {
                 c.failed = None;
                 let (tx, rx) = mpsc::channel();
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let worker_cancel = Arc::clone(&cancel);
                 let (mesh, k, ctx) = (
                     CageMesh::snapshot(&self.mesh, key.match_by_name),
                     key.clone(),
                     ctx.clone(),
                 );
                 std::thread::spawn(move || {
-                    let _ = tx.send(CageProbe::build(mesh, k));
+                    let _ = tx.send(CageProbe::build_cancellable(mesh, k, &worker_cancel));
                     ctx.request_repaint();
                 });
-                c.job = Some((key, rx));
+                c.job = Some((key, rx, cancel));
             }
             return;
         }

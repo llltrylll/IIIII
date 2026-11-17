@@ -14,6 +14,7 @@ use crate::mesh::{Mesh, unique_edges, weld_positions};
 use crate::viewport::OverlayVertex;
 use glam::Vec3;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// How far the probe looks out from and into the low poly along each
 /// direction: the farthest a cage reaches.
@@ -230,10 +231,25 @@ pub struct FixReport {
     pub unreachable: usize,
 }
 
+fn check_cancelled(cancel: &AtomicBool) -> Result<(), String> {
+    if cancel.load(Ordering::Relaxed) {
+        Err("Cage preview superseded".into())
+    } else {
+        Ok(())
+    }
+}
+
 impl CageProbe {
     /// Probes the high poly from sample points across the low poly. Runs on
     /// a worker thread.
-    pub fn build(mesh: CageMesh, key: ProbeKey) -> Result<CageProbe, String> {
+    pub(crate) fn build(mesh: CageMesh, key: ProbeKey) -> Result<CageProbe, String> {
+        Self::build_cancellable(mesh, key, &AtomicBool::new(false))
+    }
+
+    /// A newer preview request cancels obsolete work so its large mesh and
+    /// BVH buffers are dropped instead of competing with the replacement.
+    pub(crate) fn build_cancellable(mesh: CageMesh, key: ProbeKey, cancel: &AtomicBool) -> Result<CageProbe, String> {
+        check_cancelled(cancel)?;
         let CageMesh {
             positions,
             normals: vertex_normals,
@@ -285,7 +301,11 @@ impl CageProbe {
         let mut spacing = (bounds_max - bounds_min).length() / 48.0;
         let grid = |t: usize, spacing: f32| ((longest(t) / spacing).ceil() as usize).clamp(1, 12);
         // Keep the sample count bounded on huge meshes.
-        while (0..tri_count).map(|t| grid(t, spacing).pow(2)).sum::<usize>() > 400_000 {
+        loop {
+            check_cancelled(cancel)?;
+            if (0..tri_count).map(|t| grid(t, spacing).pow(2)).sum::<usize>() <= 400_000 {
+                break;
+            }
             spacing *= 1.5;
         }
         let probe_at = |t: usize, b: [f32; 3]| {
@@ -308,6 +328,9 @@ impl CageProbe {
         let mut at_vertex: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
         let mut indices = Vec::with_capacity(low_indices.len());
         for t in 0..tri_count {
+            if t.is_multiple_of(256) {
+                check_cancelled(cancel)?;
+            }
             let k = grid(t, spacing);
             // Grid point (i, j): barycentrics (1 - (i + j)/k, i/k, j/k).
             let mut ids = vec![0u32; (k + 1) * (k + 2) / 2];
@@ -356,11 +379,15 @@ impl CageProbe {
 
         let has_high = key.high_poly.is_some();
         if let Some(path) = &key.high_poly {
+            check_cancelled(cancel)?;
             let high = CageHighPoly::load(path, center, scale, key.match_by_name)?;
+            check_cancelled(cancel)?;
             // Build the hit-test BVH from indexed data. This avoids first
             // expanding every source triangle into a temporary Vec.
             let bvh = Bvh::from_indexed(&high.positions, &high.indices);
+            check_cancelled(cancel)?;
             let (tri_part, _) = components(&high.positions, &high.indices);
+            check_cancelled(cancel)?;
 
             // Name groups, as the bake pairs them (0 = sees / is seen by all).
             let mut low_tri_group = vec![0u32; tri_count];
@@ -386,6 +413,9 @@ impl CageProbe {
 
             use rayon::prelude::*;
             probes.par_iter_mut().for_each_init(Vec::new, |found, p| {
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
                 let start = p.cage_len.unwrap_or(REACH) + 1e-4;
                 let origin = p.pos + p.dir * start;
                 bvh.all_hits(origin, -p.dir, start + REACH, found);
@@ -400,6 +430,7 @@ impl CageProbe {
                     .collect();
             });
         }
+        check_cancelled(cancel)?;
         Ok(CageProbe { key, probes, indices, edges, has_high, vertex_probe, weld })
     }
 
