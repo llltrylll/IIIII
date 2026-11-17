@@ -3971,7 +3971,7 @@ impl PainterApp {
                 let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
                 ui.label(
                     egui::RichText::new(format!(
-                        "{}{:.1} ms (peak {:.0})  │  GPU est. {:.0} MB  │  Undo {:.1} MB RAM ({} steps)  │  {}²  │  {} tris",
+                        "{}{:.1} ms (peak {:.0})  │  GPU est. {:.0} MB  │  Undo {:.1}/{:.0} MB ({} steps)  │  {}²  │  {} tris",
                         if self.meter.on { format!("{}  │  ", self.meter.text(
                             self.engine.res,
                             self.engine.last_paint_scissor_pixels,
@@ -3989,6 +3989,7 @@ impl PainterApp {
                         self.frame_peak_ms,
                         mb(self.engine.vram_bytes() + self.sets.parked.iter().flatten().map(|p| p.engine.vram_bytes()).sum::<u64>()),
                         mb(self.undo.ram_bytes() as u64),
+                        mb(self.undo.max_ram_bytes as u64),
                         self.undo.undo.len(),
                         self.engine.res,
                         self.mesh.triangle_count(),
