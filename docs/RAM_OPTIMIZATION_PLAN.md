@@ -13,10 +13,10 @@ Scope: reduce **system RAM and transient CPU-memory peaks** in the existing appl
 ## Priority order
 
 ### P0 — Project I/O peak memory
-1. **Read compressed project blobs on demand.** The parser now stores file offsets and lengths instead of loading the entire project into RAM or copying all compressed blobs. The Reader seeks to and decodes one blob when requested. Mesh vertex/index/object arrays are decompressed directly into their final typed allocations.
+1. **Bound project-open RAM with a disk spool.** The worker validates the complete blob table and decompresses compressed blobs sequentially into a temporary raw spool. The UI Reader keeps only the spool's offset/length index and reads one resource at a time; mesh vertex/index/object arrays and triangle-color arrays are read directly into their final typed allocations. The compressed project and all decoded blobs are never resident together in RAM.
 2. **Spool compressed blobs to disk during save.** The Writer compresses and writes each blob to a temporary spool, then copies that spool into the final buffered `.mpp.tmp` before the existing atomic rename. It no longer retains all compressed blobs or builds a second full-size output Vec<u8>.
 3. **Stream the JSON manifest.** Opening parses the declared manifest range directly from the file instead of allocating a same-sized byte Vec. Saving counts serialized bytes, then writes the manifest directly to the buffered output instead of retaining the complete serialized JSON copy.
-4. Later: split CPU parsing/decompression from GPU resource creation, with explicit peak-memory accounting. This is a separate change because loading must remain transactional and preserve the current document on failure.
+4. CPU manifest parsing, blob integrity/resource preflight, sequential decompression, mesh/UV-edge construction and picking-BVH preparation now run on a serialized cancellable worker. GPU texture creation and document application remain on the UI/device thread after worker validation.
 - Triangle ID colors and per-corner vertex colors decompress directly into their final typed vectors when counts match the mesh, without an intermediate full-size byte vector.
 
 ### P0 — Undo history RAM
@@ -24,6 +24,11 @@ Scope: reduce **system RAM and transient CPU-memory peaks** in the existing appl
 2. Count snapshots while mapping/compressing, not only after compression has completed.
 3. Add a configurable memory budget for painted snapshot history, alongside the existing step-count limit. Evict the oldest history entries first; never evict the newest entry while older entries remain. Keep the limit visible and adjustable in Preferences.
 4. Keep structural Undo edits and GPU-resident layer ownership semantics unchanged.
+
+### P1 — Share immutable CPU resources across Texture Sets
+- Sibling Engines already share immutable GPU pipelines through Arc and share the weak Fill image cache (GPU texture plus encoded source bytes).
+- The remaining per-Engine CPU state holds independent layer stacks, mask/property snapshots, per-set mesh ranges, custom-map IDs and per-set caches. These represent genuinely different editable document state; merging them would couple independent Texture Sets or require another indirection without removing the underlying data.
+- Audit result: no additional large immutable CPU payload is duplicated between sibling Texture Sets in the current design. Keep per-set state independent rather than introducing unsafe cross-set sharing.
 
 ### P1 — Release and deduplicate source-image bytes
 - `Engine::image_cache` uses weak references to both texture and encoded bytes, and is shared by sibling Texture Set Engines. A source image remains cached only while a layer/history reference owns it.
@@ -110,11 +115,12 @@ A candidate is not considered a measured win until this protocol is run on the o
 
 - [x] Source audit of project blobs, Undo snapshots, fill-image cache and asynchronous preview/decode queues.
 - [x] Stream project manifest parsing and serialization without a full-size intermediate byte Vec.
-- [x] File-backed project blob index and on-demand blob reads.
+- [x] Temporary raw-spool blob index and one-resource-at-a-time UI reads after worker decompression.
 - [x] Stream compressed blobs through a disk spool and buffered atomic project save.
 - [x] Incremental Undo compression and pending-memory accounting.
 - [x] Configurable Undo snapshot RAM budget, including Preferences and status-bar usage.
 - [x] Weak encoded-image cache shared across sibling Texture Sets.
+- [x] Audit remaining CPU-owned Texture Set Engine data: pipelines and Fill source-image cache are already shared; the rest is per-set editable state and is intentionally independent.
 - [x] Deduplicate shared Fill image blobs in project save/open.
 - [x] Bound the HDRI thumbnail decode queue to two pending CPU images.
 - [x] Bounded CPU shelf-preview and graph-image decode queues.
