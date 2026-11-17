@@ -113,7 +113,13 @@ struct Writer {
 impl Writer {
     fn new(project_path: &Path) -> Result<Self, String> {
         let path = project_path.with_extension("mpp.blobs.tmp");
-        let file = std::fs::File::create(&path).map_err(|e| format!("can't create {}: {e}", path.display()))?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|e| format!("can't create {}: {e}", path.display()))?;
         Ok(Self {
             file: Some(std::io::BufWriter::new(file)),
             path,
