@@ -1276,6 +1276,8 @@ pub struct Engine {
     active_gpu_profile: Option<GpuStrokeProfileResources>,
     /// Shared by the texture sets of a document.
     p: Arc<Pipelines>,
+    /// Bounded readback-buffer cache shared by this document's Texture Sets.
+    snapshot_buffer_pool: Arc<crate::undo::SnapshotBufferPool>,
     pub res: u32,
     /// The texture set's range in the mesh's index buffer: only these
     /// triangles get position and normal maps, so only they take paint.
@@ -1560,13 +1562,23 @@ impl Engine {
             let _s = crate::startup_trace::span("Engine::create_pipelines");
             Arc::new(Self::create_pipelines(&rs.device))
         };
-        Self::with_pipelines(rs, p, mesh, 0..mesh.index_count, bounds, res)
+        Self::with_pipelines(
+            rs,
+            p,
+            mesh,
+            0..mesh.index_count,
+            bounds,
+            res,
+            Arc::new(crate::undo::SnapshotBufferPool::default()),
+        )
     }
 
     /// Another texture set of the same document: `tris` is its range in the
     /// mesh's index buffer. Shares this engine's pipelines and document bounds.
     pub fn sibling(&self, mesh: &GpuMesh, tris: std::ops::Range<u32>, res: u32) -> Engine {
-        let mut sibling = Self::with_pipelines(&self.rs, self.p.clone(), mesh, tris, self.bounds, res);
+        let mut sibling = Self::with_pipelines(
+            &self.rs, self.p.clone(), mesh, tris, self.bounds, res, self.snapshot_buffer_pool.clone(),
+        );
         sibling.image_cache = self.image_cache.clone();
         sibling
     }
@@ -1627,7 +1639,9 @@ impl Engine {
         bounds: (Vec3, Vec3),
         res: u32,
     ) -> Engine {
-        let mut sibling = Self::with_pipelines(&self.rs, self.p.clone(), mesh, tris, bounds, res);
+        let mut sibling = Self::with_pipelines(
+            &self.rs, self.p.clone(), mesh, tris, bounds, res, self.snapshot_buffer_pool.clone(),
+        );
         sibling.image_cache = self.image_cache.clone();
         sibling
     }
@@ -1639,6 +1653,7 @@ impl Engine {
         tris: std::ops::Range<u32>,
         bounds: (Vec3, Vec3),
         res: u32,
+        snapshot_buffer_pool: Arc<crate::undo::SnapshotBufferPool>,
     ) -> Engine {
         static NEXT_ENGINE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let id = NEXT_ENGINE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1763,6 +1778,7 @@ impl Engine {
             screen_index_buffer,
             screen_index_capacity,
             p,
+            snapshot_buffer_pool,
             device,
             queue,
             }
@@ -3226,7 +3242,7 @@ impl Engine {
         crate::select::write_mask(mesh, selected, self.res, &mut texels, mode);
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        let before = Snapshot::encode(&self.device, &mut encoder, &[tex]);
+        let before = Snapshot::encode(&self.device, &mut encoder, &[tex], self.snapshot_buffer_pool.clone());
         self.queue.submit([encoder.finish()]);
         before.request_map();
         // Queue writes run at the start of the next submission, after the "before" copy.
@@ -3237,7 +3253,7 @@ impl Engine {
             tex.extent(),
         );
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        let after = Snapshot::encode(&self.device, &mut encoder, &[tex]);
+        let after = Snapshot::encode(&self.device, &mut encoder, &[tex], self.snapshot_buffer_pool.clone());
         self.queue.submit([encoder.finish()]);
         after.request_map();
         self.invalidate_mask_cache(layer_id);
@@ -3710,7 +3726,7 @@ impl Engine {
         for (src, dst) in textures.iter().zip(&snaps) {
             encoder.copy_texture_to_texture(src.copy_info(), dst.copy_info(), src.extent());
         }
-        let before = Snapshot::encode(&self.device, &mut encoder, &textures);
+        let before = Snapshot::encode(&self.device, &mut encoder, &textures, self.snapshot_buffer_pool.clone());
         self.queue.submit([encoder.finish()]);
         before.request_map();
         self.apply_bg = None;
@@ -4300,23 +4316,29 @@ impl Engine {
             self.invalidate_thumbs();
             return None;
         };
-        // A stroke on a mask changes only that mask's thumbnail; a fill's
-        // content thumbnail (a full composite) stays as it was.
-        match active.target {
-            StrokeTarget::Mask => self.invalidate_mask_thumb(active.layer_id),
-            StrokeTarget::BakeFix(_) => self.invalidate_thumbs(),
-            // Content strokes only target Paint layers. Their contents are not
-            // shown in layer thumbnails, and they do not change mask sources.
-            StrokeTarget::Content => {}
-        }
+        // Content strokes only target Paint layers; their contents are not
+        // shown in layer thumbnails. Avoid scanning and hashing the whole stack
+        // at release when the stroke cannot have invalidated a thumbnail.
+        let refresh_thumbnails = match active.target {
+            StrokeTarget::Mask => {
+                self.invalidate_mask_thumb(active.layer_id);
+                true
+            }
+            StrokeTarget::BakeFix(_) => {
+                self.invalidate_thumbs();
+                true
+            }
+            StrokeTarget::Content => false,
+        };
         let textures = self.target_textures(active.layer_id, active.target, &active.channels)?;
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        let after = Snapshot::encode(&self.device, &mut encoder, &textures);
+        let after = Snapshot::encode(&self.device, &mut encoder, &textures, self.snapshot_buffer_pool.clone());
         self.queue.submit([encoder.finish()]);
         after.request_map();
-        // Refresh invalidated mask/fill thumbnails once after painting, not
-        // once per composite frame while the stroke is active.
-        self.update_thumbs();
+        // Refresh only when this stroke actually invalidated a thumbnail.
+        if refresh_thumbnails {
+            self.update_thumbs();
+        }
         Some(UndoEntry {
             layer_id: active.layer_id,
             target: active.target,
