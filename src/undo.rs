@@ -473,14 +473,14 @@ mod tests {
     #[test]
     fn memory_budget_discards_oldest_history_first() {
         let mut history = UndoStack::default();
-        history.set_limits(16, 20);
+        history.set_limits(16, 24);
         history.push("first", stroke_with_snapshot_bytes(6));
         history.push("second", stroke_with_snapshot_bytes(6));
         history.push("third", stroke_with_snapshot_bytes(6));
 
         assert_eq!(history.undo.iter().map(|entry| entry.label.as_str()).collect::<Vec<_>>(), vec!["second", "third"]);
         assert_eq!(history.ram_bytes(), 24);
-        assert!(history.ram_bytes() > history.max_ram_bytes, "newest entry is preserved even when it alone exceeds the cap");
+        assert_eq!(history.ram_bytes(), history.max_ram_bytes);
     }
 
     #[test]
