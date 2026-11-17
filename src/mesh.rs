@@ -95,7 +95,7 @@ impl HighPoly {
     /// Loads an OBJ or FBX in the low poly's original space and applies the
     /// same normalization, so both meshes line up.
     pub fn load(path: &std::path::Path, center: Vec3, scale: f32) -> Result<HighPoly, String> {
-        let mut raw = crate::import::load(path)?;
+        let mut raw = crate::import::load_bake_source(path)?;
         // Normalize the imported positions in place. Keeping both the raw
         // importer vector and a transformed copy doubles this large payload
         // during high-poly Bake loading.

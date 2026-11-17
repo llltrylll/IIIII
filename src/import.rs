@@ -48,10 +48,21 @@ pub struct RawMesh {
 pub const EXTENSIONS: [&str; 2] = ["obj", "fbx"];
 
 pub fn load(path: &Path) -> Result<RawMesh, String> {
+    load_with_uvs(path, true)
+}
+
+/// Loads geometry for a high-poly Bake source. UVs are deliberately omitted:
+/// they are not sampled by the high-poly BVH, and welding only on position,
+/// normal, object and source vertex lets UV seams share one geometry vertex.
+pub fn load_bake_source(path: &Path) -> Result<RawMesh, String> {
+    load_with_uvs(path, false)
+}
+
+fn load_with_uvs(path: &Path, keep_uvs: bool) -> Result<RawMesh, String> {
     let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     let mut mesh = match ext.as_str() {
-        "obj" => load_obj(path)?,
-        "fbx" => load_fbx(path)?,
+        "obj" => load_obj(path, keep_uvs)?,
+        "fbx" => load_fbx(path, keep_uvs)?,
         _ => return Err(format!("Unsupported mesh format '.{ext}'. Use OBJ or FBX.")),
     };
     if mesh.indices.is_empty() {
@@ -65,7 +76,7 @@ pub fn load(path: &Path) -> Result<RawMesh, String> {
 /// file in the same triangle-fan order used by tobj's triangulation. tobj
 /// fills missing vt/vn indices with the previous index, so its index arrays
 /// alone cannot distinguish authored attributes from fallback references.
-fn obj_corner_attribute_presence(path: &Path) -> Result<Vec<(bool, bool)>, String> {
+fn obj_corner_attribute_presence(path: &Path, keep_uvs: bool) -> Result<Vec<(bool, bool)>, String> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read OBJ attribute flags: {e}"))?;
     let mut result = Vec::new();
@@ -81,7 +92,8 @@ fn obj_corner_attribute_presence(path: &Path) -> Result<Vec<(bool, bool)>, Strin
             .map(|token| {
                 let mut parts = token.split('/');
                 let _position = parts.next();
-                let uv = parts.next().is_some_and(|value| !value.is_empty());
+                let uv_token = parts.next();
+                let uv = keep_uvs && uv_token.is_some_and(|value| !value.is_empty());
                 let normal = parts.next().is_some_and(|value| !value.is_empty());
                 (uv, normal)
             })
@@ -100,11 +112,11 @@ fn obj_corner_attribute_presence(path: &Path) -> Result<Vec<(bool, bool)>, Strin
     Ok(result)
 }
 
-fn load_obj(path: &Path) -> Result<RawMesh, String> {
+fn load_obj(path: &Path, keep_uvs: bool) -> Result<RawMesh, String> {
     // Keep OBJ position indices separate from UV/normal indices. The position
     // index is the logical vertex identity used to generate normals across UV
     // seams without welding distinct coincident shells together.
-    let (models, materials) = tobj::load_obj(path, &tobj::LoadOptions {
+    let (mut models, materials) = tobj::load_obj(path, &tobj::LoadOptions {
         single_index: false,
         triangulate: true,
         ignore_points: true,
@@ -112,7 +124,16 @@ fn load_obj(path: &Path) -> Result<RawMesh, String> {
         ..Default::default()
     })
     .map_err(|e| format!("Failed to read OBJ: {e}"))?;
-    let corner_presence = obj_corner_attribute_presence(path)?;
+    let corner_presence = obj_corner_attribute_presence(path, keep_uvs)?;
+    if !keep_uvs {
+        // OBJ parsers retain a UV array and an index per corner even when the
+        // Bake never reads them. Release those parsed arrays before building
+        // the high-poly geometry and its welding table.
+        for model in &mut models {
+            model.mesh.texcoords.clear();
+            model.mesh.texcoord_indices.clear();
+        }
+    }
     let expected_corners: usize = models.iter().map(|m| m.mesh.indices.len()).sum();
     if corner_presence.len() != expected_corners {
         return Err(format!(
@@ -121,7 +142,7 @@ fn load_obj(path: &Path) -> Result<RawMesh, String> {
         ));
     }
     let mut presence_offset = 0usize;
-    let mut out = Builder::default();
+    let mut out = Builder::with_uvs(keep_uvs);
     // A missing .mtl leaves the indices (and default names).
     out.material_names = materials.map(|m| m.into_iter().map(|m| m.name).collect()).unwrap_or_default();
     for m in &models {
@@ -129,10 +150,10 @@ fn load_obj(path: &Path) -> Result<RawMesh, String> {
         let count = mesh.positions.len() / 3;
         let model_presence = &corner_presence[presence_offset..presence_offset + mesh.indices.len()];
         presence_offset += mesh.indices.len();
-        let uv_count = mesh.texcoords.len() / 2;
+        let uv_count = if keep_uvs { mesh.texcoords.len() / 2 } else { 0 };
         let normal_count = mesh.normals.len() / 3;
-        let has_uv = model_presence.iter().all(|(has_uv, _)| *has_uv);
-        if !has_uv {
+        let has_uv = keep_uvs && model_presence.iter().all(|(has_uv, _)| *has_uv);
+        if keep_uvs && !has_uv {
             out.missing_uvs.push(m.name.clone());
         }
         let material = mesh.material_id.unwrap_or(0) as u32;
@@ -154,7 +175,7 @@ fn load_obj(path: &Path) -> Result<RawMesh, String> {
                 None
             };
 
-            let uv = if corner_has_uv {
+            let uv = if keep_uvs && corner_has_uv {
                 let i = *mesh.texcoord_indices.get(corner_index)
                     .ok_or_else(|| format!("OBJ UV index missing at model {} corner {corner_index}", m.name))?
                     as usize;
@@ -185,7 +206,7 @@ fn load_obj(path: &Path) -> Result<RawMesh, String> {
     Ok(out.finish())
 }
 
-fn load_fbx(path: &Path) -> Result<RawMesh, String> {
+fn load_fbx(path: &Path, keep_uvs: bool) -> Result<RawMesh, String> {
     let opts = ufbx::LoadOpts {
         ignore_animation: true,
         ignore_embedded: true,
@@ -203,7 +224,7 @@ fn load_fbx(path: &Path) -> Result<RawMesh, String> {
     let path_str = path.to_str().ok_or("The FBX path is not valid UTF-8.")?;
     let scene = ufbx::load_file(path_str, opts).map_err(|e| format!("Failed to read FBX: {e:?}"))?;
 
-    let mut out = Builder::default();
+    let mut out = Builder::with_uvs(keep_uvs);
     let material_count = scene.materials.len().max(1) as u32;
     out.material_names = scene.materials.iter().map(|m| m.element.name.to_string()).collect();
     let mut tri = Vec::new();
@@ -217,9 +238,9 @@ fn load_fbx(path: &Path) -> Result<RawMesh, String> {
         // This avoids both an uncorrected negative node scale and a double reversal
         // when ufbx has already changed the mesh winding during space conversion.
         let reverse_winding = negative_transform_determinant ^ mesh.reversed_winding;
-        let has_uv = mesh.vertex_uv.exists;
+        let has_uv = keep_uvs && mesh.vertex_uv.exists;
         let has_n = mesh.vertex_normal.exists;
-        if !has_uv {
+        if keep_uvs && !has_uv {
             out.missing_uvs.push(node.element.name.to_string());
         }
         let has_c = mesh.vertex_color.exists;
@@ -324,9 +345,19 @@ struct Builder {
     color_corners: [[u8; 3]; 3],
     /// Color sum of the triangle being built.
     color_acc: Vec3,
+    /// `None` keeps the full-import default; `Some(false)` skips unused Bake UVs.
+    keep_uvs: Option<bool>,
 }
 
 impl Builder {
+    fn with_uvs(keep_uvs: bool) -> Self {
+        Self { keep_uvs: Some(keep_uvs), ..Self::default() }
+    }
+
+    fn keeps_uvs(&self) -> bool {
+        self.keep_uvs.unwrap_or(true)
+    }
+
     /// Starts a new object; its triangles are tagged with its index.
     fn begin_object(&mut self, name: &str) {
         self.objects.push(name.to_string());
@@ -393,8 +424,11 @@ impl Builder {
         }
         let n = if has_normal { imported_normal } else { Vec3::ZERO };
         let uv = c.uv.unwrap_or(Vec2::ZERO);
+        // High-poly Bake geometry does not sample UVs. Do not split one logical
+        // source vertex solely because it appears at multiple texture seams.
+        let key_uv = if self.keeps_uvs() { uv } else { Vec2::ZERO };
         // Objects never share vertices, even where they touch exactly.
-        let key = [c.pos.x, c.pos.y, c.pos.z, n.x, n.y, n.z, uv.x, uv.y].map(f32::to_bits);
+        let key = [c.pos.x, c.pos.y, c.pos.z, n.x, n.y, n.z, key_uv.x, key_uv.y].map(f32::to_bits);
         let key = [
             key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7],
             object, c.source_vertex,
@@ -404,7 +438,9 @@ impl Builder {
         if index == next {
             self.positions.push(c.pos);
             self.normals.push(n);
-            self.uvs.push(uv);
+            if self.keeps_uvs() {
+                self.uvs.push(uv);
+            }
             self.vertex_has_normal.push(has_normal);
             self.vertex_object.push(object);
             self.vertex_source.push(c.source_vertex);
@@ -466,7 +502,7 @@ impl Builder {
             name: String::new(),
             normals: (!self.positions.is_empty()).then_some(self.normals),
             positions: self.positions,
-            uvs: self.all_uvs.then_some(self.uvs),
+            uvs: (self.keeps_uvs() && self.all_uvs).then_some(self.uvs),
             indices: self.indices,
             tri_material: self.tri_material,
             material_count: self.max_material + 1,
@@ -645,6 +681,63 @@ Connections: {{\n C: \"OO\",2000,0\n C: \"OO\",1000,2000\n}}\n",
         ));
         std::fs::write(&path, source).expect("write temporary OBJ fixture");
         path
+    }
+
+    #[test]
+    fn bake_source_import_welds_uv_seams_without_changing_full_import() {
+        let path = write_temp_obj(
+            "bake-uv-seam",
+            r#"v 0 0 0
+v 1 0 0
+v 1 1 0
+v 0 1 0
+vt 0 0
+vt 1 0
+vt 1 1
+vt 0 1
+vt 0.25 0.25
+vn 0 0 1
+f 1/1/1 2/2/1 3/3/1
+f 1/5/1 3/3/1 4/4/1
+"#,
+        );
+        let full = super::load(&path).expect("full import");
+        let bake = super::load_bake_source(&path).expect("Bake import");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(full.positions.len(), 5, "full import must retain the UV seam split");
+        assert_eq!(full.uvs.as_ref().map(Vec::len), Some(5));
+        assert_eq!(bake.positions.len(), 4, "Bake import should weld the UV-only split");
+        assert!(bake.uvs.is_none(), "high-poly Bake source has no UV payload");
+        assert_eq!(bake.indices.len(), full.indices.len());
+        assert_eq!(bake.tri_material, full.tri_material);
+        assert_eq!(bake.normals.as_ref().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn bake_source_import_keeps_hard_normal_splits() {
+        let path = write_temp_obj(
+            "bake-normal-seam",
+            r#"v 0 0 0
+v 1 0 0
+v 1 1 0
+v 0 1 0
+vt 0 0
+vt 1 0
+vt 1 1
+vt 0 1
+vn 0 0 1
+vn 0 1 0
+f 1/1/1 2/2/1 3/3/1
+f 1/1/2 3/3/1 4/4/1
+"#,
+        );
+        let bake = super::load_bake_source(&path).expect("Bake import");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(bake.positions.len(), 5, "different authored normals must remain split");
+        assert!(bake.uvs.is_none());
+        assert!(bake.normals.is_some());
     }
 
     #[test]
