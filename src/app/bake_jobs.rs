@@ -50,22 +50,33 @@ impl PainterApp {
         }
         let Some(res) = self.set_engine_mut(set).map(|e| e.res.min(bake::MAX_BAKE_RES)) else { return };
         self.sets.baking = set;
-        let mesh = self.mesh.clone();
+        if let Some(BakeJob::Preparing { cancel, .. }) = &self.bake_job {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        let mesh = Arc::clone(&self.mesh);
         let settings = self.job_bake_settings();
         self.baked_id_source = settings.id_source;
         let (tx, rx) = mpsc::channel();
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let key = bake_cache::key(&mesh, &settings, res, set);
-            let prepared = match bake_cache::load(&key) {
-                Some(entry) => Ok(Prepared::Cached(entry)),
-                None => bake::prepare(&mesh, &settings, set).map(|scene| Prepared::Scene(scene, key)),
+            let prepared = if worker_cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                Err("Bake preparation cancelled".into())
+            } else {
+                match bake_cache::load(&key) {
+                    Some(entry) if !worker_cancel.load(std::sync::atomic::Ordering::Relaxed) => Ok(Prepared::Cached(entry)),
+                    Some(_) => Err("Bake preparation cancelled".into()),
+                    None => bake::prepare_cancellable(&mesh, &settings, set, &worker_cancel)
+                        .map(|scene| Prepared::Scene(scene, key)),
+                }
             };
             let _ = tx.send(prepared);
             ctx.request_repaint();
         });
-        // A newer job replaces any running one; its results are dropped.
-        self.bake_job = Some(BakeJob::Preparing(rx));
+        // Superseded CPU preparation workers observe this token and release scratch.
+        self.bake_job = Some(BakeJob::Preparing { rx, cancel });
         self.status = if self.mesh.sets.len() > 1 {
             format!("Preparing bake of {}…", self.mesh.sets[set].name)
         } else {
@@ -84,7 +95,7 @@ impl PainterApp {
     pub(super) fn poll_bake(&mut self, ctx: &egui::Context) {
         match &mut self.bake_job {
             None => {}
-            Some(BakeJob::Preparing(rx)) => match rx.try_recv() {
+            Some(BakeJob::Preparing { rx, .. }) => match rx.try_recv() {
                 Ok(Ok(Prepared::Cached(entry))) => {
                     let rs = &self.rs;
                     match out_of_memory_guard(&rs.device, || entry.upload(&rs.device, &rs.queue)) {
@@ -185,7 +196,7 @@ impl PainterApp {
     pub(super) fn bake_progress(&self) -> Option<(f32, &'static str)> {
         match &self.bake_job {
             None => None,
-            Some(BakeJob::Preparing(_)) => Some((0.0, "Preparing")),
+            Some(BakeJob::Preparing { .. }) => Some((0.0, "Preparing")),
             Some(BakeJob::Running(run, _)) => Some((run.progress(), "Baking")),
         }
     }

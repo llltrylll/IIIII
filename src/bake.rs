@@ -1012,17 +1012,41 @@ fn denoise_passes(ao_rays: u32) -> u32 {
     }
 }
 
+#[inline]
+fn check_prepare_cancelled(cancel: &AtomicBool) -> Result<(), String> {
+    if cancel.load(Ordering::Relaxed) {
+        Err("Bake preparation cancelled".into())
+    } else {
+        Ok(())
+    }
+}
+
 /// Prepares baking texture set `set` of `low` (its triangles get maps; the
 /// whole mesh occludes).
 pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<PreparedScene, String> {
+    prepare_cancellable(low, settings, set, &AtomicBool::new(false))
+}
+
+/// CPU Bake preparation can be abandoned when a newer request supersedes it.
+pub fn prepare_cancellable(
+    low: &Mesh,
+    settings: &BakeSettings,
+    set: usize,
+    cancel: &AtomicBool,
+) -> Result<PreparedScene, String> {
+    check_prepare_cancelled(cancel)?;
     let start = Instant::now();
     let low_tris = low.indices.len() / 3;
     let raster = low.sets.get(set).map_or(0..low_tris as u32, |s| s.tris.clone());
     let (positions, normals, indices, tri_material, material_count, source, src_objects, tri_color, tri_vertex_color) = match &settings.high_poly {
         Some(path) => {
             let mut hp = HighPoly::load(path, low.center, low.scale)?;
+            check_prepare_cancelled(cancel)?;
             // Normalize in place instead of retaining a second normal array.
-            for normal in &mut hp.normals {
+            for (i, normal) in hp.normals.iter_mut().enumerate() {
+                if i.is_multiple_of(16384) {
+                    check_prepare_cancelled(cancel)?;
+                }
                 *normal = normal.normalize_or_zero();
             }
             let objects = if settings.match_by_name && !low.objects.is_empty() && hp.tri_object.len() == hp.indices.len() / 3 {
@@ -1055,6 +1079,7 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
         None => {
             let positions: Vec<Vec3> = low.vertices.iter().map(|v| Vec3::from_array(v.pos)).collect();
             let normals: Vec<Vec3> = low.vertices.iter().map(|v| Vec3::from_array(v.normal)).collect();
+            check_prepare_cancelled(cancel)?;
             // Material IDs are only needed when explicitly selected. Vertex
             // color payloads are copied only for Vertex Color ID mode.
             let count = low.sets.len().max(1) as u32;
@@ -1076,6 +1101,7 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
             (positions, normals, Cow::Borrowed(&low.indices), tri_material, count, format!("{} (low poly)", low.name), None, tri_color, tri_vertex_color)
         }
     };
+    check_prepare_cancelled(cancel)?;
     let triangle_count = indices.len() / 3;
 
     // Name groups: 1-based per distinct low-poly base name; 0 = unmatched
@@ -1087,7 +1113,10 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
     if let (true, Some((src_tri_object, src_names))) = (settings.match_by_name, &src_objects)
         && !low.objects.is_empty() && low.tri_object.len() == low_tris && src_tri_object.len() == indices.len() / 3 {
             let mut groups: HashMap<String, u32> = HashMap::new();
-            for name in &low.objects {
+            for (i, name) in low.objects.iter().enumerate() {
+                if i.is_multiple_of(1024) {
+                    check_prepare_cancelled(cancel)?;
+                }
                 let n = groups.len() as u32 + 1;
                 groups.entry(base_name(name)).or_insert(n);
             }
@@ -1105,10 +1134,12 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
     // Object IDs and names are only preparation inputs; don't retain them
     // alongside the expanded per-corner GPU payloads.
     drop(src_objects);
+    check_prepare_cancelled(cancel)?;
 
     let cage = match &settings.cage {
         Some(path) if settings.high_poly.is_some() => {
             let cage = HighPoly::load(path, low.center, low.scale)?;
+            check_prepare_cancelled(cancel)?;
             if cage.indices.len() != low.indices.len() {
                 return Err(format!(
                     "The cage has {} triangles but the low poly has {low_tris}; a cage must be the low poly with its vertices moved.",
@@ -1133,6 +1164,7 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
             // corners carry the direction in `pos` and the distance in the
             // tangent's x (see `cs_surface`).
             let dirs = crate::cage::projection_dirs(low, settings.average_normals);
+            check_prepare_cancelled(cancel)?;
             let paint = settings.cage_paint.as_deref().filter(|p| p.fits(low.vertices.len()));
             let corners: Vec<crate::mesh::Vertex> = low
                 .indices
@@ -1147,6 +1179,7 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
         }
         _ => None,
     };
+    check_prepare_cancelled(cancel)?;
     let cage_reach = match &cage {
         Some(corners) if settings.builds_cage() => corners.iter().map(|c| c.tangent[0]).fold(0.0, f32::max),
         Some(corners) => corners
@@ -1158,9 +1191,13 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
     };
 
     let (tri_part, part_count) = components(&positions, &indices);
+    check_prepare_cancelled(cancel)?;
     let mut part_lo = vec![f32::MAX; part_count as usize];
     let mut part_hi = vec![f32::MIN; part_count as usize];
     for (t, tri) in indices.chunks_exact(3).enumerate() {
+        if t.is_multiple_of(8192) {
+            check_prepare_cancelled(cancel)?;
+        }
         let p = tri_part[t] as usize;
         for &v in tri {
             part_lo[p] = part_lo[p].min(positions[v as usize].y);
@@ -1189,6 +1226,7 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
         }
         _ => None,
     };
+    check_prepare_cancelled(cancel)?;
     let (tri_id, ids): (Cow<'_, [u32]>, Vec<[f32; 4]>) = match color_ids {
         Some((per_tri, palette)) => (Cow::Owned(per_tri), palette),
         None if use_materials => (Cow::Owned(tri_material), (0..material_count).map(id_color).collect()),
@@ -1199,6 +1237,9 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
         .map(|c| IdRegion { color: [c[0], c[1], c[2]], triangles: 0, min: [f32::MAX; 3], max: [f32::MIN; 3] })
         .collect();
     for (t, tri) in indices.chunks_exact(3).enumerate() {
+        if t.is_multiple_of(8192) {
+            check_prepare_cancelled(cancel)?;
+        }
         let r = &mut id_regions[tri_id[t] as usize];
         r.triangles += 1;
         for &v in tri {
@@ -1212,11 +1253,14 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
 
     // Baking needs node bounds and triangle order, not a second CPU triangle
     // array. Build those directly from the source indices.
+    check_prepare_cancelled(cancel)?;
     let (bvh_nodes, bvh_order) = Bvh::build_ordered(&positions, &indices);
+    check_prepare_cancelled(cancel)?;
 
     // Curvature comes from the source mesh's vertices (see
     // `vertex_curvature`) and rides in the normal's w.
     let curvature = vertex_curvature(&positions, &normals, &indices, 1.0 / settings.curvature_scale_for(low).max(1e-6));
+    check_prepare_cancelled(cancel)?;
     let mut tri_pos = Vec::with_capacity(bvh_order.len() * 3);
     let mut tri_nrm = Vec::with_capacity(bvh_order.len() * 3);
     // Flat mesh-part/material IDs come from the compact `ids` palette in
@@ -1224,7 +1268,10 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
     // colors; leaving it empty avoids 48 bytes per triangle in the common modes.
     let has_vertex_colors = settings.id_source == IdSource::VertexColors && tri_vertex_color.as_ref().is_some_and(|colors| !colors.is_empty());
     let mut tri_vcolor = if has_vertex_colors { Vec::with_capacity(bvh_order.len() * 3) } else { Vec::new() };
-    for &t in &bvh_order {
+    for (i, &t) in bvh_order.iter().enumerate() {
+        if i.is_multiple_of(8192) {
+            check_prepare_cancelled(cancel)?;
+        }
         let t = t as usize;
         // Per-triangle attributes ride in the w components: part index, ID
         // index, name group.
@@ -1263,7 +1310,9 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
     // traced every bent triangle edge of a dense mesh, which showed as
     // staircases and scalloped mask borders.
     let low_only = settings.high_poly.is_none();
+    check_prepare_cancelled(cancel)?;
     let [convex, concave] = feature_edges(&positions, &indices, &tri_part, settings.hard_edge_angle, None, low_only.then_some(&normals[..]));
+    check_prepare_cancelled(cancel)?;
     // The remaining preparation stages use only packed data and the original low mesh.
     drop(tri_part);
     drop(positions);
@@ -1278,9 +1327,12 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
     // whose sign stays the handedness) so the surface pass never has to search
     // for it: a search ray at a seam where parts intersect can land on the
     // other part. f32 holds slots exactly below 2^24.
-    let low_corners = (settings.high_poly.is_none() && bvh_order.len() < (1 << 24) - 2).then(|| {
+    let low_corners = if settings.high_poly.is_none() && bvh_order.len() < (1 << 24) - 2 {
         let mut corners = Vec::with_capacity(bvh_order.len() * 3);
         for (slot, &t) in bvh_order.iter().enumerate() {
+            if slot.is_multiple_of(8192) {
+                check_prepare_cancelled(cancel)?;
+            }
             if !raster.contains(&t) {
                 continue;
             }
@@ -1290,15 +1342,19 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
                 corners.push(v);
             }
         }
-        corners
-    });
+        Some(corners)
+    } else {
+        None
+    };
 
+    check_prepare_cancelled(cancel)?;
     let mut nodes = Vec::with_capacity(bvh_nodes.len() * 2);
     for n in &bvh_nodes {
         nodes.push([n.min.x, n.min.y, n.min.z, f32::from_bits(n.first)]);
         nodes.push([n.max.x, n.max.y, n.max.z, f32::from_bits(n.count)]);
     }
 
+    check_prepare_cancelled(cancel)?;
     Ok(PreparedScene {
         nodes,
         tri_pos,

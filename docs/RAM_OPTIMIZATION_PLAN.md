@@ -41,6 +41,7 @@ Scope: reduce **system RAM and transient CPU-memory peaks** in the existing appl
 - This removes the per-corner color array and its GPU storage buffer from the common Bake modes; the dedicated Vulkan GPU test checks the empty-buffer palette path.
 
 ### P1 — Bake CPU preparation peak
+- Bake preparation now receives a cancellation token. Starting a newer Bake cancels an older CPU worker; the worker checks between import/cage, component, ID, BVH, curvature, edge and packing phases, plus periodically in the long preparation loops.
 - Build the bake BVH directly from indexed positions, returning only node bounds and triangle order. The bake path no longer materializes a temporary triangle array or retains a reordered CPU triangle copy.
 - Normalize imported high-poly normals in place instead of allocating a second full normal array.
 - Allocate low-poly material IDs and copy vertex-color payloads only when the selected ID source needs them.
@@ -101,6 +102,7 @@ A candidate is not considered a measured win until this protocol is run on the o
 - [x] Bound the HDRI thumbnail decode queue to two pending CPU images.
 - [x] Bounded CPU shelf-preview and graph-image decode queues.
 - [x] Decompress project triangle ID and per-corner vertex-color arrays directly into final typed vectors.
+- [x] Cancel superseded Bake preparation workers and release their large scratch arrays at bounded checkpoints.
 - [x] Remove redundant Bake BVH triangle arrays and avoid unused ID/material/object copies during CPU preparation.
 - [x] Borrow low-poly indices during low-only Bake preparation and remove the per-triangle BVH centroid scratch vector.
 - [x] Consolidate cage overlay scale/color/position scratch into one per-probe vertex buffer.

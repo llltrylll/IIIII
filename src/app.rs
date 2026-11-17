@@ -332,7 +332,10 @@ struct LineAnchor {
 enum BakeJob {
     /// Worker thread is looking the bake up in the cache, or else loading the
     /// source and building the BVH.
-    Preparing(mpsc::Receiver<Result<Prepared, String>>),
+    Preparing {
+        rx: mpsc::Receiver<Result<Prepared, String>>,
+        cancel: Arc<std::sync::atomic::AtomicBool>,
+    },
     /// GPU passes in progress; the result is cached under the key.
     Running(BakeRun, bake_cache::Key),
 }
