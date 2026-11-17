@@ -112,8 +112,8 @@ impl PainterApp {
         for p in self.sets.parked.iter_mut().flatten() {
             if p.engine.dirty {
                 p.engine.composite();
+                p.engine.release_inactive_working_set();
             }
-            p.engine.release_inactive_working_set();
         }
     }
 
