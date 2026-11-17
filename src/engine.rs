@@ -1607,6 +1607,11 @@ impl Engine {
         }
     }
 
+    pub(crate) fn restore_active_working_set(&mut self) {
+        self.ensure_composite_working_set();
+        self.ensure_stroke_target();
+    }
+
     /// Creates an engine for another mesh while reusing immutable GPU pipelines.
     /// Useful for secondary render targets that share the same device and formats.
     pub fn sibling_with_bounds(
