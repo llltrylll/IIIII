@@ -100,7 +100,7 @@ pub struct Runtime {
     pipelines: HashMap<String, Compiled>,
     rendered: HashMap<u64, Rendered>,
     images: HashMap<PathBuf, ImageState>,
-    decoded: (mpsc::Sender<Decoded>, mpsc::Receiver<Decoded>),
+    decoded: (mpsc::SyncSender<Decoded>, mpsc::Receiver<Decoded>),
     /// Called from the worker when an image is decoded (a repaint).
     waker: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Node id → why it didn't render.
@@ -174,7 +174,9 @@ impl Runtime {
             pipelines: HashMap::new(),
             rendered: HashMap::new(),
             images: HashMap::new(),
-            decoded: mpsc::channel(),
+            // Bound decoded RGBA images waiting for GPU upload. The bounded
+            // queue also applies back-pressure to the decoder workers.
+            decoded: mpsc::sync_channel(2),
             waker: None,
             errors: HashMap::new(),
         }
@@ -262,7 +264,7 @@ impl Runtime {
         self.images.insert(path.clone(), ImageState::Loading);
         let file = if path.is_relative() { asset_path(path) } else { path.clone() };
         let (tx, waker, key) = (self.decoded.0.clone(), self.waker.clone(), path.clone());
-        std::thread::spawn(move || {
+        rayon::spawn(move || {
             let img = image::open(&file).map(|i| i.into_rgba8()).map_err(|e| format!("{}: {e}", file.display()));
             if tx.send((key, img)).is_ok()
                 && let Some(w) = waker {
