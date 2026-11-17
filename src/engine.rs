@@ -1568,6 +1568,45 @@ impl Engine {
         Self::with_pipelines(&self.rs, self.p.clone(), mesh, tris, self.bounds, res)
     }
 
+    /// Drops GPU resources used only while this Texture Set is being edited.
+    /// The final composited result stays resident for the viewport. The next
+    /// composite/paint recreates the released workspace lazily.
+    pub(crate) fn release_inactive_working_set(&mut self) {
+        if self.active.is_some() || self.generation == 0 || self.prefix.is_some() {
+            return;
+        }
+        let scratch = 1 - self.final_idx;
+        self.accum[scratch] = accum_set(&self.device, 1, "parked composite scratch");
+        self.stroke = Tex::new(&self.device, "parked stroke mask", 1, 1, STROKE_FORMAT, LAYER_USAGE);
+        self.snap = Default::default();
+        self.snap_mask = None;
+        self.folder_below.clear();
+        self.prefix_cache = None;
+        self.mask_scratch = None;
+        self.mask_out.clear();
+        self.mask_final.clear();
+        self.apply_bg = None;
+        self.stamp_bg = [None, None];
+    }
+
+    fn ensure_composite_working_set(&mut self) {
+        for i in 0..2 {
+            if self.accum[i][0].width != self.res {
+                self.accum[i] = accum_set(
+                    &self.device,
+                    self.res,
+                    if i == 0 { "accum A (restored)" } else { "accum B (restored)" },
+                );
+            }
+        }
+    }
+
+    fn ensure_stroke_target(&mut self) {
+        if self.stroke.width != self.res {
+            self.stroke = Tex::new(&self.device, "stroke mask (restored)", self.res, self.res, STROKE_FORMAT, LAYER_USAGE);
+        }
+    }
+
     /// Creates an engine for another mesh while reusing immutable GPU pipelines.
     /// Useful for secondary render targets that share the same device and formats.
     pub fn sibling_with_bounds(
@@ -3502,6 +3541,7 @@ impl Engine {
     /// Starts a stroke on the content or mask of layer `idx`. Returns false if
     /// there is nothing paintable there.
     pub fn begin_stroke(&mut self, idx: usize, target: StrokeTarget, enabled: [bool; CHANNELS], erase: bool) -> bool {
+        self.ensure_stroke_target();
         if let StrokeTarget::BakeFix(map) = target {
             if !self.begin_fix_stroke(map, erase) {
                 return false;
@@ -4282,6 +4322,7 @@ impl Engine {
     }
 
     pub fn composite(&mut self) {
+        self.ensure_composite_working_set();
         if self.maps_dirty {
             self.resolve_maps();
         }
