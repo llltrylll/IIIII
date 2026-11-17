@@ -1627,7 +1627,9 @@ impl Engine {
         bounds: (Vec3, Vec3),
         res: u32,
     ) -> Engine {
-        Self::with_pipelines(&self.rs, self.p.clone(), mesh, tris, bounds, res)
+        let mut sibling = Self::with_pipelines(&self.rs, self.p.clone(), mesh, tris, bounds, res);
+        sibling.image_cache = self.image_cache.clone();
+        sibling
     }
 
     fn with_pipelines(
