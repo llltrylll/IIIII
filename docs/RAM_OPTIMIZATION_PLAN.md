@@ -13,12 +13,12 @@ Scope: reduce **system RAM and transient CPU-memory peaks** in the existing appl
 ## Priority order
 
 ### P0 — Project I/O peak memory
-1. **Borrow compressed project blobs while opening.** The project file is already held in one byte buffer; copying every compressed blob into a second Vec<Vec<u8>> is unnecessary. Store slices into the original file buffer and decompress one blob at a time when consumed.
-2. **Stream the final save file to the temporary file.** Keep the current manifest/blob layout and temp-file rename, but write header, manifest and compressed blobs through a buffered writer instead of constructing a second full-size output Vec<u8>.
+1. **Read compressed project blobs on demand.** The parser now stores file offsets and lengths instead of loading the entire project into RAM or copying all compressed blobs. The Reader seeks to and decodes one blob when requested. Mesh vertex/index/object arrays are decompressed directly into their final typed allocations.
+2. **Spool compressed blobs to disk during save.** The Writer compresses and writes each blob to a temporary spool, then copies that spool into the final buffered `.mpp.tmp` before the existing atomic rename. It no longer retains all compressed blobs or builds a second full-size output Vec<u8>.
 3. Later: split CPU parsing/decompression from GPU resource creation, with explicit peak-memory accounting. This is a separate change because loading must remain transactional and preserve the current document on failure.
 
 ### P0 — Undo history RAM
-1. Compress snapshots incrementally, releasing each uncompressed staging copy as soon as that texture is compressed instead of building a full Vec<Vec<u8>> of all raw textures first.
+1. Compress snapshots one texture at a time through a one-item bounded channel, releasing each uncompressed staging copy before moving to the next texture.
 2. Count snapshots while mapping/compressing, not only after compression has completed.
 3. Add a configurable memory budget for painted snapshot history, alongside the existing step-count limit. Evict the oldest history entries first; never evict the newest entry while older entries remain. Keep the limit visible and adjustable in Preferences.
 4. Keep structural Undo edits and GPU-resident layer ownership semantics unchanged.
@@ -59,11 +59,11 @@ A candidate is not considered a measured win until this protocol is run on the o
 ## Status
 
 - [x] Source audit of project blobs, Undo snapshots, fill-image cache and asynchronous preview/decode queues.
-- [ ] Borrowed project blob slices.
-- [ ] Buffered streaming save to the existing temporary file.
-- [ ] Incremental Undo compression and pending-memory accounting.
-- [ ] Configurable Undo snapshot RAM budget.
-- [ ] Weak encoded-image cache.
-- [ ] Bounded CPU shelf-preview and graph-image queues.
-- [ ] Add memory-focused tests and run CI/GPU/Windows package workflows.
+- [x] File-backed project blob index and on-demand blob reads.
+- [x] Stream compressed blobs through a disk spool and buffered atomic project save.
+- [x] Incremental Undo compression and pending-memory accounting.
+- [x] Configurable Undo snapshot RAM budget, including Preferences and status-bar usage.
+- [x] Weak encoded-image cache for Fill source bytes.
+- [x] Bounded CPU shelf-preview and graph-image decode queues.
+- [ ] Verify project spool/file-backed typed readback tests and Undo budget tests on the latest HEAD; finish CI/GPU/Windows package workflows.
 - [ ] Capture before/after owner-machine measurements.
