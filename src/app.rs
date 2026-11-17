@@ -700,6 +700,7 @@ pub struct PainterApp {
     /// Smart Material ZIP/PNG decoding is completed off-thread; egui textures
     /// are created incrementally when the result reaches the UI thread.
     user_smarts_job: Option<mpsc::Receiver<Vec<smart_io::UserSmartData>>>,
+    user_smarts_pending: std::collections::VecDeque<smart_io::UserSmartData>,
     path: path_tool::PathTool,
     bake_preview: bake_live::LivePreview,
     custom_ui: bake_live::CustomUi,
@@ -2222,6 +2223,7 @@ impl PainterApp {
             library: Default::default(),
             user_smarts: Vec::new(),
             user_smarts_job: Some({ let _s = crate::startup_trace::span("new: smart_io::list_async"); smart_io::list_async(&cc.egui_ctx) }),
+            user_smarts_pending: Default::default(),
             path: Default::default(),
             bake_preview: Default::default(),
             custom_ui: Default::default(),
