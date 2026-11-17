@@ -527,7 +527,7 @@ pub struct PreparedScene {
     nodes: Vec<[f32; 4]>,
     tri_pos: Vec<[f32; 4]>,
     tri_nrm: Vec<[f32; 4]>,
-    /// Per-corner sRGB vertex colors, or the selected flat ID color.
+    /// Per-corner sRGB colors for Vertex Colors mode; empty for flat ID modes.
     tri_vcolor: Vec<[f32; 4]>,
     parts: Vec<[f32; 4]>,
     ids: Vec<[f32; 4]>,
@@ -2643,6 +2643,19 @@ pub(crate) mod tests {
         let baker = GpuBaker::new(device);
         let ctx = egui::Context::default();
         let mut run = baker.start_owned(device, queue, gpu_mesh, &mut scene, settings, res);
+        // The owned upload path must release every large CPU payload as soon
+        // as its corresponding GPU buffer has been created.
+        assert!(scene.nodes.is_empty());
+        assert!(scene.tri_pos.is_empty());
+        assert!(scene.tri_nrm.is_empty());
+        assert!(scene.tri_vcolor.is_empty());
+        assert!(scene.parts.is_empty());
+        assert!(scene.ids.is_empty());
+        assert!(scene.seg_nodes.is_empty());
+        assert!(scene.segs.is_empty());
+        assert!(scene.low_corners.is_none());
+        assert!(scene.low_draws.is_none());
+        assert!(scene.cage.is_none());
         let maps = loop {
             if let Some(maps) = baker.pump(&mut run, device, queue, &ctx) {
                 break maps;
