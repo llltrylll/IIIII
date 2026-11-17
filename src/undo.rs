@@ -439,7 +439,19 @@ impl UndoStack {
 
 #[cfg(test)]
 mod tests {
-    use super::{Edit, UndoStack};
+    use super::{Edit, SnapState, Snapshot, StrokeTarget, TexInfo, UndoEntry, UndoStack};
+    use std::sync::mpsc;
+
+    fn stroke_with_snapshot_bytes(bytes: usize) -> Edit {
+        let snapshot = || Snapshot { infos: Vec::new(), state: SnapState::Ready(vec![vec![0; bytes]]) };
+        Edit::Stroke(UndoEntry {
+            layer_id: 1,
+            target: StrokeTarget::Content,
+            channels: vec![0],
+            before: snapshot(),
+            after: snapshot(),
+        })
+    }
 
     #[test]
     fn clearing_history_also_resets_open_groups() {
@@ -456,5 +468,44 @@ mod tests {
         assert_eq!(history.undo.len(), 1);
         assert_eq!(history.undo[0].label, "kept group");
         assert!(matches!(&history.undo[0].edit, Edit::Group(edits) if edits.len() == 1));
+    }
+
+    #[test]
+    fn memory_budget_discards_oldest_history_first() {
+        let mut history = UndoStack::default();
+        history.set_limits(16, 20);
+        history.push("first", stroke_with_snapshot_bytes(6));
+        history.push("second", stroke_with_snapshot_bytes(6));
+        history.push("third", stroke_with_snapshot_bytes(6));
+
+        assert_eq!(history.undo.iter().map(|entry| entry.label.as_str()).collect::<Vec<_>>(), vec!["second", "third"]);
+        assert_eq!(history.ram_bytes(), 24);
+        assert!(history.ram_bytes() > history.max_ram_bytes, "newest entry is preserved even when it alone exceeds the cap");
+    }
+
+    #[test]
+    fn memory_budget_never_discards_the_only_newest_undo_step() {
+        let mut history = UndoStack::default();
+        history.set_limits(16, 4);
+        history.push("latest", stroke_with_snapshot_bytes(6));
+
+        assert_eq!(history.undo.len(), 1);
+        assert_eq!(history.undo[0].label, "latest");
+        assert_eq!(history.ram_bytes(), 12);
+    }
+
+    #[test]
+    fn pending_snapshot_memory_is_counted_before_compression_finishes() {
+        let (_tx, receiver) = mpsc::sync_channel(1);
+        let snapshot = Snapshot {
+            infos: vec![TexInfo { width: 4, height: 4, bpp: 4 }],
+            state: SnapState::Compressing {
+                receiver,
+                packed: vec![vec![1, 2, 3]],
+                pending_raw_bytes: 64,
+                total: 2,
+            },
+        };
+        assert_eq!(snapshot.ram_bytes(), 67);
     }
 }
