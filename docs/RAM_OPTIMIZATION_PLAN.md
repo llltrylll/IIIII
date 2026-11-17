@@ -41,9 +41,9 @@ Scope: reduce **system RAM and transient CPU-memory peaks** in the existing appl
 - Upload to the GPU incrementally on the owning thread.
 
 ### P2 — Graph runtime transient allocations
-- Replace per-node debug-string hashing with deterministic typed hashing.
-- Reuse evaluation scratch storage only where it does not retain large graph-specific allocations indefinitely.
-- Measure graph evaluation peak memory before introducing persistent plans or caches.
+- Replace per-node debug-string hashing with deterministic typed hashing; node parameter values are borrowed from the graph/definition rather than cloned on each evaluation.
+- Pre-size per-evaluation plans, dependency sets and reader counts from graph size. No large persistent graph scratch cache is retained.
+- Remaining: reuse evaluation scratch storage only where it does not retain large graph-specific allocations indefinitely; measure graph evaluation peak memory before introducing persistent plans or caches.
 
 ### P2 — Whole-document loading pipeline
 - Parse and decompress CPU payloads on a worker, retaining only the data needed for GPU upload.
@@ -78,5 +78,6 @@ A candidate is not considered a measured win until this protocol is run on the o
 - [x] Bounded CPU shelf-preview and graph-image decode queues.
 - [x] Remove redundant Bake BVH triangle arrays and avoid unused ID/material/object copies during CPU preparation.
 - [x] Normalize imported high-poly normals in place and verify indexed BVH output against the existing builder.
+- [x] Replace per-node graph debug-string hash allocations with typed hashing and borrowed parameter values; pre-size transient evaluation maps.
 - [x] Verify project spool/file-backed typed reads, shared-blob reuse and Undo RAM-budget tests; latest CI, unit tests, GPU regression and Windows portable package workflows pass.
 - [ ] Capture before/after owner-machine measurements.

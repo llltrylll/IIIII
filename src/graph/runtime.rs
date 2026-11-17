@@ -113,6 +113,43 @@ fn hash_of(v: impl Hash) -> u64 {
     h.finish()
 }
 
+/// Hash parameter values directly, without formatting an intermediate debug
+/// string on every graph evaluation.
+fn hash_value(value: &Value, h: &mut impl Hasher) {
+    match value {
+        Value::Float(v) => {
+            0u8.hash(h);
+            v.to_bits().hash(h);
+        }
+        Value::Int(v) => {
+            1u8.hash(h);
+            v.hash(h);
+        }
+        Value::Bool(v) => {
+            2u8.hash(h);
+            v.hash(h);
+        }
+        Value::Color(v) => {
+            3u8.hash(h);
+            for channel in v {
+                channel.to_bits().hash(h);
+            }
+        }
+        Value::Enum(v) => {
+            4u8.hash(h);
+            v.hash(h);
+        }
+        Value::Image(v) => {
+            5u8.hash(h);
+            v.hash(h);
+        }
+        Value::MeshMap(v) => {
+            6u8.hash(h);
+            v.hash(h);
+        }
+    }
+}
+
 /// Runs `f` and returns the first validation error it caused, as text.
 pub(crate) fn validation_scope<T>(device: &wgpu::Device, f: impl FnOnce() -> T) -> (T, Option<String>) {
     use std::future::Future;
@@ -301,11 +338,11 @@ impl Runtime {
         // values and what feeds it.
         struct Plan<'a> {
             def: &'a NodeDef,
-            values: Vec<Value>,
+            values: Vec<&'a Value>,
             inputs: Vec<Option<u64>>,
             hash: u64,
         }
-        let mut plans: HashMap<u64, Plan> = HashMap::new();
+        let mut plans: HashMap<u64, Plan> = HashMap::with_capacity(order.len());
         for &id in &order {
             let node = graph.node(id).expect("ordered from the graph");
             let Some(def) = lib.find(&node.def) else {
@@ -313,17 +350,31 @@ impl Runtime {
                 self.rendered.remove(&id);
                 continue;
             };
-            let values: Vec<Value> = def.params.iter().map(|p| lib.value(node, &p.name).unwrap_or_else(|| p.default.clone())).collect();
+            // Values live in the graph or node definition. Borrow them instead
+            // of cloning each parameter (notably image paths) every evaluation.
+            let values: Vec<&Value> = def.params.iter().map(|p| lib.value_ref(node, &p.name).unwrap_or(&p.default)).collect();
             let inputs: Vec<Option<u64>> =
                 def.inputs.iter().map(|i| node.links.get(&i.name).copied().filter(|from| plans.contains_key(from))).collect();
             let uses_maps = def.surface || def.params.iter().any(|p| p.kind == ParamKind::MeshMap);
-            let hash = hash_of((
-                &def.source,
-                format!("{values:?}"),
-                res,
-                inputs.iter().map(|i| i.map(|f| plans[&f].hash)).collect::<Vec<_>>(),
-                if uses_maps { maps_key } else { 0 },
-            ));
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            def.source.hash(&mut hasher);
+            values.len().hash(&mut hasher);
+            for value in &values {
+                hash_value(value, &mut hasher);
+            }
+            res.hash(&mut hasher);
+            inputs.len().hash(&mut hasher);
+            for input in &inputs {
+                match input {
+                    Some(from) => {
+                        1u8.hash(&mut hasher);
+                        plans[from].hash.hash(&mut hasher);
+                    }
+                    None => 0u8.hash(&mut hasher),
+                }
+            }
+            if uses_maps { maps_key } else { 0 }.hash(&mut hasher);
+            let hash = hasher.finish();
             plans.insert(id, Plan { def, values, inputs, hash });
         }
 
@@ -335,7 +386,7 @@ impl Runtime {
             Some(r) => r.hash != p.hash || self.errors.contains_key(id),
             None => true,
         };
-        let mut needed: HashSet<u64> = HashSet::new();
+        let mut needed: HashSet<u64> = HashSet::with_capacity(order.len());
         for &id in order.iter().rev() {
             let Some(p) = plans.get(&id) else { continue };
             let has_tex = self.rendered.get(&id).is_some_and(|r| r.tex.is_some());
@@ -353,17 +404,17 @@ impl Runtime {
         }
         let mut changed = false;
         // Nodes that didn't render this time (waiting for an image, failed).
-        let mut missing: HashSet<u64> = HashSet::new();
+        let mut missing: HashSet<u64> = HashSet::with_capacity(order.len());
         // Lean: how many nodes still to render read each node; at zero its
         // texture goes back to `pool` for the next node to render into, so
         // a big graph holds a few textures at a time rather than one per node.
-        let mut readers: HashMap<u64, usize> = HashMap::new();
+        let mut readers: HashMap<u64, usize> = HashMap::with_capacity(order.len());
         for id in order.iter().filter(|id| needed.contains(*id)) {
             for f in plans[id].inputs.iter().flatten() {
                 *readers.entry(*f).or_default() += 1;
             }
         }
-        let mut pool: Vec<Arc<Tex>> = Vec::new();
+        let mut pool: Vec<Arc<Tex>> = Vec::with_capacity(order.len().min(16));
         let mut encoder = device.create_command_encoder(&Default::default());
         for &id in &order {
             if !needed.contains(&id) {
@@ -461,7 +512,7 @@ impl Runtime {
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         def: &NodeDef,
-        values: &[Value],
+        values: &[&Value],
         inputs: &[Option<u64>],
         res: u32,
         maps: MeshMaps,
@@ -577,5 +628,25 @@ impl Runtime {
             pass.draw(0..3, 0..1);
         }
         Ok(Some(out))
+    }
+}
+#[cfg(test)]
+mod runtime_hash_tests {
+    use super::*;
+
+    fn value_hash(value: &Value) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        hash_value(value, &mut h);
+        h.finish()
+    }
+
+    #[test]
+    fn parameter_hash_is_typed_and_deterministic() {
+        assert_eq!(value_hash(&Value::Float(1.25)), value_hash(&Value::Float(1.25)));
+        assert_ne!(value_hash(&Value::Float(1.0)), value_hash(&Value::Int(1)));
+        assert_ne!(value_hash(&Value::Float(0.0)), value_hash(&Value::Float(-0.0)));
+        assert_ne!(value_hash(&Value::Enum(0)), value_hash(&Value::MeshMap(0)));
+        assert_ne!(value_hash(&Value::Image(None)), value_hash(&Value::Image(Some("source.png".into()))));
+        assert_ne!(value_hash(&Value::Color([0.0, 0.0, 0.0])), value_hash(&Value::Color([0.0, 0.0, 1.0])));
     }
 }
