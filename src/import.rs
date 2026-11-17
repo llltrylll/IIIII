@@ -219,6 +219,10 @@ fn load_obj_with_uvs(path: &Path, keep_uvs: bool) -> Result<RawMesh, String> {
             corner_presence.len()
         ));
     }
+    // The parser's flattened arrays and corner-presence flags are no longer
+    // needed. Release them before finish() may allocate fallback-normal maps.
+    drop(models);
+    drop(corner_presence);
     Ok(out.finish())
 }
 
@@ -307,6 +311,11 @@ fn load_fbx_with_uvs(path: &Path, keep_uvs: bool) -> Result<RawMesh, String> {
             out.push_materials(n, material);
         }
     }
+    // ufbx's complete scene and the reusable face-triangulation scratch are
+    // no longer needed. Drop both before Builder::finish may allocate the
+    // fallback-normal accumulation map.
+    drop(tri);
+    drop(scene);
     let mut mesh = out.finish();
     mesh.material_count = mesh.material_count.max(material_count);
     Ok(mesh)
@@ -472,6 +481,10 @@ impl Builder {
     }
 
     fn finish(mut self) -> RawMesh {
+        // Corner welding is complete. Release the large lookup table before
+        // allocating any missing-normal accumulation maps below.
+        drop(std::mem::take(&mut self.weld));
+
         // Generate missing normals one object at a time. A scene-wide fallback
         // would discard authored normals from otherwise complete objects and
         // can cancel opposite, coincident shells from separate objects.

@@ -54,6 +54,7 @@ Scope: reduce **system RAM and transient CPU-memory peaks** in the existing appl
 - Keep source-object groups unallocated unless match-by-name finds actual matches.
 - Borrow the per-triangle ID array in the default Mesh Parts mode instead of cloning it.
 - Bake source geometry now uses a compact indexed layout: one 28-byte position/normal/curvature record per source vertex plus one 24-byte index/part/ID/name-group record per BVH-ordered triangle. This replaces 96 bytes of expanded position/normal data per triangle; savings depend on vertex sharing. The only per-corner payload retained is optional interpolated vertex color in Vertex Colors mode.
+- OBJ/FBX importer parser buffers, corner-presence flags, face-triangulation scratch and the completed vertex-weld hash table are now released before fallback-normal generation allocates its accumulation maps.
 - Borrow the low-poly index slice for low-only bakes instead of cloning the complete index array; high-poly imports remain owned.
 - Derive triangle centroids from compact bounds during BVH construction, removing the third per-triangle bounds vector (12 bytes per triangle when Vec3 is 12 bytes).
 - Transform imported high-poly positions in place, avoiding a second full position vector during source loading.
@@ -143,6 +144,7 @@ A candidate is not considered a measured win until this protocol is run on the o
 - [x] Remove flat per-corner color storage for Mesh Parts/Materials modes; add a Vulkan GPU regression test for palette lookup.
 - [x] Consume and release prepared Bake CPU arrays incrementally during full-bake GPU upload; retain borrowed uploads for cached live previews.
 - [x] Replace expanded per-corner Bake position/normal arrays with 28-byte unique-vertex and 24-byte indexed-triangle records; preserve triangle order/metadata and retain per-corner colors only for Vertex Colors mode.
+- [x] Release OBJ/FBX parser and triangulation scratch plus the completed Builder weld table before generating missing normals, reducing overlap between import buffers and fallback-normal accumulation.
 - [x] Replace per-node graph debug-string hash allocations with typed hashing and borrowed parameter values; use fixed-size per-node scratch arrays and pre-size transient evaluation maps.
 - [x] Keep per-node parameter reference arrays out of the retained evaluation plan; resolve them only when that node is rendered.
 - [x] Verify project spool/file-backed typed reads, shared-blob reuse and Undo RAM-budget tests; latest CI, unit tests, GPU regression and Windows portable package workflows pass.
