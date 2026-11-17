@@ -3344,29 +3344,23 @@ impl Engine {
 
     /// Returns whether a property edit changes every mask input, and the layer
     /// IDs whose own mask source/filter configuration changed.
-    fn mask_cache_changes(before: &DocProps, after: &DocProps) -> (bool, Vec<u64>) {
+    fn apply_mask_cache_changes(mask_final: &mut HashSet<u64>, before: &DocProps, after: &DocProps) {
         if before.levels != after.levels
             || before.layers.len() != after.layers.len()
             || before.layers.iter().zip(&after.layers).any(|(a, b)| a.0 != b.0) {
-            return (true, Vec::new());
-        }
-        let changed = before.layers.iter().zip(&after.layers)
-            .filter(|(a, b)| {
-                a.1.generator != b.1.generator
-                    || a.1.mask_filters != b.1.mask_filters
-                    || a.1.mask_layers != b.1.mask_layers
-            })
-            .map(|(a, _)| a.0)
-            .collect();
-        (false, changed)
-    }
-
-    fn apply_mask_cache_changes(mask_final: &mut HashSet<u64>, before: &DocProps, after: &DocProps) {
-        let (all, changed) = Self::mask_cache_changes(before, after);
-        if all {
             mask_final.clear();
-        } else {
-            for id in changed { mask_final.remove(&id); }
+            return;
+        }
+        // Invalidate only affected IDs in place. A temporary Vec<u64> of all
+        // changed masks is unnecessary even when a document has many layers.
+        for ((before_id, before), (after_id, after)) in before.layers.iter().zip(&after.layers) {
+            if before_id == after_id
+                && (before.generator != after.generator
+                    || before.mask_filters != after.mask_filters
+                    || before.mask_layers != after.mask_layers)
+            {
+                mask_final.remove(before_id);
+            }
         }
     }
 

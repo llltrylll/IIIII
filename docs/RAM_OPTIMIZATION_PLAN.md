@@ -70,6 +70,7 @@ Scope: reduce **system RAM and transient CPU-memory peaks** in the existing appl
 
 ### P1 — Avoid cloning committed layer properties during cache invalidation
 - Compare the committed DocProps snapshot by reference when invalidating mask caches. Do not clone all layer names, mask filter vectors and mask-layer vectors just to compute the changed mask IDs.
+- Remove changed mask IDs directly from the cache during comparison; do not allocate a temporary Vec of IDs either.
 - The current property state is still captured once for comparison/Undo when needed; this removes only the redundant second full snapshot copy.
 
 ### P2 — Graph runtime transient allocations
