@@ -5395,8 +5395,32 @@ mod scissor_tests {
 
 #[cfg(test)]
 mod mask_cache_invalidation_tests {
-    use super::{Blend, Engine, FilterKind, MaskFilter};
+    use super::{Blend, Content, Engine, FilterKind, Folder, Layer, Mask, MaskFilter};
     use crate::undo::{DocProps, LayerProps};
+    use std::collections::HashSet;
+
+    fn live_layer(id: u64, visible: bool, filters: Vec<MaskFilter>) -> Layer {
+        Layer {
+            id,
+            name: "Layer".into(),
+            visible,
+            opacity: 1.0,
+            blend: Blend::Normal,
+            content: Content::Folder(Folder { open: true, graph: None }),
+            mask: Some(Mask {
+                black_base: false,
+                paint: None,
+                generator: None,
+                filters,
+                layers: Vec::new(),
+                graph: None,
+            }),
+            disabled_channels: [false; super::CHANNELS],
+            parent: None,
+            images: Default::default(),
+            thumb: None,
+        }
+    }
 
     fn props() -> LayerProps {
         LayerProps {
@@ -5413,6 +5437,33 @@ mod mask_cache_invalidation_tests {
 
     fn doc() -> DocProps {
         DocProps { layers: vec![(7, props())], levels: Vec::new() }
+    }
+
+    #[test]
+    fn live_property_check_does_not_invalidate_for_unrelated_layer_properties() {
+        let before = doc();
+        let layer = live_layer(7, false, Vec::new());
+        let mut cache = HashSet::from([7]);
+        Engine::apply_live_mask_cache_changes(&mut cache, &[layer], &[], &before);
+        assert!(cache.contains(&7), "visibility and mask absence must not invalidate unchanged mask inputs");
+    }
+
+    #[test]
+    fn live_property_check_invalidates_only_the_changed_mask() {
+        let before = doc();
+        let layer = live_layer(7, true, vec![MaskFilter::new(FilterKind::Blur)]);
+        let mut cache = HashSet::from([7, 8]);
+        Engine::apply_live_mask_cache_changes(&mut cache, &[layer], &[], &before);
+        assert_eq!(cache, HashSet::from([8]));
+    }
+
+    #[test]
+    fn live_property_check_clears_every_mask_when_layer_identity_changes() {
+        let before = doc();
+        let layer = live_layer(8, true, Vec::new());
+        let mut cache = HashSet::from([7, 8]);
+        Engine::apply_live_mask_cache_changes(&mut cache, &[layer], &[], &before);
+        assert!(cache.is_empty());
     }
 
     #[test]
