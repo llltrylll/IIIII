@@ -776,7 +776,8 @@ struct CpuShelfPreview {
 /// CPU-only previews are generated away from PainterApp::new. The egui
 /// texture handles are created and updated only on the UI thread.
 fn start_cpu_shelf_previews(ctx: &egui::Context) -> mpsc::Receiver<CpuShelfPreview> {
-    let (tx, rx) = mpsc::channel();
+    // Back-pressure keeps generated RGBA previews from accumulating in RAM if the UI lags.
+    let (tx, rx) = mpsc::sync_channel(2);
     let ctx = ctx.clone();
     std::thread::Builder::new()
         .name("shelf-cpu-previews".into())
