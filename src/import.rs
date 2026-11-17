@@ -7,6 +7,7 @@
 
 use glam::{Vec2, Vec3};
 use std::collections::HashMap;
+use std::io::BufRead;
 use std::path::Path;
 
 pub struct RawMesh {
@@ -77,42 +78,51 @@ fn load_with_uvs(path: &Path, keep_uvs: bool) -> Result<RawMesh, String> {
 /// fills missing vt/vn indices with the previous index, so its index arrays
 /// alone cannot distinguish authored attributes from fallback references.
 fn obj_corner_attribute_presence(path: &Path, keep_uvs: bool) -> Result<Vec<(bool, bool)>, String> {
-    let source = std::fs::read_to_string(path)
+    let file = std::fs::File::open(path)
         .map_err(|e| format!("Failed to read OBJ attribute flags: {e}"))?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
     let mut result = Vec::new();
 
-    for line in source.lines() {
-        let line = line.split('#').next().unwrap_or_default();
-        let mut words = line.split_whitespace();
+    // Stream the source file. Reading it all into a String here would keep a
+    // second copy of a potentially huge OBJ resident beside tobj's parsed mesh.
+    while reader.read_line(&mut line)
+        .map_err(|e| format!("Failed to read OBJ attribute flags: {e}"))? != 0
+    {
+        let mut words = line.split('#').next().unwrap_or_default().split_whitespace();
         if words.next() != Some("f") {
+            line.clear();
             continue;
         }
 
-        let corners: Vec<(bool, bool)> = words
-            .map(|token| {
-                let mut parts = token.split('/');
-                let _position = parts.next();
-                let uv_token = parts.next();
-                let uv = keep_uvs && uv_token.is_some_and(|value| !value.is_empty());
-                let normal = parts.next().is_some_and(|value| !value.is_empty());
-                (uv, normal)
-            })
-            .collect();
+        // tobj triangulates polygons as a fan: (0,1,2), (0,2,3), ...
+        // Emit those corner flags as the tokens arrive instead of allocating
+        // a temporary Vec for every polygon.
+        let mut first = None;
+        let mut previous = None;
+        for token in words {
+            let mut parts = token.split('/');
+            let _position = parts.next();
+            let uv_token = parts.next();
+            let uv = keep_uvs && uv_token.is_some_and(|value| !value.is_empty());
+            let normal = parts.next().is_some_and(|value| !value.is_empty());
+            let current = (uv, normal);
 
-        // The OBJ loader ignores points and lines for this import path.
-        // Polygons are triangulated as a fan: (0,1,2), (0,2,3), ...
-        if corners.len() < 3 {
-            continue;
+            match (first, previous) {
+                (None, _) => first = Some(current),
+                (Some(_), None) => previous = Some(current),
+                (Some(first_corner), Some(previous_corner)) => {
+                    result.extend_from_slice(&[first_corner, previous_corner, current]);
+                    previous = Some(current);
+                }
+            }
         }
-        for i in 1..corners.len() - 1 {
-            result.extend_from_slice(&[corners[0], corners[i], corners[i + 1]]);
-        }
+        line.clear();
     }
 
     Ok(result)
 }
 
-#[cfg(test)]
 fn load_obj(path: &Path) -> Result<RawMesh, String> {
     load_obj_with_uvs(path, true)
 }
