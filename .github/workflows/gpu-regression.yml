@@ -114,6 +114,12 @@ jobs:
       - name: GPU parity - mask filters
         run: "cargo test --locked --bin material_painter preview_test::mask_filters_apply -- --ignored --exact --nocapture --test-threads 1"
 
+      - name: GPU regression - content strokes do not refresh unrelated thumbnails
+        run: "cargo test --locked --bin material_painter preview_test::content_stroke_keeps_unrelated_thumbnails -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU regression - mask strokes refresh only their own thumbnail
+        run: "cargo test --locked --bin material_painter preview_test::mask_stroke_redoes_only_the_mask_thumbnail -- --ignored --exact --nocapture --test-threads 1"
+
       - name: Upload GPU regression images
         if: always()
         uses: actions/upload-artifact@v4
