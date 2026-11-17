@@ -3342,6 +3342,43 @@ impl Engine {
         }
     }
 
+    /// Checks property state without allocating the DocProps snapshot. This is
+    /// used on idle frames; the owned snapshot is built only when a real edit
+    /// must be compared or stored in Undo history.
+    fn doc_props_match(&self, props: &DocProps) -> bool {
+        if self.layers.len() != props.layers.len() || self.map_levels.as_slice() != props.levels.as_slice() {
+            return false;
+        }
+        self.layers.iter().zip(&props.layers).all(|(layer, (id, saved))| {
+            if layer.id != *id
+                || layer.name != saved.name
+                || layer.visible != saved.visible
+                || layer.opacity != saved.opacity
+                || layer.blend != saved.blend
+            {
+                return false;
+            }
+            let fill = match &layer.content {
+                Content::Fill(fill) => Some(*fill),
+                Content::Paint(_) | Content::Folder(_) => None,
+            };
+            if fill != saved.fill {
+                return false;
+            }
+            let (generator, filters, mask_layers): (
+                Option<Generator>,
+                &[MaskFilter],
+                &[MaskLayer],
+            ) = match &layer.mask {
+                Some(mask) => (mask.generator, &mask.filters, &mask.layers),
+                None => (None, &[], &[]),
+            };
+            generator == saved.generator
+                && filters == saved.mask_filters.as_slice()
+                && mask_layers == saved.mask_layers.as_slice()
+        })
+    }
+
     /// Returns whether a property edit changes every mask input, and the layer
     /// IDs whose own mask source/filter configuration changed.
     fn apply_mask_cache_changes(mask_final: &mut HashSet<u64>, before: &DocProps, after: &DocProps) {
@@ -3374,11 +3411,13 @@ impl Engine {
     /// The app calls this once an interaction ends, so a slider drag becomes a
     /// single entry; every structural edit calls it first to keep the order.
     pub fn commit_props(&mut self, undo: &mut UndoStack) {
-        let current = self.doc_props();
-        Self::apply_mask_cache_changes(&mut self.mask_final, &self.committed, &current);
-        if current == self.committed {
+        // This runs on idle frames. Avoid constructing a full cloned
+        // DocProps (names, filters and mask layers) when nothing changed.
+        if self.doc_props_match(&self.committed) {
             return;
         }
+        let current = self.doc_props();
+        Self::apply_mask_cache_changes(&mut self.mask_final, &self.committed, &current);
         let same_layers = current.layers.len() == self.committed.layers.len()
             && current.layers.iter().zip(&self.committed.layers).all(|(a, b)| a.0 == b.0);
         if same_layers {
@@ -4182,8 +4221,12 @@ impl Engine {
     /// when only material properties changed; invalidate the exact mask inputs
     /// that changed, or all masks when mesh-map levels changed.
     pub fn mark_dirty(&mut self) {
-        let current = self.doc_props();
-        Self::apply_mask_cache_changes(&mut self.mask_final, &self.committed, &current);
+        // Most dirty marks are paint/composite changes, not property edits.
+        // Compare against the committed state without cloning it.
+        if !self.doc_props_match(&self.committed) {
+            let current = self.doc_props();
+            Self::apply_mask_cache_changes(&mut self.mask_final, &self.committed, &current);
+        }
         if self.maps_dirty { self.mask_final.clear(); }
         self.dirty = true;
         self.full_dirty = true;
