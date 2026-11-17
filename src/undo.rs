@@ -105,13 +105,14 @@ impl Snapshot {
             let (tx, receiver) = mpsc::sync_channel(1);
             rayon::spawn(move || {
                 for buffer in buffers {
-                    let raw = {
+                    // Compress directly from the mapped staging memory. A
+                    // separate raw Vec would duplicate an entire texture
+                    // while the mapped buffer still owns the same pixels.
+                    let compressed = {
                         let mapped = buffer.slice(..).get_mapped_range().expect("staging buffer is mapped");
-                        mapped.to_vec()
+                        lz4_flex::compress_prepend_size(&mapped)
                     };
                     buffer.unmap();
-                    let compressed = lz4_flex::compress_prepend_size(&raw);
-                    drop(raw);
                     if tx.send(compressed).is_err() {
                         break;
                     }
