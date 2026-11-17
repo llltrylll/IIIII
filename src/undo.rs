@@ -22,7 +22,12 @@ pub struct TexInfo {
 
 enum SnapState {
     Mapping { buffers: Vec<wgpu::Buffer>, remaining: Arc<AtomicUsize> },
-    Compressing(mpsc::Receiver<Vec<Vec<u8>>>),
+    Compressing {
+        receiver: mpsc::Receiver<Vec<u8>>,
+        packed: Vec<Vec<u8>>,
+        pending_raw_bytes: usize,
+        total: usize,
+    },
     Ready(Vec<Vec<u8>>),
 }
 
@@ -77,34 +82,74 @@ impl Snapshot {
         }
     }
 
-    /// Advances the state machine without blocking.
+    fn uncompressed_bytes(&self) -> usize {
+        self.infos.iter().fold(0usize, |sum, info| {
+            sum.saturating_add(info.width as usize * info.height as usize * info.bpp as usize)
+        })
+    }
+
+    /// Advances the state machine without blocking. Compression runs one
+    /// texture at a time and uses a one-item channel: the raw image can be
+    /// released before the next image is copied/compressed, avoiding a second
+    /// full-size collection of uncompressed snapshots in system RAM.
     pub fn update(&mut self) {
-        match &mut self.state {
-            SnapState::Mapping { buffers, remaining } => {
-                if remaining.load(Ordering::Acquire) != 0 {
-                    return;
-                }
-                let raw: Vec<Vec<u8>> = buffers
-                    .iter()
-                    .map(|b| {
-                        let data = b.slice(..).get_mapped_range().expect("staging buffer is mapped").to_vec();
-                        b.unmap();
-                        data
-                    })
-                    .collect();
-                let (tx, rx) = mpsc::channel();
-                rayon::spawn(move || {
-                    let packed = raw.iter().map(|d| lz4_flex::compress_prepend_size(d)).collect();
-                    let _ = tx.send(packed);
-                });
-                self.state = SnapState::Compressing(rx);
+        let mut mapped_buffers = None;
+        if let SnapState::Mapping { buffers, remaining } = &mut self.state
+            && remaining.load(Ordering::Acquire) == 0 {
+                mapped_buffers = Some(std::mem::take(buffers));
             }
-            SnapState::Compressing(rx) => {
-                if let Ok(data) = rx.try_recv() {
-                    self.state = SnapState::Ready(data);
+
+        if let Some(buffers) = mapped_buffers {
+            let total = buffers.len();
+            let pending_raw_bytes = self.uncompressed_bytes();
+            let (tx, receiver) = mpsc::sync_channel(1);
+            rayon::spawn(move || {
+                for buffer in buffers {
+                    let raw = {
+                        let mapped = buffer.slice(..).get_mapped_range().expect("staging buffer is mapped");
+                        mapped.to_vec()
+                    };
+                    buffer.unmap();
+                    let compressed = lz4_flex::compress_prepend_size(&raw);
+                    drop(raw);
+                    if tx.send(compressed).is_err() {
+                        break;
+                    }
+                }
+            });
+            self.state = SnapState::Compressing {
+                receiver,
+                packed: Vec::with_capacity(total),
+                pending_raw_bytes,
+                total,
+            };
+            return;
+        }
+
+        let mut ready = None;
+        if let SnapState::Compressing { receiver, packed, pending_raw_bytes, total } = &mut self.state {
+            loop {
+                match receiver.try_recv() {
+                    Ok(data) => {
+                        if let Some(info) = self.infos.get(packed.len()) {
+                            let raw_bytes = info.width as usize * info.height as usize * info.bpp as usize;
+                            *pending_raw_bytes = pending_raw_bytes.saturating_sub(raw_bytes);
+                        }
+                        packed.push(data);
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        ready = Some(std::mem::take(packed));
+                        break;
+                    }
                 }
             }
-            SnapState::Ready(_) => {}
+            if packed.len() >= *total {
+                ready = Some(std::mem::take(packed));
+            }
+        }
+        if let Some(data) = ready {
+            self.state = SnapState::Ready(data);
         }
     }
 
@@ -112,26 +157,47 @@ impl Snapshot {
     /// whose readback is still in flight.
     pub fn wait(&mut self, device: &wgpu::Device) {
         loop {
+            self.update();
             match &mut self.state {
                 SnapState::Mapping { remaining, .. } => {
                     if remaining.load(Ordering::Acquire) != 0 {
                         let _ = device.poll(wgpu::PollType::wait_indefinitely());
                     }
-                    self.update();
                 }
-                SnapState::Compressing(rx) => {
-                    let data = rx.recv().unwrap_or_default();
-                    self.state = SnapState::Ready(data);
+                SnapState::Compressing { receiver, packed, pending_raw_bytes, total } => {
+                    match receiver.recv() {
+                        Ok(data) => {
+                            if let Some(info) = self.infos.get(packed.len()) {
+                                let raw_bytes = info.width as usize * info.height as usize * info.bpp as usize;
+                                *pending_raw_bytes = pending_raw_bytes.saturating_sub(raw_bytes);
+                            }
+                            packed.push(data);
+                            if packed.len() >= *total {
+                                let data = std::mem::take(packed);
+                                self.state = SnapState::Ready(data);
+                            }
+                        }
+                        Err(_) => {
+                            let data = std::mem::take(packed);
+                            self.state = SnapState::Ready(data);
+                        }
+                    }
                 }
                 SnapState::Ready(_) => return,
             }
         }
     }
 
-    pub fn compressed_bytes(&self) -> usize {
+    /// Current Undo-history footprint. Pending snapshots use their remaining
+    /// uncompressed size as a conservative estimate; ready snapshots use the
+    /// actual compressed bytes retained in RAM.
+    pub fn ram_bytes(&self) -> usize {
         match &self.state {
+            SnapState::Mapping { .. } => self.uncompressed_bytes(),
+            SnapState::Compressing { packed, pending_raw_bytes, .. } => {
+                packed.iter().map(|v| v.len()).sum::<usize>().saturating_add(*pending_raw_bytes)
+            }
             SnapState::Ready(d) => d.iter().map(|v| v.len()).sum(),
-            _ => 0,
         }
     }
 
@@ -178,7 +244,7 @@ pub struct UndoEntry {
 
 impl UndoEntry {
     fn bytes(&self) -> usize {
-        self.before.compressed_bytes() + self.after.compressed_bytes()
+        self.before.ram_bytes().saturating_add(self.after.ram_bytes())
     }
 }
 
@@ -263,13 +329,25 @@ pub struct UndoStack {
     next_serial: u64,
     /// Steps kept; older ones are dropped (Preferences > General).
     pub max_entries: usize,
+    /// RAM budget for painted before/after snapshots. One newest entry may
+    /// exceed the budget by itself; it is kept so the latest action remains undoable.
+    pub max_ram_bytes: usize,
     /// The texture set being edited: new steps belong to it.
     pub set: usize,
 }
 
 impl Default for UndoStack {
     fn default() -> Self {
-        Self { undo: Vec::new(), redo: Vec::new(), group: None, group_depth: 0, next_serial: 0, max_entries: 64, set: 0 }
+        Self {
+            undo: Vec::new(),
+            redo: Vec::new(),
+            group: None,
+            group_depth: 0,
+            next_serial: 0,
+            max_entries: 64,
+            max_ram_bytes: 512 * 1024 * 1024,
+            set: 0,
+        }
     }
 }
 
@@ -282,10 +360,7 @@ impl UndoStack {
         self.redo.clear();
         self.next_serial += 1;
         self.undo.push(Entry { label: label.into(), edit, serial: self.next_serial, set: self.set });
-        if self.undo.len() > self.max_entries.max(1) {
-            let excess = self.undo.len() - self.max_entries.max(1);
-            self.undo.drain(..excess);
-        }
+        self.enforce_limits();
     }
 
     /// Collects nested edits into one history step until [`UndoStack::end_group`]
@@ -315,6 +390,7 @@ impl UndoStack {
                 s.after.update();
             });
         }
+        self.enforce_limits();
     }
 
     /// Identifies the current document state (0 = nothing recorded).
@@ -328,6 +404,31 @@ impl UndoStack {
         self.redo.clear();
         self.group = None;
         self.group_depth = 0;
+    }
+
+    pub fn set_limits(&mut self, max_entries: usize, max_ram_bytes: usize) {
+        self.max_entries = max_entries.max(1);
+        self.max_ram_bytes = max_ram_bytes.max(1);
+        self.enforce_limits();
+    }
+
+    fn enforce_limits(&mut self) {
+        if self.undo.len() > self.max_entries.max(1) {
+            let excess = self.undo.len() - self.max_entries.max(1);
+            self.undo.drain(..excess);
+        }
+        while self.ram_bytes() > self.max_ram_bytes {
+            // Redo entries are the first history to discard; pop removes the
+            // oldest redo step. Otherwise discard the oldest undo step, but
+            // retain the newest one even when a single stroke exceeds budget.
+            if !self.redo.is_empty() {
+                self.redo.pop();
+            } else if self.undo.len() > 1 {
+                self.undo.remove(0);
+            } else {
+                break;
+            }
+        }
     }
 
     pub fn ram_bytes(&self) -> usize {
