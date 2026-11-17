@@ -110,11 +110,13 @@ impl Writer {
     }
 }
 
-struct Reader {
-    blobs: Vec<Vec<u8>>,
+struct Reader<'a> {
+    /// Compressed blobs borrow the original project file. Keeping slices here
+    /// avoids duplicating every compressed payload while a project is opened.
+    blobs: Vec<&'a [u8]>,
 }
 
-impl Reader {
+impl Reader<'_> {
     fn blob(&self, v: &Value) -> Result<Vec<u8>, String> {
         let i = v.as_u64().ok_or("missing blob reference")? as usize;
         let packed = self.blobs.get(i).ok_or(format!("blob {i} is missing"))?;
@@ -634,11 +636,15 @@ impl PainterApp {
             manifest["active_channels"].as_array().and_then(|channels| channels.get(i)).and_then(Value::as_bool).unwrap_or(true)
         });
         let count = u64_at(take(8)?);
-        let mut blobs = Vec::with_capacity(count);
+        let mut blobs: Vec<&[u8]> = Vec::with_capacity(count);
         for _ in 0..count {
             let n = u64_at(take(8)?);
-            blobs.push(take(n)?.to_vec());
+            blobs.push(take(n)?);
         }
+        // Release the parser closure's mutable borrow of the cursor. The
+        // slices remain valid because they borrow the file buffer, which is
+        // kept alive for the whole project-open operation.
+        drop(take);
         let r = Reader { blobs };
 
         // Everything is decoded before the open document is touched.
