@@ -698,6 +698,11 @@ impl PainterApp {
         });
         file.read_exact(&mut number).map_err(|_| bad())?;
         let count_u64 = u64::from_le_bytes(number);
+        let blob_table_start = file.stream_position().map_err(|_| bad())?;
+        let minimum_table_bytes = count_u64.checked_mul(8).ok_or_else(bad)?;
+        if minimum_table_bytes > file_len.saturating_sub(blob_table_start) {
+            return Err(bad());
+        }
         let mut blobs = Vec::with_capacity(usize::try_from(count_u64).map_err(|_| bad())?);
         for _ in 0..count_u64 {
             file.read_exact(&mut number).map_err(|_| bad())?;
