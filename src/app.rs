@@ -1450,7 +1450,8 @@ const HDRI_THUMB: [usize; 2] = [256, 128];
 /// from the on-disk cache when it has them (else decoding the HDRI and
 /// caching the picture), and sends them as they're ready.
 fn start_hdri_thumbs(ctx: &egui::Context, builtins: Vec<usize>) -> mpsc::Receiver<(String, Vec<u8>)> {
-    let (tx, rx) = mpsc::channel();
+    // At most two decoded RGBA thumbnails wait for UI-thread texture upload.
+    let (tx, rx) = mpsc::sync_channel(2);
     let ctx = ctx.clone();
     std::thread::spawn(move || {
         let dir = project_io::data_dir().map(|d| d.join("hdri_thumbs"));

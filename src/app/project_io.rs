@@ -247,6 +247,32 @@ impl Reader {
         }
         Ok(output)
     }
+
+    /// Reads an optional typed payload only when it has exactly the expected
+    /// element count. Its final Vec<T> is the only decompressed allocation.
+    fn blob_pod_vec_exact<T: bytemuck::Pod>(&self, v: &Value, expected_len: usize) -> Result<Option<Vec<T>>, String> {
+        let (i, packed) = self.packed_blob(v)?;
+        if packed.len() < 4 {
+            return Err(format!("blob {i} is damaged: missing decompressed size"));
+        }
+        let byte_len = u32::from_le_bytes(packed[..4].try_into().expect("four-byte size")) as usize;
+        let element_size = std::mem::size_of::<T>();
+        if element_size == 0 {
+            return Err(format!("blob {i} has an invalid typed-array element size"));
+        }
+        let expected_bytes = expected_len.checked_mul(element_size)
+            .ok_or_else(|| format!("blob {i} typed-array size overflows"))?;
+        if byte_len != expected_bytes {
+            return Ok(None);
+        }
+        let mut output = vec![T::zeroed(); expected_len];
+        let written = lz4_flex::block::decompress_into(&packed[4..], bytemuck::cast_slice_mut(&mut output))
+            .map_err(|e| format!("blob {i} is damaged: {e}"))?;
+        if written != byte_len {
+            return Err(format!("blob {i} has an inconsistent decompressed size"));
+        }
+        Ok(Some(output))
+    }
 }
 
 fn f(v: &Value, key: &str, default: f32) -> f32 {
@@ -363,16 +389,6 @@ pub(super) fn fill_from(v: &Value) -> FillParams {
         tri_sharpness: f(v, "triplanar_sharpness", d.tri_sharpness),
         graph: v["graph"].as_u64(),
     }
-}
-
-/// Per-corner vertex colors from their saved bytes (nine a triangle); `None`
-/// when they don't cover exactly `tris` triangles.
-fn corner_colors_from_bytes(bytes: &[u8], tris: usize) -> Option<Vec<[[u8; 3]; 3]>> {
-    let colors: Vec<[[u8; 3]; 3]> = bytes
-        .chunks_exact(9)
-        .map(|c| [[c[0], c[1], c[2]], [c[3], c[4], c[5]], [c[6], c[7], c[8]]])
-        .collect();
-    (colors.len() == tris && bytes.len() == tris * 9).then_some(colors)
 }
 
 pub(super) fn generator_json(g: &Generator) -> Value {
@@ -814,14 +830,11 @@ impl PainterApp {
             }
         }
         if !m["tri_color"].is_null() {
-            let colors: Vec<[u8; 3]> = r.blob(&m["tri_color"])?.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
-            if colors.len() == tris {
-                mesh.tri_color = Some(colors);
-            }
+            mesh.tri_color = r.blob_pod_vec_exact::<[u8; 3]>(&m["tri_color"], tris)?;
         }
         // Projects saved before this key existed only have the per-triangle average.
         if !m["tri_vertex_color"].is_null() {
-            mesh.tri_vertex_color = corner_colors_from_bytes(&r.blob(&m["tri_vertex_color"])?, tris);
+            mesh.tri_vertex_color = r.blob_pod_vec_exact::<[[u8; 3]; 3]>(&m["tri_vertex_color"], tris)?;
         }
         let bv = &manifest["bake"];
         let mut bs = crate::bake::BakeSettings::default();
@@ -1141,17 +1154,6 @@ mod tests {
     }
 
     #[test]
-    fn corner_colors_survive_a_save() {
-        let colors: Vec<[[u8; 3]; 3]> = vec![[[255, 0, 0], [0, 255, 0], [0, 0, 255]], [[1, 2, 3], [4, 5, 6], [7, 8, 9]]];
-        let bytes: Vec<u8> = bytemuck::cast_slice::<[[u8; 3]; 3], u8>(&colors).to_vec();
-        assert_eq!(bytes.len(), 18);
-        assert_eq!(corner_colors_from_bytes(&bytes, 2), Some(colors));
-        // A color list that doesn't match the mesh is dropped, not misaligned.
-        assert_eq!(corner_colors_from_bytes(&bytes, 3), None);
-        assert_eq!(corner_colors_from_bytes(&bytes[..17], 2), None);
-    }
-
-    #[test]
     fn disk_spool_and_file_backed_reader_round_trip_multiple_blobs() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1160,16 +1162,25 @@ mod tests {
         let project = std::env::temp_dir().join(format!("material-painter-{}-{unique}.mpp", std::process::id()));
         let spool = project.with_extension("mpp.blobs.tmp");
         let numbers = vec![0x1122_3344u32, 7, 99, u32::MAX];
+        let tri_colors = vec![[255u8, 0, 0], [0, 255, 0]];
+        let corner_colors: Vec<[[u8; 3]; 3]> = vec![
+            [[255, 0, 0], [0, 255, 0], [0, 0, 255]],
+            [[1, 2, 3], [4, 5, 6], [7, 8, 9]],
+        ];
         let image_bytes = std::sync::Arc::new(b"encoded fill image source bytes".to_vec());
         let packed_numbers = lz4_flex::compress_prepend_size(bytemuck::cast_slice(&numbers));
         let packed_image = lz4_flex::compress_prepend_size(image_bytes.as_slice());
+        let packed_tri_colors = lz4_flex::compress_prepend_size(bytemuck::cast_slice(&tri_colors));
+        let packed_corner_colors = lz4_flex::compress_prepend_size(bytemuck::cast_slice(&corner_colors));
 
         {
             let mut writer = Writer::new(&project).expect("create spool");
             assert_eq!(writer.blob(bytemuck::cast_slice(&numbers)), json!(0));
             assert_eq!(writer.blob_arc(&image_bytes), json!(1));
             assert_eq!(writer.blob_arc(&image_bytes.clone()), json!(1), "the same Arc writes only one image blob");
-            assert_eq!(writer.count, 2);
+            assert_eq!(writer.blob(bytemuck::cast_slice(&tri_colors)), json!(2));
+            assert_eq!(writer.blob(bytemuck::cast_slice(&corner_colors)), json!(3));
+            assert_eq!(writer.count, 4);
 
             // Header with an empty manifest, followed by the exact spool data.
             let mut file = std::fs::File::create(&project).expect("create test project");
@@ -1181,15 +1192,28 @@ mod tests {
 
             let first_offset = 8 + 8 + 0 + 8 + 8;
             let second_offset = first_offset + packed_numbers.len() as u64 + 8;
+            let third_offset = second_offset + packed_image.len() as u64 + 8;
+            let fourth_offset = third_offset + packed_tri_colors.len() as u64 + 8;
             let reader = Reader {
                 file: std::sync::Mutex::new(std::fs::File::open(&project).unwrap()),
                 blobs: vec![
                     (first_offset, packed_numbers.len()),
                     (second_offset, packed_image.len()),
+                    (third_offset, packed_tri_colors.len()),
+                    (fourth_offset, packed_corner_colors.len()),
                 ],
                 shared_blobs: std::sync::Mutex::new(std::collections::HashMap::new()),
             };
             assert_eq!(reader.blob_pod_vec::<u32>(&json!(0)).unwrap(), numbers);
+            assert_eq!(
+                reader.blob_pod_vec_exact::<[u8; 3]>(&json!(2), 2).unwrap(),
+                Some(tri_colors)
+            );
+            assert!(reader.blob_pod_vec_exact::<[[u8; 3]; 3]>(&json!(3), 3).unwrap().is_none());
+            assert_eq!(
+                reader.blob_pod_vec_exact::<[[u8; 3]; 3]>(&json!(3), 2).unwrap(),
+                Some(corner_colors)
+            );
             let loaded_first = reader.blob_arc(&json!(1)).unwrap();
             let loaded_second = reader.blob_arc(&json!(1)).unwrap();
             assert!(std::sync::Arc::ptr_eq(&loaded_first, &loaded_second));

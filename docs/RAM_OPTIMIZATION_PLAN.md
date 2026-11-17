@@ -16,6 +16,7 @@ Scope: reduce **system RAM and transient CPU-memory peaks** in the existing appl
 1. **Read compressed project blobs on demand.** The parser now stores file offsets and lengths instead of loading the entire project into RAM or copying all compressed blobs. The Reader seeks to and decodes one blob when requested. Mesh vertex/index/object arrays are decompressed directly into their final typed allocations.
 2. **Spool compressed blobs to disk during save.** The Writer compresses and writes each blob to a temporary spool, then copies that spool into the final buffered `.mpp.tmp` before the existing atomic rename. It no longer retains all compressed blobs or builds a second full-size output Vec<u8>.
 3. Later: split CPU parsing/decompression from GPU resource creation, with explicit peak-memory accounting. This is a separate change because loading must remain transactional and preserve the current document on failure.
+- Triangle ID colors and per-corner vertex colors decompress directly into their final typed vectors when counts match the mesh, without an intermediate full-size byte vector.
 
 ### P0 — Undo history RAM
 1. Compress snapshots one texture at a time through a one-item bounded channel, releasing each uncompressed staging copy before moving to the next texture.
@@ -88,7 +89,9 @@ A candidate is not considered a measured win until this protocol is run on the o
 - [x] Configurable Undo snapshot RAM budget, including Preferences and status-bar usage.
 - [x] Weak encoded-image cache shared across sibling Texture Sets.
 - [x] Deduplicate shared Fill image blobs in project save/open.
+- [x] Bound the HDRI thumbnail decode queue to two pending CPU images.
 - [x] Bounded CPU shelf-preview and graph-image decode queues.
+- [x] Decompress project triangle ID and per-corner vertex-color arrays directly into final typed vectors.
 - [x] Remove redundant Bake BVH triangle arrays and avoid unused ID/material/object copies during CPU preparation.
 - [x] Borrow low-poly indices during low-only Bake preparation and remove the per-triangle BVH centroid scratch vector.
 - [x] Normalize imported high-poly normals in place and verify indexed BVH output against the existing builder.
