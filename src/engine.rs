@@ -3401,6 +3401,39 @@ impl Engine {
         (false, changed)
     }
 
+    /// Invalidates mask results directly from the live Engine state. Unlike
+    /// doc_props(), this needs no temporary copy of every layer's properties.
+    fn apply_live_mask_cache_changes(
+        mask_final: &mut HashSet<u64>,
+        layers: &[Layer],
+        levels: &[Levels],
+        before: &DocProps,
+    ) {
+        if levels != before.levels.as_slice()
+            || layers.len() != before.layers.len()
+            || layers.iter().zip(&before.layers).any(|(layer, (id, _))| layer.id != *id)
+        {
+            mask_final.clear();
+            return;
+        }
+        for (layer, (id, saved)) in layers.iter().zip(&before.layers) {
+            let (generator, filters, mask_layers): (
+                Option<Generator>,
+                &[MaskFilter],
+                &[MaskLayer],
+            ) = match &layer.mask {
+                Some(mask) => (mask.generator, &mask.filters, &mask.layers),
+                None => (None, &[], &[]),
+            };
+            if generator != saved.generator
+                || filters != saved.mask_filters.as_slice()
+                || mask_layers != saved.mask_layers.as_slice()
+            {
+                mask_final.remove(id);
+            }
+        }
+    }
+
     fn apply_mask_cache_changes(mask_final: &mut HashSet<u64>, before: &DocProps, after: &DocProps) {
         if before.levels != after.levels
             || before.layers.len() != after.layers.len()
@@ -4242,11 +4275,14 @@ impl Engine {
     /// that changed, or all masks when mesh-map levels changed.
     pub fn mark_dirty(&mut self) {
         // Most dirty marks are paint/composite changes, not property edits.
-        // Compare against the committed state without cloning it.
-        if !self.doc_props_match(&self.committed) {
-            let current = self.doc_props();
-            Self::apply_mask_cache_changes(&mut self.mask_final, &self.committed, &current);
-        }
+        // For property changes, invalidate masks from live fields directly;
+        // do not build a temporary DocProps snapshot just to discard it.
+        Self::apply_live_mask_cache_changes(
+            &mut self.mask_final,
+            &self.layers,
+            &self.map_levels,
+            &self.committed,
+        );
         if self.maps_dirty { self.mask_final.clear(); }
         self.dirty = true;
         self.full_dirty = true;

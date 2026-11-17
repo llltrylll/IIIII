@@ -74,7 +74,7 @@ Scope: reduce **system RAM and transient CPU-memory peaks** in the existing appl
 - Upload to the GPU incrementally on the owning thread.
 
 ### P0 — Avoid per-frame property snapshot allocations
-- Compare live layer properties, masks, filters and map levels directly against the committed snapshot during idle-frame commits and dirty marks.
+- Compare live layer properties directly against the committed snapshot during idle-frame commits; invalidate live mask caches from only the required mask/structure fields on dirty marks.
 - Allocate a new DocProps snapshot only when properties actually changed and the snapshot is needed for Undo/cache invalidation.
 
 ### P1 — Avoid cloning committed layer properties during cache invalidation
@@ -125,7 +125,8 @@ A candidate is not considered a measured win until this protocol is run on the o
 - [x] Bound the HDRI thumbnail decode queue to two pending CPU images.
 - [x] Bounded CPU shelf-preview and graph-image decode queues.
 - [x] Limit stale layer/mask thumbnail rendering to two per UI update after broad changes.
-- [x] Compare live document properties without allocating a DocProps snapshot on idle frames; materialize it only after a real property change.
+- [x] Compare live document properties without allocating a DocProps snapshot on idle frames; materialize it only after a real property change for Undo.
+- [x] Invalidate mask caches directly from live layers/levels on dirty marks without creating a temporary DocProps snapshot.
 - [x] Avoid cloning the full committed layer-property snapshot solely for mask-cache invalidation.
 - [x] Decompress project triangle ID and per-corner vertex-color arrays directly into final typed vectors.
 - [x] Cancel superseded Bake preparation workers and release their large scratch arrays at bounded checkpoints.
