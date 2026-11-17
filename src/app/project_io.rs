@@ -105,6 +105,8 @@ struct Writer {
     path: PathBuf,
     count: usize,
     spool_bytes: usize,
+    /// Identical Arc-backed fill sources reuse one project blob.
+    image_blobs: std::collections::HashMap<usize, usize>,
     error: Option<String>,
 }
 
@@ -112,7 +114,27 @@ impl Writer {
     fn new(project_path: &Path) -> Result<Self, String> {
         let path = project_path.with_extension("mpp.blobs.tmp");
         let file = std::fs::File::create(&path).map_err(|e| format!("can't create {}: {e}", path.display()))?;
-        Ok(Self { file: Some(std::io::BufWriter::new(file)), path, count: 0, spool_bytes: 0, error: None })
+        Ok(Self {
+            file: Some(std::io::BufWriter::new(file)),
+            path,
+            count: 0,
+            spool_bytes: 0,
+            image_blobs: std::collections::HashMap::new(),
+            error: None,
+        })
+    }
+
+    /// Identical Arc-backed Fill images share one blob in the project file.
+    /// Pointer identity is exact because both references are alive while this
+    /// project snapshot is serialized; no probabilistic hash is involved.
+    fn blob_arc(&mut self, raw: &std::sync::Arc<Vec<u8>>) -> Value {
+        let key = std::sync::Arc::as_ptr(raw) as usize;
+        if let Some(index) = self.image_blobs.get(&key) {
+            return json!(index);
+        }
+        let reference = self.blob(raw.as_slice());
+        self.image_blobs.insert(key, self.count - 1);
+        reference
     }
 
     /// Compress one payload, write it straight to the disk spool and release
@@ -159,6 +181,9 @@ struct Reader {
     /// disk; only the blob being decoded is brought into RAM.
     file: std::sync::Mutex<std::fs::File>,
     blobs: Vec<(u64, usize)>,
+    /// Weak CPU-side cache: repeated manifest references to one blob share
+    /// the same encoded image allocation for as long as a FillImage owns it.
+    shared_blobs: std::sync::Mutex<std::collections::HashMap<usize, std::sync::Weak<Vec<u8>>>>,
 }
 
 impl Reader {
@@ -177,6 +202,23 @@ impl Reader {
     fn blob(&self, v: &Value) -> Result<Vec<u8>, String> {
         let (i, packed) = self.packed_blob(v)?;
         lz4_flex::decompress_size_prepended(&packed).map_err(|e| format!("blob {i} is damaged: {e}"))
+    }
+
+    fn blob_arc(&self, v: &Value) -> Result<std::sync::Arc<Vec<u8>>, String> {
+        let index = v.as_u64().ok_or("missing blob reference")? as usize;
+        if let Some(data) = self.shared_blobs
+            .lock()
+            .map_err(|_| "project blob cache lock is poisoned")?
+            .get(&index)
+            .and_then(std::sync::Weak::upgrade) {
+            return Ok(data);
+        }
+        let data = std::sync::Arc::new(self.blob(v)?);
+        self.shared_blobs
+            .lock()
+            .map_err(|_| "project blob cache lock is poisoned")?
+            .insert(index, std::sync::Arc::downgrade(&data));
+        Ok(data)
     }
 
     /// Decompresses directly into the final typed allocation. Mesh arrays no
@@ -509,7 +551,7 @@ impl PainterApp {
                 .iter()
                 .enumerate()
                 .map(|(_ch, im)| im.as_ref().filter(|_| !from_graph))
-                .map(|im| im.map_or(Value::Null, |im| json!({"name": im.name, "data": w.blob(&im.encoded)})))
+                .map(|im| im.map_or(Value::Null, |im| json!({"name": im.name, "data": w.blob_arc(&im.encoded)})))
                 .collect();
             layers.push(json!({
                 "images": images,
@@ -742,7 +784,11 @@ impl PainterApp {
             blobs.push((offset, len));
             file.seek(SeekFrom::Start(end)).map_err(|_| bad())?;
         }
-        let r = Reader { file: std::sync::Mutex::new(file), blobs };
+        let r = Reader {
+            file: std::sync::Mutex::new(file),
+            blobs,
+            shared_blobs: std::sync::Mutex::new(std::collections::HashMap::new()),
+        };
 
         // Everything is decoded before the open document is touched.
         let m = &manifest["mesh"];
@@ -904,7 +950,7 @@ impl PainterApp {
                 let mut images: [Option<crate::engine::FillImage>; crate::engine::CHANNELS] = Default::default();
                 for (k, iv) in lv["images"].as_array().into_iter().flatten().enumerate().take(crate::engine::CHANNELS) {
                     if !iv.is_null() {
-                        let data = std::sync::Arc::new(r.blob(&iv["data"])?);
+                        let data = r.blob_arc(&iv["data"])?;
                         images[k] = Some(self.engine.decode_channel_image(k, s(iv, "name").unwrap_or("image").to_string(), data)?);
                     }
                 }
