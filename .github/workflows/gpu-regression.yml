@@ -88,6 +88,9 @@ jobs:
       - name: GPU parity - path tracer shader compiles
         run: "cargo test --locked --bin material_painter preview_test::path_trace_pipeline_compiles_with_grazing_normal_correction -- --ignored --exact --nocapture --test-threads 1"
 
+      - name: GPU bake - flat mesh-part IDs use palette without per-corner color storage
+        run: "cargo test --locked --bin material_painter bake::tests::mesh_part_ids_use_palette_without_corner_colors -- --ignored --exact --nocapture --test-threads 1"
+
       - name: GPU parity - screen painting follows imported normal facing
         run: "cargo test --locked --bin material_painter preview_test::screen_projection_respects_imported_normal_facing -- --ignored --exact --nocapture --test-threads 1"
 

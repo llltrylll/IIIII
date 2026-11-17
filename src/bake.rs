@@ -1215,7 +1215,11 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
     let curvature = vertex_curvature(&positions, &normals, &indices, 1.0 / settings.curvature_scale_for(low).max(1e-6));
     let mut tri_pos = Vec::with_capacity(bvh_order.len() * 3);
     let mut tri_nrm = Vec::with_capacity(bvh_order.len() * 3);
-    let mut tri_vcolor = Vec::with_capacity(bvh_order.len() * 3);
+    // Flat mesh-part/material IDs come from the compact `ids` palette in
+    // the shader. A per-corner buffer is needed only for interpolated vertex
+    // colors; leaving it empty avoids 48 bytes per triangle in the common modes.
+    let has_vertex_colors = settings.id_source == IdSource::VertexColors && tri_vertex_color.as_ref().is_some_and(|colors| !colors.is_empty());
+    let mut tri_vcolor = if has_vertex_colors { Vec::with_capacity(bvh_order.len() * 3) } else { Vec::new() };
     for &t in &bvh_order {
         let t = t as usize;
         // Per-triangle attributes ride in the w components: part index, ID
@@ -1227,12 +1231,12 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
             let n = normals[v as usize];
             tri_pos.push([p.x, p.y, p.z, w[k]]);
             tri_nrm.push([n.x, n.y, n.z, curvature.get(v as usize).copied().unwrap_or(0.0)]);
-            let color = if settings.id_source == IdSource::VertexColors {
-                tri_vertex_color.as_ref().and_then(|colors| colors.get(t)).map(|tri| tri[k])
+            if has_vertex_colors {
+                let color = tri_vertex_color.as_ref().and_then(|colors| colors.get(t)).map(|tri| tri[k])
                     .map(|rgb| [rgb[0] as f32 / 255.0, rgb[1] as f32 / 255.0, rgb[2] as f32 / 255.0, 1.0])
-                    .unwrap_or(flat_id)
-            } else { flat_id };
-            tri_vcolor.push(color);
+                    .unwrap_or(flat_id);
+                tri_vcolor.push(color);
+            }
         }
     }
     // A low poly's interpolated normals give unreliable texel curvature, so
@@ -2723,6 +2727,21 @@ pub(crate) mod tests {
             assert!((half(&b, i, 0) - 1.0).abs() < 1e-3, "sky neutral");
             assert!((half(&b, i, 1) - 1.0).abs() < 1e-3 && (half(&b, i, 2) - 1.0).abs() < 1e-3, "edges neutral");
         }
+    }
+
+    /// The usual Mesh Parts mode must use the compact ID palette, not
+    /// allocate one RGBA value for every triangle corner.
+    #[test]
+    #[ignore]
+    fn mesh_part_ids_use_palette_without_corner_colors() {
+        let (device, queue) = gpu();
+        let mesh = Primitive::RoundedCube.build();
+        let settings = BakeSettings::default();
+        let scene = prepare(&mesh, &settings, 0).expect("prepare low-poly scene");
+        assert!(scene.tri_vcolor.is_empty(), "flat IDs should not allocate per-corner colors");
+        drop(scene);
+        let gpu_mesh = GpuMesh::new(&device, &mesh);
+        let _ = run_bake(&device, &queue, &mesh, &gpu_mesh, &settings, 16);
     }
 
     /// Low-poly-only bakes of the built-in meshes plus any in MP_BAKE_TEST.
