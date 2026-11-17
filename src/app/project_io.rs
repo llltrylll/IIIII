@@ -1066,7 +1066,7 @@ impl PainterApp {
         }
         match result {
             Ok(prepared) => {
-                let path = job.path;
+                let path = job.path.clone();
                 match self.open_project_prepared(&path, prepared, ctx) {
                     Ok(()) => self.target = crate::undo::StrokeTarget::Content,
                     Err(error) => self.status = error,
@@ -1089,8 +1089,6 @@ impl PainterApp {
     ) -> Result<(), String> {
         let PreparedProject { manifest, reader: r, mesh, bvh } = prepared;
         let bad = || format!("{} isn't a Material Painter project (or is damaged)", path.display());
-        let m = &manifest["mesh"];
-        let tris = mesh.triangle_count();
         self.active_channels = std::array::from_fn(|i| {
             manifest["active_channels"].as_array().and_then(|channels| channels.get(i)).and_then(Value::as_bool).unwrap_or(true)
         });
