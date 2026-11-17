@@ -93,29 +93,51 @@ impl TriangleBounds {
 
 impl Bvh {
     pub fn from_mesh(mesh: &Mesh) -> Bvh {
-        let tris = mesh
-            .indices
-            .chunks_exact(3)
-            .map(|t| [t[0], t[1], t[2]].map(|i| Vec3::from_array(mesh.vertices[i as usize].pos)))
-            .collect();
-        Bvh::build(tris)
+        let triangle_count = mesh.indices.len() / 3;
+        let mut bounds = Vec::with_capacity(triangle_count);
+        for triangle in mesh.indices.chunks_exact(3) {
+            let p0 = Vec3::from_array(mesh.vertices[triangle[0] as usize].pos);
+            let p1 = Vec3::from_array(mesh.vertices[triangle[1] as usize].pos);
+            let p2 = Vec3::from_array(mesh.vertices[triangle[2] as usize].pos);
+            bounds.push(TriangleBounds { min: p0.min(p1).min(p2), max: p0.max(p1).max(p2) });
+        }
+        let (nodes, order) = Self::build_bounds(bounds);
+        let mut tris = Vec::with_capacity(order.len());
+        for &triangle in &order {
+            let base = triangle as usize * 3;
+            tris.push([0, 1, 2].map(|corner| {
+                Vec3::from_array(mesh.vertices[mesh.indices[base + corner] as usize].pos)
+            }));
+        }
+        Bvh { nodes, order, tris }
     }
 
     /// Over the mesh triangles `keep` accepts (hits still report mesh triangle indices).
+    /// Only the final leaf-order triangle data is materialized; source-order
+    /// triangles are never duplicated into a temporary Vec.
     pub fn from_mesh_where(mesh: &Mesh, keep: impl Fn(usize) -> bool) -> Bvh {
         let ids: Vec<u32> = (0..mesh.indices.len() / 3).filter(|&t| keep(t)).map(|t| t as u32).collect();
-        let tris = ids
-            .iter()
-            .map(|&t| {
-                let k = t as usize * 3;
-                [0, 1, 2].map(|c| Vec3::from_array(mesh.vertices[mesh.indices[k + c] as usize].pos))
-            })
-            .collect();
-        let mut bvh = Bvh::build(tris);
-        for o in &mut bvh.order {
-            *o = ids[*o as usize];
+        let mut bounds = Vec::with_capacity(ids.len());
+        for &triangle in &ids {
+            let base = triangle as usize * 3;
+            let p0 = Vec3::from_array(mesh.vertices[mesh.indices[base] as usize].pos);
+            let p1 = Vec3::from_array(mesh.vertices[mesh.indices[base + 1] as usize].pos);
+            let p2 = Vec3::from_array(mesh.vertices[mesh.indices[base + 2] as usize].pos);
+            bounds.push(TriangleBounds { min: p0.min(p1).min(p2), max: p0.max(p1).max(p2) });
         }
-        bvh
+        let (nodes, mut order) = Self::build_bounds(bounds);
+        for local in &mut order {
+            *local = ids[*local as usize];
+        }
+        drop(ids);
+        let mut tris = Vec::with_capacity(order.len());
+        for &triangle in &order {
+            let base = triangle as usize * 3;
+            tris.push([0, 1, 2].map(|corner| {
+                Vec3::from_array(mesh.vertices[mesh.indices[base + corner] as usize].pos)
+            }));
+        }
+        Bvh { nodes, order, tris }
     }
 
     pub fn build(tris: Vec<[Vec3; 3]>) -> Bvh {
@@ -428,6 +450,10 @@ mod tests {
         assert_eq!(indexed.order, expected.order);
         assert_eq!(indexed.tris, expected.tris);
         assert_eq!(indexed.nodes.len(), expected.nodes.len());
+        let from_mesh = Bvh::from_mesh(&mesh);
+        assert_eq!(from_mesh.order, expected.order);
+        assert_eq!(from_mesh.tris, expected.tris);
+        assert_eq!(from_mesh.nodes.len(), expected.nodes.len());
     }
 
     #[test]

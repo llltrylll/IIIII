@@ -43,6 +43,7 @@ Scope: reduce **system RAM and transient CPU-memory peaks** in the existing appl
 ### P1 — Bake CPU preparation peak
 - Bake preparation now receives a cancellation token. Starting a newer Bake cancels an older CPU worker; the worker checks between import/cage, component, ID, BVH, curvature, edge and packing phases, plus periodically in the long preparation loops.
 - Build the bake BVH directly from indexed positions, returning only node bounds and triangle order. The bake path no longer materializes a temporary triangle array or retains a reordered CPU triangle copy.
+- Build viewport/picking BVHs directly from mesh indices too; do not construct a full source-order triangle Vec before producing the final BVH leaf-order triangles.
 - Normalize imported high-poly normals in place instead of allocating a second full normal array.
 - Allocate low-poly material IDs and copy vertex-color payloads only when the selected ID source needs them.
 - Keep source-object groups unallocated unless match-by-name finds actual matches.
@@ -106,6 +107,7 @@ A candidate is not considered a measured win until this protocol is run on the o
 - [x] Decompress project triangle ID and per-corner vertex-color arrays directly into final typed vectors.
 - [x] Cancel superseded Bake preparation workers and release their large scratch arrays at bounded checkpoints.
 - [x] Remove redundant Bake BVH triangle arrays and avoid unused ID/material/object copies during CPU preparation.
+- [x] Build mesh picking BVHs directly from indexed mesh vertices, including filtered object visibility BVHs, without an extra source-order triangle array.
 - [x] Borrow low-poly indices during low-only Bake preparation and remove the per-triangle BVH centroid scratch vector.
 - [x] Consolidate cage overlay scale/color/position scratch into one per-probe vertex buffer.
 - [x] Store optional cage-probe hit arrays without per-sample Vec headers for empty/missed probes.
