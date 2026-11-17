@@ -158,6 +158,7 @@ impl Snapshot {
     pub fn wait(&mut self, device: &wgpu::Device) {
         loop {
             self.update();
+            let mut ready = None;
             match &mut self.state {
                 SnapState::Mapping { remaining, .. } => {
                     if remaining.load(Ordering::Acquire) != 0 {
@@ -167,23 +168,23 @@ impl Snapshot {
                 SnapState::Compressing { receiver, packed, pending_raw_bytes, total } => {
                     match receiver.recv() {
                         Ok(data) => {
-                            if let Some(info) = self.infos.get(packed.len()) {
+                            let index = packed.len();
+                            if let Some(info) = self.infos.get(index) {
                                 let raw_bytes = info.width as usize * info.height as usize * info.bpp as usize;
                                 *pending_raw_bytes = pending_raw_bytes.saturating_sub(raw_bytes);
                             }
                             packed.push(data);
                             if packed.len() >= *total {
-                                let data = std::mem::take(packed);
-                                self.state = SnapState::Ready(data);
+                                ready = Some(std::mem::take(packed));
                             }
                         }
-                        Err(_) => {
-                            let data = std::mem::take(packed);
-                            self.state = SnapState::Ready(data);
-                        }
+                        Err(_) => ready = Some(std::mem::take(packed)),
                     }
                 }
                 SnapState::Ready(_) => return,
+            }
+            if let Some(data) = ready {
+                self.state = SnapState::Ready(data);
             }
         }
     }
