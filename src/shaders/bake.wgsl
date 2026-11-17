@@ -41,12 +41,12 @@ struct BakeU {
 @group(0) @binding(4) var<storage, read> nodes: array<vec4<f32>>;
 
 struct BakeVertex {
-    position: vec4<f32>,
-    normal_curvature: vec4<f32>,
+    position: array<f32, 3>,
+    normal_curvature: array<f32, 4>,
 };
 struct BakeTriangle {
-    indices: vec4<u32>,
-    metadata: vec4<u32>, // part, ID index, name group, reserved
+    indices: array<u32, 3>,
+    metadata: array<u32, 3>, // part, ID index, name group
 };
 
 @group(0) @binding(5) var<storage, read> bake_vertices: array<BakeVertex>;
@@ -95,15 +95,17 @@ struct BakeTriangle {
 
 fn tri_position(ti: u32, corner: u32) -> vec3<f32> {
     let vi = bake_triangles[ti].indices[corner];
-    return bake_vertices[vi].position.xyz;
+    let p = bake_vertices[vi].position;
+    return vec3<f32>(p[0], p[1], p[2]);
 }
 fn tri_normal(ti: u32, corner: u32) -> vec3<f32> {
     let vi = bake_triangles[ti].indices[corner];
-    return bake_vertices[vi].normal_curvature.xyz;
+    let n = bake_vertices[vi].normal_curvature;
+    return vec3<f32>(n[0], n[1], n[2]);
 }
 fn tri_curvature(ti: u32, corner: u32) -> f32 {
     let vi = bake_triangles[ti].indices[corner];
-    return bake_vertices[vi].normal_curvature.w;
+    return bake_vertices[vi].normal_curvature[3];
 }
 
 // Match-by-name group of the texel being projected (0 = hit anything). Only
@@ -186,12 +188,12 @@ fn intersect(o: vec3<f32>, d: vec3<f32>, tmax: f32, any_hit: bool) -> Hit {
             for (var i = 0u; i < count; i++) {
                 let ti = first + i;
                 if (match_group != 0u) {
-                    let tg = bake_triangles[ti].metadata.z;
+                    let tg = bake_triangles[ti].metadata[2];
                     if (tg != 0u && tg != match_group) {
                         continue;
                     }
                 }
-                if (skip_part != NONE && bake_triangles[ti].metadata.x == skip_part) {
+                if (skip_part != NONE && bake_triangles[ti].metadata[0] == skip_part) {
                     continue;
                 }
                 let v0 = tri_position(ti, 0u);
@@ -221,7 +223,7 @@ fn intersect(o: vec3<f32>, d: vec3<f32>, tmax: f32, any_hit: bool) -> Hit {
                 if (cull_back && dot(cross(e1, e2), d) > 0.0) {
                     continue;
                 }
-                if (t > 0.0 && t < fold_reach && bake_triangles[ti].metadata.x == fold_part) {
+                if (t > 0.0 && t < fold_reach && bake_triangles[ti].metadata[0] == fold_part) {
                     // The face normal on the side the ray arrives from.
                     let gn = normalize(cross(e1, e2));
                     if (dot(select(gn, -gn, dot(gn, d) > 0.0), fold_n) > FOLD_COS) {
@@ -332,7 +334,7 @@ fn nearest_surface(p: vec3<f32>, radius: f32) -> Hit {
             for (var i = 0u; i < count; i++) {
                 let ti = first + i;
                 if (match_group != 0u) {
-                    let tg = bake_triangles[ti].metadata.z;
+                    let tg = bake_triangles[ti].metadata[2];
                     if (tg != 0u && tg != match_group) {
                         continue;
                     }
@@ -788,7 +790,7 @@ fn cs_surface(@builtin(global_invocation_id) gid: vec3<u32>) {
     var idc = vec3<f32>(0.5);
     var geo = vec4<f32>(nh, -1.0);
     if (center_tri != NONE) {
-        let pi = bake_triangles[center_tri].metadata.x;
+        let pi = bake_triangles[center_tri].metadata[0];
         let part = parts[pi];
         prand = part.x;
         pgrad = clamp((center_pos.y - part.y) / max(part.z, 1e-5), 0.0, 1.0);
@@ -800,7 +802,7 @@ fn cs_surface(@builtin(global_invocation_id) gid: vec3<u32>) {
         } else {
             // Mesh-part and material IDs are constant over each triangle.
             // The ID index is stored in corner 1's position.w.
-            let id_index = bake_triangles[center_tri].metadata.y;
+            let id_index = bake_triangles[center_tri].metadata[1];
             idc = ids[id_index].xyz;
         }
         geo = vec4<f32>(hit_geo_normal(center_tri, center_n), f32(pi));

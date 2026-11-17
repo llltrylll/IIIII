@@ -518,24 +518,23 @@ impl BakeSettings {
     }
 }
 
-/// A source vertex stored once for the indexed bake BVH.
-/// Position occupies xyz; normal_curvature stores the shading normal and
-/// vertex curvature in w. Both vectors are 16-byte WGSL storage values.
+/// A source vertex stored once for the indexed bake BVH (28 bytes).
+/// The scalar-array layout avoids vec3's 16-byte storage alignment.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct BakeVertex {
-    position: [f32; 4],
+    position: [f32; 3],
     normal_curvature: [f32; 4],
 }
 
 /// One BVH-ordered triangle: three source vertex indices plus per-triangle
-/// part, ID and name-match group metadata. 32 bytes instead of three expanded
+/// part, ID and name-match group metadata. 24 bytes instead of three expanded
 /// position and normal pairs (96 bytes) for every triangle.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct BakeTriangle {
-    indices: [u32; 4],
-    metadata: [u32; 4],
+    indices: [u32; 3],
+    metadata: [u32; 3],
 }
 
 /// GPU-ready bake source.
@@ -1318,8 +1317,8 @@ pub fn prepare_cancellable(
         let t = t as usize;
         let tri = &indices[t * 3..t * 3 + 3];
         bake_triangles.push(BakeTriangle {
-            indices: [tri[0], tri[1], tri[2], 0],
-            metadata: [tri_part[t], tri_id[t], src_group.get(t).copied().unwrap_or(0), 0],
+            indices: [tri[0], tri[1], tri[2]],
+            metadata: [tri_part[t], tri_id[t], src_group.get(t).copied().unwrap_or(0)],
         });
         if has_vertex_colors {
             let flat_id = ids.get(tri_id[t] as usize).copied().unwrap_or([0.5, 0.5, 0.5, 1.0]);
@@ -1372,7 +1371,7 @@ pub fn prepare_cancellable(
         }
         let n = normals.get(i).copied().unwrap_or(Vec3::ZERO);
         bake_vertices.push(BakeVertex {
-            position: [p.x, p.y, p.z, 0.0],
+            position: [p.x, p.y, p.z],
             normal_curvature: [n.x, n.y, n.z, curvature.get(i).copied().unwrap_or(0.0)],
         });
     }
@@ -2592,8 +2591,8 @@ pub(crate) mod tests {
         let scene = prepare(&mesh, &BakeSettings::default(), 0).expect("prepare indexed source");
         assert_eq!(scene.bake_vertices.len(), mesh.vertices.len());
         assert_eq!(scene.bake_triangles.len(), mesh.indices.len() / 3);
-        assert_eq!(std::mem::size_of::<BakeVertex>(), 32);
-        assert_eq!(std::mem::size_of::<BakeTriangle>(), 32);
+        assert_eq!(std::mem::size_of::<BakeVertex>(), 28);
+        assert_eq!(std::mem::size_of::<BakeTriangle>(), 24);
 
         let mut source: Vec<[u32; 3]> = mesh.indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect();
         let mut packed: Vec<[u32; 3]> = scene.bake_triangles.iter().map(|t| [t.indices[0], t.indices[1], t.indices[2]]).collect();
@@ -2606,12 +2605,12 @@ pub(crate) mod tests {
             assert_eq!(&vertex.normal_curvature[..3], &mesh.vertices[i].normal);
             assert!(vertex.normal_curvature[3].is_finite());
         }
-        assert!(scene.bake_triangles.iter().all(|t| t.indices[3] == 0 && t.metadata[3] == 0));
+        assert!(scene.bake_triangles.iter().all(|t| t.metadata[0] < scene.part_count as u32));
 
         // Old payload: 3 corners * 2 vec4 values per triangle = 96 bytes/T.
-        // Indexed payload: one 32-byte record per vertex and per triangle.
+        // Indexed payload: one 28-byte record per vertex and 24 bytes per triangle.
         let expanded = scene.bake_triangles.len() * 96;
-        let indexed = scene.bake_vertices.len() * 32 + scene.bake_triangles.len() * 32;
+        let indexed = scene.bake_vertices.len() * 28 + scene.bake_triangles.len() * 24;
         assert!(indexed < expanded, "sphere source should benefit from shared vertex indexing ({indexed} >= {expanded})");
     }
 
