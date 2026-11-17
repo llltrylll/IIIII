@@ -503,6 +503,7 @@ impl UndoStack {
 mod tests {
     use super::{Edit, SnapState, Snapshot, SnapshotBufferPool, StrokeTarget, TexInfo, UndoEntry, UndoStack};
     use std::sync::mpsc;
+    use std::sync::Arc;
 
     fn stroke_with_snapshot_bytes(bytes: usize) -> Edit {
         let snapshot = || Snapshot {
