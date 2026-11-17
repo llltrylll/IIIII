@@ -18,7 +18,7 @@ use crate::post::Tonemap;
 use crate::viewport::{Background, OrbitCam};
 use eframe::{egui, wgpu};
 use serde_json::{Value, json};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 8] = b"MPPROJ\x00\x01";
@@ -111,17 +111,24 @@ impl Writer {
     }
 }
 
-struct Reader<'a> {
-    /// Compressed blobs borrow the original project file. Keeping slices here
-    /// avoids duplicating every compressed payload while a project is opened.
-    blobs: Vec<&'a [u8]>,
+struct Reader {
+    /// Each blob's byte range in the project file. The file itself stays on
+    /// disk; only the blob being decoded is brought into RAM.
+    file: std::sync::Mutex<std::fs::File>,
+    blobs: Vec<(u64, usize)>,
 }
 
-impl Reader<'_> {
+impl Reader {
     fn blob(&self, v: &Value) -> Result<Vec<u8>, String> {
         let i = v.as_u64().ok_or("missing blob reference")? as usize;
-        let packed = self.blobs.get(i).ok_or(format!("blob {i} is missing"))?;
-        lz4_flex::decompress_size_prepended(packed).map_err(|e| format!("blob {i} is damaged: {e}"))
+        let (offset, len) = self.blobs.get(i).ok_or(format!("blob {i} is missing"))?;
+        let mut packed = vec![0u8; *len];
+        {
+            let mut file = self.file.lock().map_err(|_| "project reader lock is poisoned")?;
+            file.seek(SeekFrom::Start(*offset)).map_err(|e| format!("can't seek to blob {i}: {e}"))?;
+            file.read_exact(&mut packed).map_err(|e| format!("can't read blob {i}: {e}"))?;
+        }
+        lz4_flex::decompress_size_prepended(&packed).map_err(|e| format!("blob {i} is damaged: {e}"))
     }
 }
 
@@ -628,34 +635,47 @@ impl PainterApp {
     }
 
     pub(super) fn open_project(&mut self, path: &Path, ctx: &egui::Context) -> Result<(), String> {
-        let data = std::fs::read(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
+        let mut file = std::fs::File::open(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
+        let file_len = file.metadata().map_err(|e| e.to_string())?.len();
         let bad = || format!("{} isn't a Material Painter project (or is damaged)", path.display());
-        if data.len() < 24 || &data[..8] != MAGIC {
+        if file_len < 24 {
             return Err(bad());
         }
-        let mut at = 8;
-        let mut take = |n: usize| -> Result<&[u8], String> {
-            let slice = data.get(at..at + n).ok_or_else(bad)?;
-            at += n;
-            Ok(slice)
-        };
-        let u64_at = |b: &[u8]| u64::from_le_bytes(b.try_into().unwrap()) as usize;
-        let len = u64_at(take(8)?);
-        let manifest: Value = serde_json::from_slice(take(len)?).map_err(|e| format!("{}: {e}", bad()))?;
+        let mut magic = [0u8; 8];
+        file.read_exact(&mut magic).map_err(|_| bad())?;
+        if &magic != MAGIC {
+            return Err(bad());
+        }
+        let mut number = [0u8; 8];
+        file.read_exact(&mut number).map_err(|_| bad())?;
+        let manifest_len = u64::from_le_bytes(number);
+        let manifest_len_usize = usize::try_from(manifest_len).map_err(|_| bad())?;
+        if 16u64.checked_add(manifest_len).is_none_or(|end| end > file_len.saturating_sub(8)) {
+            return Err(bad());
+        }
+        let mut manifest_bytes = vec![0u8; manifest_len_usize];
+        file.read_exact(&mut manifest_bytes).map_err(|_| bad())?;
+        let manifest: Value = serde_json::from_slice(&manifest_bytes).map_err(|e| format!("{}: {e}", bad()))?;
+        drop(manifest_bytes);
         self.active_channels = std::array::from_fn(|i| {
             manifest["active_channels"].as_array().and_then(|channels| channels.get(i)).and_then(Value::as_bool).unwrap_or(true)
         });
-        let count = u64_at(take(8)?);
-        let mut blobs: Vec<&[u8]> = Vec::with_capacity(count);
-        for _ in 0..count {
-            let n = u64_at(take(8)?);
-            blobs.push(take(n)?);
+        file.read_exact(&mut number).map_err(|_| bad())?;
+        let count_u64 = u64::from_le_bytes(number);
+        let mut blobs = Vec::with_capacity(usize::try_from(count_u64).map_err(|_| bad())?);
+        for _ in 0..count_u64 {
+            file.read_exact(&mut number).map_err(|_| bad())?;
+            let blob_len = u64::from_le_bytes(number);
+            let offset = file.stream_position().map_err(|_| bad())?;
+            let end = offset.checked_add(blob_len).ok_or_else(bad)?;
+            if end > file_len {
+                return Err(bad());
+            }
+            let len = usize::try_from(blob_len).map_err(|_| bad())?;
+            blobs.push((offset, len));
+            file.seek(SeekFrom::Start(end)).map_err(|_| bad())?;
         }
-        // Release the parser closure's mutable borrow of the cursor. The
-        // slices remain valid because they borrow the file buffer, which is
-        // kept alive for the whole project-open operation.
-        drop(take);
-        let r = Reader { blobs };
+        let r = Reader { file: std::sync::Mutex::new(file), blobs };
 
         // Everything is decoded before the open document is touched.
         let m = &manifest["mesh"];
