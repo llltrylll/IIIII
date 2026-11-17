@@ -701,6 +701,7 @@ pub(crate) const HARD_EDGE: f32 = -1.0;
 /// shaded surface are left to its curvature.
 ///
 /// Open borders and folded-back (double-sided) faces are skipped.
+#[cfg(test)]
 pub(crate) fn feature_edges(
     positions: &[Vec3],
     indices: &[u32],
