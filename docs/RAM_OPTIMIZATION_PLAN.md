@@ -48,6 +48,8 @@ Scope: reduce **system RAM and transient CPU-memory peaks** in the existing appl
 - Remaining large allocations: expanded per-corner position/normal/color arrays. Further compaction requires shader/layout changes and separate parity tests.
 - Borrow the low-poly index slice for low-only bakes instead of cloning the complete index array; high-poly imports remain owned.
 - Derive triangle centroids from compact bounds during BVH construction, removing the third per-triangle bounds vector (12 bytes per triangle when Vec3 is 12 bytes).
+- Transform imported high-poly positions in place, avoiding a second full position vector during source loading.
+- Drop object mapping, source IDs/colors, curvature, and source geometry arrays immediately after their final CPU use in preparation, before later edge packing.
 
 ### P1 — Bound asynchronous CPU image queues
 - Bound CPU shelf-preview results and graph-image decode results.
@@ -94,6 +96,7 @@ A candidate is not considered a measured win until this protocol is run on the o
 - [x] Decompress project triangle ID and per-corner vertex-color arrays directly into final typed vectors.
 - [x] Remove redundant Bake BVH triangle arrays and avoid unused ID/material/object copies during CPU preparation.
 - [x] Borrow low-poly indices during low-only Bake preparation and remove the per-triangle BVH centroid scratch vector.
+- [x] Transform imported high-poly positions in place and release Bake preparation scratch payloads at their last use.
 - [x] Normalize imported high-poly normals in place and verify indexed BVH output against the existing builder.
 - [x] Remove flat per-corner color storage for Mesh Parts/Materials modes; add a Vulkan GPU regression test for palette lookup.
 - [x] Consume and release prepared Bake CPU arrays incrementally during full-bake GPU upload; retain borrowed uploads for cached live previews.

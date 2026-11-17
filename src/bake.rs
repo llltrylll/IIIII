@@ -1076,6 +1076,7 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
             (positions, normals, Cow::Borrowed(&low.indices), tri_material, count, format!("{} (low poly)", low.name), None, tri_color, tri_vertex_color)
         }
     };
+    let triangle_count = indices.len() / 3;
 
     // Name groups: 1-based per distinct low-poly base name; 0 = unmatched
     // (an unmatched low part sees everything, an unmatched high part is seen
@@ -1101,6 +1102,9 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
                 low_draws = Some(group_draws(&low.indices, tris, |t| low_by_object[low.tri_object[t] as usize]));
             }
         }
+    // Object IDs and names are only preparation inputs; don't retain them
+    // alongside the expanded per-corner GPU payloads.
+    drop(src_objects);
 
     let cage = match &settings.cage {
         Some(path) if settings.high_poly.is_some() => {
@@ -1239,6 +1243,14 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
             }
         }
     }
+    // These source payloads have been reduced to the final GPU arrays/palette.
+    // Release them before feature-edge construction allocates its own scratch.
+    drop(tri_id);
+    drop(tri_color);
+    drop(tri_vertex_color);
+    drop(curvature);
+    drop(src_group);
+
     // A low poly's interpolated normals give unreliable texel curvature, so
     // its bevels come from the mesh too. High polys keep texel curvature,
     // which follows their real surface detail.
@@ -1252,6 +1264,11 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
     // staircases and scalloped mask borders.
     let low_only = settings.high_poly.is_none();
     let [convex, concave] = feature_edges(&positions, &indices, &tri_part, settings.hard_edge_angle, None, low_only.then_some(&normals[..]));
+    // The remaining preparation stages use only packed data and the original low mesh.
+    drop(tri_part);
+    drop(positions);
+    drop(normals);
+    drop(indices);
     let edge_seed_curvature = bevels.unwrap_or(0.0);
     let hard_edge_count = convex.iter().chain(&concave).filter(|s| s.half_width <= 0.0).count();
     let (seg_nodes, segs, edge_roots) = pack_segments([convex, concave]);
@@ -1295,7 +1312,7 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
         hard_edges: hard_edge_count,
         edge_max_distance,
         curvature_scale: settings.curvature_scale_for(low),
-        triangles: indices.len() / 3,
+        triangles: triangle_count,
         part_count: part_count as usize,
         id_regions,
         source,
