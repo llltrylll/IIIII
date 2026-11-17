@@ -45,15 +45,18 @@ pub(super) struct UserSmartData {
 
 /// Enumerates the shelf and decodes its thumbnails on a worker. TextureHandle
 /// creation is deliberately deferred to the UI thread.
-pub(super) fn list_async() -> mpsc::Receiver<Vec<UserSmartData>> {
+pub(super) fn list_async(ctx: &egui::Context) -> mpsc::Receiver<Vec<UserSmartData>> {
     let (tx, rx) = mpsc::channel();
+    let ctx = ctx.clone();
     let spawn = std::thread::Builder::new().name("smart-material-list".into()).spawn(move || {
         let Some(dir) = smart_dir() else {
             let _ = tx.send(Vec::new());
+            ctx.request_repaint();
             return;
         };
         let Ok(read) = std::fs::read_dir(&dir) else {
             let _ = tx.send(Vec::new());
+            ctx.request_repaint();
             return;
         };
         let mut out: Vec<UserSmartData> = read
@@ -72,6 +75,7 @@ pub(super) fn list_async() -> mpsc::Receiver<Vec<UserSmartData>> {
             .collect();
         out.sort_by_key(|a| a.name.to_lowercase());
         let _ = tx.send(out);
+        ctx.request_repaint();
     });
     if spawn.is_err() {
         // The disconnected receiver lets the UI clear the pending job safely.
@@ -277,7 +281,7 @@ impl PainterApp {
     }
 
     pub(super) fn reload_user_smarts(&mut self, ctx: &egui::Context) {
-        self.user_smarts_job = Some(list_async());
+        self.user_smarts_job = Some(list_async(ctx));
         ctx.request_repaint();
     }
 
