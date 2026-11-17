@@ -250,6 +250,12 @@ fn prepare_project_file(
 ) -> Result<PreparedProject, String> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT_SPOOL: AtomicU64 = AtomicU64::new(1);
+    static OPEN_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let _open_guard = OPEN_LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock().map_err(|_| "project loader lock is poisoned")?;
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+        return Err("Project loading cancelled.".into());
+    }
     let mut file = std::fs::File::open(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
     let file_len = file.metadata().map_err(|e| e.to_string())?.len();
     let bad = || format!("{} isn't a Material Painter project (or is damaged)", path.display());
@@ -1581,6 +1587,20 @@ mod tests {
         assert_eq!(prepared.mesh.vertices.len(), mesh.vertices.len());
         assert_eq!(prepared.bvh.order.len(), mesh.triangle_count());
         assert_eq!(prepared.mesh.sets.len(), 1);
+        validate_project_payloads(&prepared.manifest, &prepared.reader, None)
+            .expect("the prepared manifest and all referenced payloads validate");
+        let mut damaged = prepared.manifest.clone();
+        damaged["texture_sets"][0]["layers_bottom_to_top"] = json!([{
+            "id": 1,
+            "content": {
+                "kind": "paint",
+                "channels": [{
+                    "format": "Rgba8Unorm", "width": 4, "height": 4, "blob": 999999
+                }]
+            }
+        }]);
+        assert!(validate_project_payloads(&damaged, &prepared.reader, None).is_err(),
+            "a bad texture reference must be rejected before the UI replaces the document");
         let spool_path = prepared.reader.cleanup_path.clone().expect("temporary spool path");
         drop(prepared);
         assert!(!spool_path.exists(), "the raw spool is deleted after the prepared project is dropped");

@@ -72,7 +72,8 @@ Scope: reduce **system RAM and transient CPU-memory peaks** in the existing appl
 - Parse the manifest, validate the blob table, decompress blobs sequentially to a temporary disk spool, rebuild mesh/UV edges and build the picking BVH on a worker.
 - Keep the decompressed project payload on disk; UI reads and uploads only one blob at a time, avoiding an all-textures CPU staging copy.
 - Keep GPU resource creation and engine replacement on the device-owning thread.
-- Do not touch the current document until worker preparation (including every blob's LZ4 integrity check) succeeds. If the current document changes while preparation runs, cancel the pending replacement.
+- Do not touch the current document until worker preparation (including every blob's LZ4 integrity check, texture references/sizes, image decoding and mask generators) succeeds. If the current document changes while preparation runs, cancel the pending replacement.
+- Serialize project-open workers so repeated/cancelled open requests cannot run multiple large blob-decompression peaks concurrently.
 - Preserve old project versions and recovery files; remove the temporary spool after application or failure.
 
 ## Measurement protocol
@@ -117,5 +118,5 @@ A candidate is not considered a measured win until this protocol is run on the o
 - [x] Consume and release prepared Bake CPU arrays incrementally during full-bake GPU upload; retain borrowed uploads for cached live previews.
 - [x] Replace per-node graph debug-string hash allocations with typed hashing and borrowed parameter values; use fixed-size per-node scratch arrays and pre-size transient evaluation maps.
 - [x] Verify project spool/file-backed typed reads, shared-blob reuse and Undo RAM-budget tests; latest CI, unit tests, GPU regression and Windows portable package workflows pass.
-- [x] Move project manifest/blob validation, sequential LZ4 decompression, mesh/UV-edge construction and picking-BVH build to a cancellable worker; keep raw payloads in a temporary disk spool and upload them one at a time on the UI thread.
+- [x] Move project manifest/blob and UI resource preflight, sequential LZ4 decompression, mesh/UV-edge construction and picking-BVH build to a serialized, cancellable worker; keep raw payloads in a temporary disk spool and upload them one at a time on the UI thread.
 - [ ] Capture before/after owner-machine measurements.
