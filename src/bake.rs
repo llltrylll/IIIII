@@ -1043,7 +1043,7 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
             (
                 hp.positions,
                 hp.normals,
-                hp.indices,
+                Cow::Owned(hp.indices),
                 tri_material,
                 hp.material_count,
                 format!("{} (high poly)", hp.name),
@@ -1073,7 +1073,7 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
             } else {
                 (None, None)
             };
-            (positions, normals, low.indices.clone(), tri_material, count, format!("{} (low poly)", low.name), None, tri_color, tri_vertex_color)
+            (positions, normals, Cow::Borrowed(&low.indices), tri_material, count, format!("{} (low poly)", low.name), None, tri_color, tri_vertex_color)
         }
     };
 

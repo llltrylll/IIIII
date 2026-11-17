@@ -76,6 +76,21 @@ fn area(min: Vec3, max: Vec3) -> f32 {
     2.0 * (e.x * e.y + e.y * e.z + e.z * e.x)
 }
 
+/// Per-triangle bounds used by the BVH builder. The centroid is derived
+/// from the bounds so the builder does not retain another Vec3 per triangle.
+#[derive(Clone, Copy)]
+struct TriangleBounds {
+    min: Vec3,
+    max: Vec3,
+}
+
+impl TriangleBounds {
+    #[inline]
+    fn centroid(self) -> Vec3 {
+        (self.min + self.max) * 0.5
+    }
+}
+
 impl Bvh {
     pub fn from_mesh(mesh: &Mesh) -> Bvh {
         let tris = mesh
@@ -104,11 +119,11 @@ impl Bvh {
     }
 
     pub fn build(tris: Vec<[Vec3; 3]>) -> Bvh {
-        let n = tris.len();
-        let bmin: Vec<Vec3> = tris.iter().map(|t| t[0].min(t[1]).min(t[2])).collect();
-        let bmax: Vec<Vec3> = tris.iter().map(|t| t[0].max(t[1]).max(t[2])).collect();
-        let cent: Vec<Vec3> = (0..n).map(|i| (bmin[i] + bmax[i]) * 0.5).collect();
-        let (nodes, order) = Self::build_bounds(bmin, bmax, cent);
+        let bounds: Vec<TriangleBounds> = tris
+            .iter()
+            .map(|t| TriangleBounds { min: t[0].min(t[1]).min(t[2]), max: t[0].max(t[1]).max(t[2]) })
+            .collect();
+        let (nodes, order) = Self::build_bounds(bounds);
         let ordered_tris = order.iter().map(|&i| tris[i as usize]).collect();
         Bvh { nodes, order, tris: ordered_tris }
     }
@@ -118,24 +133,18 @@ impl Bvh {
     /// triangle in BVH order.
     pub fn build_ordered(positions: &[Vec3], indices: &[u32]) -> (Vec<Node>, Vec<u32>) {
         let n = indices.len() / 3;
-        let mut bmin = Vec::with_capacity(n);
-        let mut bmax = Vec::with_capacity(n);
-        let mut cent = Vec::with_capacity(n);
+        let mut bounds = Vec::with_capacity(n);
         for tri in indices.chunks_exact(3) {
             let p0 = positions[tri[0] as usize];
             let p1 = positions[tri[1] as usize];
             let p2 = positions[tri[2] as usize];
-            let lo = p0.min(p1).min(p2);
-            let hi = p0.max(p1).max(p2);
-            bmin.push(lo);
-            bmax.push(hi);
-            cent.push((lo + hi) * 0.5);
+            bounds.push(TriangleBounds { min: p0.min(p1).min(p2), max: p0.max(p1).max(p2) });
         }
-        Self::build_bounds(bmin, bmax, cent)
+        Self::build_bounds(bounds)
     }
 
-    fn build_bounds(bmin: Vec<Vec3>, bmax: Vec<Vec3>, cent: Vec<Vec3>) -> (Vec<Node>, Vec<u32>) {
-        let n = bmin.len();
+    fn build_bounds(bounds: Vec<TriangleBounds>) -> (Vec<Node>, Vec<u32>) {
+        let n = bounds.len();
         let mut order: Vec<u32> = (0..n as u32).collect();
         let mut nodes = Vec::with_capacity(2 * n / MAX_LEAF as usize + 1);
         nodes.push(Node { min: Vec3::ZERO, max: Vec3::ZERO, first: 0, count: n as u32 });
@@ -146,11 +155,12 @@ impl Bvh {
             let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
             let (mut clo, mut chi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
             for &p in &order[first..first + count] {
-                let p = p as usize;
-                lo = lo.min(bmin[p]);
-                hi = hi.max(bmax[p]);
-                clo = clo.min(cent[p]);
-                chi = chi.max(cent[p]);
+                let bound = bounds[p as usize];
+                lo = lo.min(bound.min);
+                hi = hi.max(bound.max);
+                let center = bound.centroid();
+                clo = clo.min(center);
+                chi = chi.max(center);
             }
             nodes[ni].min = lo;
             nodes[ni].max = hi;
@@ -158,7 +168,8 @@ impl Bvh {
                 continue;
             }
 
-            // Binned SAH over all three axes.
+            // Binned SAH over all three axes. Centroids are derived from
+            // bounds on demand instead of retaining a third Vec3 per triangle.
             let ext = chi - clo;
             let mut best: Option<(f32, usize, usize)> = None;
             for axis in 0..3 {
@@ -169,11 +180,12 @@ impl Bvh {
                 let mut bcount = [0u32; BINS];
                 let mut bb = [(Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)); BINS];
                 for &p in &order[first..first + count] {
-                    let p = p as usize;
-                    let b = (((cent[p][axis] - clo[axis]) * scale) as usize).min(BINS - 1);
-                    bcount[b] += 1;
-                    bb[b].0 = bb[b].0.min(bmin[p]);
-                    bb[b].1 = bb[b].1.max(bmax[p]);
+                    let bound = bounds[p as usize];
+                    let center = bound.centroid();
+                    let bin = (((center[axis] - clo[axis]) * scale) as usize).min(BINS - 1);
+                    bcount[bin] += 1;
+                    bb[bin].0 = bb[bin].0.min(bound.min);
+                    bb[bin].1 = bb[bin].1.max(bound.max);
                 }
                 let mut left_area = [0.0f32; BINS];
                 let mut left_count = [0u32; BINS];
@@ -206,9 +218,9 @@ impl Bvh {
                     let scale = BINS as f32 / ext[axis];
                     let (mut i, mut j) = (first, first + count);
                     while i < j {
-                        let p = order[i] as usize;
-                        let b = (((cent[p][axis] - clo[axis]) * scale) as usize).min(BINS - 1);
-                        if b < split_bin {
+                        let center = bounds[order[i] as usize].centroid();
+                        let bin = (((center[axis] - clo[axis]) * scale) as usize).min(BINS - 1);
+                        if bin < split_bin {
                             i += 1;
                         } else {
                             j -= 1;

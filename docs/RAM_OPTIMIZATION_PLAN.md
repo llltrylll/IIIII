@@ -44,7 +44,9 @@ Scope: reduce **system RAM and transient CPU-memory peaks** in the existing appl
 - Allocate low-poly material IDs and copy vertex-color payloads only when the selected ID source needs them.
 - Keep source-object groups unallocated unless match-by-name finds actual matches.
 - Borrow the per-triangle ID array in the default Mesh Parts mode instead of cloning it.
-- Remaining large allocations: expanded per-corner position/normal/color arrays and BVH bounds scratch arrays. Further compaction requires shader/layout changes and separate parity tests.
+- Remaining large allocations: expanded per-corner position/normal/color arrays. Further compaction requires shader/layout changes and separate parity tests.
+- Borrow the low-poly index slice for low-only bakes instead of cloning the complete index array; high-poly imports remain owned.
+- Derive triangle centroids from compact bounds during BVH construction, removing the third per-triangle bounds vector (12 bytes per triangle when Vec3 is 12 bytes).
 
 ### P1 — Bound asynchronous CPU image queues
 - Bound CPU shelf-preview results and graph-image decode results.
@@ -88,6 +90,7 @@ A candidate is not considered a measured win until this protocol is run on the o
 - [x] Deduplicate shared Fill image blobs in project save/open.
 - [x] Bounded CPU shelf-preview and graph-image decode queues.
 - [x] Remove redundant Bake BVH triangle arrays and avoid unused ID/material/object copies during CPU preparation.
+- [x] Borrow low-poly indices during low-only Bake preparation and remove the per-triangle BVH centroid scratch vector.
 - [x] Normalize imported high-poly normals in place and verify indexed BVH output against the existing builder.
 - [x] Remove flat per-corner color storage for Mesh Parts/Materials modes; add a Vulkan GPU regression test for palette lookup.
 - [x] Consume and release prepared Bake CPU arrays incrementally during full-bake GPU upload; retain borrowed uploads for cached live previews.
