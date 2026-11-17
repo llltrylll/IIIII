@@ -581,6 +581,18 @@ impl ObjectDrawBuffers {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ViewBindGroupKey {
+    engine: (u64, u32, usize, u64, u64),
+    environment: u64,
+    slot: usize,
+}
+
+struct CachedViewBindGroup {
+    key: ViewBindGroupKey,
+    bind_group: wgpu::BindGroup,
+}
+
 pub struct ViewRenderer {
     /// Per texture set (missing entries: shown, no highlight).
     pub set_looks: Vec<SetLook>,
@@ -619,6 +631,11 @@ pub struct ViewRenderer {
     /// Per-draw uniforms: the 2D view's, then one per texture set in the 3D
     /// view (each set has its own resolution, bake and custom maps).
     globals: Vec<wgpu::Buffer>,
+    /// View bind groups reference texture views and are rebuilt only when an
+    /// Engine replaces a bound resource, the environment changes, or its slot changes.
+    view_bind_groups: Vec<Option<CachedViewBindGroup>>,
+    /// Reused visibility scratch storage; avoids a fresh Vec on every viewport frame.
+    shown_sets: Vec<usize>,
     sampler: wgpu::Sampler,
     pub view3d: ViewTarget,
     pub view2d: ViewTarget,
@@ -867,6 +884,8 @@ impl ViewRenderer {
             object_draw_key: None,
             bgl,
             globals,
+            view_bind_groups: Vec::new(),
+            shown_sets: Vec::new(),
             sampler: gpu::linear_sampler(device, wgpu::AddressMode::ClampToEdge),
             view3d: ViewTarget::new(rs, true),
             view2d: ViewTarget::new(rs, false),
@@ -1147,22 +1166,43 @@ impl ViewRenderer {
         while self.globals.len() < engines.len() + 1 {
             self.globals.push(Self::globals_buffer(&rs.device));
         }
-        let bgs: Vec<wgpu::BindGroup> = engines
-            .iter()
-            .enumerate()
-            .map(|(k, engine)| {
-                let mut g = Self::base_globals(engine, settings, size, settings.mode);
-                g.size[3] = self.set_looks.get(k).map_or(0.0, |l| l.highlight);
-                g.view_proj = vp.to_cols_array_2d();
-                g.inv_view_proj = vp.inverse().to_cols_array_2d();
-                g.cam_pos = cam.eye().extend(1.0).to_array();
-                rs.queue.write_buffer(&self.globals[k + 1], 0, bytemuck::bytes_of(&g));
-                self.bind_group(&rs.device, engine, env, &self.globals[k + 1])
-            })
-            .collect();
-        let bg = &bgs[0];
+        self.shown_sets.clear();
+        self.shown_sets.extend(
+            (0..mesh.sets.len()).filter(|&k| !self.set_looks.get(k).is_some_and(|l| l.hidden))
+        );
+
+        // The material textures and environment usually remain unchanged across
+        // frames. Recreating these bind groups every frame forces repeated driver
+        // validation/allocation for every visible Texture Set. Keep them until one
+        // of the actual texture-view generations changes.
+        self.view_bind_groups.resize_with(engines.len(), || None);
+        for (k, engine) in engines.iter().enumerate() {
+            // Slot zero also supplies the sky and shared light uniforms. Other
+            // hidden sets need no binding until they become visible again.
+            if k != 0 && self.set_looks.get(k).is_some_and(|look| look.hidden) {
+                continue;
+            }
+            let mut g = Self::base_globals(engine, settings, size, settings.mode);
+            g.size[3] = self.set_looks.get(k).map_or(0.0, |l| l.highlight);
+            g.view_proj = vp.to_cols_array_2d();
+            g.inv_view_proj = vp.inverse().to_cols_array_2d();
+            g.cam_pos = cam.eye().extend(1.0).to_array();
+            rs.queue.write_buffer(&self.globals[k + 1], 0, bytemuck::bytes_of(&g));
+
+            let key = ViewBindGroupKey {
+                engine: engine.viewport_binding_identity(),
+                environment: env.id,
+                slot: k,
+            };
+            let stale = self.view_bind_groups[k].as_ref().is_none_or(|cached| cached.key != key);
+            if stale {
+                let bind_group = self.bind_group(&rs.device, engine, env, &self.globals[k + 1]);
+                self.view_bind_groups[k] = Some(CachedViewBindGroup { key, bind_group });
+            }
+        }
+        let bg = &self.view_bind_groups[0].as_ref().expect("the viewport needs at least one Texture Set").bind_group;
         let transparent = settings.background == Background::Transparent;
-        let shown: Vec<usize> = (0..mesh.sets.len()).filter(|&k| !self.set_looks.get(k).is_some_and(|l| l.hidden)).collect();
+        let shown = &self.shown_sets;
 
         let t = &self.view3d;
         let mut encoder = rs.device.create_command_encoder(&Default::default());
@@ -1191,7 +1231,7 @@ impl ViewRenderer {
             if let Some(draw) = self.object_draw.as_ref() {
                 pass.set_index_buffer(draw.triangles.slice(..), wgpu::IndexFormat::Uint32);
                 for &k in &shown {
-                    if let (Some(bg), Some(range)) = (bgs.get(k), draw.triangle_ranges.get(k))
+                    if let (Some(bg), Some(range)) = (self.view_bind_groups.get(k).and_then(Option::as_ref).map(|cached| &cached.bind_group), draw.triangle_ranges.get(k))
                         && range.start < range.end {
                         pass.set_bind_group(0, bg, &[]);
                         pass.draw_indexed(range.clone(), 0, 0..1);
@@ -1200,7 +1240,7 @@ impl ViewRenderer {
             } else {
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                 for &k in &shown {
-                    if let Some(bg) = bgs.get(k) {
+                    if let Some(bg) = self.view_bind_groups.get(k).and_then(Option::as_ref).map(|cached| &cached.bind_group) {
                         pass.set_bind_group(0, bg, &[]);
                         pass.draw_indexed(mesh.sets[k].index_range(), 0, 0..1);
                     }
@@ -1281,7 +1321,7 @@ impl ViewRenderer {
             if let Some(draw) = self.object_draw.as_ref() {
                 pass.set_index_buffer(draw.triangles.slice(..), wgpu::IndexFormat::Uint32);
                 for &k in &shown {
-                    if let (Some(bg), Some(range)) = (bgs.get(k), draw.triangle_ranges.get(k))
+                    if let (Some(bg), Some(range)) = (self.view_bind_groups.get(k).and_then(Option::as_ref).map(|cached| &cached.bind_group), draw.triangle_ranges.get(k))
                         && range.start < range.end {
                         pass.set_bind_group(0, bg, &[]);
                         pass.draw_indexed(range.clone(), 0, 0..1);
@@ -1290,7 +1330,7 @@ impl ViewRenderer {
             } else {
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                 for &k in &shown {
-                    if let Some(bg) = bgs.get(k) {
+                    if let Some(bg) = self.view_bind_groups.get(k).and_then(Option::as_ref).map(|cached| &cached.bind_group) {
                         pass.set_bind_group(0, bg, &[]);
                         pass.draw_indexed(mesh.sets[k].index_range(), 0, 0..1);
                     }
@@ -1304,7 +1344,7 @@ impl ViewRenderer {
                     pass.set_index_buffer(draw.triangles.slice(..), wgpu::IndexFormat::Uint32);
                     for &k in &shown {
                         if let (Some(bg), Some(e), Some(range)) =
-                            (bgs.get(k), engines.get(k), draw.triangle_ranges.get(k))
+                            (self.view_bind_groups.get(k).and_then(Option::as_ref).map(|cached| &cached.bind_group), engines.get(k), draw.triangle_ranges.get(k))
                             && e.uses_opacity() && range.start < range.end {
                             pass.set_bind_group(0, bg, &[]);
                             pass.draw_indexed(range.clone(), 0, 0..1);
@@ -1313,7 +1353,7 @@ impl ViewRenderer {
                 } else {
                     pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                     for &k in &shown {
-                        if let (Some(bg), Some(e)) = (bgs.get(k), engines.get(k))
+                        if let (Some(bg), Some(e)) = (self.view_bind_groups.get(k).and_then(Option::as_ref).map(|cached| &cached.bind_group), engines.get(k))
                             && e.uses_opacity() {
                             pass.set_bind_group(0, bg, &[]);
                             pass.draw_indexed(mesh.sets[k].index_range(), 0, 0..1);
