@@ -162,7 +162,7 @@ struct Reader {
 }
 
 impl Reader {
-    fn blob(&self, v: &Value) -> Result<Vec<u8>, String> {
+    fn packed_blob(&self, v: &Value) -> Result<(usize, Vec<u8>), String> {
         let i = v.as_u64().ok_or("missing blob reference")? as usize;
         let (offset, len) = self.blobs.get(i).ok_or(format!("blob {i} is missing"))?;
         let mut packed = vec![0u8; *len];
@@ -171,7 +171,33 @@ impl Reader {
             file.seek(SeekFrom::Start(*offset)).map_err(|e| format!("can't seek to blob {i}: {e}"))?;
             file.read_exact(&mut packed).map_err(|e| format!("can't read blob {i}: {e}"))?;
         }
+        Ok((i, packed))
+    }
+
+    fn blob(&self, v: &Value) -> Result<Vec<u8>, String> {
+        let (i, packed) = self.packed_blob(v)?;
         lz4_flex::decompress_size_prepended(&packed).map_err(|e| format!("blob {i} is damaged: {e}"))
+    }
+
+    /// Decompresses directly into the final typed allocation. Mesh arrays no
+    /// longer need a second full-size Vec<u8> followed by a typed Vec copy.
+    fn blob_pod_vec<T: bytemuck::Pod>(&self, v: &Value) -> Result<Vec<T>, String> {
+        let (i, packed) = self.packed_blob(v)?;
+        if packed.len() < 4 {
+            return Err(format!("blob {i} is damaged: missing decompressed size"));
+        }
+        let byte_len = u32::from_le_bytes(packed[..4].try_into().expect("four-byte size")) as usize;
+        let element_size = std::mem::size_of::<T>();
+        if element_size == 0 || !byte_len.is_multiple_of(element_size) {
+            return Err(format!("blob {i} has an invalid typed-array size"));
+        }
+        let mut output = vec![T::zeroed(); byte_len / element_size];
+        let written = lz4_flex::block::decompress_into(&packed[4..], bytemuck::cast_slice_mut(&mut output))
+            .map_err(|e| format!("blob {i} is damaged: {e}"))?;
+        if written != byte_len {
+            return Err(format!("blob {i} has an inconsistent decompressed size"));
+        }
+        Ok(output)
     }
 }
 
@@ -720,8 +746,8 @@ impl PainterApp {
 
         // Everything is decoded before the open document is touched.
         let m = &manifest["mesh"];
-        let vertices: Vec<Vertex> = bytemuck::pod_collect_to_vec(&r.blob(&m["vertices"])?);
-        let indices: Vec<u32> = bytemuck::pod_collect_to_vec(&r.blob(&m["indices"])?);
+        let vertices: Vec<Vertex> = r.blob_pod_vec(&m["vertices"])?;
+        let indices: Vec<u32> = r.blob_pod_vec(&m["indices"])?;
         if indices.iter().any(|&i| i as usize >= vertices.len()) {
             return Err(bad());
         }
@@ -729,7 +755,7 @@ impl PainterApp {
         let tris = indices.len() / 3;
         let mut mesh = Mesh::from_saved(s(m, "name").unwrap_or("Mesh").to_string(), vertices, indices, center, f(m, "scale", 1.0));
         if let Some(names) = m["objects"].as_array() {
-            let tri_object: Vec<u32> = bytemuck::pod_collect_to_vec(&r.blob(&m["tri_object"])?);
+            let tri_object: Vec<u32> = r.blob_pod_vec(&m["tri_object"])?;
             if tri_object.len() == tris && tri_object.iter().all(|&o| (o as usize) < names.len()) {
                 mesh.objects = names.iter().map(|n| n.as_str().unwrap_or("").to_string()).collect();
                 mesh.tri_object = tri_object;
