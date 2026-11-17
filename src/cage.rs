@@ -10,7 +10,7 @@
 
 use crate::bake::{BakeSettings, CAGE_SCALE, CagePaint, MAX_CAGE_REACH, base_name, components};
 use crate::bvh::Bvh;
-use crate::mesh::{HighPoly, Mesh, unique_edges, weld_positions};
+use crate::mesh::{Mesh, unique_edges, weld_positions};
 use crate::viewport::OverlayVertex;
 use glam::Vec3;
 use std::path::PathBuf;
@@ -83,6 +83,30 @@ impl CageMesh {
             tri_object: if include_object_mapping { mesh.tri_object.clone() } else { Vec::new() },
             objects: if include_object_mapping { mesh.objects.clone() } else { Vec::new() },
         }
+    }
+}
+
+/// Only the high-poly channels needed by the cage preview. Importer metadata,
+/// normals, UVs, materials and vertex colors are dropped immediately.
+struct CageHighPoly {
+    positions: Vec<Vec3>,
+    indices: Vec<u32>,
+    tri_object: Vec<u32>,
+    objects: Vec<String>,
+}
+
+impl CageHighPoly {
+    fn load(path: &std::path::Path, center: Vec3, scale: f32, include_object_mapping: bool) -> Result<Self, String> {
+        let mut raw = crate::import::load(path)?;
+        for position in &mut raw.positions {
+            *position = (*position - center) * scale;
+        }
+        Ok(Self {
+            positions: raw.positions,
+            indices: raw.indices,
+            tri_object: if include_object_mapping { raw.tri_object } else { Vec::new() },
+            objects: if include_object_mapping { raw.objects } else { Vec::new() },
+        })
     }
 }
 
@@ -227,7 +251,7 @@ impl CageProbe {
         // A loaded cage gives each low vertex its own ray start.
         let mut cage_pos: Option<Vec<Vec3>> = None;
         if let Some(path) = &key.cage {
-            let cage = HighPoly::load(path, center, scale)?;
+            let cage = CageHighPoly::load(path, center, scale, false)?;
             if cage.indices.len() != low_indices.len() {
                 return Err(format!(
                     "The cage has {} triangles but the low poly has {}; a cage must be the low poly with its vertices moved.",
@@ -325,9 +349,10 @@ impl CageProbe {
 
         let has_high = key.high_poly.is_some();
         if let Some(path) = &key.high_poly {
-            let high = HighPoly::load(path, center, scale)?;
-            let tris: Vec<[Vec3; 3]> = high.indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]].map(|i| high.positions[i as usize])).collect();
-            let bvh = Bvh::build(tris);
+            let high = CageHighPoly::load(path, center, scale, key.match_by_name)?;
+            // Build the hit-test BVH from indexed data. This avoids first
+            // expanding every source triangle into a temporary Vec.
+            let bvh = Bvh::from_indexed(&high.positions, &high.indices);
             let (tri_part, _) = components(&high.positions, &high.indices);
 
             // Name groups, as the bake pairs them (0 = sees / is seen by all).

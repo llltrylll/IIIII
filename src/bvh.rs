@@ -143,6 +143,19 @@ impl Bvh {
         Self::build_bounds(bounds)
     }
 
+    /// Builds a traversable BVH directly from indexed positions. Only the
+    /// final triangles in BVH order are materialized, not a second source
+    /// triangle Vec that remains alive during hierarchy construction.
+    pub fn from_indexed(positions: &[Vec3], indices: &[u32]) -> Bvh {
+        let (nodes, order) = Self::build_ordered(positions, indices);
+        let mut tris = Vec::with_capacity(order.len());
+        for &triangle in &order {
+            let base = triangle as usize * 3;
+            tris.push([0, 1, 2].map(|corner| positions[indices[base + corner] as usize]));
+        }
+        Bvh { nodes, order, tris }
+    }
+
     fn build_bounds(bounds: Vec<TriangleBounds>) -> (Vec<Node>, Vec<u32>) {
         let n = bounds.len();
         let mut order: Vec<u32> = (0..n as u32).collect();
@@ -411,6 +424,10 @@ mod tests {
             assert_eq!(actual.first, expected.first);
             assert_eq!(actual.count, expected.count);
         }
+        let indexed = Bvh::from_indexed(&positions, &mesh.indices);
+        assert_eq!(indexed.order, expected.order);
+        assert_eq!(indexed.tris, expected.tris);
+        assert_eq!(indexed.nodes.len(), expected.nodes.len());
     }
 
     #[test]
