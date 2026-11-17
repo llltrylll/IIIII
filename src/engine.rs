@@ -3361,12 +3361,12 @@ impl Engine {
         (false, changed)
     }
 
-    fn apply_mask_cache_changes(&mut self, before: &DocProps, after: &DocProps) {
+    fn apply_mask_cache_changes(mask_final: &mut HashSet<u64>, before: &DocProps, after: &DocProps) {
         let (all, changed) = Self::mask_cache_changes(before, after);
         if all {
-            self.mask_final.clear();
+            mask_final.clear();
         } else {
-            for id in changed { self.mask_final.remove(&id); }
+            for id in changed { mask_final.remove(&id); }
         }
     }
 
@@ -3381,7 +3381,7 @@ impl Engine {
     /// single entry; every structural edit calls it first to keep the order.
     pub fn commit_props(&mut self, undo: &mut UndoStack) {
         let current = self.doc_props();
-        self.apply_mask_cache_changes(&self.committed.clone(), &current);
+        Self::apply_mask_cache_changes(&mut self.mask_final, &self.committed, &current);
         if current == self.committed {
             return;
         }
@@ -3472,7 +3472,7 @@ impl Engine {
                     *dst = *src;
                 }
                 let updated = self.doc_props();
-                self.apply_mask_cache_changes(&current, &updated);
+                Self::apply_mask_cache_changes(&mut self.mask_final, &current, &updated);
                 if current.levels != updated.levels { self.maps_dirty = true; }
                 *props = current;
             }
@@ -4189,7 +4189,7 @@ impl Engine {
     /// that changed, or all masks when mesh-map levels changed.
     pub fn mark_dirty(&mut self) {
         let current = self.doc_props();
-        self.apply_mask_cache_changes(&self.committed.clone(), &current);
+        Self::apply_mask_cache_changes(&mut self.mask_final, &self.committed, &current);
         if self.maps_dirty { self.mask_final.clear(); }
         self.dirty = true;
         self.full_dirty = true;

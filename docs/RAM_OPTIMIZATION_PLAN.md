@@ -68,6 +68,10 @@ Scope: reduce **system RAM and transient CPU-memory peaks** in the existing appl
 - Use a bounded number of worker threads and back-pressure so a large shelf or graph cannot queue an arbitrary number of decoded images in RAM.
 - Upload to the GPU incrementally on the owning thread.
 
+### P1 — Avoid cloning committed layer properties during cache invalidation
+- Compare the committed DocProps snapshot by reference when invalidating mask caches. Do not clone all layer names, mask filter vectors and mask-layer vectors just to compute the changed mask IDs.
+- The current property state is still captured once for comparison/Undo when needed; this removes only the redundant second full snapshot copy.
+
 ### P2 — Graph runtime transient allocations
 - Replace per-node debug-string hashing with deterministic typed hashing; node parameter values are borrowed from the graph/definition rather than cloned on each evaluation.
 - Store bounded parameter/input slots and texture bindings in fixed-size arrays, eliminating small per-node Vec allocations; pre-size the remaining bind-group entries, plans, dependency sets and reader counts from graph size.
@@ -110,6 +114,7 @@ A candidate is not considered a measured win until this protocol is run on the o
 - [x] Bound the HDRI thumbnail decode queue to two pending CPU images.
 - [x] Bounded CPU shelf-preview and graph-image decode queues.
 - [x] Limit stale layer/mask thumbnail rendering to two per UI update after broad changes.
+- [x] Avoid cloning the full committed layer-property snapshot solely for mask-cache invalidation.
 - [x] Decompress project triangle ID and per-corner vertex-color arrays directly into final typed vectors.
 - [x] Cancel superseded Bake preparation workers and release their large scratch arrays at bounded checkpoints.
 - [x] Remove redundant Bake BVH triangle arrays and avoid unused ID/material/object copies during CPU preparation.
