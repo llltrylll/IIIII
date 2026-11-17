@@ -1154,14 +1154,16 @@ mod tests {
         let project = std::env::temp_dir().join(format!("material-painter-{}-{unique}.mpp", std::process::id()));
         let spool = project.with_extension("mpp.blobs.tmp");
         let numbers = vec![0x1122_3344u32, 7, 99, u32::MAX];
-        let image_bytes = b"encoded fill image source bytes".to_vec();
+        let image_bytes = std::sync::Arc::new(b"encoded fill image source bytes".to_vec());
         let packed_numbers = lz4_flex::compress_prepend_size(bytemuck::cast_slice(&numbers));
-        let packed_image = lz4_flex::compress_prepend_size(&image_bytes);
+        let packed_image = lz4_flex::compress_prepend_size(image_bytes.as_slice());
 
         {
             let mut writer = Writer::new(&project).expect("create spool");
             assert_eq!(writer.blob(bytemuck::cast_slice(&numbers)), json!(0));
-            assert_eq!(writer.blob(&image_bytes), json!(1));
+            assert_eq!(writer.blob_arc(&image_bytes), json!(1));
+            assert_eq!(writer.blob_arc(&image_bytes.clone()), json!(1), "the same Arc writes only one image blob");
+            assert_eq!(writer.count, 2);
 
             // Header with an empty manifest, followed by the exact spool data.
             let mut file = std::fs::File::create(&project).expect("create test project");
@@ -1179,9 +1181,13 @@ mod tests {
                     (first_offset, packed_numbers.len()),
                     (second_offset, packed_image.len()),
                 ],
+                shared_blobs: std::sync::Mutex::new(std::collections::HashMap::new()),
             };
             assert_eq!(reader.blob_pod_vec::<u32>(&json!(0)).unwrap(), numbers);
-            assert_eq!(reader.blob(&json!(1)).unwrap(), image_bytes);
+            let loaded_first = reader.blob_arc(&json!(1)).unwrap();
+            let loaded_second = reader.blob_arc(&json!(1)).unwrap();
+            assert!(std::sync::Arc::ptr_eq(&loaded_first, &loaded_second));
+            assert_eq!(loaded_first.as_slice(), image_bytes.as_slice());
         }
 
         assert!(!spool.exists(), "the temporary blob spool must be removed");
