@@ -504,7 +504,7 @@ impl PainterApp {
         }
         // Ray-traced sample count and bounce depth are startup-only:
         // changes are saved here and take effect the next time the app opens.
-        self.undo.max_entries = new.undo_steps;
+        self.undo.set_limits(new.undo_steps, new.undo_memory_mb.saturating_mul(1024 * 1024));
         if new.recent_count != old.recent_count {
             self.recent.truncate(new.recent_count);
         }
@@ -522,7 +522,7 @@ impl PainterApp {
         self.shelf.icon_size = p.shelf_icon_size;
         self.cam.fov_y = p.fov_deg.to_radians();
         (self.rt.max_samples, self.rt.bounces) = (p.rt_max_samples, p.rt_bounces);
-        self.undo.max_entries = p.undo_steps;
+        self.undo.set_limits(p.undo_steps, p.undo_memory_mb.saturating_mul(1024 * 1024));
         self.recent.truncate(p.recent_count);
         for brush in [&mut self.brush, &mut self.other_brush] {
             (brush.size, brush.hardness, brush.spacing) = (p.brush_size, p.brush_hardness, p.brush_spacing);
