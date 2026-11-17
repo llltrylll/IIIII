@@ -101,13 +101,56 @@ const FORMATS: [wgpu::TextureFormat; 6] = [
 ];
 
 struct Writer {
-    blobs: Vec<Vec<u8>>,
+    file: Option<std::io::BufWriter<std::fs::File>>,
+    path: PathBuf,
+    count: usize,
+    spool_bytes: usize,
+    error: Option<String>,
 }
 
 impl Writer {
+    fn new(project_path: &Path) -> Result<Self, String> {
+        let path = project_path.with_extension("mpp.blobs.tmp");
+        let file = std::fs::File::create(&path).map_err(|e| format!("can't create {}: {e}", path.display()))?;
+        Ok(Self { file: Some(std::io::BufWriter::new(file)), path, count: 0, spool_bytes: 0, error: None })
+    }
+
+    /// Compress one payload, write it straight to the disk spool and release
+    /// its compressed allocation instead of retaining all project blobs in RAM.
     fn blob(&mut self, raw: &[u8]) -> Value {
-        self.blobs.push(lz4_flex::compress_prepend_size(raw));
-        json!(self.blobs.len() - 1)
+        let index = self.count;
+        self.count += 1;
+        if self.error.is_none() {
+            let packed = lz4_flex::compress_prepend_size(raw);
+            let len = (packed.len() as u64).to_le_bytes();
+            let result = self.file.as_mut().expect("writer spool is open").write_all(&len)
+                .and_then(|_| self.file.as_mut().expect("writer spool is open").write_all(&packed));
+            match result {
+                Ok(()) => self.spool_bytes = self.spool_bytes.saturating_add(8 + packed.len()),
+                Err(e) => self.error = Some(format!("can't write blob spool {}: {e}", self.path.display())),
+            }
+        }
+        json!(index)
+    }
+
+    fn copy_to(&mut self, out: &mut impl Write) -> Result<(), String> {
+        if let Some(error) = self.error.take() {
+            return Err(error);
+        }
+        let file = self.file.as_mut().expect("writer spool is open");
+        file.flush().map_err(|e| format!("can't flush blob spool {}: {e}", self.path.display()))?;
+        let file = file.get_mut();
+        file.seek(SeekFrom::Start(0)).map_err(|e| format!("can't rewind blob spool {}: {e}", self.path.display()))?;
+        std::io::copy(file, out).map_err(|e| format!("can't copy blob spool {}: {e}", self.path.display()))?;
+        Ok(())
+    }
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        // Close the spool before removing it (required on Windows).
+        self.file.take();
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -503,7 +546,7 @@ impl PainterApp {
     /// the document is saved to.
     fn write_project(&mut self, path: &Path) -> Result<usize, String> {
         self.engine.commit_props(&mut self.undo);
-        let mut w = Writer { blobs: Vec::new() };
+        let mut w = Writer::new(path)?;
         let mesh = &self.mesh;
         let mesh_json = json!({
             "name": mesh.name,
@@ -596,24 +639,17 @@ impl PainterApp {
             "view": view,
         });
         let text = serde_json::to_vec(&manifest).map_err(|e| e.to_string())?;
-        // The compressed blobs are already held by Writer. Do not allocate
-        // a second Vec as large as the final project just to write it.
-        let total_bytes = MAGIC.len()
-            + 8
-            + text.len()
-            + 8
-            + w.blobs.iter().map(|blob| 8 + blob.len()).sum::<usize>();
+        // Only the manifest and one compressed blob at a time are held in
+        // RAM. The blob spool already contains each length prefix + payload.
+        let total_bytes = MAGIC.len() + 8 + text.len() + 8 + w.spool_bytes;
         let tmp = path.with_extension("mpp.tmp");
         let file = std::fs::File::create(&tmp).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
         let mut out = std::io::BufWriter::new(file);
         out.write_all(MAGIC).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
         out.write_all(&(text.len() as u64).to_le_bytes()).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
         out.write_all(&text).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
-        out.write_all(&(w.blobs.len() as u64).to_le_bytes()).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
-        for blob in &w.blobs {
-            out.write_all(&(blob.len() as u64).to_le_bytes()).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
-            out.write_all(blob).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
-        }
+        out.write_all(&(w.count as u64).to_le_bytes()).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
+        w.copy_to(&mut out)?;
         out.flush().map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
         drop(out);
         std::fs::rename(&tmp, path).map_err(|e| format!("can't replace {}: {e}", path.display()))?;
