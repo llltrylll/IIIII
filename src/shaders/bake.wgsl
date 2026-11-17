@@ -800,7 +800,7 @@ fn cs_surface(@builtin(global_invocation_id) gid: vec3<u32>) {
         } else {
             // Mesh-part and material IDs are constant over each triangle.
             // The ID index is stored in corner 1's position.w.
-            let id_index = bitcast<u32>(bake_triangles[center_tri].metadata.y);
+            let id_index = bake_triangles[center_tri].metadata.y;
             idc = ids[id_index].xyz;
         }
         geo = vec4<f32>(hit_geo_normal(center_tri, center_n), f32(pi));

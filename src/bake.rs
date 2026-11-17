@@ -1640,8 +1640,8 @@ impl SceneUploads {
         let cage = scene.cage.as_ref().map(|vertices| Self::vertex(device, "cage", vertices));
         Self {
             nodes: GpuBaker::storage(device, "bvh nodes", &scene.nodes),
-            bake_vertices: GpuBaker::storage(device, "tri positions", &scene.bake_vertices),
-            bake_triangles: GpuBaker::storage(device, "tri normals", &scene.bake_triangles),
+            bake_vertices: GpuBaker::storage(device, "bake source vertices", &scene.bake_vertices),
+            bake_triangles: GpuBaker::storage(device, "bake triangle indices and metadata", &scene.bake_triangles),
             tri_vcolor: GpuBaker::storage(device, "tri vertex colors", &scene.tri_vcolor),
             parts: GpuBaker::storage(device, "parts", &scene.parts),
             ids: GpuBaker::storage(device, "ids", &scene.ids),
@@ -1658,8 +1658,8 @@ impl SceneUploads {
     /// than keeping every prepared array alive until the entire start pass ends.
     fn owned(device: &wgpu::Device, scene: &mut PreparedScene) -> Self {
         let nodes = GpuBaker::storage(device, "bvh nodes", &std::mem::take(&mut scene.nodes));
-        let bake_vertices = GpuBaker::storage(device, "tri positions", &std::mem::take(&mut scene.bake_vertices));
-        let bake_triangles = GpuBaker::storage(device, "tri normals", &std::mem::take(&mut scene.bake_triangles));
+        let bake_vertices = GpuBaker::storage(device, "bake source vertices", &std::mem::take(&mut scene.bake_vertices));
+        let bake_triangles = GpuBaker::storage(device, "bake triangle indices and metadata", &std::mem::take(&mut scene.bake_triangles));
         let tri_vcolor = GpuBaker::storage(device, "tri vertex colors", &std::mem::take(&mut scene.tri_vcolor));
         let parts = GpuBaker::storage(device, "parts", &std::mem::take(&mut scene.parts));
         let ids = GpuBaker::storage(device, "ids", &std::mem::take(&mut scene.ids));
