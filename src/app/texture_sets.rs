@@ -107,15 +107,22 @@ impl PainterApp {
         }
     }
 
-    /// Composites at most one changed parked set per frame to avoid a load-time spike.
-    pub(super) fn composite_parked(&mut self, ctx: &egui::Context) {
+    /// Composites every parked set when a synchronous operation needs final maps (export).
+    pub(super) fn composite_parked(&mut self) {
         for p in self.sets.parked.iter_mut().flatten() {
             if p.engine.dirty {
                 p.engine.composite();
                 p.engine.release_inactive_working_set();
-                ctx.request_repaint();
-                break;
             }
+        }
+    }
+
+    /// Spreads parked-set recomposition across frames during interactive use.
+    pub(super) fn composite_parked_one(&mut self, ctx: &egui::Context) {
+        if let Some(p) = self.sets.parked.iter_mut().flatten().find(|p| p.engine.dirty) {
+            p.engine.composite();
+            p.engine.release_inactive_working_set();
+            ctx.request_repaint();
         }
     }
 

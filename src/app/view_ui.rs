@@ -490,7 +490,7 @@ impl PainterApp {
             let engines = texture_sets::engines(&self.engine, &self.sets, self.mesh.sets.len());
             self.views.render_3d_with_object_visibility(&self.rs, size, &engines, &self.env, &self.gpu_mesh, self.mesh.as_ref(), &self.cam, &self.view, Some(&self.overlays), &self.hidden_objects);
         }
-        self.composite_parked(ctx);
+        self.composite_parked_one(ctx);
         self.drew_3d = false;
     }
 
