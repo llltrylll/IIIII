@@ -3145,6 +3145,8 @@ impl PainterApp {
         let mut exact_uv_degenerate_keys_by_object: HashMap<(usize, [i64; 6]), u32> = HashMap::new();
         let mut set_uv_degenerate = vec![0u32; self.mesh.sets.len()];
         let mut object_uv_degenerate = vec![0u32; self.mesh.objects.len()];
+        let mut set_uv_non_finite = vec![0u32; self.mesh.sets.len()];
+        let mut object_uv_non_finite = vec![0u32; self.mesh.objects.len()];
         let mut uv_non_finite_triangles = 0u32;
         // Per object: triangles, zero normals, normal alignment classes,
         // positive/negative tangent handedness, and invalid tangent frames.
@@ -3168,6 +3170,13 @@ impl PainterApp {
             }
             if !uv_finite {
                 uv_non_finite_triangles += 1;
+                let set = self.mesh.set_of(tri as u32);
+                if let Some(count) = set_uv_non_finite.get_mut(set) { *count += 1; }
+                if let Some(&object) = self.mesh.tri_object.get(tri)
+                    && let Some(count) = object_uv_non_finite.get_mut(object as usize)
+                {
+                    *count += 1;
+                }
             }
             let signed_uv_area = (uv[1].x - uv[0].x) * (uv[2].y - uv[0].y)
                 - (uv[1].y - uv[0].y) * (uv[2].x - uv[0].x);
@@ -3371,9 +3380,10 @@ impl PainterApp {
             let degenerate = by_set_degenerate.get(index).copied().unwrap_or([0; 3]);
             let triangle_count = set.tris.end.saturating_sub(set.tris.start);
             let uv_degenerate_count = set_uv_degenerate.get(index).copied().unwrap_or(0);
+            let uv_non_finite_count = set_uv_non_finite.get(index).copied().unwrap_or(0);
             out.push_str(&format!(
-                "  [{}] {} | triangles={} uv_degenerate={} valid_duplicate_groups={} valid_duplicate_faces={} max_valid_stack={} degenerate_duplicate_groups={} degenerate_duplicate_faces={} max_degenerate_stack={}\n",
-                index, set.name, triangle_count, uv_degenerate_count,
+                "  [{}] {} | triangles={} uv_degenerate={} uv_non_finite={} valid_duplicate_groups={} valid_duplicate_faces={} max_valid_stack={} degenerate_duplicate_groups={} degenerate_duplicate_faces={} max_degenerate_stack={}\n",
+                index, set.name, triangle_count, uv_degenerate_count, uv_non_finite_count,
                 valid[0], valid[1], valid[2], degenerate[0], degenerate[1], degenerate[2]
             ));
         }
@@ -3383,10 +3393,11 @@ impl PainterApp {
             let valid = by_object_valid.get(index).copied().unwrap_or([0; 3]);
             let degenerate = by_object_degenerate.get(index).copied().unwrap_or([0; 3]);
             let uv_degenerate_count = object_uv_degenerate.get(index).copied().unwrap_or(0);
+            let uv_non_finite_count = object_uv_non_finite.get(index).copied().unwrap_or(0);
             let triangles = object_normal_stats.get(index).map_or(0, |stats| stats[0]);
             out.push_str(&format!(
-                "  [{}] {} | triangles={} uv_degenerate={} valid_duplicate_groups={} valid_duplicate_faces={} max_valid_stack={} degenerate_duplicate_groups={} degenerate_duplicate_faces={} max_degenerate_stack={}\n",
-                index, name, triangles, uv_degenerate_count,
+                "  [{}] {} | triangles={} uv_degenerate={} uv_non_finite={} valid_duplicate_groups={} valid_duplicate_faces={} max_valid_stack={} degenerate_duplicate_groups={} degenerate_duplicate_faces={} max_degenerate_stack={}\n",
+                index, name, triangles, uv_degenerate_count, uv_non_finite_count,
                 valid[0], valid[1], valid[2], degenerate[0], degenerate[1], degenerate[2]
             ));
         }
