@@ -1290,8 +1290,13 @@ impl GpuStrokeProfiler {
             }
         };
         let read = |i: usize| u64::from_ne_bytes(data[i * 8..i * 8 + 8].try_into().expect("timestamp is 8 bytes"));
-        let (s0, s1, a0, a1, c0, c1, t0, t1, clear_end, body_end) =
-            (read(0), read(1), read(2), read(3), read(4), read(5), read(6), read(7), read(8), read(9));
+        let (s0, s1, a0, a1, c0, c1) =
+            (read(0), read(1), read(2), read(3), read(4), read(5));
+        let (t0, t1, clear_end, body_end) = if self.encoder_timestamps {
+            (read(6), read(7), read(8), read(9))
+        } else {
+            (0, 0, 0, 0)
+        };
         let layer_pass_ms = if self.encoder_timestamps {
             (0..GPU_PROFILE_MAX_LAYER_PASSES)
                 .map(|i| read(10 + i * 2 + 1).wrapping_sub(read(10 + i * 2)) as f64)
@@ -5045,8 +5050,14 @@ impl Engine {
                     encoder.write_timestamp(&p.query_set, 9);
                     encoder.write_timestamp(&p.query_set, 7);
                 }
-                encoder.resolve_query_set(&p.query_set, 0..GPU_PROFILE_QUERY_COUNT, &p.resolve, 0);
-                encoder.copy_buffer_to_buffer(&p.resolve, 0, &p.readback, 0, GPU_PROFILE_READBACK_SIZE);
+                let query_count = if self.gpu_profiler.as_ref().is_some_and(|profiler| profiler.encoder_timestamps) {
+                    GPU_PROFILE_QUERY_COUNT
+                } else {
+                    6
+                };
+                let resolve_bytes = u64::from(query_count) * 8;
+                encoder.resolve_query_set(&p.query_set, 0..query_count, &p.resolve, 0);
+                encoder.copy_buffer_to_buffer(&p.resolve, 0, &p.readback, 0, resolve_bytes);
             }
         }
         self.queue.submit([encoder.finish()]);
