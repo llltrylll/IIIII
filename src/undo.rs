@@ -451,7 +451,7 @@ impl Default for UndoStack {
 }
 
 impl UndoStack {
-    pub fn push(&mut self, label: impl Into<String>, edit: Edit) {
+    pub fn push(&mut self, label: impl Into<String>, mut edit: Edit) {
         let mut pending = false;
         edit.for_each_stroke(&mut |stroke| {
             pending |= stroke.before.is_pending() || stroke.after.is_pending();
