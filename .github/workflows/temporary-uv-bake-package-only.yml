@@ -1,0 +1,29 @@
+name: Temporary UV bake Windows package
+
+on:
+  push:
+    branches:
+      - fix/uv-bake-package-20261118
+
+permissions:
+  contents: read
+
+jobs:
+  windows-package:
+    name: Windows portable package
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build and stage portable package
+        shell: pwsh
+        run: ./scripts/package.ps1
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: uv-bake-test-windows-x64
+          path: dist/MaterialPainter-*-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 3
