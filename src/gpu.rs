@@ -13,6 +13,8 @@ pub struct Tex {
     pub width: u32,
     pub height: u32,
     pub samples: u32,
+    /// Number of allocated mip levels (Fill images use a full pyramid).
+    pub mip_level_count: u32,
 }
 
 pub const LAYER_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_ATTACHMENT
@@ -63,11 +65,11 @@ impl Tex {
                 ..Default::default()
             })
         });
-        Tex { texture, view, srgb_view, format, width, height, samples }
+        Tex { texture, view, srgb_view, format, width, height, samples, mip_level_count: 1 }
     }
 
     pub fn bytes(&self) -> u64 {
-        self.width as u64 * self.height as u64 * bytes_per_texel(self.format) as u64 * self.samples as u64
+        texture_memory_bytes(self.width, self.height, self.format, self.samples, self.mip_level_count)
     }
 
     pub fn copy_info(&self) -> wgpu::TexelCopyTextureInfo<'_> {
@@ -86,6 +88,27 @@ impl Tex {
     pub fn srgb(&self) -> &wgpu::TextureView {
         self.srgb_view.as_ref().unwrap_or(&self.view)
     }
+}
+
+fn texture_memory_bytes(
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+    samples: u32,
+    mip_level_count: u32,
+) -> u64 {
+    let bytes_per_texel = u64::from(bytes_per_texel(format));
+    let mut width = u64::from(width.max(1));
+    let mut height = u64::from(height.max(1));
+    let mut total = 0u64;
+    for _ in 0..mip_level_count.max(1) {
+        total = total.saturating_add(
+            width.saturating_mul(height).saturating_mul(bytes_per_texel),
+        );
+        width = (width / 2).max(1);
+        height = (height / 2).max(1);
+    }
+    total.saturating_mul(u64::from(samples.max(1)))
 }
 
 pub fn bytes_per_texel(format: wgpu::TextureFormat) -> u32 {
@@ -237,10 +260,11 @@ pub(crate) fn upload_prepared_mips(
     label: &str,
 ) -> Tex {
     let _create = crate::startup_trace::span("scan: gpu create_texture");
+    let mip_level_count = chain.levels.len() as u32;
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d { width: chain.width, height: chain.height, depth_or_array_layers: 1 },
-        mip_level_count: chain.levels.len() as u32,
+        mip_level_count,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: chain.format,
@@ -278,6 +302,7 @@ pub(crate) fn upload_prepared_mips(
         width: chain.width,
         height: chain.height,
         samples: 1,
+        mip_level_count,
     }
 }
 
@@ -318,7 +343,7 @@ pub fn upload_mips<P: image::Pixel<Subpixel = u8> + 'static>(
         }
     }
     let view = texture.create_view(&Default::default());
-    Tex { texture, view, srgb_view: None, format, width: w, height: h, samples: 1 }
+    Tex { texture, view, srgb_view: None, format, width: w, height: h, samples: 1, mip_level_count: mips }
 }
 
 pub fn layout(device: &wgpu::Device, bgl: &wgpu::BindGroupLayout) -> wgpu::PipelineLayout {
@@ -525,6 +550,34 @@ pub fn f16_to_f32(h: u16) -> f32 {
         0 => sign * man * 2f32.powi(-24),
         31 => sign * f32::INFINITY,
         _ => sign * (1.0 + man / 1024.0) * 2f32.powi(exp - 15),
+    }
+}
+
+#[cfg(test)]
+mod texture_memory_tests {
+    use super::texture_memory_bytes;
+    use eframe::wgpu::TextureFormat;
+
+    #[test]
+    fn single_level_texture_estimate_is_unchanged() {
+        assert_eq!(texture_memory_bytes(4, 4, TextureFormat::Rgba8Unorm, 1, 1), 64);
+    }
+
+    #[test]
+    fn full_mip_chain_counts_every_level() {
+        // 4x4 + 2x2 + 1x1 texels, four bytes per texel.
+        assert_eq!(texture_memory_bytes(4, 4, TextureFormat::Rgba8Unorm, 1, 3), 84);
+    }
+
+    #[test]
+    fn rectangular_mip_chain_uses_clamped_dimensions() {
+        // 8x2 + 4x1 + 2x1 + 1x1 single-channel texels.
+        assert_eq!(texture_memory_bytes(8, 2, TextureFormat::R8Unorm, 1, 4), 23);
+    }
+
+    #[test]
+    fn multisample_storage_scales_the_base_level() {
+        assert_eq!(texture_memory_bytes(4, 4, TextureFormat::Rgba8Unorm, 4, 1), 256);
     }
 }
 
