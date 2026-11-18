@@ -2996,7 +2996,10 @@ impl PainterApp {
             },
         );
 
-        let mut texture_set_gpu_resources = String::new();
+        let mut texture_set_gpu_resources = String::from(
+            "note: application-side GPU resource estimate, not physical VRAM telemetry\\n\
+             note: shared Fill image textures can be referenced by multiple Texture Set Engines and counted in more than one per-engine subtotal\\n",
+        );
         for (index, set) in self.mesh.sets.iter().enumerate() {
             let resident_engine = if index == self.sets.active {
                 Some(("ACTIVE", &self.engine))
@@ -3081,6 +3084,7 @@ impl PainterApp {
              frame_time_ema_ms: {:.3}\n\
              recent_frame_peak_ms: {:.3}\n\
              F5_FULL_COMPOSITE_GPU_PROFILE:\n{f5_gpu_profile}\n\
+             F5_PROFILE_SCOPE_NOTE: Layer, folder and mask timings are nested spans inside composite_body_gpu_ms; do not add them again to the parent body duration. Mesh maps resolve and layer thumbnails are separate GPU submissions included in F5 wall time, outside the main composite encoder span.\\n\\
              GPU_RESOURCE_ALLOCATION_BY_TEXTURE_SET:\n{texture_set_gpu_resources}",
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs()).unwrap_or(0),
