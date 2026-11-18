@@ -994,26 +994,50 @@ pub(crate) fn vertex_curvature(positions: &[Vec3], normals: &[Vec3], indices: &[
     ids.iter().map(|&g| k[g as usize]).collect()
 }
 
+/// The first normal group for a welded position is inline. Most positions
+/// have only one group, so this avoids one small heap allocation per vertex;
+/// extra allocations occur only where split normals share the same position.
+struct NormalGroupBucket {
+    first: (Vec3, u32),
+    additional: Vec<(Vec3, u32)>,
+}
+
+impl NormalGroupBucket {
+    fn new(normal: Vec3, group: u32) -> Self {
+        Self { first: (normal, group), additional: Vec::new() }
+    }
+
+    fn find_or_insert(&mut self, normal: Vec3, next: &mut u32) -> u32 {
+        if self.first.0.dot(normal) > 0.99985 {
+            return self.first.1;
+        }
+        if let Some(&(_, group)) = self.additional.iter().find(|(candidate, _)| candidate.dot(normal) > 0.99985) {
+            return group;
+        }
+        let group = *next;
+        *next += 1;
+        self.additional.push((normal, group));
+        group
+    }
+}
+
 /// Welds vertices for curvature: same position (to 1e-4 of the unit-sized
 /// mesh) and normals within about a degree share a group.
 fn weld_groups(positions: &[Vec3], normals: &[Vec3]) -> Vec<u32> {
-    let mut by_pos: HashMap<[i32; 3], Vec<(Vec3, u32)>> = HashMap::with_capacity(positions.len());
+    let mut by_pos: HashMap<[i32; 3], NormalGroupBucket> = HashMap::with_capacity(positions.len());
     let mut next = 0u32;
     positions
         .iter()
         .zip(normals)
         .map(|(p, n)| {
             let key = (*p * 1.0e4).round().as_ivec3().to_array();
-            let list = by_pos.entry(key).or_default();
-            let n = n.normalize_or_zero();
-            match list.iter().find(|(m, _)| m.dot(n) > 0.99985) {
-                Some(&(_, g)) => g,
-                None => {
-                    list.push((n, next));
-                    next += 1;
-                    next - 1
-                }
-            }
+            let normal = n.normalize_or_zero();
+            let bucket = by_pos.entry(key).or_insert_with(|| {
+                let group = next;
+                next += 1;
+                NormalGroupBucket::new(normal, group)
+            });
+            bucket.find_or_insert(normal, &mut next)
         })
         .collect()
 }
@@ -2604,6 +2628,18 @@ pub(crate) mod tests {
         edges.push((2, 7));
         edges.push((1, 3));
         assert_eq!(edges.iter().collect::<Vec<_>>(), vec![(4, 9), (2, 7), (1, 3)]);
+    }
+
+    #[test]
+    fn weld_groups_keeps_position_and_split_normal_equivalence() {
+        let positions = [Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::X];
+        let normals = [
+            Vec3::Z,
+            Vec3::new(0.0, 0.001, 1.0).normalize(),
+            Vec3::Y,
+            Vec3::Z,
+        ];
+        assert_eq!(weld_groups(&positions, &normals), vec![0, 0, 1, 2]);
     }
 
     /// Distance from p to the nearest convex feature, as the edge bake measures it.
