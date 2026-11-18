@@ -4094,8 +4094,20 @@ impl Engine {
     pub fn poll_gpu_stroke_times(
         &mut self,
     ) -> Option<(bool, f64, f64, f64, Option<f64>, Option<f64>, Option<f64>, Vec<(String, f64)>)> {
-        let (stamp, apply, layer, total, clear, body, pass_ms) =
-            self.gpu_profiler.as_mut()?.poll(&self.device, &self.queue)?;
+        let (profile_result, still_pending) = {
+            let profiler = self.gpu_profiler.as_mut()?;
+            let result = profiler.poll(&self.device, &self.queue);
+            (result, profiler.pending)
+        };
+        let Some((stamp, apply, layer, total, clear, body, pass_ms)) = profile_result else {
+            // A failed readback ends the request too. Do not let a stale F5
+            // marker turn a later brush-stroke profile into an F5 capture.
+            if !still_pending {
+                self.forced_composite_profile = false;
+                self.last_profiled_pass_labels.clear();
+            }
+            return None;
+        };
         let forced_composite = std::mem::take(&mut self.forced_composite_profile);
         let pass_labels = std::mem::take(&mut self.last_profiled_pass_labels);
         let pass_times = pass_labels.into_iter().zip(pass_ms).collect();
