@@ -637,10 +637,17 @@ fn exact_uv_triangle_key(uv: [Vec2; 3]) -> Option<([i64; 6], bool)> {
     let signed_area = (uv[1].x - uv[0].x) * (uv[2].y - uv[0].y)
         - (uv[1].y - uv[0].y) * (uv[2].x - uv[0].x);
     let degenerate = signed_area.abs() < 1.0e-10;
-    let mut quantized = uv.map(|point| [
-        (f64::from(point.x) * 1_000_000.0).round() as i64,
-        (f64::from(point.y) * 1_000_000.0).round() as i64,
-    ]);
+    // Reject finite-but-unrepresentable values instead of letting float-to-int
+    // saturation collapse unrelated extreme UV coordinates onto i64::MIN/MAX.
+    const I64_LIMIT: f64 = 9_223_372_036_854_775_808.0;
+    let quantize = |value: f32| {
+        let rounded = (f64::from(value) * 1_000_000.0).round();
+        (rounded >= -I64_LIMIT && rounded < I64_LIMIT).then_some(rounded as i64)
+    };
+    let mut quantized = [[0i64; 2]; 3];
+    for (i, point) in uv.into_iter().enumerate() {
+        quantized[i] = [quantize(point.x)?, quantize(point.y)?];
+    }
     quantized.sort_unstable();
     Some((
         [
@@ -652,18 +659,99 @@ fn exact_uv_triangle_key(uv: [Vec2; 3]) -> Option<([i64; 6], bool)> {
     ))
 }
 
-fn duplicate_uv_group_summary(counts: impl Iterator<Item = u32>) -> (u32, u32, u32) {
-    let mut groups = 0u32;
-    let mut faces = 0u32;
-    let mut max_depth = 0u32;
-    for count in counts {
-        if count > 1 {
-            groups += 1;
-            faces += count;
-            max_depth = max_depth.max(count);
-        }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ExactUvDuplicateRecord {
+    key: [i64; 6],
+    set: u32,
+    object: u32,
+    degenerate: bool,
+}
+
+type UvDuplicateStats = [u32; 3];
+
+fn add_uv_duplicate_group(stats: &mut UvDuplicateStats, count: usize) {
+    if count > 1 {
+        let count = u32::try_from(count).unwrap_or(u32::MAX);
+        stats[0] = stats[0].saturating_add(1);
+        stats[1] = stats[1].saturating_add(count);
+        stats[2] = stats[2].max(count);
     }
-    (groups, faces, max_depth)
+}
+
+/// Summarizes global exact stacks in-place, reusing one record per quantizable face.
+fn summarize_global_uv_duplicates(
+    records: &mut [ExactUvDuplicateRecord],
+) -> (UvDuplicateStats, UvDuplicateStats) {
+    records.sort_unstable_by_key(|record| (record.degenerate, record.key));
+    let mut valid = [0; 3];
+    let mut degenerate = [0; 3];
+    let mut start = 0;
+    while start < records.len() {
+        let first = records[start];
+        let mut end = start + 1;
+        while end < records.len()
+            && records[end].degenerate == first.degenerate
+            && records[end].key == first.key
+        {
+            end += 1;
+        }
+        add_uv_duplicate_group(
+            if first.degenerate { &mut degenerate } else { &mut valid },
+            end - start,
+        );
+        start = end;
+    }
+    (valid, degenerate)
+}
+
+/// Summarizes stacks by Texture Set or object without allocating one hash table per face.
+fn summarize_uv_duplicates_by_owner(
+    records: &mut [ExactUvDuplicateRecord],
+    owner_count: usize,
+    owner_index: impl Fn(&ExactUvDuplicateRecord) -> Option<usize>,
+) -> (Vec<UvDuplicateStats>, UvDuplicateStats, Vec<UvDuplicateStats>, UvDuplicateStats) {
+    records.sort_unstable_by_key(|record| {
+        (owner_index(record).unwrap_or(usize::MAX), record.degenerate, record.key)
+    });
+    let mut valid_by_owner = vec![[0; 3]; owner_count];
+    let mut degenerate_by_owner = vec![[0; 3]; owner_count];
+    let mut valid_total = [0; 3];
+    let mut degenerate_total = [0; 3];
+    let mut start = 0;
+    while start < records.len() {
+        let first = records[start];
+        let owner = owner_index(&first);
+        let mut end = start + 1;
+        while end < records.len()
+            && owner_index(&records[end]) == owner
+            && records[end].degenerate == first.degenerate
+            && records[end].key == first.key
+        {
+            end += 1;
+        }
+        if let Some(owner) = owner
+            && let Some(stats) = if first.degenerate {
+                degenerate_by_owner.get_mut(owner)
+            } else {
+                valid_by_owner.get_mut(owner)
+            }
+        {
+            let total = if first.degenerate { &mut degenerate_total } else { &mut valid_total };
+            add_uv_duplicate_group(stats, end - start);
+            add_uv_duplicate_group(total, end - start);
+        }
+        start = end;
+    }
+    (valid_by_owner, valid_total, degenerate_by_owner, degenerate_total)
+}
+
+#[cfg(test)]
+fn duplicate_uv_group_summary(counts: impl Iterator<Item = u32>) -> (u32, u32, u32) {
+    let mut stats = [0; 3];
+    for count in counts {
+        add_uv_duplicate_group(&mut stats, count as usize);
+    }
+    (stats[0], stats[1], stats[2])
 }
 
 #[cfg(test)]
@@ -692,11 +780,20 @@ mod uv_diagnostic_tests {
     }
 
     #[test]
-    fn non_finite_uv_triangles_never_enter_duplicate_maps() {
+    fn non_finite_uv_triangles_never_enter_duplicate_records() {
         assert!(exact_uv_triangle_key([
             Vec2::ZERO,
             Vec2::new(f32::NAN, 0.0),
             Vec2::ONE,
+        ]).is_none());
+    }
+
+    #[test]
+    fn extreme_finite_uv_values_cannot_saturate_into_duplicate_keys() {
+        assert!(exact_uv_triangle_key([
+            Vec2::new(1.0e20, 0.0),
+            Vec2::new(1.0e20, 1.0),
+            Vec2::new(1.0e20, 2.0),
         ]).is_none());
     }
 
@@ -707,6 +804,38 @@ mod uv_diagnostic_tests {
             (3, 9, 5),
         );
         assert_eq!(duplicate_uv_group_summary([1, 1, 0].into_iter()), (0, 0, 0));
+    }
+
+    #[test]
+    fn sorted_uv_duplicate_records_preserve_global_set_and_object_counts() {
+        let valid = [1, 2, 3, 4, 5, 6];
+        let degenerate = [7, 8, 9, 10, 11, 12];
+        let mut records = vec![
+            ExactUvDuplicateRecord { key: valid, set: 0, object: 0, degenerate: false },
+            ExactUvDuplicateRecord { key: valid, set: 0, object: 0, degenerate: false },
+            ExactUvDuplicateRecord { key: valid, set: 1, object: 1, degenerate: false },
+            ExactUvDuplicateRecord { key: degenerate, set: 2, object: 0, degenerate: true },
+            ExactUvDuplicateRecord { key: degenerate, set: 2, object: 2, degenerate: true },
+        ];
+
+        let (global_valid, global_degenerate) = summarize_global_uv_duplicates(&mut records);
+        assert_eq!(global_valid, [1, 3, 3]);
+        assert_eq!(global_degenerate, [1, 2, 2]);
+
+        let (by_set_valid, same_set_valid, by_set_degenerate, same_set_degenerate) =
+            summarize_uv_duplicates_by_owner(&mut records, 3, |record| Some(record.set as usize));
+        assert_eq!(same_set_valid, [1, 2, 2]);
+        assert_eq!(by_set_valid[0], [1, 2, 2]);
+        assert_eq!(by_set_valid[1], [0, 0, 0]);
+        assert_eq!(same_set_degenerate, [1, 2, 2]);
+        assert_eq!(by_set_degenerate[2], [1, 2, 2]);
+
+        let (by_object_valid, _, by_object_degenerate, _) =
+            summarize_uv_duplicates_by_owner(&mut records, 3, |record| Some(record.object as usize));
+        assert_eq!(by_object_valid[0], [1, 2, 2]);
+        assert_eq!(by_object_valid[1], [0, 0, 0]);
+        assert_eq!(by_object_degenerate[0], [0, 0, 0]);
+        assert_eq!(by_object_degenerate[2], [0, 0, 0]);
     }
 }
 
@@ -3149,8 +3278,6 @@ impl PainterApp {
     }
 
     fn diagnostic_mesh_report(&self) -> String {
-        use std::collections::HashMap;
-
         let mut uv_min = Vec2::splat(f32::INFINITY);
         let mut uv_max = Vec2::splat(f32::NEG_INFINITY);
         let mut uv_outside_triangles = 0u32;
@@ -3162,12 +3289,9 @@ impl PainterApp {
         let mut normals_aligned = 0u32;
         let mut normals_opposed = 0u32;
         let mut normals_mixed = 0u32;
-        let mut exact_uv_valid_keys: HashMap<[i64; 6], u32> = HashMap::new();
-        let mut exact_uv_degenerate_keys: HashMap<[i64; 6], u32> = HashMap::new();
-        let mut exact_uv_valid_keys_by_set: HashMap<(usize, [i64; 6]), u32> = HashMap::new();
-        let mut exact_uv_degenerate_keys_by_set: HashMap<(usize, [i64; 6]), u32> = HashMap::new();
-        let mut exact_uv_valid_keys_by_object: HashMap<(usize, [i64; 6]), u32> = HashMap::new();
-        let mut exact_uv_degenerate_keys_by_object: HashMap<(usize, [i64; 6]), u32> = HashMap::new();
+        // One compact record per quantizable face replaces six large hash maps.
+        // Sorting the same vector in-place yields global, per-set and per-object summaries.
+        let mut exact_uv_duplicates = Vec::with_capacity(self.mesh.triangle_count());
         let mut set_uv_degenerate = vec![0u32; self.mesh.sets.len()];
         let mut object_uv_degenerate = vec![0u32; self.mesh.objects.len()];
         let mut set_uv_non_finite = vec![0u32; self.mesh.sets.len()];
@@ -3278,66 +3402,24 @@ impl PainterApp {
                 stats[7] += triangle_tangent_invalid;
             }
 
-            // Degenerate and valid-area triangles use independent maps. Non-finite
-            // coordinates are rejected and can never collide after quantization.
+            // Store each quantizable face once; duplicate summaries sort this vector in-place.
             if let Some((key, key_degenerate)) = exact_uv_triangle_key(uv) {
-                let set = self.mesh.set_of(tri as u32);
-                if key_degenerate {
-                    *exact_uv_degenerate_keys.entry(key).or_default() += 1;
-                    *exact_uv_degenerate_keys_by_set.entry((set, key)).or_default() += 1;
-                    if let Some(&object) = self.mesh.tri_object.get(tri) {
-                        *exact_uv_degenerate_keys_by_object.entry((object as usize, key)).or_default() += 1;
-                    }
-                } else {
-                    *exact_uv_valid_keys.entry(key).or_default() += 1;
-                    *exact_uv_valid_keys_by_set.entry((set, key)).or_default() += 1;
-                    if let Some(&object) = self.mesh.tri_object.get(tri) {
-                        *exact_uv_valid_keys_by_object.entry((object as usize, key)).or_default() += 1;
-                    }
-                }
+                exact_uv_duplicates.push(ExactUvDuplicateRecord {
+                    key,
+                    set: self.mesh.set_of(tri as u32) as u32,
+                    object: self.mesh.tri_object.get(tri).copied().unwrap_or(u32::MAX),
+                    degenerate: key_degenerate,
+                });
             }
         }
 
-        let global_valid = duplicate_uv_group_summary(exact_uv_valid_keys.values().copied());
-        let global_degenerate = duplicate_uv_group_summary(exact_uv_degenerate_keys.values().copied());
-        let same_set_valid = duplicate_uv_group_summary(exact_uv_valid_keys_by_set.values().copied());
-        let same_set_degenerate = duplicate_uv_group_summary(exact_uv_degenerate_keys_by_set.values().copied());
-        let by_set_valid = {
-            let mut stats = vec![[0u32; 3]; self.mesh.sets.len()];
-            for (&(set, _), &count) in &exact_uv_valid_keys_by_set {
-                if count > 1 && let Some(s) = stats.get_mut(set) {
-                    s[0] += 1; s[1] += count; s[2] = s[2].max(count);
-                }
-            }
-            stats
-        };
-        let by_set_degenerate = {
-            let mut stats = vec![[0u32; 3]; self.mesh.sets.len()];
-            for (&(set, _), &count) in &exact_uv_degenerate_keys_by_set {
-                if count > 1 && let Some(s) = stats.get_mut(set) {
-                    s[0] += 1; s[1] += count; s[2] = s[2].max(count);
-                }
-            }
-            stats
-        };
-        let by_object_valid = {
-            let mut stats = vec![[0u32; 3]; self.mesh.objects.len()];
-            for (&(object, _), &count) in &exact_uv_valid_keys_by_object {
-                if count > 1 && let Some(s) = stats.get_mut(object) {
-                    s[0] += 1; s[1] += count; s[2] = s[2].max(count);
-                }
-            }
-            stats
-        };
-        let by_object_degenerate = {
-            let mut stats = vec![[0u32; 3]; self.mesh.objects.len()];
-            for (&(object, _), &count) in &exact_uv_degenerate_keys_by_object {
-                if count > 1 && let Some(s) = stats.get_mut(object) {
-                    s[0] += 1; s[1] += count; s[2] = s[2].max(count);
-                }
-            }
-            stats
-        };
+        let (global_valid, global_degenerate) = summarize_global_uv_duplicates(&mut exact_uv_duplicates);
+        let (by_set_valid, same_set_valid, by_set_degenerate, same_set_degenerate) =
+            summarize_uv_duplicates_by_owner(&mut exact_uv_duplicates, self.mesh.sets.len(), |record| Some(record.set as usize));
+        let (by_object_valid, _, by_object_degenerate, _) =
+            summarize_uv_duplicates_by_owner(&mut exact_uv_duplicates, self.mesh.objects.len(), |record| {
+                (record.object != u32::MAX).then_some(record.object as usize)
+            });
 
         let mut out = format!(
             "\nMESH / UV / NORMAL SUMMARY\n\
@@ -3369,7 +3451,7 @@ impl PainterApp {
              exact_degenerate_uv_duplicate_groups_same_texture_set: {}\n\
              triangles_in_exact_degenerate_uv_groups_same_texture_set: {}\n\
              exact_stack_detection_tolerance: 1e-6 UV units\n\
-             note: valid exact stacks exclude UV-degenerate and non-finite faces; partial overlaps are not detected\n",
+             note: exact stacks exclude UV-degenerate, non-finite, and unquantizable faces; partial overlaps are not detected\n",
             self.mesh.vertices.len(),
             self.mesh.triangle_count(),
             self.mesh.indices.len(),
@@ -3387,16 +3469,16 @@ impl PainterApp {
             normals_aligned,
             normals_opposed,
             normals_mixed,
-            global_valid.0,
-            global_valid.1,
-            global_valid.2,
-            global_degenerate.0,
-            global_degenerate.1,
-            global_degenerate.2,
-            same_set_valid.0,
-            same_set_valid.1,
-            same_set_degenerate.0,
-            same_set_degenerate.1,
+            global_valid[0],
+            global_valid[1],
+            global_valid[2],
+            global_degenerate[0],
+            global_degenerate[1],
+            global_degenerate[2],
+            same_set_valid[0],
+            same_set_valid[1],
+            same_set_degenerate[0],
+            same_set_degenerate[1],
         );
 
         out.push_str("texture_set_uv_stats:\n");
