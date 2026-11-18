@@ -455,12 +455,15 @@ impl UndoStack {
             pending |= stroke.before.is_pending() || stroke.after.is_pending();
         });
 
-        if let Some(Entry { edit: Edit::Group(edits), .. }) = &mut self.group {
-            // Group contents are not part of the history budget until the group closes.
-            self.pending_snapshots |= pending;
-            edits.push(edit);
-            return;
-        }
+        if let Some(group) = &mut self.group
+            && let Edit::Group(edits) = &mut group.edit {
+                // Group contents are not part of the history budget until the group closes,
+                // but their snapshots still need to be progressed in the meantime.
+                group.pending_snapshots |= pending;
+                self.pending_snapshots |= pending;
+                edits.push(edit);
+                return;
+            }
 
         let bytes = edit.bytes();
         let redo_bytes = self.redo.iter().map(|entry| entry.edit.bytes()).sum::<usize>();
