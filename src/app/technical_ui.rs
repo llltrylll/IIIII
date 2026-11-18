@@ -336,7 +336,7 @@ impl PainterApp {
                 .show(ui, |ui| {
                     ui.label(if self.meter.on { "F6 profiler is enabled." } else { "F6 profiler is disabled. Press F6 to enable it." });
                     if self.meter.on {
-                        ui.add(egui::Label::new(RichText::new(self.meter.text(
+                        let details = self.meter.text(
                             self.engine.res,
                             self.engine.last_paint_scissor_pixels,
                             self.engine.last_paint_scissor_rects,
@@ -347,8 +347,9 @@ impl PainterApp {
                             self.engine.last_composite_folder_passes,
                             self.engine.last_mask_cache_hits,
                             self.engine.last_mask_cache_misses,
-                            self.engine.last_mask_gpu_passes
-                        )).small()).wrap());
+                            self.engine.last_mask_gpu_passes,
+                        );
+                        ui.add(egui::Label::new(RichText::new(details).small()).wrap());
                     }
                 });
 
