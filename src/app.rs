@@ -459,6 +459,13 @@ struct StrokeMeter {
     /// `stroke_step` calls since the last recomposition.
     steps_now: u32,
     steps_per_frame: Stat,
+    /// Number of brush stamps generated for each cursor segment.
+    brush_stamps_per_segment: Stat,
+    /// Requested spacing versus the spacing after the per-frame stamp safety cap.
+    brush_spacing_requested_px: Stat,
+    brush_spacing_effective_px: Stat,
+    /// Frames where a long cursor jump forced spacing above the brush setting.
+    brush_spacing_cap_frames: u32,
     /// CPU time spent mapping cursor samples to surface stamps.
     resolve_cpu: Stat,
     /// CPU time spent calculating the changed UV region before GPU submission.
@@ -543,8 +550,12 @@ impl StrokeMeter {
         let patch_percent = if texture_pixels == 0 { 0.0 } else { scissor_pixels as f64 * 100.0 / texture_pixels as f64 };
         let bbox_percent = if texture_pixels == 0 { 0.0 } else { bbox_pixels as f64 * 100.0 / texture_pixels as f64 };
         format!(
-            "F6 CPU avg/peak ms: steps/frame {}, resolve {}, region {}, stamp {}, begin {}, recomp {}, end {}, engine end {}, undo push {}, end cleanup {}, target {}, snapshot {}, submit {}, thumbs {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {}, clear {}, pass body {}, slowest pass {} {} | screen tris {}/{} | paint {:.1}%/{} scissors | composite {:.1}% (bbox {:.1}%, {} scissors) | stack {}L/{}F | masks {}h/{}m/{}p | since F6: full recomps {full}, thumbnails {thumbs}",
+            "F6 CPU avg/peak ms: steps/frame {}, brush stamps {}, spacing {:.1}/{:.1}px, spacing cap {}, resolve {}, region {}, stamp {}, begin {}, recomp {}, end {}, engine end {}, undo push {}, end cleanup {}, target {}, snapshot {}, submit {}, thumbs {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {}, clear {}, pass body {}, slowest pass {} {} | screen tris {}/{} | paint {:.1}%/{} scissors | composite {:.1}% (bbox {:.1}%, {} scissors) | stack {}L/{}F | masks {}h/{}m/{}p | since F6: full recomps {full}, thumbnails {thumbs}",
             self.steps_per_frame.text(),
+            self.brush_stamps_per_segment.text(),
+            if self.brush_spacing_requested_px.n == 0 { 0.0 } else { self.brush_spacing_requested_px.sum / f64::from(self.brush_spacing_requested_px.n) },
+            if self.brush_spacing_effective_px.n == 0 { 0.0 } else { self.brush_spacing_effective_px.sum / f64::from(self.brush_spacing_effective_px.n) },
+            self.brush_spacing_cap_frames,
             self.resolve_cpu.text(),
             self.region_cpu.text(),
             self.step_cpu.text(),
@@ -5305,15 +5316,19 @@ impl PainterApp {
         let at = s.lazy;
         let pressure = self.pressure;
         let radius = self.brush.size * 0.5 * self.ppp * if self.brush.pressure_size { pressure.max(0.1) } else { 1.0 };
-        let mut step = (self.brush.spacing * radius * 2.0).max(1.0);
+        let requested_step = (self.brush.spacing * radius * 2.0).max(1.0);
+        let mut step = requested_step;
         let delta = at - s.last;
         let dist = delta.length();
         if dist < step {
             return;
         }
-        // Keep each frame's stamp list bounded on very fast strokes.
+        // Keep each frame's stamp list bounded on very fast strokes. This
+        // fallback deliberately increases spacing only when one input segment
+        // would otherwise exceed MAX_STAMPS; F6 exposes when it happens.
         let max = crate::engine::MAX_STAMPS as f32;
-        if dist / step > max {
+        let spacing_capped = dist / step > max;
+        if spacing_capped {
             step = dist / max;
         }
         let dir = delta / dist;
@@ -5324,6 +5339,14 @@ impl PainterApp {
             // Pressure eases from the last stamp's to the current one.
             points.push((s.last + dir * travelled, p0 + (pressure - p0) * travelled / dist));
             travelled += step;
+        }
+        if self.meter.on {
+            self.meter.brush_stamps_per_segment.add(points.len() as f64);
+            self.meter.brush_spacing_requested_px.add(f64::from(requested_step));
+            self.meter.brush_spacing_effective_px.add(f64::from(step));
+            if spacing_capped {
+                self.meter.brush_spacing_cap_frames += 1;
+            }
         }
         s.last += dir * (travelled - step);
         s.pressure = points.last().map_or(p0, |p| p.1);
