@@ -4714,7 +4714,7 @@ impl Engine {
                 self.forced_composite_profile = false;
             }
         }
-        let composite_profiled = self.active_gpu_profile.is_some();
+        let mut composite_profiled = self.active_gpu_profile.is_some();
         let profile_query = self.active_gpu_profile.as_ref()
             .filter(|_| self.gpu_profiler.as_ref().is_some_and(|profiler| profiler.encoder_timestamps))
             .map(|profile| profile.query_set.clone());
