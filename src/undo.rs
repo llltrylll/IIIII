@@ -453,7 +453,10 @@ impl UndoStack {
                 s.after.update();
             });
         }
-        self.enforce_limits();
+        // Do not rescan the entire history to enforce the RAM budget on
+        // every UI frame. New snapshots are charged at their uncompressed
+        // size when pushed, so push() already applies a conservative limit;
+        // compression only reduces that estimate as this state machine advances.
     }
 
     /// Identifies the current document state (0 = nothing recorded).
