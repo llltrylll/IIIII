@@ -1280,6 +1280,9 @@ pub struct Engine {
     p: Arc<Pipelines>,
     /// Bounded readback-buffer cache shared by this document's Texture Sets.
     snapshot_buffer_pool: Arc<crate::undo::SnapshotBufferPool>,
+    /// CPU milliseconds for the five phases of the most recent stroke end:
+    /// cleanup, texture lookup, snapshot encoding, submit/map request, thumbnails.
+    pub last_end_stages_ms: [f64; 5],
     pub res: u32,
     /// The texture set's range in the mesh's index buffer: only these
     /// triangles get position and normal maps, so only they take paint.
@@ -1697,6 +1700,7 @@ impl Engine {
             rs: rs.clone(),
             gpu_profiler,
             active_gpu_profile: None,
+            last_end_stages_ms: [0.0; 5],
             pos: Tex::new(&device, "position map", res, res, POS_FORMAT, LAYER_USAGE),
             nrm: Tex::new(&device, "normal map", res, res, NRM_FORMAT, LAYER_USAGE),
             tan: Tex::new(&device, "tangent map", res, res, TAN_FORMAT, LAYER_USAGE),
@@ -4308,6 +4312,9 @@ impl Engine {
 
     /// Finishes the stroke and returns its undo record.
     pub fn end_stroke(&mut self) -> Option<UndoEntry> {
+        self.last_end_stages_ms = [0.0; 5];
+        let phase = std::time::Instant::now();
+
         self.apply_bg = None;
         self.stroke_layer = None;
         self.prefix = None;
@@ -4316,6 +4323,7 @@ impl Engine {
         self.region_unknown = false;
         let Some(active) = self.active.take() else {
             self.invalidate_thumbs();
+            self.last_end_stages_ms[0] = phase.elapsed().as_secs_f64() * 1000.0;
             return None;
         };
         // Content strokes only target Paint layers; their contents are not
@@ -4332,15 +4340,32 @@ impl Engine {
             }
             StrokeTarget::Content => false,
         };
-        let textures = self.target_textures(active.layer_id, active.target, &active.channels)?;
+        self.last_end_stages_ms[0] = phase.elapsed().as_secs_f64() * 1000.0;
+
+        let phase = std::time::Instant::now();
+        let Some(textures) = self.target_textures(active.layer_id, active.target, &active.channels) else {
+            self.last_end_stages_ms[1] = phase.elapsed().as_secs_f64() * 1000.0;
+            return None;
+        };
+        self.last_end_stages_ms[1] = phase.elapsed().as_secs_f64() * 1000.0;
+
+        let phase = std::time::Instant::now();
         let mut encoder = self.device.create_command_encoder(&Default::default());
         let after = Snapshot::encode(&self.device, &mut encoder, &textures, self.snapshot_buffer_pool.clone());
+        self.last_end_stages_ms[2] = phase.elapsed().as_secs_f64() * 1000.0;
+
+        let phase = std::time::Instant::now();
         self.queue.submit([encoder.finish()]);
         after.request_map();
+        self.last_end_stages_ms[3] = phase.elapsed().as_secs_f64() * 1000.0;
+
+        let phase = std::time::Instant::now();
         // Refresh only when this stroke actually invalidated a thumbnail.
         if refresh_thumbnails {
             self.update_thumbs();
         }
+        self.last_end_stages_ms[4] = phase.elapsed().as_secs_f64() * 1000.0;
+
         Some(UndoEntry {
             layer_id: active.layer_id,
             target: active.target,
