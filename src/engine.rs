@@ -1207,6 +1207,11 @@ struct GpuStrokeProfileResources {
     readback: Arc<wgpu::Buffer>,
 }
 
+const GPU_PROFILE_BASE_QUERY_COUNT: u32 = 10;
+const GPU_PROFILE_MAX_LAYER_PASSES: usize = 16;
+const GPU_PROFILE_QUERY_COUNT: u32 = GPU_PROFILE_BASE_QUERY_COUNT + GPU_PROFILE_MAX_LAYER_PASSES as u32 * 2;
+const GPU_PROFILE_READBACK_SIZE: u64 = GPU_PROFILE_QUERY_COUNT as u64 * 8;
+
 struct GpuStrokeProfiler {
     resources: GpuStrokeProfileResources,
     tx: mpsc::Sender<bool>,
@@ -1220,17 +1225,17 @@ impl GpuStrokeProfiler {
         let query_set = Arc::new(device.create_query_set(&wgpu::QuerySetDescriptor {
             label: Some("stroke GPU timestamps"),
             ty: wgpu::QueryType::Timestamp,
-            count: 10,
+            count: GPU_PROFILE_QUERY_COUNT,
         }));
         let resolve = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("stroke timestamp resolve"),
-            size: 80,
+            size: GPU_PROFILE_READBACK_SIZE,
             usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         }));
         let readback = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("stroke timestamp readback"),
-            size: 64,
+            size: GPU_PROFILE_READBACK_SIZE,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         }));
@@ -1256,7 +1261,11 @@ impl GpuStrokeProfiler {
         });
     }
 
-    fn poll(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<(f64, f64, f64, Option<f64>, Option<f64>, Option<f64>)> {
+    fn poll(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Option<(f64, f64, f64, Option<f64>, Option<f64>, Option<f64>, Vec<f64>)> {
         if !self.pending {
             return None;
         }
@@ -1283,6 +1292,9 @@ impl GpuStrokeProfiler {
         let read = |i: usize| u64::from_ne_bytes(data[i * 8..i * 8 + 8].try_into().expect("timestamp is 8 bytes"));
         let (s0, s1, a0, a1, c0, c1, t0, t1, clear_end, body_end) =
             (read(0), read(1), read(2), read(3), read(4), read(5), read(6), read(7), read(8), read(9));
+        let layer_pass_ms = (0..GPU_PROFILE_MAX_LAYER_PASSES)
+            .map(|i| read(10 + i * 2 + 1).wrapping_sub(read(10 + i * 2)) as f64)
+            .collect::<Vec<_>>();
         drop(data);
         self.resources.readback.unmap();
         let period_ns = queue.get_timestamp_period();
@@ -1297,6 +1309,7 @@ impl GpuStrokeProfiler {
             self.encoder_timestamps.then(|| t1.wrapping_sub(t0) as f64 * period_ms),
             self.encoder_timestamps.then(|| clear_end.wrapping_sub(t0) as f64 * period_ms),
             self.encoder_timestamps.then(|| body_end.wrapping_sub(clear_end) as f64 * period_ms),
+            layer_pass_ms.into_iter().map(|ticks| ticks * period_ms).collect(),
         ))
     }
 }
@@ -1322,6 +1335,8 @@ pub struct Engine {
     snapshot_buffer_pool: Arc<crate::undo::SnapshotBufferPool>,
     /// Scratch maps/vectors reused to plan layer and folder composite passes.
     composite_scratch: CompositeScratch,
+    /// Names paired with the detailed GPU timestamps from the most recent composite.
+    last_profiled_pass_labels: Vec<String>,
     /// CPU milliseconds for the five phases of the most recent stroke end:
     /// cleanup, texture lookup, snapshot encoding, submit/map request, thumbnails.
     pub last_end_stages_ms: [f64; 5],
@@ -1828,6 +1843,7 @@ impl Engine {
             p,
             snapshot_buffer_pool,
             composite_scratch: CompositeScratch::default(),
+            last_profiled_pass_labels: Vec::new(),
             device,
             queue,
             }
@@ -3998,8 +4014,14 @@ impl Engine {
     }
 
     /// Returns completed GPU timings for stamp and apply; does not wait for the GPU.
-    pub fn poll_gpu_stroke_times(&mut self) -> Option<(f64, f64, f64, Option<f64>, Option<f64>, Option<f64>)> {
-        self.gpu_profiler.as_mut()?.poll(&self.device, &self.queue)
+    pub fn poll_gpu_stroke_times(
+        &mut self,
+    ) -> Option<(f64, f64, f64, Option<f64>, Option<f64>, Option<f64>, Vec<(String, f64)>)> {
+        let (stamp, apply, layer, total, clear, body, pass_ms) =
+            self.gpu_profiler.as_mut()?.poll(&self.device, &self.queue)?;
+        let pass_labels = std::mem::take(&mut self.last_profiled_pass_labels);
+        let pass_times = pass_labels.into_iter().zip(pass_ms).collect();
+        Some((stamp, apply, layer, total, clear, body, pass_times))
     }
 
     pub fn gpu_stroke_profile_pending(&self) -> bool {
@@ -4808,6 +4830,10 @@ impl Engine {
         let mut finals: Vec<u64> = Vec::new();
         let profile_layer = self.stroke_layer;
         let mut composite_profiled = false;
+        let mut profiled_layer_passes = 0usize;
+        if self.active_gpu_profile.is_some() {
+            self.last_profiled_pass_labels.clear();
+        }
         for (k, pass) in passes.iter().enumerate().skip(start) {
             if record == Some(k) {
                 let input = if k + 1 < passes.len() {
@@ -4959,6 +4985,21 @@ impl Engine {
             ];
             let profile = self.active_gpu_profile.as_ref().filter(|_| profile_layer == Some(layer.id));
             composite_profiled |= profile.is_some();
+            let detailed_profile_slot = if self.gpu_profiler.as_ref().is_some_and(|p| p.encoder_timestamps)
+                && self.active_gpu_profile.is_some()
+                && profiled_layer_passes < GPU_PROFILE_MAX_LAYER_PASSES {
+                    let slot = profiled_layer_passes;
+                    if let Some(p) = &self.active_gpu_profile {
+                        encoder.write_timestamp(&p.query_set, GPU_PROFILE_BASE_QUERY_COUNT + (slot as u32 * 2));
+                    }
+                    Some(slot)
+                } else {
+                    None
+                };
+            let detailed_profile_label = detailed_profile_slot.map(|_| {
+                let kind = if matches!(*pass, Pass::End(_)) { "Folder merge" } else { "Layer" };
+                format!("{kind} #{} {}", li + 1, layer.name)
+            });
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("composite layer"),
                 color_attachments: &attachments,
@@ -4982,6 +5023,15 @@ impl Engine {
                 pass.draw(0..3, 0..1);
             }
             drop(pass);
+            if let Some(slot) = detailed_profile_slot {
+                if let Some(p) = &self.active_gpu_profile {
+                    encoder.write_timestamp(&p.query_set, GPU_PROFILE_BASE_QUERY_COUNT + (slot as u32 * 2) + 1);
+                }
+                if let Some(label) = detailed_profile_label {
+                    self.last_profiled_pass_labels.push(label);
+                }
+                profiled_layer_passes += 1;
+            }
             src = dst;
             from_cache = false;
         }
@@ -4991,8 +5041,8 @@ impl Engine {
                     encoder.write_timestamp(&p.query_set, 9);
                     encoder.write_timestamp(&p.query_set, 7);
                 }
-                encoder.resolve_query_set(&p.query_set, 0..10, &p.resolve, 0);
-                encoder.copy_buffer_to_buffer(&p.resolve, 0, &p.readback, 0, 80);
+                encoder.resolve_query_set(&p.query_set, 0..GPU_PROFILE_QUERY_COUNT, &p.resolve, 0);
+                encoder.copy_buffer_to_buffer(&p.resolve, 0, &p.readback, 0, GPU_PROFILE_READBACK_SIZE);
             }
         }
         self.queue.submit([encoder.finish()]);
