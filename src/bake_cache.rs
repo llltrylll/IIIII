@@ -432,6 +432,16 @@ mod tests {
     }
 
     #[test]
+    fn cache_rejects_forged_lz4_size_prefix_before_decompression() {
+        let mut bytes = test_cache_header();
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // 1x1 texture
+        bytes.extend_from_slice(&5u32.to_le_bytes()); // packed size
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // forged decoded size
+        bytes.push(0);
+        assert!(decode(&bytes).is_none());
+    }
+
+    #[test]
     fn cache_rejects_too_many_custom_texture_arrays() {
         let mut bytes = test_cache_header();
         for format in MAP_FORMATS {
