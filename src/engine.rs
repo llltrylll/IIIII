@@ -1432,6 +1432,9 @@ pub struct Engine {
     active: Option<ActiveStroke>,
     /// Apply bindings are stable for a stroke; reuse them across its frames.
     apply_bg: Option<wgpu::BindGroup>,
+    /// Stamp bindings are stable within a stroke. Screen/Surface and UV/2D
+    /// use different depth views, so each path retains its own bind group.
+    stamp_bg: [Option<Arc<wgpu::BindGroup>>; 2],
     /// Set whenever the layer stack changes; cleared by [`Engine::composite`].
     pub dirty: bool,
     /// Something besides the painted layer changed since the last composite.
@@ -1828,6 +1831,7 @@ impl Engine {
             bounds,
             active: None,
             apply_bg: None,
+            stamp_bg: [None, None],
             dirty: true,
             full_dirty: true,
             stroke_layer: None,
@@ -3790,6 +3794,7 @@ impl Engine {
 
     /// Snapshots the stroke target (stroke base + undo "before") and clears the stroke mask.
     fn encode_stroke_start(&mut self, layer_id: u64, target: StrokeTarget, channels: Vec<usize>) -> bool {
+        self.stamp_bg = [None, None];
         let mut encoder = self.device.create_command_encoder(&Default::default());
         gpu::clear_texture(&mut encoder, &self.stroke, wgpu::Color::TRANSPARENT);
         let textures = self.target_textures(layer_id, target, &channels).expect("stroke target exists");
@@ -3923,19 +3928,24 @@ impl Engine {
         self.queue.write_buffer(&self.stamp_sbuf, 0, bytemuck::cast_slice(stamps));
 
         let device = &self.device;
-        let stamp_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("stamp"),
-            layout: &self.p.stamp_bgl,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.stamp_ubuf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: self.stamp_sbuf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.pos.view) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.nrm.view) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(depth) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.brush_alpha.view) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-            ],
-        });
+        let stamp_bg_slot = usize::from(screen_mesh.is_some());
+        if self.stamp_bg[stamp_bg_slot].is_none() {
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("stamp"),
+                layout: &self.p.stamp_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.stamp_ubuf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: self.stamp_sbuf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.pos.view) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.nrm.view) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(depth) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.brush_alpha.view) },
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                ],
+            });
+            self.stamp_bg[stamp_bg_slot] = Some(Arc::new(group));
+        }
+        let stamp_bg = self.stamp_bg[stamp_bg_slot].as_ref().expect("created above").clone();
         let profile = if profile_gpu && self.active_gpu_profile.is_none() {
             self.gpu_profiler.as_ref().and_then(GpuStrokeProfiler::resources)
         } else {
@@ -3966,7 +3976,7 @@ impl Engine {
 
             // First rasterize every face at its own UV coordinates.
             pass.set_pipeline(&self.p.stamp_uv);
-            pass.set_bind_group(0, &stamp_bg, &[]);
+            pass.set_bind_group(0, &*stamp_bg, &[]);
             pass.set_vertex_buffer(0, mesh.vertices.slice(..));
             let draw_range = if let Some(indices) = candidate_indices {
                 pass.set_index_buffer(self.screen_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -4103,6 +4113,7 @@ impl Engine {
     pub fn set_brush_alpha(&mut self, alpha: Option<(&[u8], u32)>) {
         let (pixels, size) = alpha.unwrap_or((&[255], 1));
         if self.brush_alpha.width != size {
+            self.stamp_bg = [None, None];
             self.brush_alpha = Tex::new(&self.device, "brush alpha", size, size, F::R8Unorm, LAYER_USAGE);
         }
         self.queue.write_texture(
@@ -4391,8 +4402,10 @@ impl Engine {
         let phase = std::time::Instant::now();
 
         self.apply_bg = None;
-        self.stroke_layer = None;
-        self.prefix = None;
+        self.stamp_bg = [None, None];
+        // Keep the prior composite prefix and any uncomposited dirty regions
+        // across release. A following stroke on the same layer can resume it;
+        // composite rejects it when the layer, pass list, or dirty state differs.
         // Keep the full-resolution prefix textures reusable between strokes.
         // The next stroke rewrites their contents before reading them, so the
         // old prefix itself is discarded above. At 4K the retained seven-target
@@ -4404,9 +4417,8 @@ impl Engine {
             * ACCUM_FORMATS.iter().map(|&format| u64::from(gpu::bytes_per_texel(format))).sum::<u64>();
         if prefix_cache_bytes > MAX_RETAINED_PREFIX_CACHE_BYTES {
             self.prefix_cache = None;
+            self.prefix = None;
         }
-        self.stroke_regions.clear();
-        self.region_unknown = false;
         let Some(active) = self.active.take() else {
             self.invalidate_thumbs();
             stages[0] = phase.elapsed().as_secs_f64() * 1000.0;
