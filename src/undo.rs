@@ -93,6 +93,8 @@ pub struct Snapshot {
     infos: Vec<TexInfo>,
     state: SnapState,
     pool: Arc<SnapshotBufferPool>,
+    /// Last byte count applied to the owning UndoStack's cached total.
+    accounted_bytes: usize,
 }
 
 impl Snapshot {
@@ -127,7 +129,10 @@ impl Snapshot {
             buffers.push(buffer);
         }
         let remaining = Arc::new(AtomicUsize::new(buffers.len()));
-        Snapshot { infos, state: SnapState::Mapping { buffers, remaining }, pool }
+        let accounted_bytes = infos.iter().fold(0usize, |sum, info| {
+            sum.saturating_add(info.width as usize * info.height as usize * info.bpp as usize)
+        });
+        Snapshot { infos, state: SnapState::Mapping { buffers, remaining }, pool, accounted_bytes }
     }
 
     pub fn request_map(&self) {
@@ -152,6 +157,9 @@ impl Snapshot {
     /// released before the next image is copied/compressed, avoiding a second
     /// full-size collection of uncompressed snapshots in system RAM.
     pub fn update(&mut self) {
+        if matches!(self.state, SnapState::Ready(_)) {
+            return;
+        }
         let mut mapped_buffers = None;
         if let SnapState::Mapping { buffers, remaining } = &mut self.state
             && remaining.load(Ordering::Acquire) == 0 {
@@ -264,6 +272,24 @@ impl Snapshot {
         }
     }
 
+    /// The byte count last included in UndoStack::cached_ram_bytes.
+    fn accounted_ram_bytes(&self) -> usize {
+        self.accounted_bytes
+    }
+
+    /// Returns the change since the last byte count applied to UndoStack.
+    /// This also catches state transitions completed by wait() during Undo/Redo.
+    fn take_ram_delta(&mut self) -> i128 {
+        let current = self.ram_bytes();
+        let delta = current as i128 - self.accounted_bytes as i128;
+        self.accounted_bytes = current;
+        delta
+    }
+
+    fn is_pending(&self) -> bool {
+        !matches!(self.state, SnapState::Ready(_))
+    }
+
     /// Uploads the snapshot into `textures` (same order and sizes as captured).
     pub fn restore(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, textures: &[&Tex]) {
         self.wait(device);
@@ -307,7 +333,7 @@ pub struct UndoEntry {
 
 impl UndoEntry {
     fn bytes(&self) -> usize {
-        self.before.ram_bytes().saturating_add(self.after.ram_bytes())
+        self.before.accounted_ram_bytes().saturating_add(self.after.accounted_ram_bytes())
     }
 }
 
@@ -397,6 +423,10 @@ pub struct UndoStack {
     pub max_ram_bytes: usize,
     /// The texture set being edited: new steps belong to it.
     pub set: usize,
+    /// Cached sum of accounted before/after snapshot sizes; UI reads this in O(1).
+    cached_ram_bytes: usize,
+    /// True only while at least one retained snapshot needs asynchronous progress.
+    pending_snapshots: bool,
 }
 
 impl Default for UndoStack {
@@ -410,17 +440,31 @@ impl Default for UndoStack {
             max_entries: 64,
             max_ram_bytes: 512 * 1024 * 1024,
             set: 0,
+            cached_ram_bytes: 0,
+            pending_snapshots: false,
         }
     }
 }
 
 impl UndoStack {
-    pub fn push(&mut self, label: impl Into<String>, edit: Edit) {
+    pub fn push(&mut self, label: impl Into<String>, mut edit: Edit) {
+        let mut pending = false;
+        edit.for_each_stroke(&mut |stroke| {
+            pending |= stroke.before.is_pending() || stroke.after.is_pending();
+        });
+
         if let Some(Entry { edit: Edit::Group(edits), .. }) = &mut self.group {
+            // Group contents are not part of the history budget until the group closes.
+            self.pending_snapshots |= pending;
             edits.push(edit);
             return;
         }
+
+        let bytes = edit.bytes();
+        let redo_bytes = self.redo.iter().map(|entry| entry.edit.bytes()).sum::<usize>();
+        self.cached_ram_bytes = self.cached_ram_bytes.saturating_sub(redo_bytes).saturating_add(bytes);
         self.redo.clear();
+        self.pending_snapshots |= pending;
         self.next_serial += 1;
         self.undo.push(Entry { label: label.into(), edit, serial: self.next_serial, set: self.set });
         self.enforce_limits();
@@ -447,16 +491,45 @@ impl UndoStack {
     }
 
     pub fn update(&mut self) {
-        for e in self.undo.iter_mut().chain(self.redo.iter_mut()) {
-            e.edit.for_each_stroke(&mut |s| {
-                s.before.update();
-                s.after.update();
+        if !self.pending_snapshots {
+            return;
+        }
+
+        let mut delta = 0i128;
+        let mut pending = false;
+        for entry in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+            entry.edit.for_each_stroke(&mut |stroke| {
+                stroke.before.update();
+                stroke.after.update();
+                delta += stroke.before.take_ram_delta();
+                delta += stroke.after.take_ram_delta();
+                pending |= stroke.before.is_pending() || stroke.after.is_pending();
             });
         }
-        // Do not rescan the entire history to enforce the RAM budget on
-        // every UI frame. New snapshots are charged at their uncompressed
-        // size when pushed, so push() already applies a conservative limit;
-        // compression only reduces that estimate as this state machine advances.
+
+        // An open group is not yet charged to the RAM budget, but its snapshots
+        // still need compression and their accounted sizes must be current when committed.
+        if let Some(group) = &mut self.group {
+            group.edit.for_each_stroke(&mut |stroke| {
+                stroke.before.update();
+                stroke.after.update();
+                let _ = stroke.before.take_ram_delta();
+                let _ = stroke.after.take_ram_delta();
+                pending |= stroke.before.is_pending() || stroke.after.is_pending();
+            });
+        }
+
+        if delta >= 0 {
+            self.cached_ram_bytes = self.cached_ram_bytes.saturating_add(delta as usize);
+        } else {
+            self.cached_ram_bytes = self.cached_ram_bytes.saturating_sub((-delta) as usize);
+        }
+        self.pending_snapshots = pending;
+        // Compression normally shrinks snapshots. If a block expands slightly,
+        // enforce the budget after applying that positive delta.
+        if delta > 0 {
+            self.enforce_limits();
+        }
     }
 
     /// Identifies the current document state (0 = nothing recorded).
@@ -470,6 +543,8 @@ impl UndoStack {
         self.redo.clear();
         self.group = None;
         self.group_depth = 0;
+        self.cached_ram_bytes = 0;
+        self.pending_snapshots = false;
     }
 
     pub fn set_limits(&mut self, max_entries: usize, max_ram_bytes: usize) {
@@ -481,24 +556,28 @@ impl UndoStack {
     fn enforce_limits(&mut self) {
         if self.undo.len() > self.max_entries.max(1) {
             let excess = self.undo.len() - self.max_entries.max(1);
-            self.undo.drain(..excess);
+            for entry in self.undo.drain(..excess) {
+                self.cached_ram_bytes = self.cached_ram_bytes.saturating_sub(entry.edit.bytes());
+            }
         }
-        while self.ram_bytes() > self.max_ram_bytes {
+        while self.cached_ram_bytes > self.max_ram_bytes {
             // Redo entries are the first history to discard; pop removes the
             // oldest redo step. Otherwise discard the oldest undo step, but
             // retain the newest one even when a single stroke exceeds budget.
-            if !self.redo.is_empty() {
-                self.redo.pop();
+            if let Some(entry) = self.redo.pop() {
+                self.cached_ram_bytes = self.cached_ram_bytes.saturating_sub(entry.edit.bytes());
             } else if self.undo.len() > 1 {
-                self.undo.remove(0);
+                let entry = self.undo.remove(0);
+                self.cached_ram_bytes = self.cached_ram_bytes.saturating_sub(entry.edit.bytes());
             } else {
                 break;
             }
         }
     }
 
+    /// Cached Undo-history footprint. This is O(1) for the per-frame status display.
     pub fn ram_bytes(&self) -> usize {
-        self.undo.iter().chain(self.redo.iter()).map(|e| e.edit.bytes()).sum()
+        self.cached_ram_bytes
     }
 }
 
@@ -513,6 +592,7 @@ mod tests {
             infos: Vec::new(),
             state: SnapState::Ready(vec![vec![0; bytes]]),
             pool: Arc::new(SnapshotBufferPool::default()),
+            accounted_bytes: bytes,
         };
         Edit::Stroke(UndoEntry {
             layer_id: 1,
@@ -584,6 +664,7 @@ mod tests {
                 total: 2,
             },
             pool: Arc::new(SnapshotBufferPool::default()),
+            accounted_bytes: 67,
         };
         assert_eq!(snapshot.ram_bytes(), 67);
     }
