@@ -2643,6 +2643,13 @@ impl Engine {
     ) {
         self.maps_version += 1;
         let resolve_count = (0..MAP_TEXTURES).filter(|&t| self.map_needs_resolve(t)).count();
+        if resolve_count == 0 {
+            // No level/fix shader work is required. Drop old resolved outputs and
+            // avoid submitting an otherwise empty command buffer on map invalidation.
+            self.resolved.iter_mut().for_each(|resolved| *resolved = None);
+            self.maps_dirty = false;
+            return;
+        }
         let mut encoder = self.device.create_command_encoder(&Default::default());
         let profile_slot = if resolve_count > 0 {
             begin_composite_profile_stage(&mut encoder, profile_query, profile_stage_count)
