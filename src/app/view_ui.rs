@@ -468,8 +468,11 @@ impl PainterApp {
                     self.meter.gpu_composite_body.add(ms);
                 }
                 if let Some((label, ms)) = pass_times.into_iter().max_by(|a, b| a.1.total_cmp(&b.1)) {
+                    if self.meter.gpu_composite_slowest_label != label {
+                        self.meter.gpu_composite_slowest = Default::default();
+                        self.meter.gpu_composite_slowest_label = label;
+                    }
                     self.meter.gpu_composite_slowest.add(ms);
-                    self.meter.gpu_composite_slowest_label = label;
                 }
             }
         }
