@@ -169,9 +169,9 @@ impl Snapshot {
         if let Some(buffers) = mapped_buffers {
             let total = buffers.len();
             let pending_raw_bytes = self.uncompressed_bytes();
-            // Rendezvous back-pressure: never let a second compressed texture
-            // sit in a channel while the UI still retains the previous one.
-            let (tx, receiver) = mpsc::sync_channel(0);
+            // One-item back-pressure keeps the worker from getting ahead of
+            // the UI while allowing non-blocking try_recv() polling each frame.
+            let (tx, receiver) = mpsc::sync_channel(1);
             let pool = self.pool.clone();
             rayon::spawn(move || {
                 for buffer in buffers {
