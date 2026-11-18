@@ -693,6 +693,18 @@ enum Pass {
     End(usize),
 }
 
+/// Reused CPU-side scratch for building the layer/folder pass plan.
+/// Keeps hash-table and nested-vector capacity across repeated recompositions.
+#[derive(Default)]
+struct CompositeScratch {
+    index_by_id: HashMap<u64, usize>,
+    parents: Vec<Option<usize>>,
+    block_start: Vec<usize>,
+    shown: Vec<bool>,
+    isolates: Vec<bool>,
+    opening_at: Vec<Vec<usize>>,
+}
+
 /// Builds the composite pass list in linear time.
 ///
 /// Layers are stored with a folder after its contiguous descendants. That
@@ -702,17 +714,31 @@ enum Pass {
 /// folder indices backwards preserves the old outermost-first order without
 /// allocating and sorting a temporary Vec for every layer.
 fn composite_passes(layers: &[Layer]) -> (Vec<Pass>, usize) {
+    composite_passes_with_scratch(layers, &mut CompositeScratch::default())
+}
+
+fn composite_passes_with_scratch(
+    layers: &[Layer],
+    scratch: &mut CompositeScratch,
+) -> (Vec<Pass>, usize) {
     let n = layers.len();
     if n == 0 {
         return (Vec::new(), 0);
     }
 
-    let index_by_id: HashMap<u64, usize> = layers.iter().enumerate().map(|(i, layer)| (layer.id, i)).collect();
-    let parents: Vec<Option<usize>> = layers.iter().map(|layer| layer.parent.and_then(|id| index_by_id.get(&id).copied())).collect();
+    let index_by_id = &mut scratch.index_by_id;
+    index_by_id.clear();
+    index_by_id.extend(layers.iter().enumerate().map(|(i, layer)| (layer.id, i)));
 
+    let parents = &mut scratch.parents;
+    parents.clear();
+    parents.extend(layers.iter().map(|layer| layer.parent.and_then(|id| index_by_id.get(&id).copied())));
+
+    let block_start = &mut scratch.block_start;
+    block_start.clear();
+    block_start.extend(0..n);
     // A folder's block starts at the earliest descendant, including through
     // nested folders. Descendants precede their parent in the layer vector.
-    let mut block_start: Vec<usize> = (0..n).collect();
     for i in 0..n {
         if let Some(parent) = parents[i]
             && parent > i
@@ -724,7 +750,9 @@ fn composite_passes(layers: &[Layer]) -> (Vec<Pass>, usize) {
     // Resolve inherited visibility from parent to child. Valid layer stacks
     // place every parent after its descendants, so the parent's result is
     // already available when visiting a child.
-    let mut shown = vec![false; n];
+    let shown = &mut scratch.shown;
+    shown.clear();
+    shown.resize(n, false);
     for i in (0..n).rev() {
         let parent_shown = parents[i].is_none_or(|parent| {
             if parent > i {
@@ -745,8 +773,17 @@ fn composite_passes(layers: &[Layer]) -> (Vec<Pass>, usize) {
         shown[i] = layers[i].visible && parent_shown;
     }
 
-    let mut isolates = vec![false; n];
-    let mut opening_at = vec![Vec::<usize>::new(); n];
+    let isolates = &mut scratch.isolates;
+    isolates.clear();
+    isolates.resize(n, false);
+    let opening_at = &mut scratch.opening_at;
+    opening_at.truncate(n);
+    while opening_at.len() < n {
+        opening_at.push(Vec::new());
+    }
+    for bucket in opening_at.iter_mut() {
+        bucket.clear();
+    }
     let mut folder_count = 0usize;
     for i in (0..n).rev() {
         let layer = &layers[i];
@@ -785,7 +822,6 @@ fn composite_passes(layers: &[Layer]) -> (Vec<Pass>, usize) {
     debug_assert_eq!(depth, 0, "composite folder pass depth must balance");
     (passes, max_depth)
 }
-
 /// A composite's state just before the painted layer's pass: the pass list
 /// it belongs to, that pass's index, the folder depth there and where the
 /// input lives (`None`: in `prefix_cache`; else that accum set, untouched
@@ -1280,6 +1316,8 @@ pub struct Engine {
     p: Arc<Pipelines>,
     /// Bounded readback-buffer cache shared by this document's Texture Sets.
     snapshot_buffer_pool: Arc<crate::undo::SnapshotBufferPool>,
+    /// Scratch maps/vectors reused to plan layer and folder composite passes.
+    composite_scratch: CompositeScratch,
     /// CPU milliseconds for the five phases of the most recent stroke end:
     /// cleanup, texture lookup, snapshot encoding, submit/map request, thumbnails.
     pub last_end_stages_ms: [f64; 5],
@@ -1785,6 +1823,7 @@ impl Engine {
             screen_index_capacity,
             p,
             snapshot_buffer_pool,
+            composite_scratch: CompositeScratch::default(),
             device,
             queue,
             }
@@ -4505,7 +4544,7 @@ impl Engine {
         if self.maps_dirty {
             self.resolve_maps();
         }
-        let (passes, max_depth) = composite_passes(&self.layers);
+        let (passes, max_depth) = composite_passes_with_scratch(&self.layers, &mut self.composite_scratch);
         self.last_composite_layer_passes = passes.iter().filter(|p| matches!(**p, Pass::Layer(_))).count() as u32;
         self.last_composite_folder_passes = passes.iter().filter(|p| matches!(**p, Pass::Begin | Pass::End(_))).count() as u32;
         let (mut mask_cache_hits, mut mask_cache_misses, mut mask_gpu_passes) = (0u32, 0u32, 0u32);
