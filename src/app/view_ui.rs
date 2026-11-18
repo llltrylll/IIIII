@@ -464,18 +464,20 @@ impl PainterApp {
                 let total_ms = composite_total_ms.unwrap_or(0.0);
                 let clear_ms = composite_clear_ms.unwrap_or(0.0);
                 let body_ms = composite_body_ms.unwrap_or(0.0);
-                let slowest = pass_times.iter().max_by(|a, b| a.1.total_cmp(&b.1)).map(|(label, ms)| (label.clone(), *ms));
                 self.last_composite_gpu_profile = Some(CompositeGpuProfile {
                     total_ms,
                     clear_ms,
                     body_ms,
                     stages: pass_times,
                 });
-                self.status = if let Some((label, ms)) = slowest {
-                    format!("F5 GPU breakdown: {:.2} ms total · clear {:.2} ms · body {:.2} ms · slowest {} {:.2} ms", total_ms, clear_ms, body_ms, label, ms)
-                } else {
-                    format!("F5 GPU breakdown: {:.2} ms total · clear {:.2} ms · body {:.2} ms · no per-pass timestamps", total_ms, clear_ms, body_ms)
-                };
+                if let Some(profile) = self.last_composite_gpu_profile.as_ref() {
+                    let slowest = profile.stages.iter().max_by(|a, b| a.1.total_cmp(&b.1));
+                    self.status = if let Some((label, ms)) = slowest {
+                        format!("F5 GPU breakdown: {:.2} ms total · clear {:.2} ms · body {:.2} ms · {} stages · slowest {} {:.2} ms", profile.total_ms, profile.clear_ms, profile.body_ms, profile.stages.len(), label, ms)
+                    } else {
+                        format!("F5 GPU breakdown: {:.2} ms total · clear {:.2} ms · body {:.2} ms · no per-pass timestamps", profile.total_ms, profile.clear_ms, profile.body_ms)
+                    };
+                }
             } else if self.meter.on {
                 self.meter.gpu_stamp.add(stamp_ms);
                 self.meter.gpu_apply.add(apply_ms);
