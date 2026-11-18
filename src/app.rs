@@ -3027,19 +3027,22 @@ impl PainterApp {
             ];
             let p = v.map(|v| Vec3::from_array(v.pos));
             let uv = v.map(|v| Vec2::from_array(v.uv));
-            for t in uv {
-                uv_min = uv_min.min(t);
-                uv_max = uv_max.max(t);
-            }
-
             let uv_finite = uv.iter().all(|t| t.is_finite());
+            if uv_finite {
+                for t in uv {
+                    uv_min = uv_min.min(t);
+                    uv_max = uv_max.max(t);
+                }
+            }
             if !uv_finite {
                 uv_non_finite_triangles += 1;
             }
             let signed_uv_area = (uv[1].x - uv[0].x) * (uv[2].y - uv[0].y)
                 - (uv[1].y - uv[0].y) * (uv[2].x - uv[0].x);
-            let uv_degenerate = !uv_finite || signed_uv_area.abs() < 1.0e-10;
-            if uv_degenerate {
+            let uv_degenerate = uv_finite && signed_uv_area.abs() < 1.0e-10;
+            if !uv_finite {
+                // Non-finite UVs are reported separately and never enter the duplicate maps.
+            } else if uv_degenerate {
                 uv_degenerate_triangles += 1;
                 let set = self.mesh.set_of(tri as u32);
                 if let Some(count) = set_uv_degenerate.get_mut(set) { *count += 1; }
@@ -3227,7 +3230,7 @@ impl PainterApp {
             uv_outside_triangles,
             uv_degenerate_triangles,
             uv_non_finite_triangles,
-            self.mesh.triangle_count() as u32 - uv_degenerate_triangles,
+            self.mesh.triangle_count() as u32 - uv_degenerate_triangles - uv_non_finite_triangles,
             uv_positive_triangles,
             uv_negative_triangles,
             geometry_degenerate_triangles,
@@ -3247,27 +3250,27 @@ impl PainterApp {
             same_set_degenerate.1,
         );
 
-        out.push_str("texture_set_uv_stats:\\n");
+        out.push_str("texture_set_uv_stats:\n");
         for (index, set) in self.mesh.sets.iter().enumerate() {
             let valid = by_set_valid.get(index).copied().unwrap_or([0; 3]);
             let degenerate = by_set_degenerate.get(index).copied().unwrap_or([0; 3]);
             let triangle_count = set.tris.end.saturating_sub(set.tris.start);
             let uv_degenerate_count = set_uv_degenerate.get(index).copied().unwrap_or(0);
             out.push_str(&format!(
-                "  [{}] {} | triangles={} uv_degenerate={} valid_duplicate_groups={} valid_duplicate_faces={} max_valid_stack={} degenerate_duplicate_groups={} degenerate_duplicate_faces={} max_degenerate_stack={}\\n",
+                "  [{}] {} | triangles={} uv_degenerate={} valid_duplicate_groups={} valid_duplicate_faces={} max_valid_stack={} degenerate_duplicate_groups={} degenerate_duplicate_faces={} max_degenerate_stack={}\n",
                 index, set.name, triangle_count, uv_degenerate_count,
                 valid[0], valid[1], valid[2], degenerate[0], degenerate[1], degenerate[2]
             ));
         }
 
-        out.push_str("object_uv_stats:\\n");
+        out.push_str("object_uv_stats:\n");
         for (index, name) in self.mesh.objects.iter().enumerate() {
             let valid = by_object_valid.get(index).copied().unwrap_or([0; 3]);
             let degenerate = by_object_degenerate.get(index).copied().unwrap_or([0; 3]);
             let uv_degenerate_count = object_uv_degenerate.get(index).copied().unwrap_or(0);
             let triangles = object_normal_stats.get(index).map_or(0, |stats| stats[0]);
             out.push_str(&format!(
-                "  [{}] {} | triangles={} uv_degenerate={} valid_duplicate_groups={} valid_duplicate_faces={} max_valid_stack={} degenerate_duplicate_groups={} degenerate_duplicate_faces={} max_degenerate_stack={}\\n",
+                "  [{}] {} | triangles={} uv_degenerate={} valid_duplicate_groups={} valid_duplicate_faces={} max_valid_stack={} degenerate_duplicate_groups={} degenerate_duplicate_faces={} max_degenerate_stack={}\n",
                 index, name, triangles, uv_degenerate_count,
                 valid[0], valid[1], valid[2], degenerate[0], degenerate[1], degenerate[2]
             ));
