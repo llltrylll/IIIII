@@ -5365,6 +5365,24 @@ mod composite_pass_tests {
         ];
         assert_eq!(composite_passes(&layers), (expected.clone(), 2));
         assert_eq!(composite_passes(&layers), legacy_passes(&layers));
+
+        // Reuse one scratch object while the stack shrinks, empties and grows
+        // again. Retained nested buckets must not leak stale folder passes.
+        let mut scratch = CompositeScratch::default();
+        assert_eq!(composite_passes_with_scratch(&layers, &mut scratch), (expected.clone(), 2));
+        let small = vec![
+            layer(30, None, true, 1.0, fill()),
+            layer(31, None, true, 1.0, fill()),
+        ];
+        assert_eq!(
+            composite_passes_with_scratch(&small, &mut scratch),
+            legacy_passes(&small),
+        );
+        assert_eq!(composite_passes_with_scratch(&[], &mut scratch), (Vec::new(), 0));
+        assert_eq!(
+            composite_passes_with_scratch(&layers, &mut scratch),
+            legacy_passes(&layers),
+        );
     }
 
     #[test]
