@@ -4064,7 +4064,7 @@ impl PainterApp {
                 });
             });
             if paint {
-                ui.separator();
+                ui.add_space(1.0);
                 self.technical_metrics_bar(ui);
             }
         });
