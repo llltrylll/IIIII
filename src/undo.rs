@@ -668,6 +668,38 @@ mod tests {
     }
 
     #[test]
+    fn open_groups_keep_pending_snapshots_scheduled() {
+        let pending_snapshot = || Snapshot {
+            infos: Vec::new(),
+            state: SnapState::Mapping {
+                buffers: Vec::new(),
+                remaining: Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+            },
+            pool: Arc::new(SnapshotBufferPool::default()),
+            accounted_bytes: 0,
+        };
+        let pending_stroke = Edit::Stroke(UndoEntry {
+            layer_id: 7,
+            target: StrokeTarget::Content,
+            channels: vec![0],
+            before: pending_snapshot(),
+            after: pending_snapshot(),
+        });
+        let mut history = UndoStack::default();
+        history.begin_group("composite operation");
+        history.push("nested paint", pending_stroke);
+
+        assert!(history.pending_snapshots);
+        assert!(history.group.as_ref().unwrap().pending_snapshots);
+        history.update();
+        assert!(history.pending_snapshots);
+        assert!(history.group.as_ref().unwrap().pending_snapshots);
+
+        history.clear();
+        assert!(!history.pending_snapshots);
+    }
+
+    #[test]
     fn cached_ram_total_tracks_async_compression_without_recounting_history() {
         let snapshot = || {
             let (tx, receiver) = mpsc::sync_channel(1);
