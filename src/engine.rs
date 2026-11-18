@@ -1458,6 +1458,8 @@ pub struct Engine {
     /// (scanned smart materials); entries die with their last user.
     /// Weak cache shared by every Texture Set Engine in the same document.
     image_cache: Arc<std::sync::Mutex<HashMap<std::path::PathBuf, (std::sync::Weak<Tex>, std::sync::Weak<Vec<u8>>)>>>,
+    /// Reused pointer set for allocation-free repeated GPU memory estimates.
+    fill_image_ids_scratch: std::cell::RefCell<HashSet<usize>>,
     pub layers: Vec<Layer>,
     /// Properties as of the last recorded edit; see [`Engine::commit_props`].
     committed: DocProps,
@@ -1867,6 +1869,7 @@ impl Engine {
             brush_alpha: Tex::new(&device, "brush alpha", 1, 1, F::R8Unorm, LAYER_USAGE),
             brush_grain: Tex::new(&device, "brush grain", 1, 1, F::R8Unorm, LAYER_USAGE),
             image_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            fill_image_ids_scratch: Default::default(),
             layers: Vec::new(),
             folder_below: Vec::new(),
             repeat_sampler: device.create_sampler(&wgpu::SamplerDescriptor {
@@ -5425,11 +5428,12 @@ impl Engine {
 
 
     fn fill_image_bytes(&self) -> u64 {
-        let mut seen = HashSet::with_capacity(self.layers.len());
+        let mut seen = self.fill_image_ids_scratch.borrow_mut();
+        seen.clear();
         self.layers
             .iter()
             .flat_map(|layer| layer.images.iter().flatten())
-            .filter(|image| seen.insert(Arc::as_ptr(&image.tex)))
+            .filter(|image| seen.insert(Arc::as_ptr(&image.tex) as usize))
             .map(|image| image.tex.bytes())
             .sum()
     }
