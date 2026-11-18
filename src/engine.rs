@@ -693,6 +693,19 @@ enum Pass {
     End(usize),
 }
 
+/// Reused CPU-side scratch for building the layer/folder pass plan.
+/// Keeps hash-table and nested-vector capacity across repeated recompositions.
+#[derive(Default)]
+struct CompositeScratch {
+    index_by_id: HashMap<u64, usize>,
+    parents: Vec<Option<usize>>,
+    block_start: Vec<usize>,
+    shown: Vec<bool>,
+    isolates: Vec<bool>,
+    opening_at: Vec<Vec<usize>>,
+    passes: Vec<Pass>,
+}
+
 /// Builds the composite pass list in linear time.
 ///
 /// Layers are stored with a folder after its contiguous descendants. That
@@ -701,18 +714,33 @@ enum Pass {
 /// a reverse scan. Folder openings are bucketed by block start; iterating
 /// folder indices backwards preserves the old outermost-first order without
 /// allocating and sorting a temporary Vec for every layer.
+#[cfg(test)]
 fn composite_passes(layers: &[Layer]) -> (Vec<Pass>, usize) {
+    composite_passes_with_scratch(layers, &mut CompositeScratch::default())
+}
+
+fn composite_passes_with_scratch(
+    layers: &[Layer],
+    scratch: &mut CompositeScratch,
+) -> (Vec<Pass>, usize) {
     let n = layers.len();
     if n == 0 {
         return (Vec::new(), 0);
     }
 
-    let index_by_id: HashMap<u64, usize> = layers.iter().enumerate().map(|(i, layer)| (layer.id, i)).collect();
-    let parents: Vec<Option<usize>> = layers.iter().map(|layer| layer.parent.and_then(|id| index_by_id.get(&id).copied())).collect();
+    let index_by_id = &mut scratch.index_by_id;
+    index_by_id.clear();
+    index_by_id.extend(layers.iter().enumerate().map(|(i, layer)| (layer.id, i)));
 
+    let parents = &mut scratch.parents;
+    parents.clear();
+    parents.extend(layers.iter().map(|layer| layer.parent.and_then(|id| index_by_id.get(&id).copied())));
+
+    let block_start = &mut scratch.block_start;
+    block_start.clear();
+    block_start.extend(0..n);
     // A folder's block starts at the earliest descendant, including through
     // nested folders. Descendants precede their parent in the layer vector.
-    let mut block_start: Vec<usize> = (0..n).collect();
     for i in 0..n {
         if let Some(parent) = parents[i]
             && parent > i
@@ -724,7 +752,9 @@ fn composite_passes(layers: &[Layer]) -> (Vec<Pass>, usize) {
     // Resolve inherited visibility from parent to child. Valid layer stacks
     // place every parent after its descendants, so the parent's result is
     // already available when visiting a child.
-    let mut shown = vec![false; n];
+    let shown = &mut scratch.shown;
+    shown.clear();
+    shown.resize(n, false);
     for i in (0..n).rev() {
         let parent_shown = parents[i].is_none_or(|parent| {
             if parent > i {
@@ -745,8 +775,17 @@ fn composite_passes(layers: &[Layer]) -> (Vec<Pass>, usize) {
         shown[i] = layers[i].visible && parent_shown;
     }
 
-    let mut isolates = vec![false; n];
-    let mut opening_at = vec![Vec::<usize>::new(); n];
+    let isolates = &mut scratch.isolates;
+    isolates.clear();
+    isolates.resize(n, false);
+    let opening_at = &mut scratch.opening_at;
+    opening_at.truncate(n);
+    while opening_at.len() < n {
+        opening_at.push(Vec::new());
+    }
+    for bucket in opening_at.iter_mut() {
+        bucket.clear();
+    }
     let mut folder_count = 0usize;
     for i in (0..n).rev() {
         let layer = &layers[i];
@@ -758,7 +797,9 @@ fn composite_passes(layers: &[Layer]) -> (Vec<Pass>, usize) {
         }
     }
 
-    let mut passes = Vec::with_capacity(n + folder_count * 2);
+    let mut passes = std::mem::take(&mut scratch.passes);
+    passes.clear();
+    passes.reserve(n + folder_count * 2);
     let (mut depth, mut max_depth) = (0usize, 0usize);
     for (i, layer) in layers.iter().enumerate() {
         // Buckets were populated in reverse index order: outer folders first.
@@ -785,7 +826,6 @@ fn composite_passes(layers: &[Layer]) -> (Vec<Pass>, usize) {
     debug_assert_eq!(depth, 0, "composite folder pass depth must balance");
     (passes, max_depth)
 }
-
 /// A composite's state just before the painted layer's pass: the pass list
 /// it belongs to, that pass's index, the folder depth there and where the
 /// input lives (`None`: in `prefix_cache`; else that accum set, untouched
@@ -1167,6 +1207,11 @@ struct GpuStrokeProfileResources {
     readback: Arc<wgpu::Buffer>,
 }
 
+const GPU_PROFILE_BASE_QUERY_COUNT: u32 = 10;
+const GPU_PROFILE_MAX_LAYER_PASSES: usize = 16;
+const GPU_PROFILE_QUERY_COUNT: u32 = GPU_PROFILE_BASE_QUERY_COUNT + GPU_PROFILE_MAX_LAYER_PASSES as u32 * 2;
+const GPU_PROFILE_READBACK_SIZE: u64 = GPU_PROFILE_QUERY_COUNT as u64 * 8;
+
 struct GpuStrokeProfiler {
     resources: GpuStrokeProfileResources,
     tx: mpsc::Sender<bool>,
@@ -1180,17 +1225,17 @@ impl GpuStrokeProfiler {
         let query_set = Arc::new(device.create_query_set(&wgpu::QuerySetDescriptor {
             label: Some("stroke GPU timestamps"),
             ty: wgpu::QueryType::Timestamp,
-            count: 8,
+            count: GPU_PROFILE_QUERY_COUNT,
         }));
         let resolve = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("stroke timestamp resolve"),
-            size: 64,
+            size: GPU_PROFILE_READBACK_SIZE,
             usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         }));
         let readback = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("stroke timestamp readback"),
-            size: 64,
+            size: GPU_PROFILE_READBACK_SIZE,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         }));
@@ -1216,7 +1261,11 @@ impl GpuStrokeProfiler {
         });
     }
 
-    fn poll(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<(f64, f64, f64, Option<f64>)> {
+    fn poll(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Option<(f64, f64, f64, Option<f64>, Option<f64>, Option<f64>, Vec<f64>)> {
         if !self.pending {
             return None;
         }
@@ -1241,8 +1290,20 @@ impl GpuStrokeProfiler {
             }
         };
         let read = |i: usize| u64::from_ne_bytes(data[i * 8..i * 8 + 8].try_into().expect("timestamp is 8 bytes"));
-        let (s0, s1, a0, a1, c0, c1, t0, t1) =
-            (read(0), read(1), read(2), read(3), read(4), read(5), read(6), read(7));
+        let (s0, s1, a0, a1, c0, c1) =
+            (read(0), read(1), read(2), read(3), read(4), read(5));
+        let (t0, t1, clear_end, body_end) = if self.encoder_timestamps {
+            (read(6), read(7), read(8), read(9))
+        } else {
+            (0, 0, 0, 0)
+        };
+        let layer_pass_ms = if self.encoder_timestamps {
+            (0..GPU_PROFILE_MAX_LAYER_PASSES)
+                .map(|i| read(10 + i * 2 + 1).wrapping_sub(read(10 + i * 2)) as f64)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         drop(data);
         self.resources.readback.unmap();
         let period_ns = queue.get_timestamp_period();
@@ -1255,11 +1316,16 @@ impl GpuStrokeProfiler {
             a1.wrapping_sub(a0) as f64 * period_ms,
             c1.wrapping_sub(c0) as f64 * period_ms,
             self.encoder_timestamps.then(|| t1.wrapping_sub(t0) as f64 * period_ms),
+            self.encoder_timestamps.then(|| clear_end.wrapping_sub(t0) as f64 * period_ms),
+            self.encoder_timestamps.then(|| body_end.wrapping_sub(clear_end) as f64 * period_ms),
+            layer_pass_ms.into_iter().map(|ticks| ticks * period_ms).collect(),
         ))
     }
 }
 
 pub struct Engine {
+    /// Stable identity used by renderer-side caches across Engine moves/swaps.
+    id: u64,
     /// Tiling, mipmapped sampler for fill images.
     repeat_sampler: wgpu::Sampler,
     /// The stack below each open faded/masked folder while its layers are
@@ -1274,6 +1340,15 @@ pub struct Engine {
     active_gpu_profile: Option<GpuStrokeProfileResources>,
     /// Shared by the texture sets of a document.
     p: Arc<Pipelines>,
+    /// Bounded readback-buffer cache shared by this document's Texture Sets.
+    snapshot_buffer_pool: Arc<crate::undo::SnapshotBufferPool>,
+    /// Scratch maps/vectors reused to plan layer and folder composite passes.
+    composite_scratch: CompositeScratch,
+    /// Names paired with the detailed GPU timestamps from the most recent composite.
+    last_profiled_pass_labels: Vec<String>,
+    /// CPU milliseconds for the five phases of the most recent stroke end:
+    /// cleanup, texture lookup, snapshot encoding, submit/map request, thumbnails.
+    pub last_end_stages_ms: [f64; 5],
     pub res: u32,
     /// The texture set's range in the mesh's index buffer: only these
     /// triangles get position and normal maps, so only they take paint.
@@ -1310,6 +1385,9 @@ pub struct Engine {
     pub maps_version: u64,
     /// Bumped whenever the position and normal maps are made again.
     uv_version: u64,
+    /// What the position/normal/tangent maps were last baked from, so
+    /// `set_triangles` can skip an identical bake.
+    uv_baked: Option<UvBakeKey>,
     /// Layer thumbnails (see `thumbs`).
     thumbs: thumbs::Thumbs,
     /// Composites that redid the whole texture instead of a stroke's patch (the F6 meter counts them).
@@ -1347,7 +1425,8 @@ pub struct Engine {
     brush_grain: Tex,
     /// Image files already on the GPU, shared by every layer that uses them
     /// (scanned smart materials); entries die with their last user.
-    image_cache: HashMap<std::path::PathBuf, (std::sync::Weak<Tex>, Arc<Vec<u8>>)>,
+    /// Weak cache shared by every Texture Set Engine in the same document.
+    image_cache: Arc<std::sync::Mutex<HashMap<std::path::PathBuf, (std::sync::Weak<Tex>, std::sync::Weak<Vec<u8>>)>>>,
     pub layers: Vec<Layer>,
     /// Properties as of the last recorded edit; see [`Engine::commit_props`].
     committed: DocProps,
@@ -1356,6 +1435,9 @@ pub struct Engine {
     active: Option<ActiveStroke>,
     /// Apply bindings are stable for a stroke; reuse them across its frames.
     apply_bg: Option<wgpu::BindGroup>,
+    /// Stamp bindings are stable within a stroke. Screen/Surface and UV/2D
+    /// use different depth views, so each path retains its own bind group.
+    stamp_bg: [Option<Arc<wgpu::BindGroup>>; 2],
     /// Set whenever the layer stack changes; cleared by [`Engine::composite`].
     pub dirty: bool,
     /// Something besides the painted layer changed since the last composite.
@@ -1380,6 +1462,22 @@ pub struct Engine {
     region_unknown: bool,
     /// Incremented on every composite, so dependent views know the material changed.
     pub generation: u64,
+}
+
+/// The inputs of a UV bake: which GPU mesh, which range of its index buffer,
+/// and the texture size. Two bakes with an equal key give identical maps.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct UvBakeKey {
+    mesh_id: u64,
+    tris: std::ops::Range<u32>,
+    res: u32,
+}
+
+impl UvBakeKey {
+    /// Whether baking `mesh_id`/`tris`/`res` would repeat the bake `baked` recorded.
+    fn is_current(baked: Option<&UvBakeKey>, mesh_id: u64, tris: &std::ops::Range<u32>, res: u32) -> bool {
+        baked.is_some_and(|k| k.mesh_id == mesh_id && k.tris == *tris && k.res == res)
+    }
 }
 
 fn accum_set(device: &wgpu::Device, res: u32, label: &str) -> [Tex; ACCUM] {
@@ -1543,19 +1641,86 @@ fn fit_fill_image<P: image::Pixel<Subpixel = u8> + 'static>(
 }
 
 impl Engine {
+    /// Identity and texture-view generations used by the 3D viewport bind-group cache.
+    /// Final composites swap ping-pong targets; UV bakes and map changes replace
+    /// bound views. Keeping these generations explicit avoids rebuilding bind
+    /// groups on every frame while still invalidating them when a view changes.
+    pub(crate) fn viewport_binding_identity(&self) -> (u64, u32, usize, u64, u64) {
+        (self.id, self.res, self.final_idx, self.uv_version, self.maps_version)
+    }
+
     /// A document of one texture set covering the whole mesh.
     pub fn new(rs: &egui_wgpu::RenderState, mesh: &GpuMesh, bounds: (Vec3, Vec3), res: u32) -> Engine {
         let p = {
             let _s = crate::startup_trace::span("Engine::create_pipelines");
             Arc::new(Self::create_pipelines(&rs.device))
         };
-        Self::with_pipelines(rs, p, mesh, 0..mesh.index_count, bounds, res)
+        Self::with_pipelines(
+            rs,
+            p,
+            mesh,
+            0..mesh.index_count,
+            bounds,
+            res,
+            Arc::new(crate::undo::SnapshotBufferPool::default()),
+        )
     }
 
     /// Another texture set of the same document: `tris` is its range in the
     /// mesh's index buffer. Shares this engine's pipelines and document bounds.
     pub fn sibling(&self, mesh: &GpuMesh, tris: std::ops::Range<u32>, res: u32) -> Engine {
-        Self::with_pipelines(&self.rs, self.p.clone(), mesh, tris, self.bounds, res)
+        let mut sibling = Self::with_pipelines(
+            &self.rs, self.p.clone(), mesh, tris, self.bounds, res, self.snapshot_buffer_pool.clone(),
+        );
+        sibling.image_cache = self.image_cache.clone();
+        sibling
+    }
+
+    /// Drops GPU resources used only while this Texture Set is being edited.
+    /// The final composited result stays resident for the viewport. The next
+    /// composite/paint recreates the released workspace lazily.
+    pub(crate) fn release_inactive_working_set(&mut self) {
+        if self.active.is_some() || self.generation == 0 || self.prefix.is_some() {
+            return;
+        }
+        let scratch = 1 - self.final_idx;
+        if self.accum[scratch][0].width != 1 {
+            self.accum[scratch] = accum_set(&self.device, 1, "parked composite scratch");
+        }
+        if self.stroke.width != 1 {
+            self.stroke = Tex::new(&self.device, "parked stroke mask", 1, 1, STROKE_FORMAT, LAYER_USAGE);
+        }
+        self.snap = Default::default();
+        self.snap_mask = None;
+        self.folder_below.clear();
+        self.prefix_cache = None;
+        self.mask_scratch = None;
+        self.mask_out.clear();
+        self.mask_final.clear();
+        self.apply_bg = None;
+    }
+
+    fn ensure_composite_working_set(&mut self) {
+        for i in 0..2 {
+            if self.accum[i][0].width != self.res {
+                self.accum[i] = accum_set(
+                    &self.device,
+                    self.res,
+                    if i == 0 { "accum A (restored)" } else { "accum B (restored)" },
+                );
+            }
+        }
+    }
+
+    fn ensure_stroke_target(&mut self) {
+        if self.stroke.width != self.res {
+            self.stroke = Tex::new(&self.device, "stroke mask (restored)", self.res, self.res, STROKE_FORMAT, LAYER_USAGE);
+        }
+    }
+
+    pub(crate) fn restore_active_working_set(&mut self) {
+        self.ensure_composite_working_set();
+        self.ensure_stroke_target();
     }
 
     /// Creates an engine for another mesh while reusing immutable GPU pipelines.
@@ -1567,7 +1732,11 @@ impl Engine {
         bounds: (Vec3, Vec3),
         res: u32,
     ) -> Engine {
-        Self::with_pipelines(&self.rs, self.p.clone(), mesh, tris, bounds, res)
+        let mut sibling = Self::with_pipelines(
+            &self.rs, self.p.clone(), mesh, tris, bounds, res, self.snapshot_buffer_pool.clone(),
+        );
+        sibling.image_cache = self.image_cache.clone();
+        sibling
     }
 
     fn with_pipelines(
@@ -1577,7 +1746,10 @@ impl Engine {
         tris: std::ops::Range<u32>,
         bounds: (Vec3, Vec3),
         res: u32,
+        snapshot_buffer_pool: Arc<crate::undo::SnapshotBufferPool>,
     ) -> Engine {
+        static NEXT_ENGINE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let id = NEXT_ENGINE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let _allocation = crate::startup_trace::span("Engine::with_pipelines GPU allocations");
         let device = rs.device.clone();
         let queue = rs.queue.clone();
@@ -1612,9 +1784,11 @@ impl Engine {
         let mut engine = {
             let _textures = crate::startup_trace::span("Engine::with_pipelines texture/buffer allocation");
             Engine {
+            id,
             rs: rs.clone(),
             gpu_profiler,
             active_gpu_profile: None,
+            last_end_stages_ms: [0.0; 5],
             pos: Tex::new(&device, "position map", res, res, POS_FORMAT, LAYER_USAGE),
             nrm: Tex::new(&device, "normal map", res, res, NRM_FORMAT, LAYER_USAGE),
             tan: Tex::new(&device, "tangent map", res, res, TAN_FORMAT, LAYER_USAGE),
@@ -1634,6 +1808,7 @@ impl Engine {
             has_bake: false,
             maps_version: 0,
             uv_version: 0,
+            uv_baked: None,
             thumbs: Default::default(),
             full_recomps: 0,
             last_paint_scissor_pixels: 0,
@@ -1658,7 +1833,7 @@ impl Engine {
             apply_ubuf,
             brush_alpha: Tex::new(&device, "brush alpha", 1, 1, F::R8Unorm, LAYER_USAGE),
             brush_grain: Tex::new(&device, "brush grain", 1, 1, F::R8Unorm, LAYER_USAGE),
-            image_cache: HashMap::new(),
+            image_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             layers: Vec::new(),
             folder_below: Vec::new(),
             repeat_sampler: device.create_sampler(&wgpu::SamplerDescriptor {
@@ -1676,6 +1851,7 @@ impl Engine {
             bounds,
             active: None,
             apply_bg: None,
+            stamp_bg: [None, None],
             dirty: true,
             full_dirty: true,
             stroke_layer: None,
@@ -1698,6 +1874,9 @@ impl Engine {
             screen_index_buffer,
             screen_index_capacity,
             p,
+            snapshot_buffer_pool,
+            composite_scratch: CompositeScratch::default(),
+            last_profiled_pass_labels: Vec::new(),
             device,
             queue,
             }
@@ -2140,6 +2319,7 @@ impl Engine {
         // DILATE_PASSES is even, so the result ends up back in pos/nrm.
         self.queue.submit([encoder.finish()]);
         self.uv_version += 1;
+        self.uv_baked = Some(UvBakeKey { mesh_id: mesh.mesh_id, tris: self.tris.clone(), res: self.res });
         self.mask_final.clear();
         self.mark_dirty();
     }
@@ -2154,7 +2334,8 @@ impl Engine {
     }
 
     /// Moves the texture set to another range of the (new) mesh and remakes
-    /// its position and normal maps.
+    /// its position and normal maps. The bake is skipped when the maps were
+    /// already baked from this same GPU mesh, range and size.
     pub fn set_triangles(&mut self, tris: std::ops::Range<u32>, mesh: &GpuMesh) {
         let needed = (tris.end - tris.start).max(3);
         if needed > self.screen_index_capacity {
@@ -2166,8 +2347,11 @@ impl Engine {
             });
             self.screen_index_capacity = needed;
         }
+        let repeat = UvBakeKey::is_current(self.uv_baked.as_ref(), mesh.mesh_id, &tris, self.res);
         self.tris = tris;
-        self.bake_uv(mesh);
+        if !repeat {
+            self.bake_uv(mesh);
+        }
     }
 
     pub fn set_bounds(&mut self, bounds: (Vec3, Vec3)) {
@@ -2296,6 +2480,7 @@ impl Engine {
         self.custom_ids.clear();
         self.custom_array = Self::custom_array_texture(&self.device, 1, 1);
         self.maps = Self::default_maps(&self.device, &self.queue);
+        self.maps_version = self.maps_version.wrapping_add(1);
         self.bake_report = None;
         self.has_bake = false;
         self.maps_dirty = true;
@@ -2316,6 +2501,7 @@ impl Engine {
         let id = if id.width != self.res { self.resample(&mut encoder, &id, self.res) } else { id };
         self.queue.submit([encoder.finish()]);
         self.maps[4] = id;
+        self.maps_version = self.maps_version.wrapping_add(1);
         self.map_fix = Default::default();
         self.maps_dirty = true;
         self.mark_dirty();
@@ -2341,6 +2527,7 @@ impl Engine {
         }
         self.edge_max = report.edge_max_distance;
         self.maps = maps;
+        self.maps_version = self.maps_version.wrapping_add(1);
         self.bake_report = Some(report);
         self.has_bake = true;
         self.maps_dirty = true;
@@ -2634,14 +2821,22 @@ impl Engine {
     pub fn shared_fill_image(&mut self, path: &std::path::Path) -> Result<FillImage, String> {
         let dir = path.parent().and_then(|d| d.file_name()).map_or(String::new(), |d| format!("{}/", d.to_string_lossy()));
         let name = format!("{dir}{}", path.file_name().map_or("image".into(), |n| n.to_string_lossy()));
-        if let Some((tex, encoded)) = self.image_cache.get(path)
-            && let Some(tex) = tex.upgrade() {
-                return Ok(FillImage { tex, name, encoded: encoded.clone() });
-            }
+        let cached = self
+            .image_cache
+            .lock()
+            .map_err(|_| "fill image cache lock is poisoned")?
+            .get(path)
+            .and_then(|(texture, bytes)| Some((texture.upgrade()?, bytes.upgrade()?)));
+        if let Some((tex, encoded)) = cached {
+            return Ok(FillImage { tex, name, encoded });
+        }
         let encoded = Arc::new(std::fs::read(path).map_err(|e| format!("can't read {}: {e}", path.display()))?);
         let img = self.decode_fill_image(name, encoded.clone())?;
-        self.image_cache.retain(|_, (t, _)| t.strong_count() > 0);
-        self.image_cache.insert(path.to_path_buf(), (Arc::downgrade(&img.tex), encoded));
+        let mut cache = self.image_cache.lock().map_err(|_| "fill image cache lock is poisoned")?;
+        cache.retain(|_, (texture, bytes)| texture.strong_count() > 0 && bytes.strong_count() > 0);
+        // The cache is not an owner: once the last layer/history reference is
+        // dropped, both the GPU texture and original CPU file bytes can die.
+        cache.insert(path.to_path_buf(), (Arc::downgrade(&img.tex), Arc::downgrade(&img.encoded)));
         Ok(img)
     }
 
@@ -3150,7 +3345,7 @@ impl Engine {
         crate::select::write_mask(mesh, selected, self.res, &mut texels, mode);
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        let before = Snapshot::encode(&self.device, &mut encoder, &[tex]);
+        let before = Snapshot::encode(&self.device, &mut encoder, &[tex], self.snapshot_buffer_pool.clone());
         self.queue.submit([encoder.finish()]);
         before.request_map();
         // Queue writes run at the start of the next submission, after the "before" copy.
@@ -3161,7 +3356,7 @@ impl Engine {
             tex.extent(),
         );
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        let after = Snapshot::encode(&self.device, &mut encoder, &[tex]);
+        let after = Snapshot::encode(&self.device, &mut encoder, &[tex], self.snapshot_buffer_pool.clone());
         self.queue.submit([encoder.finish()]);
         after.request_map();
         self.invalidate_mask_cache(layer_id);
@@ -3266,8 +3461,48 @@ impl Engine {
         }
     }
 
+    /// Checks property state without allocating the DocProps snapshot. This is
+    /// used on idle frames; the owned snapshot is built only when a real edit
+    /// must be compared or stored in Undo history.
+    fn doc_props_match(&self, props: &DocProps) -> bool {
+        if self.layers.len() != props.layers.len() || self.map_levels.as_slice() != props.levels.as_slice() {
+            return false;
+        }
+        self.layers.iter().zip(&props.layers).all(|(layer, (id, saved))| {
+            if layer.id != *id
+                || layer.name != saved.name
+                || layer.visible != saved.visible
+                || layer.opacity != saved.opacity
+                || layer.blend != saved.blend
+            {
+                return false;
+            }
+            let fill = match &layer.content {
+                Content::Fill(fill) => Some(*fill),
+                Content::Paint(_) | Content::Folder(_) => None,
+            };
+            if fill != saved.fill {
+                return false;
+            }
+            let (generator, filters, mask_layers): (
+                Option<Generator>,
+                &[MaskFilter],
+                &[MaskLayer],
+            ) = match &layer.mask {
+                Some(mask) => (mask.generator, &mask.filters, &mask.layers),
+                None => (None, &[], &[]),
+            };
+            generator == saved.generator
+                && filters == saved.mask_filters.as_slice()
+                && mask_layers == saved.mask_layers.as_slice()
+        })
+    }
+
     /// Returns whether a property edit changes every mask input, and the layer
     /// IDs whose own mask source/filter configuration changed.
+    // Kept only for the focused unit tests that assert the invalidation diff.
+    // Production invalidation below removes IDs in place without allocating this Vec.
+    #[cfg(test)]
     fn mask_cache_changes(before: &DocProps, after: &DocProps) -> (bool, Vec<u64>) {
         if before.levels != after.levels
             || before.layers.len() != after.layers.len()
@@ -3285,12 +3520,56 @@ impl Engine {
         (false, changed)
     }
 
-    fn apply_mask_cache_changes(&mut self, before: &DocProps, after: &DocProps) {
-        let (all, changed) = Self::mask_cache_changes(before, after);
-        if all {
-            self.mask_final.clear();
-        } else {
-            for id in changed { self.mask_final.remove(&id); }
+    /// Invalidates mask results directly from the live Engine state. Unlike
+    /// doc_props(), this needs no temporary copy of every layer's properties.
+    fn apply_live_mask_cache_changes(
+        mask_final: &mut HashSet<u64>,
+        layers: &[Layer],
+        levels: &[Levels],
+        before: &DocProps,
+    ) {
+        if levels != before.levels.as_slice()
+            || layers.len() != before.layers.len()
+            || layers.iter().zip(&before.layers).any(|(layer, (id, _))| layer.id != *id)
+        {
+            mask_final.clear();
+            return;
+        }
+        for (layer, (id, saved)) in layers.iter().zip(&before.layers) {
+            let (generator, filters, mask_layers): (
+                Option<Generator>,
+                &[MaskFilter],
+                &[MaskLayer],
+            ) = match &layer.mask {
+                Some(mask) => (mask.generator, &mask.filters, &mask.layers),
+                None => (None, &[], &[]),
+            };
+            if generator != saved.generator
+                || filters != saved.mask_filters.as_slice()
+                || mask_layers != saved.mask_layers.as_slice()
+            {
+                mask_final.remove(id);
+            }
+        }
+    }
+
+    fn apply_mask_cache_changes(mask_final: &mut HashSet<u64>, before: &DocProps, after: &DocProps) {
+        if before.levels != after.levels
+            || before.layers.len() != after.layers.len()
+            || before.layers.iter().zip(&after.layers).any(|(a, b)| a.0 != b.0) {
+            mask_final.clear();
+            return;
+        }
+        // Invalidate only affected IDs in place. A temporary Vec<u64> of all
+        // changed masks is unnecessary even when a document has many layers.
+        for ((before_id, before), (after_id, after)) in before.layers.iter().zip(&after.layers) {
+            if before_id == after_id
+                && (before.generator != after.generator
+                    || before.mask_filters != after.mask_filters
+                    || before.mask_layers != after.mask_layers)
+            {
+                mask_final.remove(before_id);
+            }
         }
     }
 
@@ -3304,11 +3583,13 @@ impl Engine {
     /// The app calls this once an interaction ends, so a slider drag becomes a
     /// single entry; every structural edit calls it first to keep the order.
     pub fn commit_props(&mut self, undo: &mut UndoStack) {
-        let current = self.doc_props();
-        self.apply_mask_cache_changes(&self.committed.clone(), &current);
-        if current == self.committed {
+        // This runs on idle frames. Avoid constructing a full cloned
+        // DocProps (names, filters and mask layers) when nothing changed.
+        if self.doc_props_match(&self.committed) {
             return;
         }
+        let current = self.doc_props();
+        Self::apply_mask_cache_changes(&mut self.mask_final, &self.committed, &current);
         let same_layers = current.layers.len() == self.committed.layers.len()
             && current.layers.iter().zip(&self.committed.layers).all(|(a, b)| a.0 == b.0);
         if same_layers {
@@ -3396,7 +3677,7 @@ impl Engine {
                     *dst = *src;
                 }
                 let updated = self.doc_props();
-                self.apply_mask_cache_changes(&current, &updated);
+                Self::apply_mask_cache_changes(&mut self.mask_final, &current, &updated);
                 if current.levels != updated.levels { self.maps_dirty = true; }
                 *props = current;
             }
@@ -3486,6 +3767,7 @@ impl Engine {
     /// Starts a stroke on the content or mask of layer `idx`. Returns false if
     /// there is nothing paintable there.
     pub fn begin_stroke(&mut self, idx: usize, target: StrokeTarget, enabled: [bool; CHANNELS], erase: bool) -> bool {
+        self.ensure_stroke_target();
         if let StrokeTarget::BakeFix(map) = target {
             if !self.begin_fix_stroke(map, erase) {
                 return false;
@@ -3537,6 +3819,7 @@ impl Engine {
 
     /// Snapshots the stroke target (stroke base + undo "before") and clears the stroke mask.
     fn encode_stroke_start(&mut self, layer_id: u64, target: StrokeTarget, channels: Vec<usize>) -> bool {
+        self.stamp_bg = [None, None];
         let mut encoder = self.device.create_command_encoder(&Default::default());
         gpu::clear_texture(&mut encoder, &self.stroke, wgpu::Color::TRANSPARENT);
         let textures = self.target_textures(layer_id, target, &channels).expect("stroke target exists");
@@ -3547,7 +3830,7 @@ impl Engine {
         for (src, dst) in textures.iter().zip(&snaps) {
             encoder.copy_texture_to_texture(src.copy_info(), dst.copy_info(), src.extent());
         }
-        let before = Snapshot::encode(&self.device, &mut encoder, &textures);
+        let before = Snapshot::encode(&self.device, &mut encoder, &textures, self.snapshot_buffer_pool.clone());
         self.queue.submit([encoder.finish()]);
         before.request_map();
         self.apply_bg = None;
@@ -3670,19 +3953,24 @@ impl Engine {
         self.queue.write_buffer(&self.stamp_sbuf, 0, bytemuck::cast_slice(stamps));
 
         let device = &self.device;
-        let stamp_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("stamp"),
-            layout: &self.p.stamp_bgl,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.stamp_ubuf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: self.stamp_sbuf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.pos.view) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.nrm.view) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(depth) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.brush_alpha.view) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-            ],
-        });
+        let stamp_bg_slot = usize::from(screen_mesh.is_some());
+        if self.stamp_bg[stamp_bg_slot].is_none() {
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("stamp"),
+                layout: &self.p.stamp_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.stamp_ubuf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: self.stamp_sbuf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.pos.view) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.nrm.view) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(depth) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.brush_alpha.view) },
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                ],
+            });
+            self.stamp_bg[stamp_bg_slot] = Some(Arc::new(group));
+        }
+        let stamp_bg = self.stamp_bg[stamp_bg_slot].as_ref().expect("created above").clone();
         let profile = if profile_gpu && self.active_gpu_profile.is_none() {
             self.gpu_profiler.as_ref().and_then(GpuStrokeProfiler::resources)
         } else {
@@ -3713,7 +4001,7 @@ impl Engine {
 
             // First rasterize every face at its own UV coordinates.
             pass.set_pipeline(&self.p.stamp_uv);
-            pass.set_bind_group(0, &stamp_bg, &[]);
+            pass.set_bind_group(0, &*stamp_bg, &[]);
             pass.set_vertex_buffer(0, mesh.vertices.slice(..));
             let draw_range = if let Some(indices) = candidate_indices {
                 pass.set_index_buffer(self.screen_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -3755,7 +4043,7 @@ impl Engine {
                 multiview_mask: None,
             }).forget_lifetime();
             pass.set_pipeline(&self.p.stamp);
-            pass.set_bind_group(0, &stamp_bg, &[]);
+            pass.set_bind_group(0, &*stamp_bg, &[]);
             if let Some(rects) = &frame_scissors {
                 for &[x0, y0, x1, y1] in rects {
                     pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
@@ -3770,8 +4058,14 @@ impl Engine {
     }
 
     /// Returns completed GPU timings for stamp and apply; does not wait for the GPU.
-    pub fn poll_gpu_stroke_times(&mut self) -> Option<(f64, f64, f64, Option<f64>)> {
-        self.gpu_profiler.as_mut()?.poll(&self.device, &self.queue)
+    pub fn poll_gpu_stroke_times(
+        &mut self,
+    ) -> Option<(f64, f64, f64, Option<f64>, Option<f64>, Option<f64>, Vec<(String, f64)>)> {
+        let (stamp, apply, layer, total, clear, body, pass_ms) =
+            self.gpu_profiler.as_mut()?.poll(&self.device, &self.queue)?;
+        let pass_labels = std::mem::take(&mut self.last_profiled_pass_labels);
+        let pass_times = pass_labels.into_iter().zip(pass_ms).collect();
+        Some((stamp, apply, layer, total, clear, body, pass_times))
     }
 
     pub fn gpu_stroke_profile_pending(&self) -> bool {
@@ -3844,6 +4138,7 @@ impl Engine {
     pub fn set_brush_alpha(&mut self, alpha: Option<(&[u8], u32)>) {
         let (pixels, size) = alpha.unwrap_or((&[255], 1));
         if self.brush_alpha.width != size {
+            self.stamp_bg = [None, None];
             self.brush_alpha = Tex::new(&self.device, "brush alpha", size, size, F::R8Unorm, LAYER_USAGE);
         }
         self.queue.write_texture(
@@ -4111,8 +4406,15 @@ impl Engine {
     /// when only material properties changed; invalidate the exact mask inputs
     /// that changed, or all masks when mesh-map levels changed.
     pub fn mark_dirty(&mut self) {
-        let current = self.doc_props();
-        self.apply_mask_cache_changes(&self.committed.clone(), &current);
+        // Most dirty marks are paint/composite changes, not property edits.
+        // For property changes, invalidate masks from live fields directly;
+        // do not build a temporary DocProps snapshot just to discard it.
+        Self::apply_live_mask_cache_changes(
+            &mut self.mask_final,
+            &self.layers,
+            &self.map_levels,
+            &self.committed,
+        );
         if self.maps_dirty { self.mask_final.clear(); }
         self.dirty = true;
         self.full_dirty = true;
@@ -4120,33 +4422,77 @@ impl Engine {
 
     /// Finishes the stroke and returns its undo record.
     pub fn end_stroke(&mut self) -> Option<UndoEntry> {
+        self.last_end_stages_ms = [0.0; 5];
+        let mut stages = [0.0; 5];
+        let phase = std::time::Instant::now();
+
         self.apply_bg = None;
-        self.stroke_layer = None;
-        self.prefix = None;
-        self.prefix_cache = None;
-        self.stroke_regions.clear();
-        self.region_unknown = false;
+        self.stamp_bg = [None, None];
+        // Keep the prior composite prefix and any uncomposited dirty regions
+        // across release. A following stroke on the same layer can resume it;
+        // composite rejects it when the layer, pass list, or dirty state differs.
+        // Keep the full-resolution prefix textures reusable between strokes.
+        // The next stroke rewrites their contents before reading them, so the
+        // old prefix itself is discarded above. At 4K the retained seven-target
+        // cache would cost roughly 272 MiB, so release it instead of pinning
+        // that much VRAM in the common idle state.
+        const MAX_RETAINED_PREFIX_CACHE_BYTES: u64 = 96 * 1024 * 1024;
+        let prefix_cache_bytes = u64::from(self.res)
+            * u64::from(self.res)
+            * ACCUM_FORMATS.iter().map(|&format| u64::from(gpu::bytes_per_texel(format))).sum::<u64>();
+        if prefix_cache_bytes > MAX_RETAINED_PREFIX_CACHE_BYTES {
+            self.prefix_cache = None;
+            self.prefix = None;
+        }
         let Some(active) = self.active.take() else {
             self.invalidate_thumbs();
+            stages[0] = phase.elapsed().as_secs_f64() * 1000.0;
+            self.last_end_stages_ms = stages;
             return None;
         };
-        // A stroke on a mask changes only that mask's thumbnail; a fill's
-        // content thumbnail (a full composite) stays as it was.
-        match active.target {
-            StrokeTarget::Mask => self.invalidate_mask_thumb(active.layer_id),
-            StrokeTarget::BakeFix(_) => self.invalidate_thumbs(),
-            // Content strokes only target Paint layers. Their contents are not
-            // shown in layer thumbnails, and they do not change mask sources.
-            StrokeTarget::Content => {}
-        }
-        let textures = self.target_textures(active.layer_id, active.target, &active.channels)?;
+        // Content strokes only target Paint layers; their contents are not
+        // shown in layer thumbnails. Avoid scanning and hashing the whole stack
+        // at release when the stroke cannot have invalidated a thumbnail.
+        let refresh_thumbnails = match active.target {
+            StrokeTarget::Mask => {
+                self.invalidate_mask_thumb(active.layer_id);
+                true
+            }
+            StrokeTarget::BakeFix(_) => {
+                self.invalidate_thumbs();
+                true
+            }
+            StrokeTarget::Content => false,
+        };
+        stages[0] = phase.elapsed().as_secs_f64() * 1000.0;
+
+        let phase = std::time::Instant::now();
+        let Some(textures) = self.target_textures(active.layer_id, active.target, &active.channels) else {
+            stages[1] = phase.elapsed().as_secs_f64() * 1000.0;
+            self.last_end_stages_ms = stages;
+            return None;
+        };
+        stages[1] = phase.elapsed().as_secs_f64() * 1000.0;
+
+        let phase = std::time::Instant::now();
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        let after = Snapshot::encode(&self.device, &mut encoder, &textures);
+        let after = Snapshot::encode(&self.device, &mut encoder, &textures, self.snapshot_buffer_pool.clone());
+        stages[2] = phase.elapsed().as_secs_f64() * 1000.0;
+        drop(textures);
+
+        let phase = std::time::Instant::now();
         self.queue.submit([encoder.finish()]);
         after.request_map();
-        // Refresh invalidated mask/fill thumbnails once after painting, not
-        // once per composite frame while the stroke is active.
-        self.update_thumbs();
+        stages[3] = phase.elapsed().as_secs_f64() * 1000.0;
+
+        let phase = std::time::Instant::now();
+        // Refresh only when this stroke actually invalidated a thumbnail.
+        if refresh_thumbnails {
+            self.update_thumbs();
+        }
+        stages[4] = phase.elapsed().as_secs_f64() * 1000.0;
+        self.last_end_stages_ms = stages;
+
         Some(UndoEntry {
             layer_id: active.layer_id,
             target: active.target,
@@ -4266,10 +4612,11 @@ impl Engine {
     }
 
     pub fn composite(&mut self) {
+        self.ensure_composite_working_set();
         if self.maps_dirty {
             self.resolve_maps();
         }
-        let (passes, max_depth) = composite_passes(&self.layers);
+        let (passes, max_depth) = composite_passes_with_scratch(&self.layers, &mut self.composite_scratch);
         self.last_composite_layer_passes = passes.iter().filter(|p| matches!(**p, Pass::Layer(_))).count() as u32;
         self.last_composite_folder_passes = passes.iter().filter(|p| matches!(**p, Pass::Begin | Pass::End(_))).count() as u32;
         let (mut mask_cache_hits, mut mask_cache_misses, mut mask_gpu_passes) = (0u32, 0u32, 0u32);
@@ -4463,6 +4810,11 @@ impl Engine {
                 ],
             );
         }
+        if let Some(p) = &self.active_gpu_profile {
+            if self.gpu_profiler.as_ref().is_some_and(|profiler| profiler.encoder_timestamps) {
+                encoder.write_timestamp(&p.query_set, 8);
+            }
+        }
         // Resumed frames only redo the patch the stroke touched. Each pass
         // there reads the texel it writes, so inside the patch the chain is
         // exact; outside it the final set keeps the last composite's result,
@@ -4506,6 +4858,7 @@ impl Engine {
                 self.stroke_regions = rects;
                 self.stroke_regions.clear();
             }
+            self.composite_scratch.passes = passes;
             return;
         }
         if scissors.is_none() {
@@ -4523,6 +4876,10 @@ impl Engine {
         let mut finals: Vec<u64> = Vec::new();
         let profile_layer = self.stroke_layer;
         let mut composite_profiled = false;
+        let mut profiled_layer_passes = 0usize;
+        if self.active_gpu_profile.is_some() {
+            self.last_profiled_pass_labels.clear();
+        }
         for (k, pass) in passes.iter().enumerate().skip(start) {
             if record == Some(k) {
                 let input = if k + 1 < passes.len() {
@@ -4674,6 +5031,21 @@ impl Engine {
             ];
             let profile = self.active_gpu_profile.as_ref().filter(|_| profile_layer == Some(layer.id));
             composite_profiled |= profile.is_some();
+            let detailed_profile_slot = if self.gpu_profiler.as_ref().is_some_and(|p| p.encoder_timestamps)
+                && self.active_gpu_profile.is_some()
+                && profiled_layer_passes < GPU_PROFILE_MAX_LAYER_PASSES {
+                    let slot = profiled_layer_passes;
+                    if let Some(p) = &self.active_gpu_profile {
+                        encoder.write_timestamp(&p.query_set, GPU_PROFILE_BASE_QUERY_COUNT + (slot as u32 * 2));
+                    }
+                    Some(slot)
+                } else {
+                    None
+                };
+            let detailed_profile_label = detailed_profile_slot.map(|_| {
+                let kind = if matches!(*pass, Pass::End(_)) { "Folder merge" } else { "Layer" };
+                format!("{kind} #{} {}", li + 1, layer.name)
+            });
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("composite layer"),
                 color_attachments: &attachments,
@@ -4697,16 +5069,32 @@ impl Engine {
                 pass.draw(0..3, 0..1);
             }
             drop(pass);
+            if let Some(slot) = detailed_profile_slot {
+                if let Some(p) = &self.active_gpu_profile {
+                    encoder.write_timestamp(&p.query_set, GPU_PROFILE_BASE_QUERY_COUNT + (slot as u32 * 2) + 1);
+                }
+                if let Some(label) = detailed_profile_label {
+                    self.last_profiled_pass_labels.push(label);
+                }
+                profiled_layer_passes += 1;
+            }
             src = dst;
             from_cache = false;
         }
         if composite_profiled {
             if let Some(p) = &self.active_gpu_profile {
                 if self.gpu_profiler.as_ref().is_some_and(|profiler| profiler.encoder_timestamps) {
+                    encoder.write_timestamp(&p.query_set, 9);
                     encoder.write_timestamp(&p.query_set, 7);
                 }
-                encoder.resolve_query_set(&p.query_set, 0..8, &p.resolve, 0);
-                encoder.copy_buffer_to_buffer(&p.resolve, 0, &p.readback, 0, 64);
+                let query_count = if self.gpu_profiler.as_ref().is_some_and(|profiler| profiler.encoder_timestamps) {
+                    GPU_PROFILE_QUERY_COUNT
+                } else {
+                    6
+                };
+                let resolve_bytes = u64::from(query_count) * 8;
+                encoder.resolve_query_set(&p.query_set, 0..query_count, &p.resolve, 0);
+                encoder.copy_buffer_to_buffer(&p.resolve, 0, &p.readback, 0, resolve_bytes);
             }
         }
         self.queue.submit([encoder.finish()]);
@@ -4735,6 +5123,7 @@ impl Engine {
             self.stroke_regions = rects;
             self.stroke_regions.clear();
         }
+        self.composite_scratch.passes = passes;
     }
 
     /// Whether any visible layer sets opacity: only then can the result be
@@ -5083,6 +5472,37 @@ mod composite_pass_tests {
         ];
         assert_eq!(composite_passes(&layers), (expected.clone(), 2));
         assert_eq!(composite_passes(&layers), legacy_passes(&layers));
+
+        // Reuse one scratch object while the stack shrinks, empties and grows
+        // again. Retained nested buckets must not leak stale folder passes.
+        let mut scratch = CompositeScratch::default();
+        assert_eq!(composite_passes_with_scratch(&layers, &mut scratch), (expected.clone(), 2));
+        let small = vec![
+            layer(30, None, true, 1.0, fill()),
+            layer(31, None, true, 1.0, fill()),
+        ];
+        assert_eq!(
+            composite_passes_with_scratch(&small, &mut scratch),
+            legacy_passes(&small),
+        );
+        assert_eq!(composite_passes_with_scratch(&[], &mut scratch), (Vec::new(), 0));
+        assert_eq!(
+            composite_passes_with_scratch(&layers, &mut scratch),
+            legacy_passes(&layers),
+        );
+    }
+
+    #[test]
+    fn gpu_timestamp_readback_covers_every_profiled_query() {
+        assert_eq!(
+            GPU_PROFILE_READBACK_SIZE,
+            u64::from(GPU_PROFILE_QUERY_COUNT) * 8,
+        );
+        assert_eq!(
+            GPU_PROFILE_QUERY_COUNT,
+            GPU_PROFILE_BASE_QUERY_COUNT + GPU_PROFILE_MAX_LAYER_PASSES as u32 * 2,
+        );
+        assert!(GPU_PROFILE_QUERY_COUNT > 10);
     }
 
     #[test]
@@ -5224,8 +5644,32 @@ mod scissor_tests {
 
 #[cfg(test)]
 mod mask_cache_invalidation_tests {
-    use super::{Blend, Engine, FilterKind, MaskFilter};
+    use super::{Blend, Content, Engine, FilterKind, Folder, Layer, Mask, MaskFilter};
     use crate::undo::{DocProps, LayerProps};
+    use std::collections::HashSet;
+
+    fn live_layer(id: u64, visible: bool, filters: Vec<MaskFilter>) -> Layer {
+        Layer {
+            id,
+            name: "Layer".into(),
+            visible,
+            opacity: 1.0,
+            blend: Blend::Normal,
+            content: Content::Folder(Folder { open: true, graph: None }),
+            mask: Some(Mask {
+                black_base: false,
+                paint: None,
+                generator: None,
+                filters,
+                layers: Vec::new(),
+                graph: None,
+            }),
+            disabled_channels: [false; super::CHANNELS],
+            parent: None,
+            images: Default::default(),
+            thumb: None,
+        }
+    }
 
     fn props() -> LayerProps {
         LayerProps {
@@ -5242,6 +5686,33 @@ mod mask_cache_invalidation_tests {
 
     fn doc() -> DocProps {
         DocProps { layers: vec![(7, props())], levels: Vec::new() }
+    }
+
+    #[test]
+    fn live_property_check_does_not_invalidate_for_unrelated_layer_properties() {
+        let before = doc();
+        let layer = live_layer(7, false, Vec::new());
+        let mut cache = HashSet::from([7]);
+        Engine::apply_live_mask_cache_changes(&mut cache, &[layer], &[], &before);
+        assert!(cache.contains(&7), "visibility and mask absence must not invalidate unchanged mask inputs");
+    }
+
+    #[test]
+    fn live_property_check_invalidates_only_the_changed_mask() {
+        let before = doc();
+        let layer = live_layer(7, true, vec![MaskFilter::new(FilterKind::Blur)]);
+        let mut cache = HashSet::from([7, 8]);
+        Engine::apply_live_mask_cache_changes(&mut cache, &[layer], &[], &before);
+        assert_eq!(cache, HashSet::from([8]));
+    }
+
+    #[test]
+    fn live_property_check_clears_every_mask_when_layer_identity_changes() {
+        let before = doc();
+        let layer = live_layer(8, true, Vec::new());
+        let mut cache = HashSet::from([7, 8]);
+        Engine::apply_live_mask_cache_changes(&mut cache, &[layer], &[], &before);
+        assert!(cache.is_empty());
     }
 
     #[test]
@@ -5272,5 +5743,40 @@ mod mask_cache_invalidation_tests {
         let mut structure = before.clone();
         structure.layers[0].0 = 8;
         assert_eq!(Engine::mask_cache_changes(&before, &structure), (true, Vec::new()));
+    }
+}
+
+#[cfg(test)]
+mod uv_bake_key_tests {
+    use super::UvBakeKey;
+
+    fn key() -> UvBakeKey {
+        UvBakeKey { mesh_id: 7, tris: 0..36, res: 2048 }
+    }
+
+    #[test]
+    fn same_mesh_range_and_size_repeats_the_bake() {
+        assert!(UvBakeKey::is_current(Some(&key()), 7, &(0..36), 2048));
+    }
+
+    #[test]
+    fn never_baked_engine_must_bake() {
+        assert!(!UvBakeKey::is_current(None, 7, &(0..36), 2048));
+    }
+
+    #[test]
+    fn changed_range_must_bake() {
+        assert!(!UvBakeKey::is_current(Some(&key()), 7, &(0..18), 2048));
+        assert!(!UvBakeKey::is_current(Some(&key()), 7, &(18..36), 2048));
+    }
+
+    #[test]
+    fn changed_mesh_identity_must_bake_even_with_the_same_range() {
+        assert!(!UvBakeKey::is_current(Some(&key()), 8, &(0..36), 2048));
+    }
+
+    #[test]
+    fn changed_resolution_must_bake() {
+        assert!(!UvBakeKey::is_current(Some(&key()), 7, &(0..36), 1024));
     }
 }

@@ -10,6 +10,7 @@ use crate::gpu::{self, GpuMesh, LAYER_USAGE, Tex};
 use crate::mesh::{HighPoly, Mesh, smooth_normals, weld_positions};
 use eframe::{egui, wgpu};
 use glam::Vec3;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -517,6 +518,25 @@ impl BakeSettings {
     }
 }
 
+/// A source vertex stored once for the indexed bake BVH (28 bytes).
+/// The scalar-array layout avoids vec3's 16-byte storage alignment.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BakeVertex {
+    position: [f32; 3],
+    normal_curvature: [f32; 4],
+}
+
+/// One BVH-ordered triangle: three source vertex indices plus per-triangle
+/// part, ID and name-match group metadata. 24 bytes instead of three expanded
+/// position and normal pairs (96 bytes) for every triangle.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BakeTriangle {
+    indices: [u32; 3],
+    metadata: [u32; 3],
+}
+
 /// GPU-ready bake source.
 pub struct PreparedScene {
     /// Baking the low poly alone: the curvature (1/length) from which its
@@ -524,9 +544,9 @@ pub struct PreparedScene {
     /// threshold decide).
     edge_seed_curvature: f32,
     nodes: Vec<[f32; 4]>,
-    tri_pos: Vec<[f32; 4]>,
-    tri_nrm: Vec<[f32; 4]>,
-    /// Per-corner sRGB vertex colors, or the selected flat ID color.
+    bake_vertices: Vec<BakeVertex>,
+    bake_triangles: Vec<BakeTriangle>,
+    /// Per-corner sRGB colors for Vertex Colors mode; empty for flat ID modes.
     tri_vcolor: Vec<[f32; 4]>,
     parts: Vec<[f32; 4]>,
     ids: Vec<[f32; 4]>,
@@ -637,7 +657,14 @@ fn id_color(i: u32) -> [f32; 4] {
 
 /// Connected components over welded positions; returns the part of each triangle.
 pub(crate) fn components(positions: &[Vec3], indices: &[u32]) -> (Vec<u32>, u32) {
+    components_cancellable(positions, indices, &AtomicBool::new(false))
+        .expect("uncancelled component traversal")
+}
+
+fn components_cancellable(positions: &[Vec3], indices: &[u32], cancel: &AtomicBool) -> Result<(Vec<u32>, u32), String> {
+    check_prepare_cancelled(cancel)?;
     let weld = weld_positions(positions);
+    check_prepare_cancelled(cancel)?;
     let mut parent: Vec<u32> = (0..positions.len() as u32).collect();
     fn find(p: &mut [u32], mut x: u32) -> u32 {
         while p[x as usize] != x {
@@ -646,28 +673,25 @@ pub(crate) fn components(positions: &[Vec3], indices: &[u32]) -> (Vec<u32>, u32)
         }
         x
     }
-    for tri in indices.chunks_exact(3) {
+    for (i, tri) in indices.chunks_exact(3).enumerate() {
+        if i.is_multiple_of(8192) { check_prepare_cancelled(cancel)?; }
         let a = find(&mut parent, weld[tri[0] as usize] as u32);
         for &v in &tri[1..] {
             let b = find(&mut parent, weld[v as usize] as u32);
-            if a != b {
-                parent[b as usize] = a;
-            }
+            if a != b { parent[b as usize] = a; }
         }
     }
     let mut remap = std::collections::HashMap::new();
-    let tri_part: Vec<u32> = indices
-        .chunks_exact(3)
-        .map(|tri| {
-            let root = find(&mut parent, weld[tri[0] as usize] as u32);
-            let next = remap.len() as u32;
-            *remap.entry(root).or_insert(next)
-        })
-        .collect();
+    let mut tri_part = Vec::with_capacity(indices.len() / 3);
+    for (i, tri) in indices.chunks_exact(3).enumerate() {
+        if i.is_multiple_of(8192) { check_prepare_cancelled(cancel)?; }
+        let root = find(&mut parent, weld[tri[0] as usize] as u32);
+        let next = remap.len() as u32;
+        tri_part.push(*remap.entry(root).or_insert(next));
+    }
     let count = remap.len() as u32;
-    (tri_part, count)
+    Ok((tri_part, count))
 }
-
 /// A feature for the edge-distance bake: a segment, or with `half_width > 0`
 /// a band around it (a bevel facet), so every point inside reads as distance 0.
 /// Hard edges have `half_width` [`HARD_EDGE`]; only they draw curvature lines.
@@ -695,7 +719,36 @@ pub(crate) const HARD_EDGE: f32 = -1.0;
 /// normals are split along it (a smoothing-group edge); folds of a smooth
 /// shaded surface are left to its curvature.
 ///
+/// Inline storage for a triangle's at-most-three bevel edges.
+/// A sentinel marks unused pairs, keeping the per-triangle record at 24 bytes
+/// and avoiding one heap allocation per triangle with bevel edges.
+#[derive(Clone, Copy)]
+struct TriangleBevelEdges([u32; 6]);
+
+impl Default for TriangleBevelEdges {
+    fn default() -> Self {
+        Self([u32::MAX; 6])
+    }
+}
+
+impl TriangleBevelEdges {
+    fn push(&mut self, edge: (u32, u32)) {
+        let slot = self.0.chunks_exact_mut(2)
+            .find(|pair| pair[0] == u32::MAX)
+            .expect("a triangle cannot have more than three edges");
+        slot[0] = edge.0;
+        slot[1] = edge.1;
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.0.chunks_exact(2)
+            .take_while(|pair| pair[0] != u32::MAX)
+            .map(|pair| (pair[0], pair[1]))
+    }
+}
+
 /// Open borders and folded-back (double-sided) faces are skipped.
+#[cfg(test)]
 pub(crate) fn feature_edges(
     positions: &[Vec3],
     indices: &[u32],
@@ -704,12 +757,29 @@ pub(crate) fn feature_edges(
     bevel_curvature: Option<f32>,
     shading_normals: Option<&[Vec3]>,
 ) -> [Vec<EdgeSeg>; 2] {
+    feature_edges_cancellable(positions, indices, tri_part, min_angle_deg, bevel_curvature, shading_normals, &AtomicBool::new(false))
+        .expect("uncancelled feature-edge preparation")
+}
+
+fn feature_edges_cancellable(
+    positions: &[Vec3],
+    indices: &[u32],
+    tri_part: &[u32],
+    min_angle_deg: f32,
+    bevel_curvature: Option<f32>,
+    shading_normals: Option<&[Vec3]>,
+    cancel: &AtomicBool,
+) -> Result<[Vec<EdgeSeg>; 2], String> {
+    check_prepare_cancelled(cancel)?;
     const NONE: u32 = u32::MAX;
     let weld = weld_positions(positions);
+    check_prepare_cancelled(cancel)?;
     let smooth = if bevel_curvature.is_some() { smooth_normals(positions, indices) } else { Vec::new() };
+    check_prepare_cancelled(cancel)?;
     let mut face_n = Vec::with_capacity(indices.len() / 3);
     let mut center = Vec::with_capacity(indices.len() / 3);
-    for t in indices.chunks_exact(3) {
+    for (i, t) in indices.chunks_exact(3).enumerate() {
+        if i.is_multiple_of(8192) { check_prepare_cancelled(cancel)?; }
         let [a, b, c] = [t[0], t[1], t[2]].map(|i| positions[i as usize]);
         face_n.push((b - a).cross(c - a).normalize_or_zero());
         center.push((a + b + c) / 3.0);
@@ -723,9 +793,12 @@ pub(crate) fn feature_edges(
         opposite: u32,
     }
     let empty = Side { tri: NONE, forward: false, opposite: 0 };
+    // Connected triangle meshes usually have about 1.5 unique edges per face.
+    // Reserve for 2 per face instead of 3; disconnected triangle soup can still grow.
     let mut edges: std::collections::HashMap<(u32, u32), [Side; 2]> =
-        std::collections::HashMap::with_capacity(indices.len());
+        std::collections::HashMap::with_capacity(indices.len().saturating_mul(2) / 3);
     for (t, tri) in indices.chunks_exact(3).enumerate() {
+        if t.is_multiple_of(8192) { check_prepare_cancelled(cancel)?; }
         for k in 0..3 {
             let a = weld[tri[k] as usize] as u32;
             let b = weld[tri[(k + 1) % 3] as usize] as u32;
@@ -745,8 +818,11 @@ pub(crate) fn feature_edges(
     let mut out = [Vec::new(), Vec::new()];
     // Bevel edges with their convexity, and the bevel edges of each triangle.
     let mut bevel: std::collections::HashMap<(u32, u32), bool> = std::collections::HashMap::new();
-    let mut tri_bevels: Vec<Vec<(u32, u32)>> = vec![Vec::new(); face_n.len()];
-    for (&(a, b), &[s0, s1]) in &edges {
+    // Every triangle has only three edges. Store them inline rather than making
+    // a separate heap allocation for each triangle that contains a bevel edge.
+    let mut tri_bevels = vec![TriangleBevelEdges::default(); face_n.len()];
+    for (edge_index, (&(a, b), &[s0, s1])) in edges.iter().enumerate() {
+        if edge_index.is_multiple_of(8192) { check_prepare_cancelled(cancel)?; }
         if s1.tri == NONE {
             continue;
         }
@@ -810,13 +886,14 @@ pub(crate) fn feature_edges(
     // Bevel facets: two triangles sharing a non-bevel edge (the quad
     // diagonal), each holding a different bevel edge, the two edges roughly
     // parallel and spanning the quad's four corners.
-    for (&(a, b), &[s0, s1]) in &edges {
+    for (edge_index, (&(a, b), &[s0, s1])) in edges.iter().enumerate() {
+        if edge_index.is_multiple_of(8192) { check_prepare_cancelled(cancel)?; }
         if s1.tri == NONE || bevel.contains_key(&(a, b)) {
             continue;
         }
         let (ta, tb) = (s0.tri as usize, s1.tri as usize);
-        for &ea in &tri_bevels[ta] {
-            for &eb in &tri_bevels[tb] {
+        for ea in tri_bevels[ta].iter() {
+            for eb in tri_bevels[tb].iter() {
                 let corners = [ea.0, ea.1, eb.0, eb.1];
                 let distinct = (0..4).all(|i| (i + 1..4).all(|j| corners[i] != corners[j]));
                 if !distinct || bevel[&ea] != bevel[&eb] {
@@ -840,9 +917,9 @@ pub(crate) fn feature_edges(
             }
         }
     }
-    out
+    check_prepare_cancelled(cancel)?;
+    Ok(out)
 }
-
 /// Mean curvature at each vertex of a mesh, from how its shading normals
 /// turn toward its neighbors: (n_j - n_i)·(p_j - p_i) / |p_j - p_i|²,
 /// averaged. Vertices that share a position and (within a degree) a normal
@@ -917,26 +994,50 @@ pub(crate) fn vertex_curvature(positions: &[Vec3], normals: &[Vec3], indices: &[
     ids.iter().map(|&g| k[g as usize]).collect()
 }
 
+/// The first normal group for a welded position is inline. Most positions
+/// have only one group, so this avoids one small heap allocation per vertex;
+/// extra allocations occur only where split normals share the same position.
+struct NormalGroupBucket {
+    first: (Vec3, u32),
+    additional: Vec<(Vec3, u32)>,
+}
+
+impl NormalGroupBucket {
+    fn new(normal: Vec3, group: u32) -> Self {
+        Self { first: (normal, group), additional: Vec::new() }
+    }
+
+    fn find_or_insert(&mut self, normal: Vec3, next: &mut u32) -> u32 {
+        if self.first.0.dot(normal) > 0.99985 {
+            return self.first.1;
+        }
+        if let Some(&(_, group)) = self.additional.iter().find(|(candidate, _)| candidate.dot(normal) > 0.99985) {
+            return group;
+        }
+        let group = *next;
+        *next += 1;
+        self.additional.push((normal, group));
+        group
+    }
+}
+
 /// Welds vertices for curvature: same position (to 1e-4 of the unit-sized
 /// mesh) and normals within about a degree share a group.
 fn weld_groups(positions: &[Vec3], normals: &[Vec3]) -> Vec<u32> {
-    let mut by_pos: HashMap<[i32; 3], Vec<(Vec3, u32)>> = HashMap::with_capacity(positions.len());
+    let mut by_pos: HashMap<[i32; 3], NormalGroupBucket> = HashMap::with_capacity(positions.len());
     let mut next = 0u32;
     positions
         .iter()
         .zip(normals)
         .map(|(p, n)| {
             let key = (*p * 1.0e4).round().as_ivec3().to_array();
-            let list = by_pos.entry(key).or_default();
-            let n = n.normalize_or_zero();
-            match list.iter().find(|(m, _)| m.dot(n) > 0.99985) {
-                Some(&(_, g)) => g,
-                None => {
-                    list.push((n, next));
-                    next += 1;
-                    next - 1
-                }
-            }
+            let normal = n.normalize_or_zero();
+            let bucket = by_pos.entry(key).or_insert_with(|| {
+                let group = next;
+                next += 1;
+                NormalGroupBucket::new(normal, group)
+            });
+            bucket.find_or_insert(normal, &mut next)
         })
         .collect()
 }
@@ -1011,66 +1112,134 @@ fn denoise_passes(ao_rays: u32) -> u32 {
     }
 }
 
+#[inline]
+fn check_prepare_cancelled(cancel: &AtomicBool) -> Result<(), String> {
+    if cancel.load(Ordering::Relaxed) {
+        Err("Bake preparation cancelled".into())
+    } else {
+        Ok(())
+    }
+}
+
 /// Prepares baking texture set `set` of `low` (its triangles get maps; the
 /// whole mesh occludes).
 pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<PreparedScene, String> {
+    prepare_cancellable(low, settings, set, &AtomicBool::new(false))
+}
+
+/// CPU Bake preparation can be abandoned when a newer request supersedes it.
+pub fn prepare_cancellable(
+    low: &Mesh,
+    settings: &BakeSettings,
+    set: usize,
+    cancel: &AtomicBool,
+) -> Result<PreparedScene, String> {
+    check_prepare_cancelled(cancel)?;
     let start = Instant::now();
     let low_tris = low.indices.len() / 3;
     let raster = low.sets.get(set).map_or(0..low_tris as u32, |s| s.tris.clone());
     let (positions, normals, indices, tri_material, material_count, source, src_objects, tri_color, tri_vertex_color) = match &settings.high_poly {
         Some(path) => {
-            let hp = HighPoly::load(path, low.center, low.scale)?;
-            let objects = (hp.tri_object, hp.objects);
-            // Imported normals need not be unit length; `vertex_curvature`
-            // measures how fast they turn, which only means curvature for unit ones.
-            let normals: Vec<Vec3> = hp.normals.iter().map(|n| n.normalize_or_zero()).collect();
-            (hp.positions, normals, hp.indices, hp.tri_material, hp.material_count, format!("{} (high poly)", hp.name), Some(objects), hp.tri_color, hp.tri_vertex_color)
+            let mut hp = HighPoly::load(path, low.center, low.scale)?;
+            check_prepare_cancelled(cancel)?;
+            // Normalize in place instead of retaining a second normal array.
+            for (i, normal) in hp.normals.iter_mut().enumerate() {
+                if i.is_multiple_of(16384) {
+                    check_prepare_cancelled(cancel)?;
+                }
+                *normal = normal.normalize_or_zero();
+            }
+            let objects = if settings.match_by_name && !low.objects.is_empty() && hp.tri_object.len() == hp.indices.len() / 3 {
+                Some((std::mem::take(&mut hp.tri_object), std::mem::take(&mut hp.objects)))
+            } else {
+                None
+            };
+            let tri_material = if settings.id_source == IdSource::Materials && hp.material_count > 1 {
+                hp.tri_material
+            } else {
+                Vec::new()
+            };
+            let (tri_color, tri_vertex_color) = if settings.id_source == IdSource::VertexColors {
+                (hp.tri_color, hp.tri_vertex_color)
+            } else {
+                (None, None)
+            };
+            (
+                hp.positions,
+                hp.normals,
+                Cow::Owned(hp.indices),
+                tri_material,
+                hp.material_count,
+                format!("{} (high poly)", hp.name),
+                objects,
+                tri_color,
+                tri_vertex_color,
+            )
         }
         None => {
             let positions: Vec<Vec3> = low.vertices.iter().map(|v| Vec3::from_array(v.pos)).collect();
             let normals: Vec<Vec3> = low.vertices.iter().map(|v| Vec3::from_array(v.normal)).collect();
-            // The low poly's materials are its texture sets.
-            let mut tri_material = vec![0; low_tris];
-            for (k, s) in low.sets.iter().enumerate() {
-                tri_material[s.tris.start as usize..s.tris.end as usize].fill(k as u32);
-            }
+            check_prepare_cancelled(cancel)?;
+            // Material IDs are only needed when explicitly selected. Vertex
+            // color payloads are copied only for Vertex Color ID mode.
             let count = low.sets.len().max(1) as u32;
-            (positions, normals, low.indices.clone(), tri_material, count, format!("{} (low poly)", low.name), None, low.tri_color.clone(), low.tri_vertex_color.clone())
+            let mut tri_material = if settings.id_source == IdSource::Materials && count > 1 {
+                vec![0; low_tris]
+            } else {
+                Vec::new()
+            };
+            if !tri_material.is_empty() {
+                for (k, s) in low.sets.iter().enumerate() {
+                    tri_material[s.tris.start as usize..s.tris.end as usize].fill(k as u32);
+                }
+            }
+            let (tri_color, tri_vertex_color) = if settings.id_source == IdSource::VertexColors {
+                (low.tri_color.clone(), low.tri_vertex_color.clone())
+            } else {
+                (None, None)
+            };
+            (positions, normals, Cow::Borrowed(&low.indices), tri_material, count, format!("{} (low poly)", low.name), None, tri_color, tri_vertex_color)
         }
     };
+    check_prepare_cancelled(cancel)?;
+    let triangle_count = indices.len() / 3;
 
     // Name groups: 1-based per distinct low-poly base name; 0 = unmatched
     // (an unmatched low part sees everything, an unmatched high part is seen
     // by everyone).
-    let mut src_group = vec![0u32; indices.len() / 3];
+    let mut src_group = Vec::new();
     let mut low_draws = None;
     let mut matched_names = 0;
     if let (true, Some((src_tri_object, src_names))) = (settings.match_by_name, &src_objects)
-        && !low.objects.is_empty() && low.tri_object.len() == low_tris && src_tri_object.len() == src_group.len() {
+        && !low.objects.is_empty() && low.tri_object.len() == low_tris && src_tri_object.len() == indices.len() / 3 {
             let mut groups: HashMap<String, u32> = HashMap::new();
-            for name in &low.objects {
+            for (i, name) in low.objects.iter().enumerate() {
+                if i.is_multiple_of(1024) {
+                    check_prepare_cancelled(cancel)?;
+                }
                 let n = groups.len() as u32 + 1;
                 groups.entry(base_name(name)).or_insert(n);
             }
             let src_by_object: Vec<u32> = src_names.iter().map(|n| groups.get(&base_name(n)).copied().unwrap_or(0)).collect();
-            for (g, &o) in src_group.iter_mut().zip(src_tri_object) {
-                *g = src_by_object[o as usize];
-            }
             let matched: std::collections::HashSet<u32> = src_by_object.iter().copied().filter(|&g| g > 0).collect();
             matched_names = matched.len();
             if matched_names > 0 {
+                src_group = src_tri_object.iter().map(|&o| src_by_object[o as usize]).collect();
                 let low_by_object: Vec<u32> =
                     low.objects.iter().map(|n| groups[&base_name(n)]).map(|g| if matched.contains(&g) { g } else { 0 }).collect();
                 let tris = raster.start as usize..raster.end as usize;
                 low_draws = Some(group_draws(&low.indices, tris, |t| low_by_object[low.tri_object[t] as usize]));
-            } else {
-                src_group.fill(0);
             }
         }
+    // Object IDs and names are only preparation inputs; don't retain them
+    // alongside the expanded per-corner GPU payloads.
+    drop(src_objects);
+    check_prepare_cancelled(cancel)?;
 
     let cage = match &settings.cage {
         Some(path) if settings.high_poly.is_some() => {
             let cage = HighPoly::load(path, low.center, low.scale)?;
+            check_prepare_cancelled(cancel)?;
             if cage.indices.len() != low.indices.len() {
                 return Err(format!(
                     "The cage has {} triangles but the low poly has {low_tris}; a cage must be the low poly with its vertices moved.",
@@ -1095,6 +1264,7 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
             // corners carry the direction in `pos` and the distance in the
             // tangent's x (see `cs_surface`).
             let dirs = crate::cage::projection_dirs(low, settings.average_normals);
+            check_prepare_cancelled(cancel)?;
             let paint = settings.cage_paint.as_deref().filter(|p| p.fits(low.vertices.len()));
             let corners: Vec<crate::mesh::Vertex> = low
                 .indices
@@ -1109,6 +1279,7 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
         }
         _ => None,
     };
+    check_prepare_cancelled(cancel)?;
     let cage_reach = match &cage {
         Some(corners) if settings.builds_cage() => corners.iter().map(|c| c.tangent[0]).fold(0.0, f32::max),
         Some(corners) => corners
@@ -1119,10 +1290,14 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
         None => 0.0,
     };
 
-    let (tri_part, part_count) = components(&positions, &indices);
+    let (tri_part, part_count) = components_cancellable(&positions, &indices, cancel)?;
+    check_prepare_cancelled(cancel)?;
     let mut part_lo = vec![f32::MAX; part_count as usize];
     let mut part_hi = vec![f32::MIN; part_count as usize];
     for (t, tri) in indices.chunks_exact(3).enumerate() {
+        if t.is_multiple_of(8192) {
+            check_prepare_cancelled(cancel)?;
+        }
         let p = tri_part[t] as usize;
         for &v in tri {
             part_lo[p] = part_lo[p].min(positions[v as usize].y);
@@ -1151,20 +1326,20 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
         }
         _ => None,
     };
-    let tri_id: Vec<u32> = match &color_ids {
-        Some((per_tri, _)) => per_tri.clone(),
-        None if use_materials => tri_material.clone(),
-        None => tri_part.clone(),
-    };
-    let ids: Vec<[f32; 4]> = match color_ids {
-        Some((_, palette)) => palette,
-        None => (0..if use_materials { material_count } else { part_count }).map(id_color).collect(),
+    check_prepare_cancelled(cancel)?;
+    let (tri_id, ids): (Cow<'_, [u32]>, Vec<[f32; 4]>) = match color_ids {
+        Some((per_tri, palette)) => (Cow::Owned(per_tri), palette),
+        None if use_materials => (Cow::Owned(tri_material), (0..material_count).map(id_color).collect()),
+        None => (Cow::Borrowed(&tri_part), (0..part_count).map(id_color).collect()),
     };
     let mut id_regions: Vec<IdRegion> = ids
         .iter()
         .map(|c| IdRegion { color: [c[0], c[1], c[2]], triangles: 0, min: [f32::MAX; 3], max: [f32::MIN; 3] })
         .collect();
     for (t, tri) in indices.chunks_exact(3).enumerate() {
+        if t.is_multiple_of(8192) {
+            check_prepare_cancelled(cancel)?;
+        }
         let r = &mut id_regions[tri_id[t] as usize];
         r.triangles += 1;
         for &v in tri {
@@ -1176,35 +1351,48 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
         }
     }
 
-    let tris: Vec<[Vec3; 3]> =
-        indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]].map(|i| positions[i as usize])).collect();
-    let bvh = Bvh::build(tris);
+    // Baking needs node bounds and triangle order, not a second CPU triangle
+    // array. Build those directly from the source indices.
+    check_prepare_cancelled(cancel)?;
+    let (bvh_nodes, bvh_order) = Bvh::build_ordered(&positions, &indices);
+    check_prepare_cancelled(cancel)?;
 
     // Curvature comes from the source mesh's vertices (see
     // `vertex_curvature`) and rides in the normal's w.
     let curvature = vertex_curvature(&positions, &normals, &indices, 1.0 / settings.curvature_scale_for(low).max(1e-6));
-    let mut tri_pos = Vec::with_capacity(bvh.order.len() * 3);
-    let mut tri_nrm = Vec::with_capacity(bvh.order.len() * 3);
-    let mut tri_vcolor = Vec::with_capacity(bvh.order.len() * 3);
-    for &t in &bvh.order {
+    check_prepare_cancelled(cancel)?;
+    let mut bake_triangles = Vec::with_capacity(bvh_order.len());
+    // Flat mesh-part/material IDs come from the compact palette. Only true
+    // vertex-color mode retains a separate per-corner color payload.
+    let has_vertex_colors = settings.id_source == IdSource::VertexColors && tri_vertex_color.as_ref().is_some_and(|colors| !colors.is_empty());
+    let mut tri_vcolor = if has_vertex_colors { Vec::with_capacity(bvh_order.len() * 3) } else { Vec::new() };
+    for (i, &t) in bvh_order.iter().enumerate() {
+        if i.is_multiple_of(8192) {
+            check_prepare_cancelled(cancel)?;
+        }
         let t = t as usize;
-        // Per-triangle attributes ride in the w components: part index, ID
-        // index, name group.
-        let w = [f32::from_bits(tri_part[t]), f32::from_bits(tri_id[t]), f32::from_bits(src_group[t])];
-        let flat_id = ids.get(tri_id[t] as usize).copied().unwrap_or([0.5, 0.5, 0.5, 1.0]);
-        for (k, &v) in indices[t * 3..t * 3 + 3].iter().enumerate() {
-            let p = positions[v as usize];
-            let n = normals[v as usize];
-            tri_pos.push([p.x, p.y, p.z, w[k]]);
-            tri_nrm.push([n.x, n.y, n.z, curvature.get(v as usize).copied().unwrap_or(0.0)]);
-            let color = if settings.id_source == IdSource::VertexColors {
-                tri_vertex_color.as_ref().and_then(|colors| colors.get(t)).map(|tri| tri[k])
+        let tri = &indices[t * 3..t * 3 + 3];
+        bake_triangles.push(BakeTriangle {
+            indices: [tri[0], tri[1], tri[2]],
+            metadata: [tri_part[t], tri_id[t], src_group.get(t).copied().unwrap_or(0)],
+        });
+        if has_vertex_colors {
+            let flat_id = ids.get(tri_id[t] as usize).copied().unwrap_or([0.5, 0.5, 0.5, 1.0]);
+            for k in 0..3 {
+                let color = tri_vertex_color.as_ref().and_then(|colors| colors.get(t)).map(|tri| tri[k])
                     .map(|rgb| [rgb[0] as f32 / 255.0, rgb[1] as f32 / 255.0, rgb[2] as f32 / 255.0, 1.0])
-                    .unwrap_or(flat_id)
-            } else { flat_id };
-            tri_vcolor.push(color);
+                    .unwrap_or(flat_id);
+                tri_vcolor.push(color);
+            }
         }
     }
+    // These source payloads have been reduced to the final GPU arrays/palette.
+    // Release them before feature-edge construction allocates its own scratch.
+    drop(tri_id);
+    drop(tri_color);
+    drop(tri_vertex_color);
+    drop(src_group);
+
     // A low poly's interpolated normals give unreliable texel curvature, so
     // its bevels come from the mesh too. High polys keep texel curvature,
     // which follows their real surface detail.
@@ -1217,19 +1405,48 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
     // traced every bent triangle edge of a dense mesh, which showed as
     // staircases and scalloped mask borders.
     let low_only = settings.high_poly.is_none();
-    let [convex, concave] = feature_edges(&positions, &indices, &tri_part, settings.hard_edge_angle, None, low_only.then_some(&normals[..]));
+    check_prepare_cancelled(cancel)?;
+    let [convex, concave] = feature_edges_cancellable(
+        &positions, &indices, &tri_part, settings.hard_edge_angle, None,
+        low_only.then_some(&normals[..]), cancel,
+    )?;
+    check_prepare_cancelled(cancel)?;
+    // The remaining preparation stages use only packed data and the original low mesh.
+    drop(tri_part);
     let edge_seed_curvature = bevels.unwrap_or(0.0);
     let hard_edge_count = convex.iter().chain(&concave).filter(|s| s.half_width <= 0.0).count();
     let (seg_nodes, segs, edge_roots) = pack_segments([convex, concave]);
+
+    // Materialize one packed record per source vertex, not one per triangle
+    // corner. Defer this until feature-edge preparation has released its
+    // scratch arrays, then discard the source CPU arrays immediately.
+    let mut bake_vertices = Vec::with_capacity(positions.len());
+    for (i, p) in positions.iter().enumerate() {
+        if i.is_multiple_of(16384) {
+            check_prepare_cancelled(cancel)?;
+        }
+        let n = normals.get(i).copied().unwrap_or(Vec3::ZERO);
+        bake_vertices.push(BakeVertex {
+            position: [p.x, p.y, p.z],
+            normal_curvature: [n.x, n.y, n.z, curvature.get(i).copied().unwrap_or(0.0)],
+        });
+    }
+    drop(curvature);
+    drop(positions);
+    drop(normals);
+    drop(indices);
 
     // Baking the low poly alone, every texel already lies on a known low-poly
     // triangle. The raster records it (as the BVH slot, in the tangent w,
     // whose sign stays the handedness) so the surface pass never has to search
     // for it: a search ray at a seam where parts intersect can land on the
     // other part. f32 holds slots exactly below 2^24.
-    let low_corners = (settings.high_poly.is_none() && bvh.order.len() < (1 << 24) - 2).then(|| {
-        let mut corners = Vec::with_capacity(bvh.order.len() * 3);
-        for (slot, &t) in bvh.order.iter().enumerate() {
+    let low_corners = if settings.high_poly.is_none() && bvh_order.len() < (1 << 24) - 2 {
+        let mut corners = Vec::with_capacity(bvh_order.len() * 3);
+        for (slot, &t) in bvh_order.iter().enumerate() {
+            if slot.is_multiple_of(8192) {
+                check_prepare_cancelled(cancel)?;
+            }
             if !raster.contains(&t) {
                 continue;
             }
@@ -1239,19 +1456,23 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
                 corners.push(v);
             }
         }
-        corners
-    });
+        Some(corners)
+    } else {
+        None
+    };
 
-    let mut nodes = Vec::with_capacity(bvh.nodes.len() * 2);
-    for n in &bvh.nodes {
+    check_prepare_cancelled(cancel)?;
+    let mut nodes = Vec::with_capacity(bvh_nodes.len() * 2);
+    for n in &bvh_nodes {
         nodes.push([n.min.x, n.min.y, n.min.z, f32::from_bits(n.first)]);
         nodes.push([n.max.x, n.max.y, n.max.z, f32::from_bits(n.count)]);
     }
 
+    check_prepare_cancelled(cancel)?;
     Ok(PreparedScene {
         nodes,
-        tri_pos,
-        tri_nrm,
+        bake_vertices,
+        bake_triangles,
         tri_vcolor,
         parts,
         ids,
@@ -1261,7 +1482,7 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
         hard_edges: hard_edge_count,
         edge_max_distance,
         curvature_scale: settings.curvature_scale_for(low),
-        triangles: indices.len() / 3,
+        triangles: triangle_count,
         part_count: part_count as usize,
         id_regions,
         source,
@@ -1425,6 +1646,92 @@ enum Entry {
     StorageTex(F),
 }
 
+struct SceneUploads {
+    nodes: wgpu::Buffer,
+    bake_vertices: wgpu::Buffer,
+    bake_triangles: wgpu::Buffer,
+    tri_vcolor: wgpu::Buffer,
+    parts: wgpu::Buffer,
+    ids: wgpu::Buffer,
+    seg_nodes: wgpu::Buffer,
+    segs: wgpu::Buffer,
+    low_corners: Option<(wgpu::Buffer, usize)>,
+    low_draws: Option<(wgpu::Buffer, Vec<(u32, u32, u32)>)>,
+    cage: Option<wgpu::Buffer>,
+}
+
+impl SceneUploads {
+    fn vertex(device: &wgpu::Device, label: &str, vertices: &[crate::mesh::Vertex]) -> wgpu::Buffer {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::cast_slice(vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        })
+    }
+
+    fn vertex_owned(device: &wgpu::Device, label: &str, vertices: Vec<crate::mesh::Vertex>) -> wgpu::Buffer {
+        Self::vertex(device, label, &vertices)
+    }
+
+    fn indices(device: &wgpu::Device, label: &str, indices: &[u32]) -> wgpu::Buffer {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::cast_slice(indices),
+            usage: wgpu::BufferUsages::INDEX,
+        })
+    }
+
+    fn indices_owned(device: &wgpu::Device, label: &str, indices: Vec<u32>) -> wgpu::Buffer {
+        Self::indices(device, label, &indices)
+    }
+
+    fn borrowed(device: &wgpu::Device, scene: &PreparedScene) -> Self {
+        let low_corners = scene.low_corners.as_ref().map(|vertices| {
+            (Self::vertex(device, "bake low corners", vertices), vertices.len())
+        });
+        let low_draws = scene.low_draws.as_ref().map(|(sorted, draws)| {
+            (Self::indices(device, "bake low by group", sorted), draws.clone())
+        });
+        let cage = scene.cage.as_ref().map(|vertices| Self::vertex(device, "cage", vertices));
+        Self {
+            nodes: GpuBaker::storage(device, "bvh nodes", &scene.nodes),
+            bake_vertices: GpuBaker::storage(device, "bake source vertices", &scene.bake_vertices),
+            bake_triangles: GpuBaker::storage(device, "bake triangle indices and metadata", &scene.bake_triangles),
+            tri_vcolor: GpuBaker::storage(device, "tri vertex colors", &scene.tri_vcolor),
+            parts: GpuBaker::storage(device, "parts", &scene.parts),
+            ids: GpuBaker::storage(device, "ids", &scene.ids),
+            seg_nodes: GpuBaker::storage(device, "edge bvh nodes", &scene.seg_nodes),
+            segs: GpuBaker::storage(device, "edge segments", &scene.segs),
+            low_corners,
+            low_draws,
+            cage,
+        }
+    }
+
+    /// Moves each large CPU array into a short-lived upload call. The source
+    /// vector is dropped as soon as its GPU buffer has been initialized, rather
+    /// than keeping every prepared array alive until the entire start pass ends.
+    fn owned(device: &wgpu::Device, scene: &mut PreparedScene) -> Self {
+        let nodes = GpuBaker::storage(device, "bvh nodes", &std::mem::take(&mut scene.nodes));
+        let bake_vertices = GpuBaker::storage(device, "bake source vertices", &std::mem::take(&mut scene.bake_vertices));
+        let bake_triangles = GpuBaker::storage(device, "bake triangle indices and metadata", &std::mem::take(&mut scene.bake_triangles));
+        let tri_vcolor = GpuBaker::storage(device, "tri vertex colors", &std::mem::take(&mut scene.tri_vcolor));
+        let parts = GpuBaker::storage(device, "parts", &std::mem::take(&mut scene.parts));
+        let ids = GpuBaker::storage(device, "ids", &std::mem::take(&mut scene.ids));
+        let seg_nodes = GpuBaker::storage(device, "edge bvh nodes", &std::mem::take(&mut scene.seg_nodes));
+        let segs = GpuBaker::storage(device, "edge segments", &std::mem::take(&mut scene.segs));
+        let low_corners = scene.low_corners.take().map(|vertices| {
+            let count = vertices.len();
+            (Self::vertex_owned(device, "bake low corners", vertices), count)
+        });
+        let low_draws = scene.low_draws.take().map(|(sorted, draws)| {
+            (Self::indices_owned(device, "bake low by group", sorted), draws)
+        });
+        let cage = scene.cage.take().map(|vertices| Self::vertex_owned(device, "cage", vertices));
+        Self { nodes, bake_vertices, bake_triangles, tri_vcolor, parts, ids, seg_nodes, segs, low_corners, low_draws, cage }
+    }
+}
+
 pub struct GpuBaker {
     uv: wgpu::RenderPipeline,
     dilate: wgpu::RenderPipeline,
@@ -1465,8 +1772,8 @@ pub struct BakeRun {
     /// The custom map textures, four maps each, and each one's settings.
     custom: Vec<(Tex, [[f32; 4]; CUSTOM_PER_TEXTURE * 3])>,
     nodes: wgpu::Buffer,
-    tri_pos: wgpu::Buffer,
-    tri_nrm: wgpu::Buffer,
+    bake_vertices: wgpu::Buffer,
+    bake_triangles: wgpu::Buffer,
     seg_nodes: wgpu::Buffer,
     segs: wgpu::Buffer,
     /// Ray-traced tiles: x, y and the pass (0 occlusion, 1 custom maps).
@@ -1711,9 +2018,9 @@ impl GpuBaker {
         })
     }
 
-    fn storage(device: &wgpu::Device, label: &str, data: &[[f32; 4]]) -> wgpu::Buffer {
-        // Empty storage bindings are invalid; keep at least one element.
-        let fallback = [[0.0f32; 4]];
+    fn storage<T: bytemuck::Pod>(device: &wgpu::Device, label: &str, data: &[T]) -> wgpu::Buffer {
+        // Empty storage bindings are invalid; keep one zeroed element.
+        let fallback = [T::zeroed()];
         let data = if data.is_empty() { &fallback[..] } else { data };
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
@@ -1785,6 +2092,39 @@ impl GpuBaker {
         settings: &BakeSettings,
         res: u32,
     ) -> BakeRun {
+        let uploads = SceneUploads::borrowed(device, scene);
+        self.start_uploaded(device, queue, mesh, scene, settings, res, uploads)
+    }
+
+    /// Bake a prepared scene that can release its CPU arrays after each upload.
+    /// Live preview uses start because it keeps its prepared scene cached.
+    pub fn start_owned(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        mesh: &GpuMesh,
+        scene: &mut PreparedScene,
+        settings: &BakeSettings,
+        res: u32,
+    ) -> BakeRun {
+        let uploads = SceneUploads::owned(device, scene);
+        self.start_uploaded(device, queue, mesh, scene, settings, res, uploads)
+    }
+
+    fn start_uploaded(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        mesh: &GpuMesh,
+        scene: &PreparedScene,
+        settings: &BakeSettings,
+        res: u32,
+        uploads: SceneUploads,
+    ) -> BakeRun {
+        let SceneUploads {
+            nodes, bake_vertices, bake_triangles, tri_vcolor, parts, ids, seg_nodes, segs,
+            low_corners, low_draws, cage: cage_vertices,
+        } = uploads;
         let res = res.min(MAX_BAKE_RES);
         let usage = LAYER_USAGE | wgpu::TextureUsages::STORAGE_BINDING;
         let t = |label: &str, f: F| Tex::new(device, label, res, res, f, usage);
@@ -1798,25 +2138,15 @@ impl GpuBaker {
             let mut pass = gpu::pass(&mut encoder, "bake uv", &att);
             pass.set_pipeline(&self.uv);
             pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-            match (&scene.low_corners, &scene.low_draws) {
+            match (&low_corners, &low_draws) {
                 // The low poly alone: one vertex per corner, carrying its triangle.
-                (Some(corners), _) => {
-                    let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("bake low corners"),
-                        contents: bytemuck::cast_slice(corners),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
+                (Some((vertices, count)), _) => {
                     pass.set_vertex_buffer(0, vertices.slice(..));
-                    pass.draw(0..corners.len() as u32, 0..1);
+                    pass.draw(0..*count as u32, 0..1);
                 }
-                // Each name group draws as instance `group`, which the shader
+                // Each name group draws as instance group, which the shader
                 // records per texel.
-                (None, Some((sorted, draws))) => {
-                    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("bake low by group"),
-                        contents: bytemuck::cast_slice(sorted),
-                        usage: wgpu::BufferUsages::INDEX,
-                    });
+                (None, Some((index_buffer, draws))) => {
                     pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                     for &(first, count, group) in draws {
                         pass.draw_indexed(first..first + count, 0, group..group + 1);
@@ -1844,13 +2174,8 @@ impl GpuBaker {
         }
 
         // The cage, rasterized at the low poly's UVs and dilated the same way.
-        let cage = scene.cage.as_ref().map(|corners| {
+        let cage = cage_vertices.as_ref().map(|vertices| {
             let set = [t("cage pos", F::Rgba32Float), t("cage nrm", F::Rgba16Float), t("cage tan", F::Rgba32Float)];
-            let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("cage"),
-                contents: bytemuck::cast_slice(corners),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
             {
                 let clear = wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT);
                 let att: Vec<_> = set.iter().map(|t| gpu::color_attachment(&t.view, clear)).collect();
@@ -1898,14 +2223,6 @@ impl GpuBaker {
             cust: [[0.0; 4]; CUSTOM_PER_TEXTURE * 3],
         };
         let ubuf = Self::uniform_buffer(device, &uniform);
-        let nodes = Self::storage(device, "bvh nodes", &scene.nodes);
-        let tri_pos = Self::storage(device, "tri positions", &scene.tri_pos);
-        let tri_nrm = Self::storage(device, "tri normals", &scene.tri_nrm);
-        let tri_vcolor = Self::storage(device, "tri vertex colors", &scene.tri_vcolor);
-        let parts = Self::storage(device, "parts", &scene.parts);
-        let ids = Self::storage(device, "ids", &scene.ids);
-        let seg_nodes = Self::storage(device, "edge bvh nodes", &scene.seg_nodes);
-        let segs = Self::storage(device, "edge segments", &scene.segs);
         let counters = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("bake counters"),
             contents: bytemuck::cast_slice(&[0u32, 0u32, 0u32]),
@@ -1934,8 +2251,8 @@ impl GpuBaker {
                 (2, v(&low[1])),
                 (3, v(&low[2])),
                 (4, nodes.as_entire_binding()),
-                (5, tri_pos.as_entire_binding()),
-                (6, tri_nrm.as_entire_binding()),
+                (5, bake_vertices.as_entire_binding()),
+                (6, bake_triangles.as_entire_binding()),
                 (7, parts.as_entire_binding()),
                 (39, tri_vcolor.as_entire_binding()),
                 (8, ids.as_entire_binding()),
@@ -1972,7 +2289,7 @@ impl GpuBaker {
             edge_max_distance: scene.edge_max_distance,
             id_regions: scene.id_regions.clone(),
             matched_names: scene.matched_names,
-            used_cage: scene.cage.is_some(),
+            used_cage: cage_vertices.is_some(),
             baked: settings.baked_maps(),
             custom: settings.baked_custom().iter().map(|c| c.id).collect(),
             from_cache: false,
@@ -2026,8 +2343,8 @@ impl GpuBaker {
             maps: Some(maps),
             custom,
             nodes,
-            tri_pos,
-            tri_nrm,
+            bake_vertices,
+            bake_triangles,
             seg_nodes,
             segs,
             tiles,
@@ -2063,8 +2380,8 @@ impl GpuBaker {
                         (0, ubuf.as_entire_binding()),
                         (1, v(&run.low[0])),
                         (4, run.nodes.as_entire_binding()),
-                        (5, run.tri_pos.as_entire_binding()),
-                        (6, run.tri_nrm.as_entire_binding()),
+                        (5, run.bake_vertices.as_entire_binding()),
+                        (6, run.bake_triangles.as_entire_binding()),
                         (13, v(&run.surf_pos)),
                         (14, v(&run.surf_nrm)),
                         (15, v(&run.occ)),
@@ -2085,8 +2402,8 @@ impl GpuBaker {
                         (0, ubuf.as_entire_binding()),
                         (1, v(&run.low[0])),
                         (4, run.nodes.as_entire_binding()),
-                        (5, run.tri_pos.as_entire_binding()),
-                        (6, run.tri_nrm.as_entire_binding()),
+                        (5, run.bake_vertices.as_entire_binding()),
+                        (6, run.bake_triangles.as_entire_binding()),
                         (13, v(&run.surf_pos)),
                         (14, v(&run.surf_nrm)),
                         (28, v(&run.surf_geo)),
@@ -2303,6 +2620,28 @@ pub(crate) mod tests {
     use glam::Vec2;
     use std::path::Path;
 
+    #[test]
+    fn compact_triangle_bevel_storage_preserves_edge_order() {
+        let mut edges = TriangleBevelEdges::default();
+        assert_eq!(edges.iter().count(), 0);
+        edges.push((4, 9));
+        edges.push((2, 7));
+        edges.push((1, 3));
+        assert_eq!(edges.iter().collect::<Vec<_>>(), vec![(4, 9), (2, 7), (1, 3)]);
+    }
+
+    #[test]
+    fn weld_groups_keeps_position_and_split_normal_equivalence() {
+        let positions = [Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::X];
+        let normals = [
+            Vec3::Z,
+            Vec3::new(0.0, 0.001, 1.0).normalize(),
+            Vec3::Y,
+            Vec3::Z,
+        ];
+        assert_eq!(weld_groups(&positions, &normals), vec![0, 0, 1, 2]);
+    }
+
     /// Distance from p to the nearest convex feature, as the edge bake measures it.
     fn edge_distance(segs: &[EdgeSeg], p: Vec3) -> f32 {
         segs.iter()
@@ -2313,6 +2652,49 @@ pub(crate) mod tests {
                 (p.distance(a + e * t) - s.half_width.max(0.0)).max(0.0)
             })
             .fold(f32::MAX, f32::min)
+    }
+
+    #[test]
+    fn cancelled_bake_preparation_exits_before_work() {
+        let mesh = Primitive::RoundedCube.build();
+        let settings = BakeSettings::default();
+        let cancel = AtomicBool::new(true);
+        let result = prepare_cancellable(&mesh, &settings, 0, &cancel);
+        assert!(matches!(result, Err(message) if message == "Bake preparation cancelled"));
+    }
+
+    #[test]
+    fn indexed_bake_payload_preserves_triangles_and_reduces_common_case_storage() {
+        let mesh = Primitive::Sphere.build();
+        let scene = prepare(&mesh, &BakeSettings::default(), 0).expect("prepare indexed source");
+        assert_eq!(scene.bake_vertices.len(), mesh.vertices.len());
+        assert_eq!(scene.bake_triangles.len(), mesh.indices.len() / 3);
+        assert_eq!(std::mem::size_of::<BakeVertex>(), 28);
+        assert_eq!(std::mem::size_of::<BakeTriangle>(), 24);
+
+        let mut source: Vec<[u32; 3]> = mesh.indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect();
+        let mut packed: Vec<[u32; 3]> = scene.bake_triangles.iter().map(|t| [t.indices[0], t.indices[1], t.indices[2]]).collect();
+        source.sort_unstable();
+        packed.sort_unstable();
+        assert_eq!(packed, source, "BVH ordering must preserve each source triangle exactly");
+
+        for (i, vertex) in scene.bake_vertices.iter().enumerate() {
+            assert_eq!(&vertex.position[..3], &mesh.vertices[i].pos);
+            assert_eq!(&vertex.normal_curvature[..3], &mesh.vertices[i].normal);
+            assert!(vertex.normal_curvature[3].is_finite());
+        }
+        assert!(scene.bake_triangles.iter().all(|t| t.metadata[0] < scene.part_count as u32));
+
+        // Old payload: 3 corners * 2 vec4 values per triangle = 96 bytes/T.
+        // Indexed payload: one 28-byte record per vertex and 24 bytes per triangle.
+        let expanded = scene.bake_triangles.len() * 96;
+        let indexed = scene.bake_vertices.len() * 28 + scene.bake_triangles.len() * 24;
+        println!(
+            "  indexed Bake payload: {} vertices, {} triangles; {indexed} bytes vs {expanded} expanded bytes ({:.1}% less)",
+            scene.bake_vertices.len(), scene.bake_triangles.len(),
+            (1.0 - indexed as f64 / expanded.max(1) as f64) * 100.0,
+        );
+        assert!(indexed < expanded, "sphere source should benefit from shared vertex indexing ({indexed} >= {expanded})");
     }
 
     #[test]
@@ -2509,10 +2891,23 @@ pub(crate) mod tests {
         settings: &BakeSettings,
         res: u32,
     ) -> (BakedMaps, Arc<BakeReport>, Tex) {
-        let scene = prepare(mesh, settings, 0).expect("bake source");
+        let mut scene = prepare(mesh, settings, 0).expect("bake source");
         let baker = GpuBaker::new(device);
         let ctx = egui::Context::default();
-        let mut run = baker.start(device, queue, gpu_mesh, &scene, settings, res);
+        let mut run = baker.start_owned(device, queue, gpu_mesh, &mut scene, settings, res);
+        // The owned upload path must release every large CPU payload as soon
+        // as its corresponding GPU buffer has been created.
+        assert!(scene.nodes.is_empty());
+        assert!(scene.bake_vertices.is_empty());
+        assert!(scene.bake_triangles.is_empty());
+        assert!(scene.tri_vcolor.is_empty());
+        assert!(scene.parts.is_empty());
+        assert!(scene.ids.is_empty());
+        assert!(scene.seg_nodes.is_empty());
+        assert!(scene.segs.is_empty());
+        assert!(scene.low_corners.is_none());
+        assert!(scene.low_draws.is_none());
+        assert!(scene.cage.is_none());
         let maps = loop {
             if let Some(maps) = baker.pump(&mut run, device, queue, &ctx) {
                 break maps;
@@ -2695,6 +3090,21 @@ pub(crate) mod tests {
         }
     }
 
+    /// The usual Mesh Parts mode must use the compact ID palette, not
+    /// allocate one RGBA value for every triangle corner.
+    #[test]
+    #[ignore]
+    fn mesh_part_ids_use_palette_without_corner_colors() {
+        let (device, queue) = gpu();
+        let mesh = Primitive::RoundedCube.build();
+        let settings = BakeSettings::default();
+        let scene = prepare(&mesh, &settings, 0).expect("prepare low-poly scene");
+        assert!(scene.tri_vcolor.is_empty(), "flat IDs should not allocate per-corner colors");
+        drop(scene);
+        let gpu_mesh = GpuMesh::new(&device, &mesh);
+        let _ = run_bake(&device, &queue, &mesh, &gpu_mesh, &settings, 16);
+    }
+
     /// Low-poly-only bakes of the built-in meshes plus any in MP_BAKE_TEST.
     #[test]
     #[ignore]
@@ -2722,10 +3132,10 @@ pub(crate) mod tests {
 
     fn project(device: &wgpu::Device, queue: &wgpu::Queue, mesh: &Mesh, settings: &BakeSettings, res: u32) -> Projected {
         let gpu_mesh = GpuMesh::new(device, mesh);
-        let scene = prepare(mesh, settings, 0).expect("bake source");
+        let mut scene = prepare(mesh, settings, 0).expect("bake source");
         let baker = GpuBaker::new(device);
         let ctx = egui::Context::default();
-        let mut run = baker.start(device, queue, &gpu_mesh, &scene, settings, res);
+        let mut run = baker.start_owned(device, queue, &gpu_mesh, &mut scene, settings, res);
         let maps = loop {
             if let Some(maps) = baker.pump(&mut run, device, queue, &ctx) {
                 break maps;

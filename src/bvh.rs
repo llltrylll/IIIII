@@ -76,38 +76,110 @@ fn area(min: Vec3, max: Vec3) -> f32 {
     2.0 * (e.x * e.y + e.y * e.z + e.z * e.x)
 }
 
+/// Per-triangle bounds used by the BVH builder. The centroid is derived
+/// from the bounds so the builder does not retain another Vec3 per triangle.
+#[derive(Clone, Copy)]
+struct TriangleBounds {
+    min: Vec3,
+    max: Vec3,
+}
+
+impl TriangleBounds {
+    #[inline]
+    fn centroid(self) -> Vec3 {
+        (self.min + self.max) * 0.5
+    }
+}
+
 impl Bvh {
     pub fn from_mesh(mesh: &Mesh) -> Bvh {
-        let tris = mesh
-            .indices
-            .chunks_exact(3)
-            .map(|t| [t[0], t[1], t[2]].map(|i| Vec3::from_array(mesh.vertices[i as usize].pos)))
-            .collect();
-        Bvh::build(tris)
+        let triangle_count = mesh.indices.len() / 3;
+        let mut bounds = Vec::with_capacity(triangle_count);
+        for triangle in mesh.indices.chunks_exact(3) {
+            let p0 = Vec3::from_array(mesh.vertices[triangle[0] as usize].pos);
+            let p1 = Vec3::from_array(mesh.vertices[triangle[1] as usize].pos);
+            let p2 = Vec3::from_array(mesh.vertices[triangle[2] as usize].pos);
+            bounds.push(TriangleBounds { min: p0.min(p1).min(p2), max: p0.max(p1).max(p2) });
+        }
+        let (nodes, order) = Self::build_bounds(bounds);
+        let mut tris = Vec::with_capacity(order.len());
+        for &triangle in &order {
+            let base = triangle as usize * 3;
+            tris.push([0, 1, 2].map(|corner| {
+                Vec3::from_array(mesh.vertices[mesh.indices[base + corner] as usize].pos)
+            }));
+        }
+        Bvh { nodes, order, tris }
     }
 
     /// Over the mesh triangles `keep` accepts (hits still report mesh triangle indices).
+    /// Only the final leaf-order triangle data is materialized; source-order
+    /// triangles are never duplicated into a temporary Vec.
     pub fn from_mesh_where(mesh: &Mesh, keep: impl Fn(usize) -> bool) -> Bvh {
         let ids: Vec<u32> = (0..mesh.indices.len() / 3).filter(|&t| keep(t)).map(|t| t as u32).collect();
-        let tris = ids
-            .iter()
-            .map(|&t| {
-                let k = t as usize * 3;
-                [0, 1, 2].map(|c| Vec3::from_array(mesh.vertices[mesh.indices[k + c] as usize].pos))
-            })
-            .collect();
-        let mut bvh = Bvh::build(tris);
-        for o in &mut bvh.order {
-            *o = ids[*o as usize];
+        let mut bounds = Vec::with_capacity(ids.len());
+        for &triangle in &ids {
+            let base = triangle as usize * 3;
+            let p0 = Vec3::from_array(mesh.vertices[mesh.indices[base] as usize].pos);
+            let p1 = Vec3::from_array(mesh.vertices[mesh.indices[base + 1] as usize].pos);
+            let p2 = Vec3::from_array(mesh.vertices[mesh.indices[base + 2] as usize].pos);
+            bounds.push(TriangleBounds { min: p0.min(p1).min(p2), max: p0.max(p1).max(p2) });
         }
-        bvh
+        let (nodes, mut order) = Self::build_bounds(bounds);
+        for local in &mut order {
+            *local = ids[*local as usize];
+        }
+        drop(ids);
+        let mut tris = Vec::with_capacity(order.len());
+        for &triangle in &order {
+            let base = triangle as usize * 3;
+            tris.push([0, 1, 2].map(|corner| {
+                Vec3::from_array(mesh.vertices[mesh.indices[base + corner] as usize].pos)
+            }));
+        }
+        Bvh { nodes, order, tris }
     }
 
     pub fn build(tris: Vec<[Vec3; 3]>) -> Bvh {
-        let n = tris.len();
-        let bmin: Vec<Vec3> = tris.iter().map(|t| t[0].min(t[1]).min(t[2])).collect();
-        let bmax: Vec<Vec3> = tris.iter().map(|t| t[0].max(t[1]).max(t[2])).collect();
-        let cent: Vec<Vec3> = (0..n).map(|i| (bmin[i] + bmax[i]) * 0.5).collect();
+        let bounds: Vec<TriangleBounds> = tris
+            .iter()
+            .map(|t| TriangleBounds { min: t[0].min(t[1]).min(t[2]), max: t[0].max(t[1]).max(t[2]) })
+            .collect();
+        let (nodes, order) = Self::build_bounds(bounds);
+        let ordered_tris = order.iter().map(|&i| tris[i as usize]).collect();
+        Bvh { nodes, order, tris: ordered_tris }
+    }
+
+    /// Builds only the hierarchy and triangle order from indexed positions.
+    /// Baking needs these for GPU packing, not a second CPU copy of every
+    /// triangle in BVH order.
+    pub fn build_ordered(positions: &[Vec3], indices: &[u32]) -> (Vec<Node>, Vec<u32>) {
+        let n = indices.len() / 3;
+        let mut bounds = Vec::with_capacity(n);
+        for tri in indices.chunks_exact(3) {
+            let p0 = positions[tri[0] as usize];
+            let p1 = positions[tri[1] as usize];
+            let p2 = positions[tri[2] as usize];
+            bounds.push(TriangleBounds { min: p0.min(p1).min(p2), max: p0.max(p1).max(p2) });
+        }
+        Self::build_bounds(bounds)
+    }
+
+    /// Builds a traversable BVH directly from indexed positions. Only the
+    /// final triangles in BVH order are materialized, not a second source
+    /// triangle Vec that remains alive during hierarchy construction.
+    pub fn from_indexed(positions: &[Vec3], indices: &[u32]) -> Bvh {
+        let (nodes, order) = Self::build_ordered(positions, indices);
+        let mut tris = Vec::with_capacity(order.len());
+        for &triangle in &order {
+            let base = triangle as usize * 3;
+            tris.push([0, 1, 2].map(|corner| positions[indices[base + corner] as usize]));
+        }
+        Bvh { nodes, order, tris }
+    }
+
+    fn build_bounds(bounds: Vec<TriangleBounds>) -> (Vec<Node>, Vec<u32>) {
+        let n = bounds.len();
         let mut order: Vec<u32> = (0..n as u32).collect();
         let mut nodes = Vec::with_capacity(2 * n / MAX_LEAF as usize + 1);
         nodes.push(Node { min: Vec3::ZERO, max: Vec3::ZERO, first: 0, count: n as u32 });
@@ -118,11 +190,12 @@ impl Bvh {
             let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
             let (mut clo, mut chi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
             for &p in &order[first..first + count] {
-                let p = p as usize;
-                lo = lo.min(bmin[p]);
-                hi = hi.max(bmax[p]);
-                clo = clo.min(cent[p]);
-                chi = chi.max(cent[p]);
+                let bound = bounds[p as usize];
+                lo = lo.min(bound.min);
+                hi = hi.max(bound.max);
+                let center = bound.centroid();
+                clo = clo.min(center);
+                chi = chi.max(center);
             }
             nodes[ni].min = lo;
             nodes[ni].max = hi;
@@ -130,7 +203,8 @@ impl Bvh {
                 continue;
             }
 
-            // Binned SAH over all three axes.
+            // Binned SAH over all three axes. Centroids are derived from
+            // bounds on demand instead of retaining a third Vec3 per triangle.
             let ext = chi - clo;
             let mut best: Option<(f32, usize, usize)> = None;
             for axis in 0..3 {
@@ -141,11 +215,12 @@ impl Bvh {
                 let mut bcount = [0u32; BINS];
                 let mut bb = [(Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)); BINS];
                 for &p in &order[first..first + count] {
-                    let p = p as usize;
-                    let b = (((cent[p][axis] - clo[axis]) * scale) as usize).min(BINS - 1);
-                    bcount[b] += 1;
-                    bb[b].0 = bb[b].0.min(bmin[p]);
-                    bb[b].1 = bb[b].1.max(bmax[p]);
+                    let bound = bounds[p as usize];
+                    let center = bound.centroid();
+                    let bin = (((center[axis] - clo[axis]) * scale) as usize).min(BINS - 1);
+                    bcount[bin] += 1;
+                    bb[bin].0 = bb[bin].0.min(bound.min);
+                    bb[bin].1 = bb[bin].1.max(bound.max);
                 }
                 let mut left_area = [0.0f32; BINS];
                 let mut left_count = [0u32; BINS];
@@ -178,9 +253,9 @@ impl Bvh {
                     let scale = BINS as f32 / ext[axis];
                     let (mut i, mut j) = (first, first + count);
                     while i < j {
-                        let p = order[i] as usize;
-                        let b = (((cent[p][axis] - clo[axis]) * scale) as usize).min(BINS - 1);
-                        if b < split_bin {
+                        let center = bounds[order[i] as usize].centroid();
+                        let bin = (((center[axis] - clo[axis]) * scale) as usize).min(BINS - 1);
+                        if bin < split_bin {
                             i += 1;
                         } else {
                             j -= 1;
@@ -203,8 +278,7 @@ impl Bvh {
             stack.push(left + 1);
         }
 
-        let tris = order.iter().map(|&i| tris[i as usize]).collect();
-        Bvh { nodes, order, tris }
+        (nodes, order)
     }
 
     fn slab(min: Vec3, max: Vec3, o: Vec3, inv: Vec3, tmax: f32) -> bool {
@@ -353,6 +427,33 @@ mod tests {
         }
         assert_eq!(stack.pop(), Some(0));
         assert_eq!(stack.pop(), None);
+    }
+
+    #[test]
+    fn indexed_build_matches_triangle_build_without_materializing_triangles() {
+        let mesh = Primitive::Torus.build();
+        let positions: Vec<Vec3> = mesh.vertices.iter().map(|v| Vec3::from_array(v.pos)).collect();
+        let tris: Vec<[Vec3; 3]> = mesh.indices.chunks_exact(3)
+            .map(|t| [t[0], t[1], t[2]].map(|i| positions[i as usize]))
+            .collect();
+        let expected = Bvh::build(tris);
+        let (nodes, order) = Bvh::build_ordered(&positions, &mesh.indices);
+        assert_eq!(order, expected.order);
+        assert_eq!(nodes.len(), expected.nodes.len());
+        for (actual, expected) in nodes.iter().zip(&expected.nodes) {
+            assert_eq!(actual.min.to_array(), expected.min.to_array());
+            assert_eq!(actual.max.to_array(), expected.max.to_array());
+            assert_eq!(actual.first, expected.first);
+            assert_eq!(actual.count, expected.count);
+        }
+        let indexed = Bvh::from_indexed(&positions, &mesh.indices);
+        assert_eq!(indexed.order, expected.order);
+        assert_eq!(indexed.tris, expected.tris);
+        assert_eq!(indexed.nodes.len(), expected.nodes.len());
+        let from_mesh = Bvh::from_mesh(&mesh);
+        assert_eq!(from_mesh.order, expected.order);
+        assert_eq!(from_mesh.tris, expected.tris);
+        assert_eq!(from_mesh.nodes.len(), expected.nodes.len());
     }
 
     #[test]

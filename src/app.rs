@@ -85,7 +85,7 @@ enum Tool {
 struct CagePreview {
     show: bool,
     probe: Option<Arc<CageProbe>>,
-    job: Option<(ProbeKey, mpsc::Receiver<Result<CageProbe, String>>)>,
+    job: Option<(ProbeKey, mpsc::Receiver<Result<CageProbe, String>>, Arc<std::sync::atomic::AtomicBool>)>,
     /// A probe that failed, so it isn't retried until the inputs change.
     failed: Option<(ProbeKey, String)>,
     /// The distances (and painted cage) the overlay was built for.
@@ -332,7 +332,10 @@ struct LineAnchor {
 enum BakeJob {
     /// Worker thread is looking the bake up in the cache, or else loading the
     /// source and building the BVH.
-    Preparing(mpsc::Receiver<Result<Prepared, String>>),
+    Preparing {
+        rx: mpsc::Receiver<Result<Prepared, String>>,
+        cancel: Arc<std::sync::atomic::AtomicBool>,
+    },
     /// GPU passes in progress; the result is cached under the key.
     Running(BakeRun, bake_cache::Key),
 }
@@ -456,6 +459,13 @@ struct StrokeMeter {
     /// `stroke_step` calls since the last recomposition.
     steps_now: u32,
     steps_per_frame: Stat,
+    /// Number of brush stamps generated for each cursor segment.
+    brush_stamps_per_segment: Stat,
+    /// Requested spacing versus the spacing after the per-frame stamp safety cap.
+    brush_spacing_requested_px: Stat,
+    brush_spacing_effective_px: Stat,
+    /// Frames where a long cursor jump forced spacing above the brush setting.
+    brush_spacing_cap_frames: u32,
     /// CPU time spent mapping cursor samples to surface stamps.
     resolve_cpu: Stat,
     /// CPU time spent calculating the changed UV region before GPU submission.
@@ -464,6 +474,13 @@ struct StrokeMeter {
     begin_cpu: Stat,
     composite_cpu: Stat,
     end_cpu: Stat,
+    end_engine_cpu: Stat,
+    undo_push_cpu: Stat,
+    end_cleanup_cpu: Stat,
+    end_target_cpu: Stat,
+    end_snapshot_cpu: Stat,
+    end_submit_cpu: Stat,
+    end_thumbs_cpu: Stat,
     /// The recomposition right after letting go is still due.
     after_pending: bool,
     after_release_cpu: Stat,
@@ -471,6 +488,10 @@ struct StrokeMeter {
     gpu_apply: Stat,
     gpu_composite: Stat,
     gpu_composite_total: Stat,
+    gpu_composite_clear: Stat,
+    gpu_composite_body: Stat,
+    gpu_composite_slowest: Stat,
+    gpu_composite_slowest_label: String,
     /// Candidate screen triangles submitted to the UV raster pass (avg/peak).
     screen_candidate_triangles: Stat,
     /// Active texture-set triangle count while measuring Screen strokes.
@@ -529,19 +550,34 @@ impl StrokeMeter {
         let patch_percent = if texture_pixels == 0 { 0.0 } else { scissor_pixels as f64 * 100.0 / texture_pixels as f64 };
         let bbox_percent = if texture_pixels == 0 { 0.0 } else { bbox_pixels as f64 * 100.0 / texture_pixels as f64 };
         format!(
-            "F6 CPU avg/peak ms: steps/frame {}, resolve {}, region {}, stamp {}, begin {}, recomp {}, end {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {} | screen tris {}/{} | paint {:.1}%/{} scissors | composite {:.1}% (bbox {:.1}%, {} scissors) | stack {}L/{}F | masks {}h/{}m/{}p | since F6: full recomps {full}, thumbnails {thumbs}",
+            "F6 CPU avg/peak ms: steps/frame {}, brush stamps {}, spacing {:.1}/{:.1}px, spacing cap {}, resolve {}, region {}, stamp {}, begin {}, recomp {}, end {}, engine end {}, undo push {}, end cleanup {}, target {}, snapshot {}, submit {}, thumbs {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {}, clear {}, pass body {}, slowest pass {} {} | screen tris {}/{} | paint {:.1}%/{} scissors | composite {:.1}% (bbox {:.1}%, {} scissors) | stack {}L/{}F | masks {}h/{}m/{}p | since F6: full recomps {full}, thumbnails {thumbs}",
             self.steps_per_frame.text(),
+            self.brush_stamps_per_segment.text(),
+            if self.brush_spacing_requested_px.n == 0 { 0.0 } else { self.brush_spacing_requested_px.sum / f64::from(self.brush_spacing_requested_px.n) },
+            if self.brush_spacing_effective_px.n == 0 { 0.0 } else { self.brush_spacing_effective_px.sum / f64::from(self.brush_spacing_effective_px.n) },
+            self.brush_spacing_cap_frames,
             self.resolve_cpu.text(),
             self.region_cpu.text(),
             self.step_cpu.text(),
             self.begin_cpu.text(),
             self.composite_cpu.text(),
             self.end_cpu.text(),
+            self.end_engine_cpu.text(),
+            self.undo_push_cpu.text(),
+            self.end_cleanup_cpu.text(),
+            self.end_target_cpu.text(),
+            self.end_snapshot_cpu.text(),
+            self.end_submit_cpu.text(),
+            self.end_thumbs_cpu.text(),
             self.after_release_cpu.text(),
             self.gpu_stamp.text(),
             self.gpu_apply.text(),
             self.gpu_composite.text(),
             self.gpu_composite_total.text(),
+            self.gpu_composite_clear.text(),
+            self.gpu_composite_body.text(),
+            if self.gpu_composite_slowest_label.is_empty() { "-" } else { &self.gpu_composite_slowest_label },
+            self.gpu_composite_slowest.text(),
             self.screen_candidate_triangles.text(),
             self.screen_total_triangles,
             paint_percent,
@@ -662,6 +698,10 @@ pub struct PainterApp {
     /// The picture of an environment that just loaded.
     hdri_new_thumb: Option<(String, Vec<u8>)>,
     stroke: Option<StrokeInput>,
+    /// Reused cursor samples built while interpolating an active stroke.
+    stroke_raw_stamps: Vec<([f32; 4], f32)>,
+    /// Reused stamps after resolving projection and symmetry.
+    resolved_stamps: Vec<Stamp>,
     bake_settings: BakeSettings,
     bake_job: Option<BakeJob>,
     /// Compiled on demand when a mesh bake is actually requested.
@@ -697,10 +737,15 @@ pub struct PainterApp {
     welcome_tex: Option<egui::TextureHandle>,
     library: library_ui::LibraryUi,
     user_smarts: Vec<smart_io::UserSmart>,
+    /// Smart Material ZIP/PNG decoding is completed off-thread; egui textures
+    /// are created incrementally when the result reaches the UI thread.
+    user_smarts_job: Option<mpsc::Receiver<smart_io::UserSmartData>>,
     path: path_tool::PathTool,
     bake_preview: bake_live::LivePreview,
     custom_ui: bake_live::CustomUi,
     spp: spp_open::SppOpen,
+    /// CPU-side project parsing/decompression running away from the UI thread.
+    project_open: Option<project_io::OpenJob>,
     preview: preview_shader::PreviewShader,
     /// A crash report the last run left, shown once.
     crash_report: Option<std::path::PathBuf>,
@@ -773,7 +818,8 @@ struct CpuShelfPreview {
 /// CPU-only previews are generated away from PainterApp::new. The egui
 /// texture handles are created and updated only on the UI thread.
 fn start_cpu_shelf_previews(ctx: &egui::Context) -> mpsc::Receiver<CpuShelfPreview> {
-    let (tx, rx) = mpsc::channel();
+    // Back-pressure keeps generated RGBA previews from accumulating in RAM if the UI lags.
+    let (tx, rx) = mpsc::sync_channel(2);
     let ctx = ctx.clone();
     std::thread::Builder::new()
         .name("shelf-cpu-previews".into())
@@ -1038,7 +1084,25 @@ pub(crate) fn resolve_stamps(
     radius: f32,
     raw: &[([f32; 4], f32)],
 ) -> Vec<Stamp> {
-    let mut out = Vec::with_capacity(raw.len() * if symmetry > 0 { 2 } else { 1 });
+    let mut out = Vec::new();
+    resolve_stamps_into(mesh, bvh, triangle_range, cam, size, projection, symmetry, radius, raw, &mut out);
+    out
+}
+
+fn resolve_stamps_into(
+    mesh: &Mesh,
+    bvh: &Bvh,
+    triangle_range: std::ops::Range<u32>,
+    cam: &OrbitCam,
+    size: Vec2,
+    projection: BrushProjection,
+    symmetry: u8,
+    radius: f32,
+    raw: &[([f32; 4], f32)],
+    out: &mut Vec<Stamp>,
+) {
+    out.clear();
+    out.reserve(raw.len().saturating_mul(if symmetry > 0 { 2 } else { 1 }));
     let eye = cam.eye();
     let fwd = (cam.target - eye).normalize();
     let (right, _) = cam.basis();
@@ -1084,9 +1148,8 @@ pub(crate) fn resolve_stamps(
             out.push(m);
         }
     }
-    out
-}
 
+}
 fn grow(acc: Option<[f32; 4]>, lo: Vec2, hi: Vec2) -> [f32; 4] {
     match acc {
         Some(a) => [a[0].min(lo.x), a[1].min(lo.y), a[2].max(hi.x), a[3].max(hi.y)],
@@ -1446,7 +1509,8 @@ const HDRI_THUMB: [usize; 2] = [256, 128];
 /// from the on-disk cache when it has them (else decoding the HDRI and
 /// caching the picture), and sends them as they're ready.
 fn start_hdri_thumbs(ctx: &egui::Context, builtins: Vec<usize>) -> mpsc::Receiver<(String, Vec<u8>)> {
-    let (tx, rx) = mpsc::channel();
+    // At most two decoded RGBA thumbnails wait for UI-thread texture upload.
+    let (tx, rx) = mpsc::sync_channel(2);
     let ctx = ctx.clone();
     std::thread::spawn(move || {
         let dir = project_io::data_dir().map(|d| d.join("hdri_thumbs"));
@@ -2193,6 +2257,8 @@ impl PainterApp {
             }),
             hdri_new_thumb: None,
             stroke: None,
+            stroke_raw_stamps: Vec::new(),
+            resolved_stamps: Vec::new(),
             bake_settings: BakeSettings::default(),
             bake_job: None,
             baker: None,
@@ -2217,11 +2283,13 @@ impl PainterApp {
             show_welcome: false,
             welcome_tex: None,
             library: Default::default(),
-            user_smarts: { let _s = crate::startup_trace::span("new: smart_io::list"); smart_io::list(&cc.egui_ctx) },
+            user_smarts: Vec::new(),
+            user_smarts_job: Some({ let _s = crate::startup_trace::span("new: smart_io::list_async"); smart_io::list_async(&cc.egui_ctx) }),
             path: Default::default(),
             bake_preview: Default::default(),
             custom_ui: Default::default(),
             spp: Default::default(),
+            project_open: None,
             preview: Default::default(),
             crash_report: crate::crash::take_report(),
             frame_ms: 0.0,
@@ -2292,6 +2360,11 @@ impl PainterApp {
     /// Loads `mesh`, making its new texture sets at `sizes` (per set, in
     /// order) instead of the default size.
     fn load_mesh_sized(&mut self, mesh: Mesh, ctx: &egui::Context, sizes: &[u32]) {
+        let bvh = Arc::new(Bvh::from_mesh(&mesh));
+        self.load_mesh_sized_with_bvh(mesh, bvh, ctx, sizes, true);
+    }
+
+    fn load_mesh_sized_with_bvh(&mut self, mesh: Mesh, bvh: Arc<Bvh>, ctx: &egui::Context, sizes: &[u32], start_auto_bake: bool) {
         if self.stroke.is_some() {
             return;
         }
@@ -2301,7 +2374,7 @@ impl PainterApp {
         self.end_preview(false);
         self.gpu_mesh = GpuMesh::new(&self.rs.device, &mesh);
         self.views.invalidate_shadow();
-        self.bvh = Arc::new(Bvh::from_mesh(&mesh));
+        self.bvh = bvh;
         if let Some(raytracer) = self.raytracer.as_mut() {
             raytracer.set_mesh(&self.rs.device, &mesh, &self.bvh);
         }
@@ -2326,7 +2399,7 @@ impl PainterApp {
             self.bake_settings.cage_paint = None;
         }
         self.cam = OrbitCam { fov_y: self.cam.fov_y, ..OrbitCam::default() };
-        if self.prefs.bake_on_load {
+        if start_auto_bake && self.prefs.bake_on_load {
             self.start_bake_all(ctx);
         }
     }
@@ -2651,10 +2724,7 @@ impl PainterApp {
             Action::OpenSpp(path) => self.start_spp_open(path, ctx),
             Action::OpenProject(path) => {
                 if let Some(path) = path.or_else(Self::open_dialog) {
-                    if let Err(e) = self.open_project(&path, ctx) {
-                        self.status = e;
-                    }
-                    self.target = StrokeTarget::Content;
+                    self.start_open_project(&path, ctx);
                 }
             }
             Action::Exit => {
@@ -2693,9 +2763,7 @@ impl PainterApp {
         if let Some(recover) = choice {
             let path = self.recovery.take().expect("checked above");
             if recover {
-                if let Err(e) = self.open_project(&path, ctx) {
-                    self.status = e;
-                }
+                self.start_open_project(&path, ctx);
             } else {
                 project_io::remove_recovery(&path);
             }
@@ -3966,7 +4034,7 @@ impl PainterApp {
                 let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
                 ui.label(
                     egui::RichText::new(format!(
-                        "{}{:.1} ms (peak {:.0})  │  GPU est. {:.0} MB  │  Undo {:.1} MB RAM ({} steps)  │  {}²  │  {} tris",
+                        "{}{:.1} ms (peak {:.0})  │  GPU est. {:.0} MB  │  Undo {:.1}/{:.0} MB ({} steps)  │  {}²  │  {} tris",
                         if self.meter.on { format!("{}  │  ", self.meter.text(
                             self.engine.res,
                             self.engine.last_paint_scissor_pixels,
@@ -3984,6 +4052,7 @@ impl PainterApp {
                         self.frame_peak_ms,
                         mb(self.engine.vram_bytes() + self.sets.parked.iter().flatten().map(|p| p.engine.vram_bytes()).sum::<u64>()),
                         mb(self.undo.ram_bytes() as u64),
+                        mb(self.undo.max_ram_bytes as u64),
                         self.undo.undo.len(),
                         self.engine.res,
                         self.mesh.triangle_count(),
@@ -4803,7 +4872,7 @@ impl PainterApp {
     fn update_cage_preview(&mut self, ctx: &egui::Context) {
         self.apply_cage_action();
         let c = &mut self.cage_preview;
-        if let Some((key, rx)) = &c.job {
+        if let Some((key, rx, _cancel)) = &c.job {
             match rx.try_recv() {
                 Ok(Ok(probe)) => {
                     c.probe = Some(Arc::new(probe));
@@ -4820,6 +4889,9 @@ impl PainterApp {
         }
         // A cage only exists for high-poly bakes.
         if !(self.show_bake && c.show && self.bake_settings.high_poly.is_some()) {
+            if let Some((_, _, cancel)) = c.job.take() {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             if self.overlays.is_set(OverlaySlot::Cage) {
                 self.overlays.clear(OverlaySlot::Cage);
                 ctx.request_repaint();
@@ -4828,6 +4900,12 @@ impl PainterApp {
             return;
         }
         let key = ProbeKey::new(&self.mesh, &self.bake_settings);
+        if c.job.as_ref().is_some_and(|(active, _, _)| *active != key) {
+            if let Some((_, _, cancel)) = c.job.take() {
+                // Superseded previews must release their imported mesh and hit-test scratch.
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
         let current = c.probe.as_ref().is_some_and(|p| p.key == key);
         if !current {
             if self.overlays.is_set(OverlaySlot::Cage) {
@@ -4836,17 +4914,21 @@ impl PainterApp {
             }
             c.drawn = None;
             c.stats = None;
-            let running = c.job.as_ref().is_some_and(|(k, _)| *k == key);
+            let running = c.job.as_ref().is_some_and(|(k, _, _)| *k == key);
             let failed = c.failed.as_ref().is_some_and(|(k, _)| *k == key);
             if !running && !failed {
                 c.failed = None;
                 let (tx, rx) = mpsc::channel();
-                let (mesh, k, ctx) = (self.mesh.clone(), key.clone(), ctx.clone());
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let worker_cancel = Arc::clone(&cancel);
+                // self.mesh is an Arc<Mesh>; the worker shares it without
+                // cloning vertex/index/UV data from the active document.
+                let (mesh, k, ctx) = (Arc::clone(&self.mesh), key.clone(), ctx.clone());
                 std::thread::spawn(move || {
-                    let _ = tx.send(CageProbe::build(&mesh, k));
+                    let _ = tx.send(CageProbe::build_cancellable(&mesh, k, &worker_cancel));
                     ctx.request_repaint();
                 });
-                c.job = Some((key, rx));
+                c.job = Some((key, rx, cancel));
             }
             return;
         }
@@ -5125,15 +5207,23 @@ impl PainterApp {
         }
         let su = self.stamp_uniform(kind);
         let resolve_started = self.meter.on.then(Instant::now);
-        let stamps = match kind {
+        let mut stamps = std::mem::take(&mut self.resolved_stamps);
+        match kind {
             ViewKind::V3d => {
                 let [w, h] = self.views.view3d.size;
                 let radius = self.brush.size * 0.5 * self.ppp;
-                resolve_stamps(&self.mesh, &self.bvh, self.engine.triangles(), &self.cam, Vec2::new(w as f32, h as f32), self.brush.projection, self.brush.symmetry, radius, raw)
+                resolve_stamps_into(
+                    &self.mesh, &self.bvh, self.engine.triangles(), &self.cam,
+                    Vec2::new(w as f32, h as f32), self.brush.projection,
+                    self.brush.symmetry, radius, raw, &mut stamps,
+                );
             }
             // The 2D view is the texture: stamps land where they are drawn.
-            ViewKind::V2d => resolve_stamps(&self.mesh, &self.bvh, self.engine.triangles(), &self.cam, Vec2::ONE, BrushProjection::Screen, 0, 0.0, raw),
-        };
+            ViewKind::V2d => resolve_stamps_into(
+                &self.mesh, &self.bvh, self.engine.triangles(), &self.cam,
+                Vec2::ONE, BrushProjection::Screen, 0, 0.0, raw, &mut stamps,
+            ),
+        }
         if let Some(started) = resolve_started {
             self.meter.resolve_cpu.add(started.elapsed().as_secs_f64() * 1000.0);
         }
@@ -5243,45 +5333,65 @@ impl PainterApp {
             self.meter.steps_now += 1;
             self.meter.step_cpu.add(stamp_started.elapsed().as_secs_f64() * 1000.0);
         }
+        self.resolved_stamps = stamps;
     }
 
     fn continue_stroke(&mut self, at: Vec2) {
-        let Some(s) = &mut self.stroke else { return };
-        // Stabilizer: the brush follows the cursor on a string, only moving
-        // once the cursor pulls the string tight.
-        let string = self.brush.stabilize * self.ppp;
-        let pull = at - s.lazy;
-        if pull.length() > string {
-            s.lazy += pull * (1.0 - string / pull.length());
-        }
-        let at = s.lazy;
         let pressure = self.pressure;
-        let radius = self.brush.size * 0.5 * self.ppp * if self.brush.pressure_size { pressure.max(0.1) } else { 1.0 };
-        let mut step = (self.brush.spacing * radius * 2.0).max(1.0);
-        let delta = at - s.last;
-        let dist = delta.length();
-        if dist < step {
-            return;
-        }
-        // Keep each frame's stamp list bounded on very fast strokes.
-        let max = crate::engine::MAX_STAMPS as f32;
-        if dist / step > max {
-            step = dist / max;
-        }
-        let dir = delta / dist;
-        let mut points = Vec::new();
+        let (last, p0, kind, requested_step, step, dist, dir, spacing_capped) = {
+            let Some(s) = &mut self.stroke else { return };
+            // Stabilizer: the brush follows the cursor on a string, only moving
+            // once the cursor pulls the string tight.
+            let string = self.brush.stabilize * self.ppp;
+            let pull = at - s.lazy;
+            if pull.length() > string {
+                s.lazy += pull * (1.0 - string / pull.length());
+            }
+            let at = s.lazy;
+            let radius = self.brush.size * 0.5 * self.ppp
+                * if self.brush.pressure_size { pressure.max(0.1) } else { 1.0 };
+            let requested_step = (self.brush.spacing * radius * 2.0).max(1.0);
+            let mut step = requested_step;
+            let delta = at - s.last;
+            let dist = delta.length();
+            if dist < step {
+                return;
+            }
+            // Keep each input segment bounded. F6 reports whenever this
+            // safety cap increases the effective spacing.
+            let max = crate::engine::MAX_STAMPS as f32;
+            let spacing_capped = dist / step > max;
+            if spacing_capped {
+                step = dist / max;
+            }
+            (s.last, s.pressure, s.view, requested_step, step, dist, delta / dist, spacing_capped)
+        };
+
+        let mut raw = std::mem::take(&mut self.stroke_raw_stamps);
+        raw.clear();
+        raw.reserve((dist / step).floor().max(1.0) as usize);
         let mut travelled = step;
-        let p0 = s.pressure;
+        let mut last_pressure = p0;
         while travelled <= dist {
-            // Pressure eases from the last stamp's to the current one.
-            points.push((s.last + dir * travelled, p0 + (pressure - p0) * travelled / dist));
+            // Generate the raw stamp directly; no intermediate Vec of points.
+            last_pressure = p0 + (pressure - p0) * travelled / dist;
+            raw.push(self.make_stamp(last + dir * travelled, Some(dir), last_pressure));
             travelled += step;
         }
-        s.last += dir * (travelled - step);
-        s.pressure = points.last().map_or(p0, |p| p.1);
-        let kind = s.view;
-        let stamps: Vec<([f32; 4], f32)> = points.into_iter().map(|(p, pr)| self.make_stamp(p, Some(dir), pr)).collect();
-        self.paint_stamps(kind, &stamps);
+        if self.meter.on {
+            self.meter.brush_stamps_per_segment.add(raw.len() as f64);
+            self.meter.brush_spacing_requested_px.add(f64::from(requested_step));
+            self.meter.brush_spacing_effective_px.add(f64::from(step));
+            if spacing_capped {
+                self.meter.brush_spacing_cap_frames += 1;
+            }
+        }
+        if let Some(s) = self.stroke.as_mut() {
+            s.last = last + dir * (travelled - step);
+            s.pressure = last_pressure;
+        }
+        self.paint_stamps(kind, &raw);
+        self.stroke_raw_stamps = raw;
     }
 
     fn end_stroke(&mut self) {
@@ -5290,11 +5400,23 @@ impl PainterApp {
                 self.line_anchor = Some(LineAnchor { view: s.view, at: s.last, key: self.view_key(s.view) });
             }
             let ending = Instant::now();
-            if let Some(entry) = self.engine.end_stroke() {
+            let engine_ending = Instant::now();
+            let entry = self.engine.end_stroke();
+            let engine_ms = engine_ending.elapsed().as_secs_f64() * 1000.0;
+            let end_parts = self.engine.last_end_stages_ms;
+            let undo_started = Instant::now();
+            if let Some(entry) = entry {
                 self.undo.push("Paint stroke", crate::undo::Edit::Stroke(entry));
             }
             if self.meter.on {
                 self.meter.end_cpu.add(ending.elapsed().as_secs_f64() * 1000.0);
+                self.meter.end_engine_cpu.add(engine_ms);
+                self.meter.undo_push_cpu.add(undo_started.elapsed().as_secs_f64() * 1000.0);
+                self.meter.end_cleanup_cpu.add(end_parts[0]);
+                self.meter.end_target_cpu.add(end_parts[1]);
+                self.meter.end_snapshot_cpu.add(end_parts[2]);
+                self.meter.end_submit_cpu.add(end_parts[3]);
+                self.meter.end_thumbs_cpu.add(end_parts[4]);
                 self.meter.after_pending = true;
             }
         }
@@ -5347,8 +5469,10 @@ impl eframe::App for PainterApp {
         {
             let _s = crate::startup_trace::span("frame: async job polling");
             self.undo.update();
+            self.poll_user_smarts(&ctx);
             self.poll_bake(&ctx);
             self.poll_spp_open(&ctx);
+            self.poll_open_project(&ctx);
             self.update_preview(&ctx);
             self.poll_env();
             self.poll_hdri_thumbs(&ctx);
@@ -5625,3 +5749,117 @@ mod texture_set_stamp_resolution_tests {
         }
     }
 }
+
+
+#[cfg(test)]
+mod resolved_stamp_buffer_tests {
+    use super::*;
+    use crate::mesh::Primitive;
+    use std::ops::Range;
+
+    // Independent copy of the pre-buffering resolver. The comparison checks
+    // the exact output, not two calls through the new implementation.
+    fn previous_resolver(
+        mesh: &Mesh,
+        bvh: &Bvh,
+        triangle_range: &Range<u32>,
+        cam: &OrbitCam,
+        size: Vec2,
+        projection: BrushProjection,
+        symmetry: u8,
+        radius: f32,
+        raw: &[([f32; 4], f32)],
+    ) -> Vec<Stamp> {
+        let mut out = Vec::with_capacity(raw.len() * if symmetry > 0 { 2 } else { 1 });
+        let eye = cam.eye();
+        let fwd = (cam.target - eye).normalize();
+        let (right, _) = cam.basis();
+        let px_world = 2.0 * (cam.fov_y * 0.5).tan() / size.y.max(1.0);
+        let tangent = |n: Vec3, r: Vec3| {
+            (r - n * r.dot(n)).try_normalize().unwrap_or_else(|| n.any_orthonormal_vector())
+        };
+        for &(sample, flow) in raw {
+            let mut stamp: Stamp = [sample, [0.0; 4], [0.0; 4], [0.0; 4], [0.0, 0.0, flow, 0.0]];
+            if projection == BrushProjection::Screen {
+                out.push(stamp);
+                continue;
+            }
+            let (origin, direction) = cam.ray(Vec2::new(sample[0], sample[1]), size);
+            let Some(hit) = bvh.raycast_range(origin, direction, triangle_range) else { continue };
+            let r = radius * sample[2] * (hit.pos - eye).dot(fwd).max(1e-4) * px_world;
+            let (normal, uv, uv_scale) = surface_at(mesh, hit.tri, hit.bary);
+            let x = tangent(normal, right);
+            stamp[1] = hit.pos.extend(r).to_array();
+            stamp[2] = normal.extend(r * uv_scale).to_array();
+            stamp[3] = x.extend(0.0).to_array();
+            stamp[4] = [uv.x, uv.y, flow, 0.0];
+            out.push(stamp);
+            if symmetry > 0 {
+                let mut flip = Vec3::ONE;
+                flip[symmetry as usize - 1] = -1.0;
+                let (center, mirrored_normal) = (hit.pos * flip, normal * flip);
+                let mut mirrored = stamp;
+                mirrored[1] = center.extend(r).to_array();
+                mirrored[2] = mirrored_normal.extend(r * uv_scale).to_array();
+                mirrored[3] = (x * flip).extend(0.0).to_array();
+                if projection == BrushProjection::Uv {
+                    match bvh.raycast_range(center + mirrored_normal * r, -mirrored_normal, triangle_range) {
+                        Some(mirror_hit) if mirror_hit.pos.distance(center) < 2.0 * r => {
+                            let (_, mirror_uv, scale) = surface_at(mesh, mirror_hit.tri, mirror_hit.bary);
+                            mirrored[2][3] = r * scale;
+                            mirrored[4][0] = mirror_uv.x;
+                            mirrored[4][1] = mirror_uv.y;
+                        }
+                        _ => continue,
+                    }
+                }
+                out.push(mirrored);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn caller_owned_stamp_buffer_matches_previous_output_and_reuses_capacity() {
+        let mesh = Primitive::RoundedCube.build();
+        let bvh = Bvh::from_mesh(&mesh);
+        let cam = OrbitCam::default();
+        let size = Vec2::splat(256.0);
+        let triangle_range = 0..(mesh.indices.len() / 3) as u32;
+        let raw = [
+            ([128.0, 128.0, 1.0, 0.0], 0.75),
+            ([133.0, 129.0, 0.8, 0.2], 1.0),
+        ];
+        let mut scratch = Vec::new();
+
+        for projection in [BrushProjection::Screen, BrushProjection::Surface, BrushProjection::Uv] {
+            let expected = previous_resolver(&mesh, &bvh, &triangle_range, &cam, size, projection, 1, 24.0, &raw);
+            assert!(!expected.is_empty(), "{projection:?} should resolve the center hit");
+            resolve_stamps_into(
+                &mesh, &bvh, triangle_range.clone(), &cam, size, projection, 1, 24.0, &raw, &mut scratch,
+            );
+            assert_eq!(scratch, expected, "{projection:?} output must match the previous resolver");
+            assert_eq!(
+                resolve_stamps(&mesh, &bvh, triangle_range.clone(), &cam, size, projection, 1, 24.0, &raw),
+                expected,
+            );
+
+            let capacity = scratch.capacity();
+            let expected_small = previous_resolver(
+                &mesh, &bvh, &triangle_range, &cam, size, projection, 0, 24.0, &raw[..1],
+            );
+            resolve_stamps_into(
+                &mesh, &bvh, triangle_range.clone(), &cam, size, projection, 0, 24.0, &raw[..1], &mut scratch,
+            );
+            assert_eq!(scratch, expected_small, "{projection:?} must clear stale stamps");
+            assert_eq!(scratch.capacity(), capacity, "{projection:?} should reuse the existing allocation");
+
+            resolve_stamps_into(
+                &mesh, &bvh, triangle_range.clone(), &cam, size, projection, 0, 24.0, &[], &mut scratch,
+            );
+            assert!(scratch.is_empty(), "{projection:?} empty input must clear the output");
+            assert_eq!(scratch.capacity(), capacity, "{projection:?} empty input must retain capacity");
+        }
+    }
+}
+

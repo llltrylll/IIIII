@@ -45,6 +45,8 @@ pub struct Preferences {
     /// Edits between autosaves.
     pub autosave_every: u32,
     pub undo_steps: usize,
+    /// RAM cap for painted before/after snapshots retained by Undo/Redo.
+    pub undo_memory_mb: usize,
     pub recent_count: usize,
     /// Texture resolution of new projects.
     pub default_resolution: u32,
@@ -95,6 +97,7 @@ impl Default for Preferences {
             autosave: true,
             autosave_every: 10,
             undo_steps: 64,
+            undo_memory_mb: 512,
             recent_count: 10,
             default_resolution: 2048,
             bake_on_load: true,
@@ -158,6 +161,7 @@ impl Preferences {
             "autosave": self.autosave,
             "autosave_every": self.autosave_every,
             "undo_steps": self.undo_steps,
+            "undo_memory_mb": self.undo_memory_mb,
             "recent_count": self.recent_count,
             "default_resolution": self.default_resolution,
             "bake_on_load": self.bake_on_load,
@@ -205,6 +209,7 @@ impl Preferences {
             autosave: b("autosave", d.autosave),
             autosave_every: u("autosave_every", d.autosave_every as u64, 1, 500) as u32,
             undo_steps: u("undo_steps", d.undo_steps as u64, 8, 512) as usize,
+            undo_memory_mb: u("undo_memory_mb", d.undo_memory_mb as u64, 128, 8192) as usize,
             recent_count: u("recent_count", d.recent_count as u64, 1, 30) as usize,
             default_resolution: res("default_resolution", d.default_resolution),
             bake_on_load: b("bake_on_load", d.bake_on_load),
@@ -338,7 +343,8 @@ impl PainterApp {
         let p = &mut self.prefs;
         match page {
             Page::General => {
-                (p.autosave, p.autosave_every, p.undo_steps, p.recent_count) = (d.autosave, d.autosave_every, d.undo_steps, d.recent_count);
+                (p.autosave, p.autosave_every, p.undo_steps, p.undo_memory_mb, p.recent_count) =
+                    (d.autosave, d.autosave_every, d.undo_steps, d.undo_memory_mb, d.recent_count);
                 (p.default_resolution, p.bake_on_load) = (d.default_resolution, d.bake_on_load);
             }
             Page::Interface => (p.ui_scale, p.shelf_icon_size) = (d.ui_scale, d.shelf_icon_size),
@@ -384,7 +390,8 @@ impl PainterApp {
                     labeled(ui, "Every", |ui| ui.add(egui::DragValue::new(&mut p.autosave_every).range(1..=500).suffix(" edits")));
                 });
                 labeled(ui, "Undo steps", |ui| ui.add(egui::DragValue::new(&mut p.undo_steps).range(8..=512)));
-                hint(ui, "More steps keep more painted texture history in memory.");
+                labeled(ui, "Undo memory", |ui| ui.add(egui::DragValue::new(&mut p.undo_memory_mb).range(128..=8192).suffix(" MB")));
+                hint(ui, "The older undo/redo steps are discarded when this memory budget is reached. One newest step is always retained.");
             }
             Page::Interface => {
                 section(ui, "Scale");
@@ -497,7 +504,7 @@ impl PainterApp {
         }
         // Ray-traced sample count and bounce depth are startup-only:
         // changes are saved here and take effect the next time the app opens.
-        self.undo.max_entries = new.undo_steps;
+        self.undo.set_limits(new.undo_steps, new.undo_memory_mb.saturating_mul(1024 * 1024));
         if new.recent_count != old.recent_count {
             self.recent.truncate(new.recent_count);
         }
@@ -515,7 +522,7 @@ impl PainterApp {
         self.shelf.icon_size = p.shelf_icon_size;
         self.cam.fov_y = p.fov_deg.to_radians();
         (self.rt.max_samples, self.rt.bounces) = (p.rt_max_samples, p.rt_bounces);
-        self.undo.max_entries = p.undo_steps;
+        self.undo.set_limits(p.undo_steps, p.undo_memory_mb.saturating_mul(1024 * 1024));
         self.recent.truncate(p.recent_count);
         for brush in [&mut self.brush, &mut self.other_brush] {
             (brush.size, brush.hardness, brush.spacing) = (p.brush_size, p.brush_hardness, p.brush_spacing);

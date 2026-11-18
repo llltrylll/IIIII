@@ -290,7 +290,10 @@ impl PainterApp {
                     }
                     None => self.try_begin_stroke(kind, local(p)),
                 }
-            } else if down && self.stroke.as_ref().is_some_and(|s| s.view == kind) {
+            } else if self.stroke.as_ref().is_some_and(|s| s.view == kind) {
+                // Process the release-frame cursor position too. Otherwise,
+                // the last movement delivered with mouse-up is discarded
+                // immediately before end_stroke() captures the final state.
                 self.continue_stroke(local(p));
             }
         }
@@ -346,7 +349,6 @@ impl PainterApp {
                 );
             }
         }
-        self.composite_parked();
         let size = [(rect.width() * self.ppp).round() as u32, (rect.height() * self.ppp).round() as u32];
         let mut rt_view = None;
         match kind {
@@ -451,13 +453,28 @@ impl PainterApp {
     /// After every view drew: strokes end when the button is released, and
     /// the 3D depth the brush reads stays valid when no 3D view is showing.
     pub(super) fn views_end_frame(&mut self, ctx: &egui::Context) {
-        if let Some((stamp_ms, apply_ms, composite_ms, composite_total_ms)) = self.engine.poll_gpu_stroke_times() {
+        if let Some((stamp_ms, apply_ms, composite_ms, composite_total_ms, composite_clear_ms, composite_body_ms, pass_times)) =
+            self.engine.poll_gpu_stroke_times()
+        {
             if self.meter.on {
                 self.meter.gpu_stamp.add(stamp_ms);
                 self.meter.gpu_apply.add(apply_ms);
                 self.meter.gpu_composite.add(composite_ms);
                 if let Some(ms) = composite_total_ms {
                     self.meter.gpu_composite_total.add(ms);
+                }
+                if let Some(ms) = composite_clear_ms {
+                    self.meter.gpu_composite_clear.add(ms);
+                }
+                if let Some(ms) = composite_body_ms {
+                    self.meter.gpu_composite_body.add(ms);
+                }
+                if let Some((label, ms)) = pass_times.into_iter().max_by(|a, b| a.1.total_cmp(&b.1)) {
+                    if self.meter.gpu_composite_slowest_label != label {
+                        self.meter.gpu_composite_slowest = Default::default();
+                        self.meter.gpu_composite_slowest_label = label;
+                    }
+                    self.meter.gpu_composite_slowest.add(ms);
                 }
             }
         }
@@ -473,6 +490,7 @@ impl PainterApp {
             let engines = texture_sets::engines(&self.engine, &self.sets, self.mesh.sets.len());
             self.views.render_3d_with_object_visibility(&self.rs, size, &engines, &self.env, &self.gpu_mesh, self.mesh.as_ref(), &self.cam, &self.view, Some(&self.overlays), &self.hidden_objects);
         }
+        self.composite_parked_one(ctx);
         self.drew_3d = false;
     }
 

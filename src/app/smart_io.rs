@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 
 const FORMAT: &str = "material-painter-smart-material";
 const VERSION: u64 = 1;
@@ -35,26 +35,95 @@ pub(super) struct UserSmart {
     pub thumb: Option<egui::TextureHandle>,
 }
 
-/// Every saved smart material, by name, with its thumbnail.
-pub(super) fn list(ctx: &egui::Context) -> Vec<UserSmart> {
-    let Some(dir) = smart_dir() else { return Vec::new() };
-    let Ok(read) = std::fs::read_dir(&dir) else { return Vec::new() };
-    let mut out: Vec<UserSmart> = read
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == EXTENSION))
-        .map(|path| {
+/// CPU-side result from listing and decoding the Smart Material shelf.
+/// It contains no egui objects, so the worker can safely produce it off-thread.
+pub(super) struct UserSmartData {
+    path: PathBuf,
+    name: String,
+    thumb: Option<([usize; 2], Vec<u8>)>,
+}
+
+/// Enumerates the shelf and decodes its thumbnails on a worker. TextureHandle
+/// creation is deliberately deferred to the UI thread.
+pub(super) fn list_async(ctx: &egui::Context) -> mpsc::Receiver<UserSmartData> {
+    // Bound decoded thumbnail memory: the worker cannot get more than eight
+    // images ahead of the UI uploader.
+    let (tx, rx) = mpsc::sync_channel(8);
+    let ctx = ctx.clone();
+    let spawn = std::thread::Builder::new().name("smart-material-list".into()).spawn(move || {
+        let Some(dir) = smart_dir() else {
+            ctx.request_repaint();
+            return;
+        };
+        let Ok(read) = std::fs::read_dir(&dir) else {
+            ctx.request_repaint();
+            return;
+        };
+        let mut paths: Vec<PathBuf> = read
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == EXTENSION))
+            .collect();
+        paths.sort_by_key(|path| {
+            path.file_stem().map_or_else(String::new, |name| name.to_string_lossy().to_lowercase())
+        });
+        for path in paths {
             let name = path.file_stem().map_or(String::new(), |s| s.to_string_lossy().into_owned());
             let thumb = read_entry(&path, "thumb.png").ok().and_then(|png| {
                 let img = image::load_from_memory(&png).ok()?.into_rgba8();
                 let size = [img.width() as usize, img.height() as usize];
-                Some(ctx.load_texture(format!("smart {}", path.display()), egui::ColorImage::from_rgba_unmultiplied(size, &img), Default::default()))
+                Some((size, img.into_raw()))
             });
-            UserSmart { path, name, thumb }
-        })
-        .collect();
-    out.sort_by_key(|a| a.name.to_lowercase());
-    out
+            if tx.send(UserSmartData { path, name, thumb }).is_err() {
+                break;
+            }
+            ctx.request_repaint();
+        }
+        ctx.request_repaint();
+    });
+    if spawn.is_err() {
+        // The disconnected receiver lets the UI clear the pending job safely.
+    }
+    rx
+}
+impl PainterApp {
+    pub(super) fn poll_user_smarts(&mut self, ctx: &egui::Context) {
+        let mut received = Vec::with_capacity(4);
+        let mut disconnected = false;
+        if let Some(rx) = self.user_smarts_job.as_ref() {
+            for _ in 0..4 {
+                match rx.try_recv() {
+                    Ok(item) => received.push(item),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if disconnected {
+            self.user_smarts_job = None;
+        }
+
+        // Creating egui texture handles uploads images to the GPU. Limit each
+        // frame to four items; the bounded worker channel caps decoded CPU
+        // memory while keeping the shelf responsive.
+        let count = received.len();
+        for item in received {
+            let thumb = item.thumb.map(|(size, rgba)| {
+                ctx.load_texture(
+                    format!("smart {}", item.path.display()),
+                    egui::ColorImage::from_rgba_unmultiplied(size, &rgba),
+                    Default::default(),
+                )
+            });
+            self.user_smarts.push(UserSmart { path: item.path, name: item.name, thumb });
+        }
+        if count == 4 {
+            ctx.request_repaint();
+        }
+    }
 }
 
 fn read_entry(path: &Path, name: &str) -> Result<Vec<u8>, String> {
@@ -226,7 +295,9 @@ impl PainterApp {
     }
 
     pub(super) fn reload_user_smarts(&mut self, ctx: &egui::Context) {
-        self.user_smarts = list(ctx);
+        self.user_smarts.clear();
+        self.user_smarts_job = Some(list_async(ctx));
+        ctx.request_repaint();
     }
 
     /// Adds a saved smart material at `at` inside `parent`, as one undo step.

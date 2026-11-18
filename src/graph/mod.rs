@@ -544,9 +544,15 @@ impl Library {
     /// A node's value for a parameter: its own if set and of the right
     /// kind, else the definition's default.
     pub fn value(&self, node: &Node, name: &str) -> Option<Value> {
+        self.value_ref(node, name).cloned()
+    }
+
+    /// Borrows a node's parameter value, falling back to its definition's default.
+    /// Prefer this in per-frame evaluation paths to avoid cloning image paths and other values.
+    pub fn value_ref<'a>(&'a self, node: &'a Node, name: &str) -> Option<&'a Value> {
         let p = self.find(&node.def)?.params.iter().find(|p| p.name == name)?;
         let own = node.params.get(name).filter(|v| std::mem::discriminant(*v) == std::mem::discriminant(&p.default));
-        Some(own.cloned().unwrap_or_else(|| p.default.clone()))
+        Some(own.unwrap_or(&p.default))
     }
 
     /// Categories in display order, each with its node ids.

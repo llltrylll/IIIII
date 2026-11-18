@@ -10,10 +10,11 @@
 
 use crate::bake::{BakeSettings, CAGE_SCALE, CagePaint, MAX_CAGE_REACH, base_name, components};
 use crate::bvh::Bvh;
-use crate::mesh::{HighPoly, Mesh, unique_edges, weld_positions};
+use crate::mesh::{Mesh, unique_edges, weld_positions};
 use crate::viewport::OverlayVertex;
 use glam::Vec3;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// How far the probe looks out from and into the low poly along each
 /// direction: the farthest a cage reaches.
@@ -23,16 +24,21 @@ const REACH: f32 = MAX_CAGE_REACH;
 /// Averaged: the angle-weighted normals of every face at the vertex's
 /// position, so split copies (hard edges, UV seams) share one direction and
 /// the cage stays closed. Otherwise the vertex's own normal.
-pub fn projection_dirs(mesh: &Mesh, average: bool) -> Vec<Vec3> {
-    let own: Vec<Vec3> = mesh.vertices.iter().map(|v| Vec3::from_array(v.normal).normalize_or_zero()).collect();
+fn projection_dirs_from_data(
+    positions: &[Vec3],
+    vertex_normals: &[Vec3],
+    indices: &[u32],
+    weld: &[usize],
+    average: bool,
+) -> Vec<Vec3> {
+    // Normalize one output array, then overwrite it with averaged directions.
+    let mut dirs: Vec<Vec3> = vertex_normals.iter().map(|n| n.normalize_or_zero()).collect();
     if !average {
-        return own;
+        return dirs;
     }
-    let pos: Vec<Vec3> = mesh.vertices.iter().map(|v| Vec3::from_array(v.pos)).collect();
-    let weld = weld_positions(&pos);
-    let mut sum = vec![Vec3::ZERO; pos.len()];
-    for t in mesh.indices.chunks_exact(3) {
-        let p = [0, 1, 2].map(|k| pos[t[k] as usize]);
+    let mut sum = vec![Vec3::ZERO; positions.len()];
+    for t in indices.chunks_exact(3) {
+        let p = [0, 1, 2].map(|k| positions[t[k] as usize]);
         let n = (p[1] - p[0]).cross(p[2] - p[0]).normalize_or_zero();
         for k in 0..3 {
             // Weighted by the corner's angle, so how a face is split into
@@ -41,13 +47,45 @@ pub fn projection_dirs(mesh: &Mesh, average: bool) -> Vec<Vec3> {
             sum[weld[t[k] as usize]] += n * a.dot(b).clamp(-1.0, 1.0).acos();
         }
     }
-    (0..pos.len())
-        .map(|v| {
-            let d = sum[weld[v]].normalize_or_zero();
-            // A degenerate spot (faces cancelling out) keeps its own normal.
-            if d == Vec3::ZERO { own[v] } else { d }
+    for v in 0..positions.len() {
+        let d = sum[weld[v]].normalize_or_zero();
+        // A degenerate spot (faces cancelling out) keeps its own normal.
+        if d != Vec3::ZERO {
+            dirs[v] = d;
+        }
+    }
+    dirs
+}
+
+pub fn projection_dirs(mesh: &Mesh, average: bool) -> Vec<Vec3> {
+    let positions: Vec<Vec3> = mesh.vertices.iter().map(|v| Vec3::from_array(v.pos)).collect();
+    let normals: Vec<Vec3> = mesh.vertices.iter().map(|v| Vec3::from_array(v.normal)).collect();
+    let weld = if average { weld_positions(&positions) } else { Vec::new() };
+    projection_dirs_from_data(&positions, &normals, &mesh.indices, &weld, average)
+}
+
+/// Only the high-poly channels needed by the cage preview. Importer metadata,
+/// normals, UVs, materials and vertex colors are dropped immediately.
+struct CageHighPoly {
+    positions: Vec<Vec3>,
+    indices: Vec<u32>,
+    tri_object: Vec<u32>,
+    objects: Vec<String>,
+}
+
+impl CageHighPoly {
+    fn load(path: &std::path::Path, center: Vec3, scale: f32, include_object_mapping: bool) -> Result<Self, String> {
+        let mut raw = crate::import::load(path)?;
+        for position in &mut raw.positions {
+            *position = (*position - center) * scale;
+        }
+        Ok(Self {
+            positions: raw.positions,
+            indices: raw.indices,
+            tri_object: if include_object_mapping { raw.tri_object } else { Vec::new() },
+            objects: if include_object_mapping { raw.objects } else { Vec::new() },
         })
-        .collect()
+    }
 }
 
 /// What the bake ray from one low-poly vertex finds.
@@ -127,7 +165,15 @@ struct Probe {
     bary: [f32; 3],
     /// High-poly crossings as (offset along `dir` from `pos`, part), filtered
     /// to the parts the bake lets this vertex see.
-    hits: Vec<(f32, u32)>,
+    /// Empty hit lists need only a nullable pointer, not a Vec header per probe.
+    hits: Option<Box<[(f32, u32)]>>,
+}
+
+impl Probe {
+    #[inline]
+    fn hits(&self) -> &[(f32, u32)] {
+        self.hits.as_deref().unwrap_or(&[])
+    }
 }
 
 /// Probe results for one scene.
@@ -164,18 +210,42 @@ pub struct FixReport {
     pub unreachable: usize,
 }
 
+fn check_cancelled(cancel: &AtomicBool) -> Result<(), String> {
+    if cancel.load(Ordering::Relaxed) {
+        Err("Cage preview superseded".into())
+    } else {
+        Ok(())
+    }
+}
+
 impl CageProbe {
     /// Probes the high poly from sample points across the low poly. Runs on
     /// a worker thread.
-    pub fn build(mesh: &Mesh, key: ProbeKey) -> Result<CageProbe, String> {
+    pub(crate) fn build(mesh: &Mesh, key: ProbeKey) -> Result<CageProbe, String> {
+        Self::build_cancellable(mesh, key, &AtomicBool::new(false))
+    }
+
+    /// A newer preview request cancels obsolete work so its large scratch
+    /// buffers are released instead of competing with the replacement.
+    pub(crate) fn build_cancellable(mesh: &Mesh, key: ProbeKey, cancel: &AtomicBool) -> Result<CageProbe, String> {
+        check_cancelled(cancel)?;
         let positions: Vec<Vec3> = mesh.vertices.iter().map(|v| Vec3::from_array(v.pos)).collect();
-        // The bake's directions: averaged unless a cage file gives them.
-        let normals = projection_dirs(mesh, key.average_normals && key.cage.is_none());
+        let vertex_normals: Vec<Vec3> = mesh.vertices.iter().map(|v| Vec3::from_array(v.normal)).collect();
+        // The welded-vertex map is retained by the probe and also used for
+        // averaged projection directions, so it is computed exactly once.
+        let weld = weld_positions(&positions);
+        let normals = projection_dirs_from_data(
+            &positions,
+            &vertex_normals,
+            &mesh.indices,
+            &weld,
+            key.average_normals && key.cage.is_none(),
+        );
 
         // A loaded cage gives each low vertex its own ray start.
         let mut cage_pos: Option<Vec<Vec3>> = None;
         if let Some(path) = &key.cage {
-            let cage = HighPoly::load(path, mesh.center, mesh.scale)?;
+            let cage = CageHighPoly::load(path, mesh.center, mesh.scale, false)?;
             if cage.indices.len() != mesh.indices.len() {
                 return Err(format!(
                     "The cage has {} triangles but the low poly has {}; a cage must be the low poly with its vertices moved.",
@@ -201,7 +271,11 @@ impl CageProbe {
         let mut spacing = (mesh.bounds_max - mesh.bounds_min).length() / 48.0;
         let grid = |t: usize, spacing: f32| ((longest(t) / spacing).ceil() as usize).clamp(1, 12);
         // Keep the sample count bounded on huge meshes.
-        while (0..tri_count).map(|t| grid(t, spacing).pow(2)).sum::<usize>() > 400_000 {
+        loop {
+            check_cancelled(cancel)?;
+            if (0..tri_count).map(|t| grid(t, spacing).pow(2)).sum::<usize>() <= 400_000 {
+                break;
+            }
             spacing *= 1.5;
         }
         let probe_at = |t: usize, b: [f32; 3]| {
@@ -218,12 +292,15 @@ impl CageProbe {
                 None => (mix(&normals).normalize_or_zero(), None),
             };
             let corners = [corner(t, 0), corner(t, 1), corner(t, 2)].map(|v| v as u32);
-            Probe { pos, dir, cage_len, tri: t as u32, corners, bary: b, hits: Vec::new() }
+            Probe { pos, dir, cage_len, tri: t as u32, corners, bary: b, hits: None }
         };
         let mut probes: Vec<Probe> = Vec::new();
         let mut at_vertex: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
         let mut indices = Vec::with_capacity(mesh.indices.len());
         for t in 0..tri_count {
+            if t.is_multiple_of(256) {
+                check_cancelled(cancel)?;
+            }
             let k = grid(t, spacing);
             // Grid point (i, j): barycentrics (1 - (i + j)/k, i/k, j/k).
             let mut ids = vec![0u32; (k + 1) * (k + 2) / 2];
@@ -269,14 +346,18 @@ impl CageProbe {
         // The wireframe follows the low poly's own edges, through its corners.
         let edges: Vec<u32> = unique_edges(&mesh.indices).into_iter().map(|v| at_vertex[&(v as usize)]).collect();
         let vertex_probe: Vec<u32> = (0..mesh.vertices.len()).map(|v| at_vertex.get(&v).copied().unwrap_or(u32::MAX)).collect();
-        let weld = weld_positions(&positions);
 
         let has_high = key.high_poly.is_some();
         if let Some(path) = &key.high_poly {
-            let high = HighPoly::load(path, mesh.center, mesh.scale)?;
-            let tris: Vec<[Vec3; 3]> = high.indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]].map(|i| high.positions[i as usize])).collect();
-            let bvh = Bvh::build(tris);
+            check_cancelled(cancel)?;
+            let high = CageHighPoly::load(path, mesh.center, mesh.scale, key.match_by_name)?;
+            check_cancelled(cancel)?;
+            // Build the hit-test BVH from indexed data. This avoids first
+            // expanding every source triangle into a temporary Vec.
+            let bvh = Bvh::from_indexed(&high.positions, &high.indices);
+            check_cancelled(cancel)?;
             let (tri_part, _) = components(&high.positions, &high.indices);
+            check_cancelled(cancel)?;
 
             // Name groups, as the bake pairs them (0 = sees / is seen by all).
             let mut low_tri_group = vec![0u32; tri_count];
@@ -302,11 +383,14 @@ impl CageProbe {
 
             use rayon::prelude::*;
             probes.par_iter_mut().for_each_init(Vec::new, |found, p| {
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
                 let start = p.cage_len.unwrap_or(REACH) + 1e-4;
                 let origin = p.pos + p.dir * start;
                 bvh.all_hits(origin, -p.dir, start + REACH, found);
                 let g = low_tri_group[p.tri as usize];
-                p.hits = found
+                let hits: Vec<(f32, u32)> = found
                     .iter()
                     .filter(|&&(_, t)| {
                         let tg = high_tri_group[t as usize];
@@ -314,8 +398,10 @@ impl CageProbe {
                     })
                     .map(|&(t, tri)| (start - t, tri_part[tri as usize]))
                     .collect();
+                p.hits = (!hits.is_empty()).then(|| hits.into_boxed_slice());
             });
         }
+        check_cancelled(cancel)?;
         Ok(CageProbe { key, probes, indices, edges, has_high, vertex_probe, weld })
     }
 
@@ -331,12 +417,12 @@ impl CageProbe {
     fn status(&self, p: &Probe, front: f32, rear: f32) -> Status {
         let front = p.cage_len.unwrap_or(front);
         // The bake ray starts on the cage and keeps the first surface it meets.
-        let first = p.hits.iter().filter(|h| h.0 <= front && h.0 >= -rear).max_by(|a, b| a.0.total_cmp(&b.0));
+        let first = p.hits().iter().filter(|h| h.0 <= front && h.0 >= -rear).max_by(|a, b| a.0.total_cmp(&b.0));
         let Some(&(h, part)) = first else {
             return Status::Missed;
         };
         // The surface the vertex really belongs to is the nearest one.
-        let own = p.hits.iter().min_by(|a, b| a.0.abs().total_cmp(&b.0.abs())).map(|o| o.1);
+        let own = p.hits().iter().min_by(|a, b| a.0.abs().total_cmp(&b.0.abs())).map(|o| o.1);
         if own != Some(part) {
             Status::Overlap
         } else if h > front * 0.85 || h < -rear * 0.85 {
@@ -351,38 +437,49 @@ impl CageProbe {
     pub fn overlay(&self, reach: &Reach) -> (Vec<OverlayVertex>, Vec<OverlayVertex>, CageStats) {
         let mut stats = CageStats::default();
         let paint = reach.paint.as_deref().filter(|p| p.fits(self.weld.len()));
-        let scales: Vec<f32> = self.probes.iter().map(|p| self.scale(p, paint)).collect();
-        let colors: Vec<[u8; 3]> = self
-            .probes
-            .iter()
-            .zip(&scales)
-            .map(|(p, &s)| {
-                if !self.has_high {
-                    return [90, 160, 255];
-                }
-                let st = self.status(p, (reach.front * s).min(REACH), (reach.rear * s).min(REACH));
-                match st {
+
+        // Derive the final overlay vertex once per probe. This replaces three
+        // full-size temporary arrays (scale, color and shell position).
+        let mut probe_vertices = Vec::with_capacity(self.probes.len());
+        for p in &self.probes {
+            let scale = self.scale(p, paint);
+            let color = if !self.has_high {
+                [90, 160, 255]
+            } else {
+                let status = self.status(
+                    p,
+                    (reach.front * scale).min(REACH),
+                    (reach.rear * scale).min(REACH),
+                );
+                match status {
                     Status::Ok => stats.ok += 1.0,
                     Status::Tight => stats.tight += 1.0,
                     Status::Missed => stats.missed += 1.0,
                     Status::Overlap => stats.overlap += 1.0,
                 }
-                st.color()
-            })
-            .collect();
+                status.color()
+            };
+            let distance = p.cage_len.unwrap_or((reach.front * scale).min(REACH));
+            probe_vertices.push(OverlayVertex {
+                pos: (p.pos + p.dir * distance).to_array(),
+                color: [color[0], color[1], color[2], 0],
+            });
+        }
         let n = self.probes.len().max(1) as f32;
-        stats = CageStats { ok: stats.ok / n, tight: stats.tight / n, missed: stats.missed / n, overlap: stats.overlap / n };
-        let shell: Vec<Vec3> =
-            self.probes.iter().zip(&scales).map(|(p, &s)| p.pos + p.dir * p.cage_len.unwrap_or((reach.front * s).min(REACH))).collect();
+        stats = CageStats {
+            ok: stats.ok / n,
+            tight: stats.tight / n,
+            missed: stats.missed / n,
+            overlap: stats.overlap / n,
+        };
         let vertex = |i: u32, alpha: u8| {
-            let c = colors[i as usize];
-            OverlayVertex { pos: shell[i as usize].to_array(), color: [c[0], c[1], c[2], alpha] }
+            let v = probe_vertices[i as usize];
+            OverlayVertex { pos: v.pos, color: [v.color[0], v.color[1], v.color[2], alpha] }
         };
         let tris = self.indices.iter().map(|&i| vertex(i, 46)).collect();
         let lines = self.edges.iter().map(|&i| vertex(i, 120)).collect();
         (tris, lines, stats)
     }
-
     /// Fits the cage to the high poly: per vertex, the multiplier that lets
     /// its ray reach its own surface (with a margin) without first reaching
     /// another part's. Vertices that are fine keep their multiplier; copies
@@ -403,14 +500,14 @@ impl CageProbe {
         for v in 0..n {
             let Some(p) = self.probes.get(self.vertex_probe[v] as usize) else { continue };
             let w = self.weld[v];
-            let Some(&(o, part)) = p.hits.iter().min_by(|a, b| a.0.abs().total_cmp(&b.0.abs())) else { continue };
+            let Some(&(o, part)) = p.hits().iter().min_by(|a, b| a.0.abs().total_cmp(&b.0.abs())) else { continue };
             found[w] = true;
             // 15% margin past the surface, so the ray starts clear of it.
             let reach_out = if o > 0.0 { o * 1.15 / front } else { 0.0 };
             let reach_in = if o < 0.0 { -o * 1.15 / rear } else { 0.0 };
             need[w] = need[w].max(reach_out).max(reach_in);
             // Another part outside this surface: the cage must start below it.
-            let foreign = p.hits.iter().filter(|h| h.1 != part && h.0 > o).map(|h| h.0).fold(f32::MAX, f32::min);
+            let foreign = p.hits().iter().filter(|h| h.1 != part && h.0 > o).map(|h| h.0).fold(f32::MAX, f32::min);
             if foreign < f32::MAX {
                 allow[w] = allow[w].min(((o + foreign) * 0.5).max(0.0) / front);
             }

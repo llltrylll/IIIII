@@ -88,6 +88,12 @@ jobs:
       - name: GPU parity - path tracer shader compiles
         run: "cargo test --locked --bin material_painter preview_test::path_trace_pipeline_compiles_with_grazing_normal_correction -- --ignored --exact --nocapture --test-threads 1"
 
+      - name: GPU bake - flat mesh-part IDs use palette without per-corner color storage
+        run: "cargo test --locked --bin material_painter bake::tests::mesh_part_ids_use_palette_without_corner_colors -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU bake - indexed high-poly source and self-projection parity
+        run: "cargo test --locked --bin material_painter bake::tests::bake_self_projection_is_flat -- --ignored --exact --nocapture --test-threads 1"
+
       - name: GPU parity - screen painting follows imported normal facing
         run: "cargo test --locked --bin material_painter preview_test::screen_projection_respects_imported_normal_facing -- --ignored --exact --nocapture --test-threads 1"
 
@@ -105,8 +111,17 @@ jobs:
       - name: GPU parity - multi-scissor composite
         run: "cargo test --locked --bin material_painter preview_test::multi_scissor_matches_full_composite -- --ignored --exact --nocapture --test-threads 1"
 
+      - name: GPU parity - composite prefix survives stroke release
+        run: "cargo test --locked --bin material_painter preview_test::content_stroke_patch_ignores_current_filtered_masks -- --ignored --exact --nocapture --test-threads 1"
+
       - name: GPU parity - mask filters
         run: "cargo test --locked --bin material_painter preview_test::mask_filters_apply -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU regression - content strokes do not refresh unrelated thumbnails
+        run: "cargo test --locked --bin material_painter preview_test::content_stroke_keeps_unrelated_thumbnails -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU regression - mask strokes refresh only their own thumbnail
+        run: "cargo test --locked --bin material_painter preview_test::mask_stroke_redoes_only_the_mask_thumbnail -- --ignored --exact --nocapture --test-threads 1"
 
       - name: Upload GPU regression images
         if: always()

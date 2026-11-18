@@ -79,6 +79,8 @@ impl PainterApp {
         self.end_preview(true);
         self.engine.commit_props(&mut self.undo);
         std::mem::swap(&mut self.engine, &mut p.engine);
+        self.engine.restore_active_working_set();
+        p.engine.release_inactive_working_set();
         self.engine_epoch = self.engine_epoch.wrapping_add(1);
         std::mem::swap(&mut self.selected, &mut p.selected);
         std::mem::swap(&mut self.target, &mut p.target);
@@ -105,12 +107,22 @@ impl PainterApp {
         }
     }
 
-    /// Composites the parked sets that changed (new mesh, bake, load).
+    /// Composites every parked set when a synchronous operation needs final maps (export).
     pub(super) fn composite_parked(&mut self) {
         for p in self.sets.parked.iter_mut().flatten() {
             if p.engine.dirty {
                 p.engine.composite();
+                p.engine.release_inactive_working_set();
             }
+        }
+    }
+
+    /// Spreads parked-set recomposition across frames during interactive use.
+    pub(super) fn composite_parked_one(&mut self, ctx: &egui::Context) {
+        if let Some(p) = self.sets.parked.iter_mut().flatten().find(|p| p.engine.dirty) {
+            p.engine.composite();
+            p.engine.release_inactive_working_set();
+            ctx.request_repaint();
         }
     }
 

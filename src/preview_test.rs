@@ -1891,6 +1891,131 @@ fn mask_stroke_redoes_only_the_mask_thumbnail() {
     assert_eq!(engine.thumb_renders(), settled + 1, "and the next recomposition doesn't redo it");
 }
 
+#[test]
+#[ignore]
+fn content_stroke_patch_ignores_current_filtered_masks() {
+    use crate::app::{BrushProjection, resolve_stamps};
+    use crate::engine::{ACCUM, BrushPaint, FillParams, FilterKind, MaskFilter, MatValues, StampUniform};
+    use crate::undo::{StrokeTarget, UndoStack};
+    use glam::Vec2;
+
+    fn fill_of(rgb: [f32; 3]) -> FillParams {
+        FillParams { mat: MatValues { enabled: [true, false, false, false, false, false, false, false], color: rgb, ..Default::default() }, ..Default::default() }
+    }
+    let mesh = crate::mesh::Primitive::RoundedCube.build();
+    let bvh = crate::bvh::Bvh::from_mesh(&mesh);
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let res = 512u32;
+    let size = [800u32, 500u32];
+    let fsize = Vec2::new(size[0] as f32, size[1] as f32);
+    let cam = OrbitCam { target: (mesh.bounds_min + mesh.bounds_max) * 0.5, ..Default::default() };
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+    let radius = 18.0;
+    let su = StampUniform {
+        view_proj: cam.view_proj(fsize.x / fsize.y).to_cols_array_2d(),
+        cam_pos: cam.eye().extend(1.0).to_array(),
+        view: [fsize.x, fsize.y, 0.0, 0.0],
+        view2d: [0.0; 4],
+        brush: [radius, 0.6, 1.0, 0.0],
+        clip: [crate::viewport::NEAR, crate::viewport::FAR, 0.0, 0.0],
+        proj: [BrushProjection::Screen as u32 as f32, 0.0, 85f32.to_radians().cos(), 0.0],
+    };
+    let paint = BrushPaint {
+        mat: MatValues { enabled: [true, true, true, false, false, false, false, false], color: [0.95, 0.1, 0.05], ..Default::default() },
+        mask_value: 1.0,
+        opacity: 1.0,
+        erase: false,
+        grain: [0.0; 4],
+    };
+
+    // The same stack and strokes, once with a strongly filtered mask above the
+    // painted layer and once without any mask: (patch pixels per step, full recomps).
+    let run = |filtered: bool| -> (Vec<u64>, u32, u32, Vec<String>) {
+        let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+        let mut undo = UndoStack::default();
+        let p = engine.add_paint_layer(0, None, None, &mut undo);
+        let pid = engine.layers[p].id;
+        let b = engine.add_fill_layer(1, None, "B".into(), fill_of([0.9, 0.7, 0.1]), &mut undo);
+        if filtered {
+            engine.add_mask(b, true, None, &mut undo);
+            let m = engine.layers[b].mask.as_mut().unwrap();
+            m.filters = vec![MaskFilter::new(FilterKind::Blur), MaskFilter::new(FilterKind::Warp)];
+            m.filters[0].a = 40.0;
+            engine.mark_dirty();
+        }
+        engine.composite();
+        let mut views = ViewRenderer::new(&rs);
+        views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &ViewSettings::default(), None);
+        let layer = engine.layers.iter().position(|l| l.id == pid).unwrap();
+        assert!(engine.begin_stroke(layer, StrokeTarget::Content, [true, true, true, false, false, false, false, false], false));
+        let recomps_before = engine.full_recomps;
+        let mut patches = Vec::new();
+        for f in 0..6 {
+            let raw: Vec<([f32; 4], f32)> = (0..5)
+                .map(|i| {
+                    let k = (f * 5 + i) as f32;
+                    ([215.0 + k * 8.0, 250.0 + 85.0 * (k * 0.09).sin(), 1.0, 0.0], 1.0)
+                })
+                .collect();
+            let stamps = resolve_stamps(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+            let region = crate::app::stroke_region(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps);
+            engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, region);
+            engine.composite();
+            patches.push(engine.last_scissor_pixels);
+        }
+        let recomps = engine.full_recomps - recomps_before;
+        engine.end_stroke();
+        engine.composite();
+
+        // A separate drag on the same layer must reuse the prefix from the first
+        // drag. End before compositing this one to also verify the release path
+        // preserves a pending dirty region instead of forcing a full recomposite.
+        let second_recomps_before = engine.full_recomps;
+        assert!(engine.begin_stroke(layer, StrokeTarget::Content, [true, true, true, false, false, false, false, false], false));
+        let raw: Vec<([f32; 4], f32)> = (0..5)
+            .map(|i| {
+                let k = (30 + i) as f32;
+                ([215.0 + k * 8.0, 250.0 + 85.0 * (k * 0.09).sin(), 1.0, 0.0], 1.0)
+            })
+            .collect();
+        let stamps = resolve_stamps(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &raw);
+        let region = crate::app::stroke_region(&mesh, &bvh, engine.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps);
+        engine.stroke_step(&stamps, su, views.view3d.depth_view(), &paint, region);
+        engine.end_stroke();
+        engine.composite();
+        let second_recomps = engine.full_recomps - second_recomps_before;
+
+        // Final textures after the incremental patches vs a from-scratch composite.
+        let partial: Vec<Vec<u8>> = (0..ACCUM).map(|c| read_texture(&rs.device, &rs.queue, engine.final_tex(c))).collect();
+        engine.mark_dirty();
+        engine.composite();
+        let mut diffs = Vec::new();
+        for c in 0..ACCUM {
+            let full = read_texture(&rs.device, &rs.queue, engine.final_tex(c));
+            let n = full.iter().zip(&partial[c]).filter(|(a, b)| a != b).count();
+            if n > 0 {
+                diffs.push(format!("channel {c}: {n} bytes differ"));
+            }
+        }
+        (patches, recomps, second_recomps, diffs)
+    };
+    let (plain, plain_recomps, plain_second_recomps, plain_diffs) = run(false);
+    let (filtered, filtered_recomps, filtered_second_recomps, filtered_diffs) = run(true);
+    println!("  patch pixels per step: no mask {plain:?}, filtered mask {filtered:?}; full recomps first/second drag {plain_recomps}/{plain_second_recomps} vs {filtered_recomps}/{filtered_second_recomps}");
+    // The first step builds the prefix cache with a full composite.
+    assert!(plain[1..].iter().all(|&p| p < u64::from(res) * u64::from(res)), "the plain stroke must stay a patch");
+    assert_eq!(plain, filtered, "a current filtered mask must not widen a content stroke's patch");
+    assert_eq!(plain_recomps, filtered_recomps);
+    assert_eq!(plain_second_recomps, 0, "a second drag on the same layer must reuse the composite prefix");
+    assert_eq!(filtered_second_recomps, 0, "the same prefix reuse must work with a current filtered mask");
+    // The patch size alone proves nothing about the pixels: compare the textures.
+    println!("  final textures incremental vs full: no mask {plain_diffs:?}, filtered mask {filtered_diffs:?}");
+    assert!(plain_diffs.is_empty(), "no mask: incremental != full: {plain_diffs:?}");
+    assert!(filtered_diffs.is_empty(), "filtered mask: incremental != full: {filtered_diffs:?}");
+}
+
 /// The UV display mode is independent from the 3D mode, and Base Color
 /// composites transparent texels over the checkerboard.
 #[test]
@@ -3269,6 +3394,55 @@ fn open_spp_projects() {
         assert_eq!(harness.state().test_sets(), sets, "{path}: the project round-trips");
         let _ = std::fs::remove_file(&project);
     }
+}
+
+/// `set_triangles` repeats the UV bake only when the GPU mesh, the triangle
+/// range or the size changed. `uv_version` (4th field of the binding identity)
+/// counts bakes.
+#[test]
+#[ignore]
+fn set_triangles_skips_only_identical_uv_bakes() {
+    let mesh = crate::mesh::set_tests::split_plane();
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let bounds = (mesh.bounds_min, mesh.bounds_max);
+    let bakes = |e: &Engine| e.viewport_binding_identity().3;
+    let all = 0..gpu_mesh.index_count;
+    let first = mesh.sets[0].index_range();
+    let second = mesh.sets[1].index_range();
+
+    let mut engine = Engine::new(&rs, &gpu_mesh, bounds, 128);
+    assert_eq!(bakes(&engine), 1, "creation bakes once");
+
+    engine.set_triangles(all.clone(), &gpu_mesh);
+    assert_eq!(bakes(&engine), 1, "same mesh and range: skipped");
+
+    engine.set_triangles(first.clone(), &gpu_mesh);
+    assert_eq!(bakes(&engine), 2, "changed range: baked");
+    engine.set_triangles(first.clone(), &gpu_mesh);
+    assert_eq!(bakes(&engine), 2, "repeated range: skipped");
+    engine.set_triangles(second.clone(), &gpu_mesh);
+    assert_eq!(bakes(&engine), 3, "another range: baked");
+
+    let other_mesh = GpuMesh::new(&rs.device, &mesh);
+    assert_ne!(other_mesh.mesh_id, gpu_mesh.mesh_id);
+    engine.set_triangles(second.clone(), &other_mesh);
+    assert_eq!(bakes(&engine), 4, "new mesh identity with the same range: baked");
+
+    // The rebuild_sets case: a sibling is made for a range, then told the same range.
+    let mut sibling = engine.sibling(&other_mesh, first.clone(), 128);
+    assert_eq!(bakes(&sibling), 1);
+    sibling.set_triangles(first.clone(), &other_mesh);
+    assert_eq!(bakes(&sibling), 1, "sibling creation already baked this mesh and range");
+
+    // A resolution change still bakes, and the new size is then the current one.
+    let mut undo = crate::undo::UndoStack::default();
+    let before = bakes(&sibling);
+    sibling.set_resolution(64, &other_mesh, &mut undo);
+    assert!(bakes(&sibling) > before, "set_resolution re-bakes");
+    let after = bakes(&sibling);
+    sibling.set_triangles(first, &other_mesh);
+    assert_eq!(bakes(&sibling), after, "same mesh, range and new size: skipped");
 }
 
 /// Two texture sets on one plane (left and right halves of the UV square):

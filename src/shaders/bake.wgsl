@@ -39,8 +39,18 @@ struct BakeU {
 @group(0) @binding(2) var low_nrm: texture_2d<f32>;
 @group(0) @binding(3) var low_tan: texture_2d<f32>;
 @group(0) @binding(4) var<storage, read> nodes: array<vec4<f32>>;
-@group(0) @binding(5) var<storage, read> tri_pos: array<vec4<f32>>;
-@group(0) @binding(6) var<storage, read> tri_nrm: array<vec4<f32>>;
+
+struct BakeVertex {
+    position: array<f32, 3>,
+    normal_curvature: array<f32, 4>,
+};
+struct BakeTriangle {
+    indices: array<u32, 3>,
+    metadata: array<u32, 3>, // part, ID index, name group
+};
+
+@group(0) @binding(5) var<storage, read> bake_vertices: array<BakeVertex>;
+@group(0) @binding(6) var<storage, read> bake_triangles: array<BakeTriangle>;
 @group(0) @binding(7) var<storage, read> parts: array<vec4<f32>>;
 @group(0) @binding(8) var<storage, read> ids: array<vec4<f32>>;
 @group(0) @binding(9) var surf_pos_w: texture_storage_2d<rgba32float, write>;
@@ -80,8 +90,23 @@ struct BakeU {
 // The custom maps, one per channel.
 @group(0) @binding(36) var cust_w: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(37) var cust_t: texture_2d<f32>;
-// Original per-corner vertex colors (or flat ID colors) for interpolation.
+// Original per-corner vertex colors, present only for Vertex Colors ID mode.
 @group(0) @binding(39) var<storage, read> tri_vcolor: array<vec4<f32>>;
+
+fn tri_position(ti: u32, corner: u32) -> vec3<f32> {
+    let vi = bake_triangles[ti].indices[corner];
+    let p = bake_vertices[vi].position;
+    return vec3<f32>(p[0], p[1], p[2]);
+}
+fn tri_normal(ti: u32, corner: u32) -> vec3<f32> {
+    let vi = bake_triangles[ti].indices[corner];
+    let n = bake_vertices[vi].normal_curvature;
+    return vec3<f32>(n[0], n[1], n[2]);
+}
+fn tri_curvature(ti: u32, corner: u32) -> f32 {
+    let vi = bake_triangles[ti].indices[corner];
+    return bake_vertices[vi].normal_curvature[3];
+}
 
 // Match-by-name group of the texel being projected (0 = hit anything). Only
 // projection rays set it; occlusion rays see the whole mesh.
@@ -163,17 +188,17 @@ fn intersect(o: vec3<f32>, d: vec3<f32>, tmax: f32, any_hit: bool) -> Hit {
             for (var i = 0u; i < count; i++) {
                 let ti = first + i;
                 if (match_group != 0u) {
-                    let tg = bitcast<u32>(tri_pos[ti * 3u + 2u].w);
+                    let tg = bake_triangles[ti].metadata[2];
                     if (tg != 0u && tg != match_group) {
                         continue;
                     }
                 }
-                if (skip_part != NONE && bitcast<u32>(tri_pos[ti * 3u].w) == skip_part) {
+                if (skip_part != NONE && bake_triangles[ti].metadata[0] == skip_part) {
                     continue;
                 }
-                let v0 = tri_pos[ti * 3u].xyz;
-                let e1 = tri_pos[ti * 3u + 1u].xyz - v0;
-                let e2 = tri_pos[ti * 3u + 2u].xyz - v0;
+                let v0 = tri_position(ti, 0u);
+                let e1 = tri_position(ti, 1u) - v0;
+                let e2 = tri_position(ti, 2u) - v0;
                 let p = cross(d, e2);
                 let det = dot(e1, p);
                 if (abs(det) < 1e-14) {
@@ -198,7 +223,7 @@ fn intersect(o: vec3<f32>, d: vec3<f32>, tmax: f32, any_hit: bool) -> Hit {
                 if (cull_back && dot(cross(e1, e2), d) > 0.0) {
                     continue;
                 }
-                if (t > 0.0 && t < fold_reach && bitcast<u32>(tri_pos[ti * 3u].w) == fold_part) {
+                if (t > 0.0 && t < fold_reach && bake_triangles[ti].metadata[0] == fold_part) {
                     // The face normal on the side the ray arrives from.
                     let gn = normalize(cross(e1, e2));
                     if (dot(select(gn, -gn, dot(gn, d) > 0.0), fold_n) > FOLD_COS) {
@@ -309,14 +334,14 @@ fn nearest_surface(p: vec3<f32>, radius: f32) -> Hit {
             for (var i = 0u; i < count; i++) {
                 let ti = first + i;
                 if (match_group != 0u) {
-                    let tg = bitcast<u32>(tri_pos[ti * 3u + 2u].w);
+                    let tg = bake_triangles[ti].metadata[2];
                     if (tg != 0u && tg != match_group) {
                         continue;
                     }
                 }
-                let v0 = tri_pos[ti * 3u].xyz;
-                let v1 = tri_pos[ti * 3u + 1u].xyz;
-                let v2 = tri_pos[ti * 3u + 2u].xyz;
+                let v0 = tri_position(ti, 0u);
+                let v1 = tri_position(ti, 1u);
+                let v2 = tri_position(ti, 2u);
                 let w = nearest_on_tri(p, v0, v1, v2);
                 let d = distance(p, v0 * w.x + v1 * w.y + v2 * w.z);
                 if (d < h.t) {
@@ -337,7 +362,7 @@ fn nearest_surface(p: vec3<f32>, radius: f32) -> Hit {
 
 fn hit_point(h: Hit) -> vec3<f32> {
     let w0 = 1.0 - h.b1 - h.b2;
-    return tri_pos[h.tri * 3u].xyz * w0 + tri_pos[h.tri * 3u + 1u].xyz * h.b1 + tri_pos[h.tri * 3u + 2u].xyz * h.b2;
+    return tri_position(h.tri, 0u) * w0 + tri_position(h.tri, 1u) * h.b1 + tri_position(h.tri, 2u) * h.b2;
 }
 
 // Interpolated shading normal at a hit along ray direction `dir`. Zero or
@@ -345,7 +370,7 @@ fn hit_point(h: Hit) -> vec3<f32> {
 // facing the ray, instead of writing NaN into every map.
 fn hit_normal(h: Hit, dir: vec3<f32>) -> vec3<f32> {
     let w0 = 1.0 - h.b1 - h.b2;
-    let n = tri_nrm[h.tri * 3u].xyz * w0 + tri_nrm[h.tri * 3u + 1u].xyz * h.b1 + tri_nrm[h.tri * 3u + 2u].xyz * h.b2;
+    let n = tri_normal(h.tri, 0u) * w0 + tri_normal(h.tri, 1u) * h.b1 + tri_normal(h.tri, 2u) * h.b2;
     if (dot(n, n) < 1e-12) {
         return hit_geo_normal(h.tri, -dir);
     }
@@ -354,8 +379,8 @@ fn hit_normal(h: Hit, dir: vec3<f32>) -> vec3<f32> {
 
 // Face normal of the hit triangle, flipped to the side of `toward`.
 fn hit_geo_normal(tri: u32, toward: vec3<f32>) -> vec3<f32> {
-    let v0 = tri_pos[tri * 3u].xyz;
-    let g = cross(tri_pos[tri * 3u + 1u].xyz - v0, tri_pos[tri * 3u + 2u].xyz - v0);
+    let v0 = tri_position(tri, 0u);
+    let g = cross(tri_position(tri, 1u) - v0, tri_position(tri, 2u) - v0);
     if (dot(g, g) < 1e-30) {
         return toward;
     }
@@ -551,9 +576,9 @@ fn encode_tangent(hn: vec3<f32>, fr: LowFrame, sign: f32) -> vec3<f32> {
 // Point `p` on triangle `ti` (it lies on it up to float error): barycentrics
 // of its projection, clamped into the triangle.
 fn surface_hit(ti: u32, p: vec3<f32>) -> Hit {
-    let v0 = tri_pos[ti * 3u].xyz;
-    let e1 = tri_pos[ti * 3u + 1u].xyz - v0;
-    let e2 = tri_pos[ti * 3u + 2u].xyz - v0;
+    let v0 = tri_position(ti, 0u);
+    let e1 = tri_position(ti, 1u) - v0;
+    let e2 = tri_position(ti, 2u) - v0;
     let s = p - v0;
     let d00 = dot(e1, e1);
     let d01 = dot(e1, e2);
@@ -765,14 +790,21 @@ fn cs_surface(@builtin(global_invocation_id) gid: vec3<u32>) {
     var idc = vec3<f32>(0.5);
     var geo = vec4<f32>(nh, -1.0);
     if (center_tri != NONE) {
-        let pi = bitcast<u32>(tri_pos[center_tri * 3u].w);
+        let pi = bake_triangles[center_tri].metadata[0];
         let part = parts[pi];
         prand = part.x;
         pgrad = clamp((center_pos.y - part.y) / max(part.z, 1e-5), 0.0, 1.0);
         let bary = vec3<f32>(1.0 - center_bary.x - center_bary.y, center_bary.x, center_bary.y);
-        idc = tri_vcolor[center_tri * 3u].xyz * bary.x
-            + tri_vcolor[center_tri * 3u + 1u].xyz * bary.y
-            + tri_vcolor[center_tri * 3u + 2u].xyz * bary.z;
+        if (arrayLength(&tri_vcolor) > 1u) {
+            idc = tri_vcolor[center_tri * 3u].xyz * bary.x
+                + tri_vcolor[center_tri * 3u + 1u].xyz * bary.y
+                + tri_vcolor[center_tri * 3u + 2u].xyz * bary.z;
+        } else {
+            // Mesh-part and material IDs are constant over each triangle.
+            // The ID index is stored in corner 1's position.w.
+            let id_index = bake_triangles[center_tri].metadata[1];
+            idc = ids[id_index].xyz;
+        }
         geo = vec4<f32>(hit_geo_normal(center_tri, center_n), f32(pi));
     }
     // Heights span [-range, range] around mid-gray. With a cage, rays start
@@ -787,10 +819,10 @@ fn cs_surface(@builtin(global_invocation_id) gid: vec3<u32>) {
     var tri_size = 0.0;
     if (center_tri != NONE) {
         let b = vec3<f32>(1.0 - center_bary.x - center_bary.y, center_bary.x, center_bary.y);
-        kv = dot(b, vec3<f32>(tri_nrm[center_tri * 3u].w, tri_nrm[center_tri * 3u + 1u].w, tri_nrm[center_tri * 3u + 2u].w));
-        let p0 = tri_pos[center_tri * 3u].xyz;
-        let p1 = tri_pos[center_tri * 3u + 1u].xyz;
-        let p2 = tri_pos[center_tri * 3u + 2u].xyz;
+        kv = dot(b, vec3<f32>(tri_curvature(center_tri, 0u), tri_curvature(center_tri, 1u), tri_curvature(center_tri, 2u)));
+        let p0 = tri_position(center_tri, 0u);
+        let p1 = tri_position(center_tri, 1u);
+        let p2 = tri_position(center_tri, 2u);
         tri_size = (distance(p0, p1) + distance(p1, p2) + distance(p2, p0)) / 3.0;
     }
     textureStore(surf_curv_w, c, vec4<f32>(kv, tri_size, 0.0, 0.0));

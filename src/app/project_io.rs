@@ -18,9 +18,35 @@ use crate::post::Tonemap;
 use crate::viewport::{Background, OrbitCam};
 use eframe::{egui, wgpu};
 use serde_json::{Value, json};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 8] = b"MPPROJ\x00\x01";
+
+/// Counts serialized bytes without retaining a second copy of the manifest.
+#[derive(Default)]
+struct CountingWriter {
+    bytes: u64,
+}
+
+impl Write for CountingWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let len = u64::try_from(buffer.len())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "manifest length overflow"))?;
+        self.bytes = self.bytes.checked_add(len)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "manifest length overflow"))?;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Parses only the declared manifest range directly from the project file.
+fn read_manifest<R: Read>(reader: &mut R, len: u64) -> Result<Value, serde_json::Error> {
+    serde_json::from_reader(Read::take(reader, len))
+}
 
 /// Per-user app data: recent projects and the autosave.
 pub(super) fn data_dir() -> Option<PathBuf> {
@@ -100,26 +126,518 @@ const FORMATS: [wgpu::TextureFormat; 6] = [
 ];
 
 struct Writer {
-    blobs: Vec<Vec<u8>>,
+    file: Option<std::io::BufWriter<std::fs::File>>,
+    path: PathBuf,
+    count: usize,
+    spool_bytes: usize,
+    /// Identical Arc-backed fill sources reuse one project blob.
+    image_blobs: std::collections::HashMap<usize, usize>,
+    error: Option<String>,
 }
 
 impl Writer {
-    fn blob(&mut self, raw: &[u8]) -> Value {
-        self.blobs.push(lz4_flex::compress_prepend_size(raw));
-        json!(self.blobs.len() - 1)
+    fn new(project_path: &Path) -> Result<Self, String> {
+        let path = project_path.with_extension("mpp.blobs.tmp");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|e| format!("can't create {}: {e}", path.display()))?;
+        Ok(Self {
+            file: Some(std::io::BufWriter::new(file)),
+            path,
+            count: 0,
+            spool_bytes: 0,
+            image_blobs: std::collections::HashMap::new(),
+            error: None,
+        })
     }
+
+    /// Identical Arc-backed Fill images share one blob in the project file.
+    /// Pointer identity is exact because both references are alive while this
+    /// project snapshot is serialized; no probabilistic hash is involved.
+    fn blob_arc(&mut self, raw: &std::sync::Arc<Vec<u8>>) -> Value {
+        let key = std::sync::Arc::as_ptr(raw) as usize;
+        if let Some(index) = self.image_blobs.get(&key) {
+            return json!(index);
+        }
+        let reference = self.blob(raw.as_slice());
+        self.image_blobs.insert(key, self.count - 1);
+        reference
+    }
+
+    /// Compress one payload, write it straight to the disk spool and release
+    /// its compressed allocation instead of retaining all project blobs in RAM.
+    fn blob(&mut self, raw: &[u8]) -> Value {
+        let index = self.count;
+        self.count += 1;
+        if self.error.is_none() {
+            let packed = lz4_flex::compress_prepend_size(raw);
+            let len = (packed.len() as u64).to_le_bytes();
+            let result = self.file.as_mut().expect("writer spool is open").write_all(&len)
+                .and_then(|_| self.file.as_mut().expect("writer spool is open").write_all(&packed));
+            match result {
+                Ok(()) => self.spool_bytes = self.spool_bytes.saturating_add(8 + packed.len()),
+                Err(e) => self.error = Some(format!("can't write blob spool {}: {e}", self.path.display())),
+            }
+        }
+        json!(index)
+    }
+
+    fn copy_to(&mut self, out: &mut impl Write) -> Result<(), String> {
+        if let Some(error) = self.error.take() {
+            return Err(error);
+        }
+        let file = self.file.as_mut().expect("writer spool is open");
+        file.flush().map_err(|e| format!("can't flush blob spool {}: {e}", self.path.display()))?;
+        let file = file.get_mut();
+        file.seek(SeekFrom::Start(0)).map_err(|e| format!("can't rewind blob spool {}: {e}", self.path.display()))?;
+        std::io::copy(file, out).map_err(|e| format!("can't copy blob spool {}: {e}", self.path.display()))?;
+        Ok(())
+    }
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        // Close the spool before removing it (required on Windows).
+        self.file.take();
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+
+/// A project whose manifest, binary blobs and CPU mesh structures have been
+/// prepared off the UI thread. Large decoded blobs live in a temporary disk
+/// spool; the UI reads and uploads one texture at a time.
+pub(super) struct PreparedProject {
+    manifest: Value,
+    reader: Reader,
+    mesh: Mesh,
+    bvh: std::sync::Arc<crate::bvh::Bvh>,
+}
+
+pub(super) struct OpenJob {
+    pub path: PathBuf,
+    pub rx: std::sync::mpsc::Receiver<Result<PreparedProject, String>>,
+    pub cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    state_serial: u64,
+    settings_serial: u64,
+}
+
+impl Drop for OpenJob {
+    fn drop(&mut self) {
+        self.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+struct TempLoadSpool(Option<PathBuf>);
+
+impl Drop for TempLoadSpool {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Reads the container and expands blobs sequentially to disk so decompression
+/// never holds more than one packed blob and its output in CPU memory.
+fn prepare_project_file(
+    path: &Path,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<PreparedProject, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_SPOOL: AtomicU64 = AtomicU64::new(1);
+    static OPEN_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let _open_guard = OPEN_LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock().map_err(|_| "project loader lock is poisoned")?;
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+        return Err("Project loading cancelled.".into());
+    }
+    let mut file = std::fs::File::open(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
+    let file_len = file.metadata().map_err(|e| e.to_string())?.len();
+    let bad = || format!("{} isn't a Material Painter project (or is damaged)", path.display());
+    if file_len < 24 {
+        return Err(bad());
+    }
+    let mut magic = [0u8; 8];
+    file.read_exact(&mut magic).map_err(|_| bad())?;
+    if &magic != MAGIC {
+        return Err(bad());
+    }
+    let mut number = [0u8; 8];
+    file.read_exact(&mut number).map_err(|_| bad())?;
+    let manifest_len = u64::from_le_bytes(number);
+    let manifest_end = 16u64.checked_add(manifest_len)
+        .filter(|&end| end <= file_len.saturating_sub(8))
+        .ok_or_else(bad)?;
+    let manifest = read_manifest(&mut file, manifest_len).map_err(|e| format!("{}: {e}", bad()))?;
+    file.seek(SeekFrom::Start(manifest_end)).map_err(|_| bad())?;
+    file.read_exact(&mut number).map_err(|_| bad())?;
+    let count_u64 = u64::from_le_bytes(number);
+    let table_start = file.stream_position().map_err(|_| bad())?;
+    if count_u64.checked_mul(8).ok_or_else(bad)? > file_len.saturating_sub(table_start) {
+        return Err(bad());
+    }
+    let count = usize::try_from(count_u64).map_err(|_| bad())?;
+    let mut packed_ranges = Vec::with_capacity(count);
+    for _ in 0..count {
+        file.read_exact(&mut number).map_err(|_| bad())?;
+        let packed_len = u64::from_le_bytes(number);
+        let offset = file.stream_position().map_err(|_| bad())?;
+        let end = offset.checked_add(packed_len).filter(|&end| end <= file_len).ok_or_else(bad)?;
+        packed_ranges.push((offset, usize::try_from(packed_len).map_err(|_| bad())?));
+        file.seek(SeekFrom::Start(end)).map_err(|_| bad())?;
+    }
+
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+        return Err("Project loading cancelled.".into());
+    }
+    let spool_path = std::env::temp_dir().join(format!(
+        "material-painter-open-{}-{}.raw",
+        std::process::id(),
+        NEXT_SPOOL.fetch_add(1, Ordering::Relaxed),
+    ));
+    let mut cleanup = TempLoadSpool(Some(spool_path.clone()));
+    let spool_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&spool_path)
+        .map_err(|e| format!("can't create project load spool {}: {e}", spool_path.display()))?;
+    let mut spool = std::io::BufWriter::new(spool_file);
+    let mut raw_ranges = Vec::with_capacity(count);
+    let mut raw_offset = 0u64;
+    for (index, (offset, packed_len)) in packed_ranges.into_iter().enumerate() {
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            return Err("Project loading cancelled.".into());
+        }
+        let mut packed = vec![0u8; packed_len];
+        file.seek(SeekFrom::Start(offset)).map_err(|e| format!("can't seek to project blob {index}: {e}"))?;
+        file.read_exact(&mut packed).map_err(|e| format!("can't read project blob {index}: {e}"))?;
+        let raw = lz4_flex::decompress_size_prepended(&packed)
+            .map_err(|e| format!("project blob {index} is damaged: {e}"))?;
+        let len = raw.len();
+        spool.write_all(&raw).map_err(|e| format!("can't spool project blob {index}: {e}"))?;
+        raw_ranges.push((raw_offset, len));
+        raw_offset = raw_offset.checked_add(len as u64).ok_or("project load spool size overflow")?;
+    }
+    spool.flush().map_err(|e| format!("can't flush project load spool: {e}"))?;
+    drop(spool);
+    drop(file);
+
+    let reader = Reader {
+        file: std::sync::Mutex::new(Some(std::fs::File::open(&spool_path)
+            .map_err(|e| format!("can't reopen project load spool: {e}"))?)),
+        blobs: raw_ranges,
+        raw: true,
+        cleanup_path: cleanup.0.take(),
+        shared_blobs: std::sync::Mutex::new(std::collections::HashMap::new()),
+    }; 
+    validate_project_payloads(&manifest, &reader, cancelled)?;
+
+    // Prepare the mesh, derived UV edges and picking BVH here rather than
+    // rebuilding them synchronously after the UI has discarded its old mesh.
+    let m = &manifest["mesh"];
+    let vertices: Vec<Vertex> = reader.blob_pod_vec(&m["vertices"])?;
+    let indices: Vec<u32> = reader.blob_pod_vec(&m["indices"])?;
+    if indices.iter().any(|&i| i as usize >= vertices.len()) {
+        return Err(bad());
+    }
+    let center = glam::Vec3::from_array(arr(m, "center", [0.0; 3]));
+    let tris = indices.len() / 3;
+    let mut mesh = Mesh::from_saved(
+        s(m, "name").unwrap_or("Mesh").to_string(),
+        vertices,
+        indices,
+        center,
+        f(m, "scale", 1.0),
+    );
+    if let Some(names) = m["objects"].as_array() {
+        let tri_object: Vec<u32> = reader.blob_pod_vec(&m["tri_object"])?;
+        if tri_object.len() == tris && tri_object.iter().all(|&o| (o as usize) < names.len()) {
+            mesh.objects = names.iter().map(|n| n.as_str().unwrap_or("").to_string()).collect();
+            mesh.tri_object = tri_object;
+        }
+    }
+    if !m["tri_color"].is_null() {
+        mesh.tri_color = reader.blob_pod_vec_exact::<[u8; 3]>(&m["tri_color"], tris)?;
+    }
+    if !m["tri_vertex_color"].is_null() {
+        mesh.tri_vertex_color = reader.blob_pod_vec_exact::<[[u8; 3]; 3]>(&m["tri_vertex_color"], tris)?;
+    }
+    let set_values: Vec<&Value> = match manifest["texture_sets"].as_array() {
+        Some(values) if !values.is_empty() => values.iter().collect(),
+        _ => vec![&manifest],
+    };
+    let ranges: Vec<(String, std::ops::Range<u32>)> = set_values.iter().filter_map(|sv| {
+        let t = sv["tris"].as_array()?;
+        let (a, b) = (t.first()?.as_u64()? as u32, t.get(1)?.as_u64()? as u32);
+        Some((s(sv, "name").unwrap_or("Material").to_string(), a..b))
+    }).collect();
+    if ranges.len() == set_values.len() {
+        mesh.set_ranges(ranges);
+    }
+    let hidden_objects: Vec<bool> = m["hidden_objects"].as_array()
+        .map(|values| values.iter().map(|v| v.as_bool().unwrap_or(false)).take(mesh.objects.len()).collect())
+        .unwrap_or_else(|| vec![false; mesh.objects.len()]);
+    let any_hidden = hidden_objects.iter().any(|hidden| *hidden);
+    if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+        return Err("Project loading cancelled.".into());
+    }
+    let bvh = std::sync::Arc::new(if any_hidden {
+        crate::bvh::Bvh::from_mesh_where(&mesh, |tri| {
+            let object = mesh.tri_object.get(tri).copied().unwrap_or(u32::MAX) as usize;
+            !hidden_objects.get(object).copied().unwrap_or(false)
+        })
+    } else {
+        crate::bvh::Bvh::from_mesh(&mesh)
+    });
+    Ok(PreparedProject { manifest, reader, mesh, bvh })
 }
 
 struct Reader {
-    blobs: Vec<Vec<u8>>,
+    /// The source file or the worker's decompressed spool. Only one blob is
+    /// read into CPU memory at a time.
+    file: std::sync::Mutex<Option<std::fs::File>>,
+    blobs: Vec<(u64, usize)>,
+    /// True when ranges point to raw bytes in the worker spool, not LZ4 data.
+    raw: bool,
+    /// Deleted after the file handle is closed (Windows does not unlink open files).
+    cleanup_path: Option<PathBuf>,
+    /// Weak CPU-side cache: repeated manifest references to one blob share
+    /// the same encoded image allocation for as long as a FillImage owns it.
+    shared_blobs: std::sync::Mutex<std::collections::HashMap<usize, std::sync::Weak<Vec<u8>>>>,
+}
+
+impl Drop for Reader {
+    fn drop(&mut self) {
+        if let Ok(file) = self.file.get_mut() {
+            file.take();
+        }
+        if let Some(path) = self.cleanup_path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 impl Reader {
-    fn blob(&self, v: &Value) -> Result<Vec<u8>, String> {
+    fn packed_blob(&self, v: &Value) -> Result<(usize, Vec<u8>), String> {
         let i = v.as_u64().ok_or("missing blob reference")? as usize;
-        let packed = self.blobs.get(i).ok_or(format!("blob {i} is missing"))?;
-        lz4_flex::decompress_size_prepended(packed).map_err(|e| format!("blob {i} is damaged: {e}"))
+        let (offset, len) = self.blobs.get(i).ok_or(format!("blob {i} is missing"))?;
+        let mut bytes = vec![0u8; *len];
+        {
+            let mut file = self.file.lock().map_err(|_| "project reader lock is poisoned")?;
+            let file = file.as_mut().ok_or("project reader file is closed")?;
+            file.seek(SeekFrom::Start(*offset)).map_err(|e| format!("can't seek to blob {i}: {e}"))?;
+            file.read_exact(&mut bytes).map_err(|e| format!("can't read blob {i}: {e}"))?;
+        }
+        Ok((i, bytes))
     }
+
+    fn blob(&self, v: &Value) -> Result<Vec<u8>, String> {
+        let (i, bytes) = self.packed_blob(v)?;
+        if self.raw {
+            Ok(bytes)
+        } else {
+            lz4_flex::decompress_size_prepended(&bytes).map_err(|e| format!("blob {i} is damaged: {e}"))
+        }
+    }
+
+    fn blob_arc(&self, v: &Value) -> Result<std::sync::Arc<Vec<u8>>, String> {
+        let index = v.as_u64().ok_or("missing blob reference")? as usize;
+        if let Some(data) = self.shared_blobs
+            .lock()
+            .map_err(|_| "project blob cache lock is poisoned")?
+            .get(&index)
+            .and_then(std::sync::Weak::upgrade) {
+            return Ok(data);
+        }
+        let data = std::sync::Arc::new(self.blob(v)?);
+        self.shared_blobs
+            .lock()
+            .map_err(|_| "project blob cache lock is poisoned")?
+            .insert(index, std::sync::Arc::downgrade(&data));
+        Ok(data)
+    }
+
+    /// Reads directly into the final typed allocation. Raw worker spools avoid
+    /// a second temporary byte vector; legacy compressed readers keep the LZ4 path.
+    fn blob_pod_vec<T: bytemuck::Pod>(&self, v: &Value) -> Result<Vec<T>, String> {
+        let i = v.as_u64().ok_or("missing blob reference")? as usize;
+        let (offset, len) = *self.blobs.get(i).ok_or(format!("blob {i} is missing"))?;
+        let element_size = std::mem::size_of::<T>();
+        if element_size == 0 {
+            return Err(format!("blob {i} has an invalid typed-array element size"));
+        }
+        if self.raw {
+            if !len.is_multiple_of(element_size) {
+                return Err(format!("blob {i} has an invalid typed-array size"));
+            }
+            let mut output = vec![T::zeroed(); len / element_size];
+            let mut file = self.file.lock().map_err(|_| "project reader lock is poisoned")?;
+            let file = file.as_mut().ok_or("project reader file is closed")?;
+            file.seek(SeekFrom::Start(offset)).map_err(|e| format!("can't seek to blob {i}: {e}"))?;
+            file.read_exact(bytemuck::cast_slice_mut(&mut output)).map_err(|e| format!("can't read blob {i}: {e}"))?;
+            return Ok(output);
+        }
+        let (_, packed) = self.packed_blob(v)?;
+        if packed.len() < 4 {
+            return Err(format!("blob {i} is damaged: missing decompressed size"));
+        }
+        let byte_len = u32::from_le_bytes(packed[..4].try_into().expect("four-byte size")) as usize;
+        if !byte_len.is_multiple_of(element_size) {
+            return Err(format!("blob {i} has an invalid typed-array size"));
+        }
+        let mut output = vec![T::zeroed(); byte_len / element_size];
+        let written = lz4_flex::block::decompress_into(&packed[4..], bytemuck::cast_slice_mut(&mut output))
+            .map_err(|e| format!("blob {i} is damaged: {e}"))?;
+        if written != byte_len {
+            return Err(format!("blob {i} has an inconsistent decompressed size"));
+        }
+        Ok(output)
+    }
+
+    /// Reads an optional typed payload only when it has exactly the expected
+    /// element count. Its final Vec<T> is the only decompressed allocation.
+    fn blob_pod_vec_exact<T: bytemuck::Pod>(&self, v: &Value, expected_len: usize) -> Result<Option<Vec<T>>, String> {
+        let i = v.as_u64().ok_or("missing blob reference")? as usize;
+        let (offset, len) = *self.blobs.get(i).ok_or(format!("blob {i} is missing"))?;
+        let element_size = std::mem::size_of::<T>();
+        if element_size == 0 {
+            return Err(format!("blob {i} has an invalid typed-array element size"));
+        }
+        let expected_bytes = expected_len.checked_mul(element_size)
+            .ok_or_else(|| format!("blob {i} typed-array size overflows"))?;
+        if self.raw {
+            if len != expected_bytes {
+                return Ok(None);
+            }
+            let mut output = vec![T::zeroed(); expected_len];
+            let mut file = self.file.lock().map_err(|_| "project reader lock is poisoned")?;
+            let file = file.as_mut().ok_or("project reader file is closed")?;
+            file.seek(SeekFrom::Start(offset)).map_err(|e| format!("can't seek to blob {i}: {e}"))?;
+            file.read_exact(bytemuck::cast_slice_mut(&mut output)).map_err(|e| format!("can't read blob {i}: {e}"))?;
+            return Ok(Some(output));
+        }
+        let (_, packed) = self.packed_blob(v)?;
+        if packed.len() < 4 {
+            return Err(format!("blob {i} is damaged: missing decompressed size"));
+        }
+        let byte_len = u32::from_le_bytes(packed[..4].try_into().expect("four-byte size")) as usize;
+        if byte_len != expected_bytes {
+            return Ok(None);
+        }
+        let mut output = vec![T::zeroed(); expected_len];
+        let written = lz4_flex::block::decompress_into(&packed[4..], bytemuck::cast_slice_mut(&mut output))
+            .map_err(|e| format!("blob {i} is damaged: {e}"))?;
+        if written != byte_len {
+            return Err(format!("blob {i} has an inconsistent decompressed size"));
+        }
+        Ok(Some(output))
+    }
+}
+
+/// Validates every payload the UI-side project apply phase may touch. The
+/// worker checks texture sizes, image decodability and mask generators before
+/// the existing document is changed.
+fn validate_project_payloads(
+    manifest: &Value,
+    reader: &Reader,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<(), String> {
+    let bad = "project manifest is incomplete or damaged";
+    let texture = |value: &Value, label: &str| -> Result<(), String> {
+        if value.is_null() {
+            return Ok(());
+        }
+        let name = s(value, "format").ok_or_else(|| format!("{label}: texture without a format"))?;
+        let format = FORMATS.into_iter().find(|format| format!("{format:?}") == name)
+            .ok_or_else(|| format!("{label}: unknown texture format '{name}'"))?;
+        let width = value["width"].as_u64().ok_or_else(|| format!("{label}: missing width"))?;
+        let height = value["height"].as_u64().ok_or_else(|| format!("{label}: missing height"))?;
+        if width == 0 || height == 0 || width > u32::MAX as u64 || height > u32::MAX as u64 {
+            return Err(format!("{label}: invalid texture dimensions"));
+        }
+        let expected = width.checked_mul(height)
+            .and_then(|pixels| pixels.checked_mul(crate::gpu::bytes_per_texel(format) as u64))
+            .ok_or_else(|| format!("{label}: texture size overflows"))?;
+        let index = value["blob"].as_u64().ok_or_else(|| format!("{label}: missing texture blob"))? as usize;
+        let (_, actual) = reader.blobs.get(index).ok_or_else(|| format!("{label}: texture blob {index} is missing"))?;
+        if *actual as u64 != expected {
+            return Err(format!("{label}: texture payload has {} bytes; expected {expected}", actual));
+        }
+        Ok(())
+    };
+
+    let sets: Vec<&Value> = match manifest["texture_sets"].as_array() {
+        Some(values) if !values.is_empty() => values.iter().collect(),
+        _ => vec![manifest],
+    };
+    for (set_index, set) in sets.iter().enumerate() {
+        if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+            return Err("Project loading cancelled.".into());
+        }
+        let layers = set["layers_bottom_to_top"].as_array()
+            .ok_or_else(|| bad.to_string())?;
+        for (layer_index, layer) in layers.iter().enumerate() {
+            if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+                return Err("Project loading cancelled.".into());
+            }
+            let label = format!("texture set {set_index}, layer {layer_index}");
+            if layer["id"].as_u64().is_none() {
+                return Err(format!("{label}: layer without an ID"));
+            }
+            let content = &layer["content"];
+            match s(content, "kind") {
+                Some("paint") => {
+                    let channels = content["channels"].as_array()
+                        .ok_or_else(|| format!("{label}: paint layer has no channel list"))?;
+                    for (channel, value) in channels.iter().enumerate().take(crate::engine::CHANNELS) {
+                        texture(value, &format!("{label}, channel {channel}"))?;
+                    }
+                }
+                Some("fill" | "folder") => {}
+                _ => return Err(format!("{label}: unknown layer content")),
+            }
+
+            if let Some(mask) = layer.get("mask").filter(|mask| !mask.is_null()) {
+                if let Some(paint) = mask.get("paint").filter(|paint| !paint.is_null()) {
+                    texture(paint, &format!("{label}, mask"))?;
+                }
+                if let Some(generator) = mask.get("generator").filter(|generator| !generator.is_null()) {
+                    generator_from(generator).map_err(|error| format!("{label}, mask generator: {error}"))?;
+                }
+                for (mask_layer_index, mask_layer) in mask["layers"].as_array().into_iter().flatten().enumerate() {
+                    if let Some(generator) = mask_layer["source"].get("generator") {
+                        generator_from(generator).map_err(|error| {
+                            format!("{label}, mask layer {mask_layer_index}: {error}")
+                        })?;
+                    }
+                }
+            }
+
+            for (channel, image_value) in layer["images"].as_array().into_iter().flatten()
+                .enumerate().take(crate::engine::CHANNELS)
+            {
+                if image_value.is_null() {
+                    continue;
+                }
+                let bytes = reader.blob(&image_value["data"])
+                    .map_err(|error| format!("{label}, fill image channel {channel}: {error}"))?;
+                image::load_from_memory(&bytes).map_err(|error| {
+                    format!("{label}, fill image channel {channel}: {error}")
+                })?;
+                // The encoded bytes and decoded image are dropped before the next source.
+            }
+        }
+
+        for (fix_index, fix) in set["map_fixes"].as_array().into_iter().flatten().enumerate() {
+            texture(&fix["texture"], &format!("texture set {set_index}, map fix {fix_index}"))?;
+        }
+    }
+    Ok(())
 }
 
 fn f(v: &Value, key: &str, default: f32) -> f32 {
@@ -236,16 +754,6 @@ pub(super) fn fill_from(v: &Value) -> FillParams {
         tri_sharpness: f(v, "triplanar_sharpness", d.tri_sharpness),
         graph: v["graph"].as_u64(),
     }
-}
-
-/// Per-corner vertex colors from their saved bytes (nine a triangle); `None`
-/// when they don't cover exactly `tris` triangles.
-fn corner_colors_from_bytes(bytes: &[u8], tris: usize) -> Option<Vec<[[u8; 3]; 3]>> {
-    let colors: Vec<[[u8; 3]; 3]> = bytes
-        .chunks_exact(9)
-        .map(|c| [[c[0], c[1], c[2]], [c[3], c[4], c[5]], [c[6], c[7], c[8]]])
-        .collect();
-    (colors.len() == tris && bytes.len() == tris * 9).then_some(colors)
 }
 
 pub(super) fn generator_json(g: &Generator) -> Value {
@@ -430,7 +938,7 @@ impl PainterApp {
                 .iter()
                 .enumerate()
                 .map(|(_ch, im)| im.as_ref().filter(|_| !from_graph))
-                .map(|im| im.map_or(Value::Null, |im| json!({"name": im.name, "data": w.blob(&im.encoded)})))
+                .map(|im| im.map_or(Value::Null, |im| json!({"name": im.name, "data": w.blob_arc(&im.encoded)})))
                 .collect();
             layers.push(json!({
                 "images": images,
@@ -493,7 +1001,7 @@ impl PainterApp {
     /// the document is saved to.
     fn write_project(&mut self, path: &Path) -> Result<usize, String> {
         self.engine.commit_props(&mut self.undo);
-        let mut w = Writer { blobs: Vec::new() };
+        let mut w = Writer::new(path)?;
         let mesh = &self.mesh;
         let mesh_json = json!({
             "name": mesh.name,
@@ -585,20 +1093,30 @@ impl PainterApp {
             "bake": bake,
             "view": view,
         });
-        let text = serde_json::to_vec(&manifest).map_err(|e| e.to_string())?;
-        let mut out = Vec::with_capacity(text.len() + w.blobs.iter().map(|b| b.len() + 8).sum::<usize>() + 32);
-        out.extend_from_slice(MAGIC);
-        out.extend_from_slice(&(text.len() as u64).to_le_bytes());
-        out.extend_from_slice(&text);
-        out.extend_from_slice(&(w.blobs.len() as u64).to_le_bytes());
-        for blob in &w.blobs {
-            out.extend_from_slice(&(blob.len() as u64).to_le_bytes());
-            out.extend_from_slice(blob);
-        }
+        // Count once, then stream the manifest to the final writer. This
+        // avoids a second full-size Vec<u8> containing serialized metadata.
+        let mut counter = CountingWriter::default();
+        serde_json::to_writer(&mut counter, &manifest).map_err(|e| e.to_string())?;
+        let manifest_len = counter.bytes;
+        let manifest_len_usize = usize::try_from(manifest_len).map_err(|_| "project manifest is too large")?;
+        let total_bytes = MAGIC.len()
+            .checked_add(8)
+            .and_then(|n| n.checked_add(manifest_len_usize))
+            .and_then(|n| n.checked_add(8))
+            .and_then(|n| n.checked_add(w.spool_bytes))
+            .ok_or("project file size overflows address space")?;
         let tmp = path.with_extension("mpp.tmp");
-        std::fs::write(&tmp, &out).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
+        let file = std::fs::File::create(&tmp).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
+        let mut out = std::io::BufWriter::new(file);
+        out.write_all(MAGIC).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
+        out.write_all(&manifest_len.to_le_bytes()).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
+        serde_json::to_writer(&mut out, &manifest).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
+        out.write_all(&(w.count as u64).to_le_bytes()).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
+        w.copy_to(&mut out)?;
+        out.flush().map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
+        drop(out);
         std::fs::rename(&tmp, path).map_err(|e| format!("can't replace {}: {e}", path.display()))?;
-        Ok(out.len())
+        Ok(total_bytes)
     }
 
     fn remember_recent(&mut self, path: &Path) {
@@ -615,59 +1133,76 @@ impl PainterApp {
         }
     }
 
-    pub(super) fn open_project(&mut self, path: &Path, ctx: &egui::Context) -> Result<(), String> {
-        let data = std::fs::read(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
-        let bad = || format!("{} isn't a Material Painter project (or is damaged)", path.display());
-        if data.len() < 24 || &data[..8] != MAGIC {
-            return Err(bad());
+    pub(super) fn start_open_project(&mut self, path: &Path, ctx: &egui::Context) {
+        self.project_open.take();
+        let path = path.to_path_buf();
+        let worker_path = path.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_cancelled = cancelled.clone();
+        let worker_ctx = ctx.clone();
+        let spawn = std::thread::Builder::new().name("project-open-cpu".into()).spawn(move || {
+            let result = prepare_project_file(&worker_path, Some(&worker_cancelled));
+            let _ = tx.send(result);
+            worker_ctx.request_repaint();
+        });
+        if let Err(error) = spawn {
+            self.status = format!("Couldn't start project loader: {error}");
+            return;
         }
-        let mut at = 8;
-        let mut take = |n: usize| -> Result<&[u8], String> {
-            let slice = data.get(at..at + n).ok_or_else(bad)?;
-            at += n;
-            Ok(slice)
+        self.project_open = Some(OpenJob {
+            path: path.clone(),
+            rx,
+            cancelled,
+            state_serial: self.undo.state_serial(),
+            settings_serial: self.project_settings_serial,
+        });
+        self.status = format!("Preparing {} in the background…", path.display());
+    }
+
+    pub(super) fn poll_open_project(&mut self, ctx: &egui::Context) {
+        let result = match self.project_open.as_ref().map(|job| job.rx.try_recv()) {
+            Some(Ok(result)) => Some(result),
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => Some(Err("Project loading worker stopped unexpectedly.".into())),
+            _ => None,
         };
-        let u64_at = |b: &[u8]| u64::from_le_bytes(b.try_into().unwrap()) as usize;
-        let len = u64_at(take(8)?);
-        let manifest: Value = serde_json::from_slice(take(len)?).map_err(|e| format!("{}: {e}", bad()))?;
+        let Some(result) = result else { return };
+        let Some(job) = self.project_open.take() else { return };
+        if self.undo.state_serial() != job.state_serial
+            || self.project_settings_serial != job.settings_serial
+            || self.stroke.is_some()
+        {
+            self.status = "Project loading cancelled because the current document changed.".into();
+            return;
+        }
+        match result {
+            Ok(prepared) => {
+                let path = job.path.clone();
+                match self.open_project_prepared(&path, prepared, ctx) {
+                    Ok(()) => self.target = crate::undo::StrokeTarget::Content,
+                    Err(error) => self.status = error,
+                }
+            }
+            Err(error) => self.status = error,
+        }
+    }
+
+    pub(super) fn open_project(&mut self, path: &Path, ctx: &egui::Context) -> Result<(), String> {
+        let prepared = prepare_project_file(path, None)?;
+        self.open_project_prepared(path, prepared, ctx)
+    }
+
+    fn open_project_prepared(
+        &mut self,
+        path: &Path,
+        prepared: PreparedProject,
+        ctx: &egui::Context,
+    ) -> Result<(), String> {
+        let PreparedProject { manifest, reader: r, mesh, bvh } = prepared;
+        let bad = || format!("{} isn't a Material Painter project (or is damaged)", path.display());
         self.active_channels = std::array::from_fn(|i| {
             manifest["active_channels"].as_array().and_then(|channels| channels.get(i)).and_then(Value::as_bool).unwrap_or(true)
         });
-        let count = u64_at(take(8)?);
-        let mut blobs = Vec::with_capacity(count);
-        for _ in 0..count {
-            let n = u64_at(take(8)?);
-            blobs.push(take(n)?.to_vec());
-        }
-        let r = Reader { blobs };
-
-        // Everything is decoded before the open document is touched.
-        let m = &manifest["mesh"];
-        let vertices: Vec<Vertex> = bytemuck::pod_collect_to_vec(&r.blob(&m["vertices"])?);
-        let indices: Vec<u32> = bytemuck::pod_collect_to_vec(&r.blob(&m["indices"])?);
-        if indices.iter().any(|&i| i as usize >= vertices.len()) {
-            return Err(bad());
-        }
-        let center = glam::Vec3::from_array(arr(m, "center", [0.0; 3]));
-        let tris = indices.len() / 3;
-        let mut mesh = Mesh::from_saved(s(m, "name").unwrap_or("Mesh").to_string(), vertices, indices, center, f(m, "scale", 1.0));
-        if let Some(names) = m["objects"].as_array() {
-            let tri_object: Vec<u32> = bytemuck::pod_collect_to_vec(&r.blob(&m["tri_object"])?);
-            if tri_object.len() == tris && tri_object.iter().all(|&o| (o as usize) < names.len()) {
-                mesh.objects = names.iter().map(|n| n.as_str().unwrap_or("").to_string()).collect();
-                mesh.tri_object = tri_object;
-            }
-        }
-        if !m["tri_color"].is_null() {
-            let colors: Vec<[u8; 3]> = r.blob(&m["tri_color"])?.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
-            if colors.len() == tris {
-                mesh.tri_color = Some(colors);
-            }
-        }
-        // Projects saved before this key existed only have the per-triangle average.
-        if !m["tri_vertex_color"].is_null() {
-            mesh.tri_vertex_color = corner_colors_from_bytes(&r.blob(&m["tri_vertex_color"])?, tris);
-        }
         let bv = &manifest["bake"];
         let mut bs = crate::bake::BakeSettings::default();
         if let Some(q) = s(bv, "quality") {
@@ -720,29 +1255,20 @@ impl PainterApp {
             Some(a) if !a.is_empty() => a.iter().collect(),
             _ => vec![&manifest],
         };
-        let ranges: Vec<(String, std::ops::Range<u32>)> = set_values
-            .iter()
-            .filter_map(|sv| {
-                let t = sv["tris"].as_array()?;
-                let (a, b) = (t.first()?.as_u64()? as u32, t.get(1)?.as_u64()? as u32);
-                Some((s(sv, "name").unwrap_or("Material").to_string(), a..b))
-            })
-            .collect();
-        if ranges.len() == set_values.len() {
-            mesh.set_ranges(ranges);
-        }
         let set_count = mesh.sets.len();
 
-        // Switch mesh first, then each set's size: layers are created at it.
+        // The worker already built the CPU mesh, UV edges and visible BVH.
+        // Only GPU mesh/engine creation remains on the device-owning thread.
         self.bake_settings = bs;
         let sizes: Vec<u32> = set_values.iter().map(|sv| sv["resolution"].as_u64().unwrap_or(2048) as u32).collect();
-        self.load_mesh_sized(mesh, ctx, &sizes);
+        // Release the previous document's snapshots before allocating the new one.
+        self.undo.clear();
+        self.load_mesh_sized_with_bvh(mesh, bvh, ctx, &sizes, false);
         self.hidden_objects = manifest["mesh"]["hidden_objects"]
             .as_array()
             .map(|hidden| hidden.iter().map(|value| value.as_bool().unwrap_or(false)).take(self.mesh.objects.len()).collect())
             .unwrap_or_else(|| vec![false; self.mesh.objects.len()]);
         self.hidden_objects.resize(self.mesh.objects.len(), false);
-        self.rebuild_visible_bvh();
         self.graphs.clear(&self.rs);
         for gv in manifest["graphs"].as_array().into_iter().flatten() {
             let Some(id) = gv["id"].as_u64() else { continue };
@@ -755,9 +1281,8 @@ impl PainterApp {
         }
         for (k, sv) in set_values.iter().enumerate().take(set_count) {
             self.switch_set(k);
-            while !self.engine.layers.is_empty() {
-                self.engine.delete_layer(0, &mut self.undo);
-            }
+            // Replacing a document must drop old layer textures, not retain them in Undo.
+            self.engine.restore_layers(Vec::new());
             let res = sv["resolution"].as_u64().unwrap_or(2048) as u32;
             if res != self.engine.res {
                 self.engine.set_resolution(res, &self.gpu_mesh, &mut self.undo);
@@ -801,7 +1326,7 @@ impl PainterApp {
                 let mut images: [Option<crate::engine::FillImage>; crate::engine::CHANNELS] = Default::default();
                 for (k, iv) in lv["images"].as_array().into_iter().flatten().enumerate().take(crate::engine::CHANNELS) {
                     if !iv.is_null() {
-                        let data = std::sync::Arc::new(r.blob(&iv["data"])?);
+                        let data = r.blob_arc(&iv["data"])?;
                         images[k] = Some(self.engine.decode_channel_image(k, s(iv, "name").unwrap_or("image").to_string(), data)?);
                     }
                 }
@@ -936,6 +1461,9 @@ impl PainterApp {
             self.remember_recent(path);
             self.status = format!("Opened {}.", path.display());
         }
+        if self.prefs.bake_on_load {
+            self.start_bake_all(ctx);
+        }
         Ok(())
     }
 
@@ -986,13 +1514,177 @@ mod tests {
     }
 
     #[test]
-    fn corner_colors_survive_a_save() {
-        let colors: Vec<[[u8; 3]; 3]> = vec![[[255, 0, 0], [0, 255, 0], [0, 0, 255]], [[1, 2, 3], [4, 5, 6], [7, 8, 9]]];
-        let bytes: Vec<u8> = bytemuck::cast_slice::<[[u8; 3]; 3], u8>(&colors).to_vec();
-        assert_eq!(bytes.len(), 18);
-        assert_eq!(corner_colors_from_bytes(&bytes, 2), Some(colors));
-        // A color list that doesn't match the mesh is dropped, not misaligned.
-        assert_eq!(corner_colors_from_bytes(&bytes, 3), None);
-        assert_eq!(corner_colors_from_bytes(&bytes[..17], 2), None);
+    fn manifest_count_matches_streamed_json_serialization() {
+        let manifest = json!({
+            "active_channels": [true, false, true],
+            "layers": ["paint", "fill", "folder"],
+            "metadata": "stream without a full output Vec"
+        });
+        let mut counter = CountingWriter::default();
+        serde_json::to_writer(&mut counter, &manifest).unwrap();
+        let expected = serde_json::to_vec(&manifest).unwrap();
+        assert_eq!(counter.bytes, expected.len() as u64);
+    }
+
+    #[test]
+    fn manifest_reader_does_not_consume_the_blob_table() {
+        let manifest_bytes = br#"{"version":4,"active_channels":[true,false]}"#;
+        let mut input = std::io::Cursor::new([manifest_bytes.as_slice(), b"BLOBTABLE"].concat());
+        let manifest = read_manifest(&mut input, manifest_bytes.len() as u64).unwrap();
+        assert_eq!(manifest["version"], 4);
+        assert_eq!(manifest["active_channels"][1], false);
+        assert_eq!(input.position(), manifest_bytes.len() as u64);
+        let mut following = [0u8; 9];
+        input.read_exact(&mut following).unwrap();
+        assert_eq!(&following, b"BLOBTABLE");
+    }
+
+    #[test]
+    fn project_cpu_preparation_spools_blobs_and_builds_mesh_bvh_offline() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).expect("clock").as_nanos();
+        let project = std::env::temp_dir().join(format!("material-painter-prepared-{}-{unique}.mpp", std::process::id()));
+        let mesh = crate::mesh::Primitive::Plane.build();
+        let mut writer = Writer::new(&project).expect("create project blob spool");
+        let vertices = writer.blob(bytemuck::cast_slice(&mesh.vertices));
+        let indices = writer.blob(bytemuck::cast_slice(&mesh.indices));
+        // Real project saves include this blob even when the mesh has no objects.
+        let empty_tri_object: Vec<u32> = Vec::new();
+        let tri_object = writer.blob(bytemuck::cast_slice(&empty_tri_object));
+        let manifest = json!({
+            "active_channels": vec![true; crate::engine::CHANNELS],
+            "version": 4,
+            "mesh": {
+                "name": mesh.name,
+                "center": mesh.center.to_array(),
+                "scale": mesh.scale,
+                "vertices": vertices,
+                "indices": indices,
+                "objects": [],
+                "tri_object": tri_object,
+                "hidden_objects": []
+            },
+            "texture_sets": [{
+                "name": "Plane",
+                "tris": [0, mesh.triangle_count()],
+                "resolution": 512,
+                "layers_bottom_to_top": [],
+                "map_fixes": [],
+                "map_levels": [],
+                "selected": 0
+            }],
+            "bake": {},
+            "graphs": [],
+            "view": {}
+        });
+        let text = serde_json::to_vec(&manifest).expect("manifest");
+        let file = std::fs::File::create(&project).expect("project file");
+        let mut out = std::io::BufWriter::new(file);
+        out.write_all(MAGIC).unwrap();
+        out.write_all(&(text.len() as u64).to_le_bytes()).unwrap();
+        out.write_all(&text).unwrap();
+        out.write_all(&(writer.count as u64).to_le_bytes()).unwrap();
+        writer.copy_to(&mut out).unwrap();
+        out.flush().unwrap();
+        drop(out);
+        drop(writer);
+
+        let prepared = prepare_project_file(&project, None).expect("worker preparation");
+        assert!(prepared.reader.raw, "the UI should read already-expanded spool blobs");
+        assert_eq!(prepared.mesh.triangle_count(), mesh.triangle_count());
+        assert_eq!(prepared.mesh.vertices.len(), mesh.vertices.len());
+        assert_eq!(prepared.bvh.order.len(), mesh.triangle_count());
+        assert_eq!(prepared.mesh.sets.len(), 1);
+        validate_project_payloads(&prepared.manifest, &prepared.reader, None)
+            .expect("the prepared manifest and all referenced payloads validate");
+        let mut damaged = prepared.manifest.clone();
+        damaged["texture_sets"][0]["layers_bottom_to_top"] = json!([{
+            "id": 1,
+            "content": {
+                "kind": "paint",
+                "channels": [{
+                    "format": "Rgba8Unorm", "width": 4, "height": 4, "blob": 999999
+                }]
+            }
+        }]);
+        assert!(validate_project_payloads(&damaged, &prepared.reader, None).is_err(),
+            "a bad texture reference must be rejected before the UI replaces the document");
+        let spool_path = prepared.reader.cleanup_path.clone().expect("temporary spool path");
+        drop(prepared);
+        assert!(!spool_path.exists(), "the raw spool is deleted after the prepared project is dropped");
+        let _ = std::fs::remove_file(project);
+    }
+
+    #[test]
+    fn disk_spool_and_file_backed_reader_round_trip_multiple_blobs() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let project = std::env::temp_dir().join(format!("material-painter-{}-{unique}.mpp", std::process::id()));
+        let spool = project.with_extension("mpp.blobs.tmp");
+        let numbers = vec![0x1122_3344u32, 7, 99, u32::MAX];
+        let tri_colors = vec![[255u8, 0, 0], [0, 255, 0]];
+        let corner_colors: Vec<[[u8; 3]; 3]> = vec![
+            [[255, 0, 0], [0, 255, 0], [0, 0, 255]],
+            [[1, 2, 3], [4, 5, 6], [7, 8, 9]],
+        ];
+        let image_bytes = std::sync::Arc::new(b"encoded fill image source bytes".to_vec());
+        let packed_numbers = lz4_flex::compress_prepend_size(bytemuck::cast_slice(&numbers));
+        let packed_image = lz4_flex::compress_prepend_size(image_bytes.as_slice());
+        let packed_tri_colors = lz4_flex::compress_prepend_size(bytemuck::cast_slice(&tri_colors));
+        let packed_corner_colors = lz4_flex::compress_prepend_size(bytemuck::cast_slice(&corner_colors));
+
+        {
+            let mut writer = Writer::new(&project).expect("create spool");
+            assert_eq!(writer.blob(bytemuck::cast_slice(&numbers)), json!(0));
+            assert_eq!(writer.blob_arc(&image_bytes), json!(1));
+            assert_eq!(writer.blob_arc(&image_bytes.clone()), json!(1), "the same Arc writes only one image blob");
+            assert_eq!(writer.blob(bytemuck::cast_slice(&tri_colors)), json!(2));
+            assert_eq!(writer.blob(bytemuck::cast_slice(&corner_colors)), json!(3));
+            assert_eq!(writer.count, 4);
+
+            // Header with an empty manifest, followed by the exact spool data.
+            let mut file = std::fs::File::create(&project).expect("create test project");
+            file.write_all(MAGIC).unwrap();
+            file.write_all(&0u64.to_le_bytes()).unwrap();
+            file.write_all(&2u64.to_le_bytes()).unwrap();
+            writer.copy_to(&mut file).expect("copy compressed blobs");
+            file.flush().unwrap();
+
+            let first_offset = 8 + 8 + 0 + 8 + 8;
+            let second_offset = first_offset + packed_numbers.len() as u64 + 8;
+            let third_offset = second_offset + packed_image.len() as u64 + 8;
+            let fourth_offset = third_offset + packed_tri_colors.len() as u64 + 8;
+            let reader = Reader {
+                file: std::sync::Mutex::new(Some(std::fs::File::open(&project).unwrap())),
+                blobs: vec![
+                    (first_offset, packed_numbers.len()),
+                    (second_offset, packed_image.len()),
+                    (third_offset, packed_tri_colors.len()),
+                    (fourth_offset, packed_corner_colors.len()),
+                ],
+                raw: false,
+                cleanup_path: None,
+                shared_blobs: std::sync::Mutex::new(std::collections::HashMap::new()),
+            };
+            assert_eq!(reader.blob_pod_vec::<u32>(&json!(0)).unwrap(), numbers);
+            assert_eq!(
+                reader.blob_pod_vec_exact::<[u8; 3]>(&json!(2), 2).unwrap(),
+                Some(tri_colors)
+            );
+            assert!(reader.blob_pod_vec_exact::<[[u8; 3]; 3]>(&json!(3), 3).unwrap().is_none());
+            assert_eq!(
+                reader.blob_pod_vec_exact::<[[u8; 3]; 3]>(&json!(3), 2).unwrap(),
+                Some(corner_colors)
+            );
+            let loaded_first = reader.blob_arc(&json!(1)).unwrap();
+            let loaded_second = reader.blob_arc(&json!(1)).unwrap();
+            assert!(std::sync::Arc::ptr_eq(&loaded_first, &loaded_second));
+            assert_eq!(loaded_first.as_slice(), image_bytes.as_slice());
+        }
+
+        assert!(!spool.exists(), "the temporary blob spool must be removed");
+        let _ = std::fs::remove_file(project);
     }
 }
