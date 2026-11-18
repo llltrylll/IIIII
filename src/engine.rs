@@ -1795,6 +1795,9 @@ impl Engine {
         self.mask_out.clear();
         self.mask_final.clear();
         self.apply_bg = None;
+        // Cached stamp bind groups retain views such as the last viewport depth target.
+        // A parked Engine won't paint; recreate these lazily on its next stroke.
+        self.stamp_bg = [None, None];
 
         // Parked Engines never encode layer or mask-filter passes. Return their
         // dynamic uniform buffers to the small baseline; they grow lazily again
