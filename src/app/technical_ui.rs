@@ -533,8 +533,11 @@ impl PainterApp {
 
     fn technical_report(&self) -> String {
         let info = self.rs.adapter.get_info();
-        let gpu_bytes = self.engine.vram_bytes()
-            + self.sets.parked.iter().flatten().map(|parked| parked.engine.vram_bytes()).sum::<u64>();
+        let gpu_bytes = self.sets.parked.iter().flatten().fold(
+            self.engine.vram_bytes(),
+            |total, parked| total.saturating_add(parked.engine.vram_bytes()),
+        );
+        let shared_undo_staging_bytes = self.engine.snapshot_buffer_pool_cached_bytes();
         let undo_bytes = self.undo.ram_bytes() as u64;
         let bake = self.engine.bake_report.as_ref().map_or_else(
             || "No completed bake report.".to_string(),
@@ -573,7 +576,7 @@ impl PainterApp {
         };
 
         format!(
-            "{}\n\nAPPLICATION / FRAME\nframe_interval_ms={:.6}\nviewport_fps_estimate={:.3}\nui_frame_cpu_ema_ms={:.6}\nui_frame_recent_peak_ms={:.6}\nstatus={}\n\nGPU ADAPTER\n{:#?}\n\nGPU DEVICE LIMITS\n{:#?}\ngpu_texture_memory_estimate_bytes={}\nundo_memory_bytes={}\nundo_memory_limit_bytes={}\nundo_steps={}\n\nBAKE REPORT\n{}\nCURRENT BAKE SETTINGS\n{:#?}\n\nF6 PAINT PROFILER\n{}\n\nMESH / UV / NORMAL / TANGENT DIAGNOSTICS\n{}",
+            "{}\n\nAPPLICATION / FRAME\nframe_interval_ms={:.6}\nviewport_fps_estimate={:.3}\nui_frame_cpu_ema_ms={:.6}\nui_frame_recent_peak_ms={:.6}\nstatus={}\n\nGPU ADAPTER\n{:#?}\n\nGPU DEVICE LIMITS\n{:#?}\ngpu_resource_allocation_estimate_bytes={}\ndocument_shared_undo_readback_cache_bytes={}\nundo_memory_bytes={}\nundo_memory_limit_bytes={}\nundo_steps={}\n\nBAKE REPORT\n{}\nCURRENT BAKE SETTINGS\n{:#?}\n\nF6 PAINT PROFILER\n{}\n\nMESH / UV / NORMAL / TANGENT DIAGNOSTICS\n{}",
             self.diagnostic_context_report("technical panel copy"),
             self.frame_interval_ms,
             if self.frame_interval_ms > 0.01 { 1000.0 / self.frame_interval_ms } else { 0.0 },
@@ -583,6 +586,7 @@ impl PainterApp {
             info,
             self.rs.device.limits(),
             gpu_bytes,
+            shared_undo_staging_bytes,
             undo_bytes,
             self.undo.max_ram_bytes as u64,
             self.undo.undo.len(),
