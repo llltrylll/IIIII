@@ -3396,6 +3396,55 @@ fn open_spp_projects() {
     }
 }
 
+/// `set_triangles` repeats the UV bake only when the GPU mesh, the triangle
+/// range or the size changed. `uv_version` (4th field of the binding identity)
+/// counts bakes.
+#[test]
+#[ignore]
+fn set_triangles_skips_only_identical_uv_bakes() {
+    let mesh = crate::mesh::set_tests::split_plane();
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let bounds = (mesh.bounds_min, mesh.bounds_max);
+    let bakes = |e: &Engine| e.viewport_binding_identity().3;
+    let all = 0..gpu_mesh.index_count;
+    let first = mesh.sets[0].index_range();
+    let second = mesh.sets[1].index_range();
+
+    let mut engine = Engine::new(&rs, &gpu_mesh, bounds, 128);
+    assert_eq!(bakes(&engine), 1, "creation bakes once");
+
+    engine.set_triangles(all.clone(), &gpu_mesh);
+    assert_eq!(bakes(&engine), 1, "same mesh and range: skipped");
+
+    engine.set_triangles(first.clone(), &gpu_mesh);
+    assert_eq!(bakes(&engine), 2, "changed range: baked");
+    engine.set_triangles(first.clone(), &gpu_mesh);
+    assert_eq!(bakes(&engine), 2, "repeated range: skipped");
+    engine.set_triangles(second.clone(), &gpu_mesh);
+    assert_eq!(bakes(&engine), 3, "another range: baked");
+
+    let other_mesh = GpuMesh::new(&rs.device, &mesh);
+    assert_ne!(other_mesh.mesh_id, gpu_mesh.mesh_id);
+    engine.set_triangles(second.clone(), &other_mesh);
+    assert_eq!(bakes(&engine), 4, "new mesh identity with the same range: baked");
+
+    // The rebuild_sets case: a sibling is made for a range, then told the same range.
+    let mut sibling = engine.sibling(&other_mesh, first.clone(), 128);
+    assert_eq!(bakes(&sibling), 1);
+    sibling.set_triangles(first.clone(), &other_mesh);
+    assert_eq!(bakes(&sibling), 1, "sibling creation already baked this mesh and range");
+
+    // A resolution change still bakes, and the new size is then the current one.
+    let mut undo = crate::undo::UndoStack::default();
+    let before = bakes(&sibling);
+    sibling.set_resolution(64, &other_mesh, &mut undo);
+    assert!(bakes(&sibling) > before, "set_resolution re-bakes");
+    let after = bakes(&sibling);
+    sibling.set_triangles(first, &other_mesh);
+    assert_eq!(bakes(&sibling), after, "same mesh, range and new size: skipped");
+}
+
 /// Two texture sets on one plane (left and right halves of the UV square):
 /// a stroke across the whole plane paints only the edited set's half, and
 /// the 3D view draws each half with its own set. The frame goes to

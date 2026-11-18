@@ -1385,6 +1385,9 @@ pub struct Engine {
     pub maps_version: u64,
     /// Bumped whenever the position and normal maps are made again.
     uv_version: u64,
+    /// What the position/normal/tangent maps were last baked from, so
+    /// `set_triangles` can skip an identical bake.
+    uv_baked: Option<UvBakeKey>,
     /// Layer thumbnails (see `thumbs`).
     thumbs: thumbs::Thumbs,
     /// Composites that redid the whole texture instead of a stroke's patch (the F6 meter counts them).
@@ -1459,6 +1462,22 @@ pub struct Engine {
     region_unknown: bool,
     /// Incremented on every composite, so dependent views know the material changed.
     pub generation: u64,
+}
+
+/// The inputs of a UV bake: which GPU mesh, which range of its index buffer,
+/// and the texture size. Two bakes with an equal key give identical maps.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct UvBakeKey {
+    mesh_id: u64,
+    tris: std::ops::Range<u32>,
+    res: u32,
+}
+
+impl UvBakeKey {
+    /// Whether baking `mesh_id`/`tris`/`res` would repeat the bake `baked` recorded.
+    fn is_current(baked: Option<&UvBakeKey>, mesh_id: u64, tris: &std::ops::Range<u32>, res: u32) -> bool {
+        baked.is_some_and(|k| k.mesh_id == mesh_id && k.tris == *tris && k.res == res)
+    }
 }
 
 fn accum_set(device: &wgpu::Device, res: u32, label: &str) -> [Tex; ACCUM] {
@@ -1789,6 +1808,7 @@ impl Engine {
             has_bake: false,
             maps_version: 0,
             uv_version: 0,
+            uv_baked: None,
             thumbs: Default::default(),
             full_recomps: 0,
             last_paint_scissor_pixels: 0,
@@ -2299,6 +2319,7 @@ impl Engine {
         // DILATE_PASSES is even, so the result ends up back in pos/nrm.
         self.queue.submit([encoder.finish()]);
         self.uv_version += 1;
+        self.uv_baked = Some(UvBakeKey { mesh_id: mesh.mesh_id, tris: self.tris.clone(), res: self.res });
         self.mask_final.clear();
         self.mark_dirty();
     }
@@ -2313,7 +2334,8 @@ impl Engine {
     }
 
     /// Moves the texture set to another range of the (new) mesh and remakes
-    /// its position and normal maps.
+    /// its position and normal maps. The bake is skipped when the maps were
+    /// already baked from this same GPU mesh, range and size.
     pub fn set_triangles(&mut self, tris: std::ops::Range<u32>, mesh: &GpuMesh) {
         let needed = (tris.end - tris.start).max(3);
         if needed > self.screen_index_capacity {
@@ -2325,8 +2347,11 @@ impl Engine {
             });
             self.screen_index_capacity = needed;
         }
+        let repeat = UvBakeKey::is_current(self.uv_baked.as_ref(), mesh.mesh_id, &tris, self.res);
         self.tris = tris;
-        self.bake_uv(mesh);
+        if !repeat {
+            self.bake_uv(mesh);
+        }
     }
 
     pub fn set_bounds(&mut self, bounds: (Vec3, Vec3)) {
@@ -5718,5 +5743,40 @@ mod mask_cache_invalidation_tests {
         let mut structure = before.clone();
         structure.layers[0].0 = 8;
         assert_eq!(Engine::mask_cache_changes(&before, &structure), (true, Vec::new()));
+    }
+}
+
+#[cfg(test)]
+mod uv_bake_key_tests {
+    use super::UvBakeKey;
+
+    fn key() -> UvBakeKey {
+        UvBakeKey { mesh_id: 7, tris: 0..36, res: 2048 }
+    }
+
+    #[test]
+    fn same_mesh_range_and_size_repeats_the_bake() {
+        assert!(UvBakeKey::is_current(Some(&key()), 7, &(0..36), 2048));
+    }
+
+    #[test]
+    fn never_baked_engine_must_bake() {
+        assert!(!UvBakeKey::is_current(None, 7, &(0..36), 2048));
+    }
+
+    #[test]
+    fn changed_range_must_bake() {
+        assert!(!UvBakeKey::is_current(Some(&key()), 7, &(0..18), 2048));
+        assert!(!UvBakeKey::is_current(Some(&key()), 7, &(18..36), 2048));
+    }
+
+    #[test]
+    fn changed_mesh_identity_must_bake_even_with_the_same_range() {
+        assert!(!UvBakeKey::is_current(Some(&key()), 8, &(0..36), 2048));
+    }
+
+    #[test]
+    fn changed_resolution_must_bake() {
+        assert!(!UvBakeKey::is_current(Some(&key()), 7, &(0..36), 1024));
     }
 }
