@@ -4801,7 +4801,7 @@ impl Engine {
         let mut layer_op_labels: HashMap<usize, Vec<String>> = HashMap::new();
         for &li in source_slot.keys() {
             let mut ops = Vec::new();
-            let mut op_labels = Vec::new();
+            let mut op_labels: Vec<String> = Vec::new();
             let scale = self.res as f32 / FILTER_REF_RES;
             let mask = self.layers[li].mask.as_ref().expect("filtered layers have masks");
             for (ml, &slot) in mask.layers.iter().filter(|ml| ml.enabled).zip(&item_slots[&li]) {
