@@ -348,7 +348,7 @@ impl PainterApp {
                             self.engine.last_mask_cache_hits,
                             self.engine.last_mask_cache_misses,
                             self.engine.last_mask_gpu_passes
-                        )).small()).wrap();
+                        )).small()).wrap());
                     }
                 });
 
