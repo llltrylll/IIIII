@@ -5749,3 +5749,117 @@ mod texture_set_stamp_resolution_tests {
         }
     }
 }
+
+
+#[cfg(test)]
+mod resolved_stamp_buffer_tests {
+    use super::*;
+    use crate::mesh::Primitive;
+    use std::ops::Range;
+
+    // Independent copy of the pre-buffering resolver. The comparison checks
+    // the exact output, not two calls through the new implementation.
+    fn previous_resolver(
+        mesh: &Mesh,
+        bvh: &Bvh,
+        triangle_range: &Range<u32>,
+        cam: &OrbitCam,
+        size: Vec2,
+        projection: BrushProjection,
+        symmetry: u8,
+        radius: f32,
+        raw: &[([f32; 4], f32)],
+    ) -> Vec<Stamp> {
+        let mut out = Vec::with_capacity(raw.len() * if symmetry > 0 { 2 } else { 1 });
+        let eye = cam.eye();
+        let fwd = (cam.target - eye).normalize();
+        let (right, _) = cam.basis();
+        let px_world = 2.0 * (cam.fov_y * 0.5).tan() / size.y.max(1.0);
+        let tangent = |n: Vec3, r: Vec3| {
+            (r - n * r.dot(n)).try_normalize().unwrap_or_else(|| n.any_orthonormal_vector())
+        };
+        for &(sample, flow) in raw {
+            let mut stamp: Stamp = [sample, [0.0; 4], [0.0; 4], [0.0; 4], [0.0, 0.0, flow, 0.0]];
+            if projection == BrushProjection::Screen {
+                out.push(stamp);
+                continue;
+            }
+            let (origin, direction) = cam.ray(Vec2::new(sample[0], sample[1]), size);
+            let Some(hit) = bvh.raycast_range(origin, direction, triangle_range) else { continue };
+            let r = radius * sample[2] * (hit.pos - eye).dot(fwd).max(1e-4) * px_world;
+            let (normal, uv, uv_scale) = surface_at(mesh, hit.tri, hit.bary);
+            let x = tangent(normal, right);
+            stamp[1] = hit.pos.extend(r).to_array();
+            stamp[2] = normal.extend(r * uv_scale).to_array();
+            stamp[3] = x.extend(0.0).to_array();
+            stamp[4] = [uv.x, uv.y, flow, 0.0];
+            out.push(stamp);
+            if symmetry > 0 {
+                let mut flip = Vec3::ONE;
+                flip[symmetry as usize - 1] = -1.0;
+                let (center, mirrored_normal) = (hit.pos * flip, normal * flip);
+                let mut mirrored = stamp;
+                mirrored[1] = center.extend(r).to_array();
+                mirrored[2] = mirrored_normal.extend(r * uv_scale).to_array();
+                mirrored[3] = (x * flip).extend(0.0).to_array();
+                if projection == BrushProjection::Uv {
+                    match bvh.raycast_range(center + mirrored_normal * r, -mirrored_normal, triangle_range) {
+                        Some(mirror_hit) if mirror_hit.pos.distance(center) < 2.0 * r => {
+                            let (_, mirror_uv, scale) = surface_at(mesh, mirror_hit.tri, mirror_hit.bary);
+                            mirrored[2][3] = r * scale;
+                            mirrored[4][0] = mirror_uv.x;
+                            mirrored[4][1] = mirror_uv.y;
+                        }
+                        _ => continue,
+                    }
+                }
+                out.push(mirrored);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn caller_owned_stamp_buffer_matches_previous_output_and_reuses_capacity() {
+        let mesh = Primitive::RoundedCube.build();
+        let bvh = Bvh::from_mesh(&mesh);
+        let cam = OrbitCam::default();
+        let size = Vec2::splat(256.0);
+        let triangle_range = 0..(mesh.indices.len() / 3) as u32;
+        let raw = [
+            ([128.0, 128.0, 1.0, 0.0], 0.75),
+            ([133.0, 129.0, 0.8, 0.2], 1.0),
+        ];
+        let mut scratch = Vec::new();
+
+        for projection in [BrushProjection::Screen, BrushProjection::Surface, BrushProjection::Uv] {
+            let expected = previous_resolver(&mesh, &bvh, &triangle_range, &cam, size, projection, 1, 24.0, &raw);
+            assert!(!expected.is_empty(), "{projection:?} should resolve the center hit");
+            resolve_stamps_into(
+                &mesh, &bvh, triangle_range.clone(), &cam, size, projection, 1, 24.0, &raw, &mut scratch,
+            );
+            assert_eq!(scratch, expected, "{projection:?} output must match the previous resolver");
+            assert_eq!(
+                resolve_stamps(&mesh, &bvh, triangle_range.clone(), &cam, size, projection, 1, 24.0, &raw),
+                expected,
+            );
+
+            let capacity = scratch.capacity();
+            let expected_small = previous_resolver(
+                &mesh, &bvh, &triangle_range, &cam, size, projection, 0, 24.0, &raw[..1],
+            );
+            resolve_stamps_into(
+                &mesh, &bvh, triangle_range.clone(), &cam, size, projection, 0, 24.0, &raw[..1], &mut scratch,
+            );
+            assert_eq!(scratch, expected_small, "{projection:?} must clear stale stamps");
+            assert_eq!(scratch.capacity(), capacity, "{projection:?} should reuse the existing allocation");
+
+            resolve_stamps_into(
+                &mesh, &bvh, triangle_range.clone(), &cam, size, projection, 0, 24.0, &[], &mut scratch,
+            );
+            assert!(scratch.is_empty(), "{projection:?} empty input must clear the output");
+            assert_eq!(scratch.capacity(), capacity, "{projection:?} empty input must retain capacity");
+        }
+    }
+}
+
