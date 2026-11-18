@@ -82,6 +82,14 @@ fn layer_uniform_buffer_capacity(current: u64, required: usize) -> u64 {
     }
 }
 
+fn retained_folder_depth(current: usize, required: usize) -> usize {
+    if required > current || (current > 0 && current >= required.saturating_mul(4)) {
+        required
+    } else {
+        current
+    }
+}
+
 #[cfg(test)]
 mod working_buffer_capacity_tests {
     use super::{layer_uniform_buffer_capacity, mask_filter_buffer_capacity};
@@ -108,6 +116,14 @@ mod working_buffer_capacity_tests {
         assert_eq!(layer_uniform_buffer_capacity(16, 17), 32);
         assert_eq!(layer_uniform_buffer_capacity(2048, 300), 512);
         assert_eq!(layer_uniform_buffer_capacity(1024, 300), 1024);
+    }
+
+    #[test]
+    fn folder_cache_depth_only_shrinks_after_a_fourfold_reduction() {
+        assert_eq!(retained_folder_depth(0, 3), 3);
+        assert_eq!(retained_folder_depth(8, 3), 8);
+        assert_eq!(retained_folder_depth(12, 3), 3);
+        assert_eq!(retained_folder_depth(4, 0), 0);
     }
 }
 const STROKE_FORMAT: F = F::R16Float;
@@ -4808,8 +4824,9 @@ impl Engine {
         self.last_mask_cache_misses = 0;
         self.last_mask_gpu_passes = 0;
         self.folder_below.retain(|set| set[0].width == self.res);
-        self.folder_below.truncate(max_depth);
-        while self.folder_below.len() < max_depth {
+        let retained_depth = retained_folder_depth(self.folder_below.len(), max_depth);
+        self.folder_below.truncate(retained_depth);
+        while self.folder_below.len() < retained_depth {
             let set = ACCUM_FORMATS.map(|f| Tex::new(&self.device, "folder below", self.res, self.res, f, LAYER_USAGE));
             self.folder_below.push(set);
         }
