@@ -3131,12 +3131,12 @@ impl PainterApp {
         );
         let shared_snapshot_bytes = self.engine.snapshot_buffer_pool_cached_bytes();
         texture_set_gpu_resources.push_str(&format!(
-            "document_shared_gpu_buffers: undo_snapshot_staging_cache={} bytes ({:.2} MiB)\\n",
+            "document_shared_staging_buffers: undo_snapshot_readback_cache={} bytes ({:.2} MiB)\\n",
             shared_snapshot_bytes,
             shared_snapshot_bytes as f64 / (1024.0 * 1024.0),
         ));
         texture_set_gpu_resources.push_str(
-            "note: document-shared Undo staging cache is counted once; in-flight staging buffers are not included\\n",
+            "note: document-shared host-visible Undo readback cache is counted once; physical memory location is backend/driver dependent; in-flight staging buffers are not included\\n",
         );
         for (index, set) in self.mesh.sets.iter().enumerate() {
             let resident_engine = if index == self.sets.active {
