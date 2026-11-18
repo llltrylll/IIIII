@@ -5216,14 +5216,6 @@ impl Engine {
         self.last_mask_cache_hits = mask_cache_hits;
         self.last_mask_cache_misses = mask_cache_misses;
         self.last_mask_gpu_passes = mask_gpu_passes;
-        if composite_profiled {
-            self.active_gpu_profile = None;
-            if let Some(profiler) = &mut self.gpu_profiler {
-                profiler.request_map();
-            }
-        } else {
-            self.active_gpu_profile = None;
-        }
         if let Some(p) = resume {
             self.prefix = Some(p);
         }
@@ -5448,7 +5440,8 @@ impl Engine {
     }
 
     fn gpu_buffer_bytes(&self) -> u64 {
-        let stroke = self.layer_ubuf.size()
+        let stroke = self.screen_index_buffer.size()
+            + self.layer_ubuf.size()
             + self.stamp_ubuf.size()
             + self.stamp_sbuf.size()
             + self.apply_ubuf.size()
@@ -5457,7 +5450,7 @@ impl Engine {
         stroke + profile
     }
 
-    /// Exact application-side GPU allocation estimate by owned resource category.
+    /// Application-side estimate of known GPU allocations by owned resource category.
     /// Driver padding, shared renderer resources and the viewport mesh are excluded.
     pub fn gpu_resource_breakdown(&self) -> [(&'static str, u64); 13] {
         [
