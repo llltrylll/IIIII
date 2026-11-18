@@ -1755,6 +1755,17 @@ impl Engine {
         sibling
     }
 
+    /// Remove expired weak entries from the document-shared Fill image cache.
+    /// The cache is only an index: live layers/history own the actual textures and bytes.
+    fn prune_fill_image_cache(&self) {
+        let mut cache = self.image_cache.lock().unwrap_or_else(|poison| poison.into_inner());
+        let before = cache.len();
+        cache.retain(|_, (texture, bytes)| texture.strong_count() > 0 && bytes.strong_count() > 0);
+        if cache.len() < before / 2 {
+            cache.shrink_to_fit();
+        }
+    }
+
     /// Drops GPU resources used only while this Texture Set is being edited.
     /// The final composited result stays resident for the viewport. The next
     /// composite/paint recreates the released workspace lazily.
@@ -1762,6 +1773,9 @@ impl Engine {
         if self.active.is_some() || self.generation == 0 {
             return;
         }
+        // Drop expired path/Weak bookkeeping from the document-wide cache on
+        // set switches, not on every frame or image lookup.
+        self.prune_fill_image_cache();
         // A parked Engine cannot reuse an incremental stroke prefix until it is
         // active again. Drop it now so the workspace below can be reclaimed.
         self.prefix = None;
