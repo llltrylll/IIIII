@@ -111,6 +111,9 @@ jobs:
       - name: GPU parity - multi-scissor composite
         run: "cargo test --locked --bin material_painter preview_test::multi_scissor_matches_full_composite -- --ignored --exact --nocapture --test-threads 1"
 
+      - name: GPU parity - composite prefix survives stroke release
+        run: "cargo test --locked --bin material_painter preview_test::content_stroke_patch_ignores_current_filtered_masks -- --ignored --exact --nocapture --test-threads 1"
+
       - name: GPU parity - mask filters
         run: "cargo test --locked --bin material_painter preview_test::mask_filters_apply -- --ignored --exact --nocapture --test-threads 1"
 
