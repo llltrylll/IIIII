@@ -1743,9 +1743,13 @@ impl Engine {
     /// The final composited result stays resident for the viewport. The next
     /// composite/paint recreates the released workspace lazily.
     pub(crate) fn release_inactive_working_set(&mut self) {
-        if self.active.is_some() || self.generation == 0 || self.prefix.is_some() {
+        if self.active.is_some() || self.generation == 0 {
             return;
         }
+        // A parked Engine cannot reuse an incremental stroke prefix until it is
+        // active again. Drop it now so the workspace below can be reclaimed.
+        self.prefix = None;
+        self.full_dirty = true;
         let scratch = 1 - self.final_idx;
         if self.accum[scratch][0].width != 1 {
             self.accum[scratch] = accum_set(&self.device, 1, "parked composite scratch");
