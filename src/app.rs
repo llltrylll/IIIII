@@ -2963,6 +2963,56 @@ impl PainterApp {
             .unwrap_or("(none)");
         let eye = self.cam.eye();
 
+        let f5_gpu_profile = self.last_composite_gpu_profile.as_ref().map_or_else(
+            || "not captured in this session; press F5 to request a full-composite GPU timestamp capture".to_string(),
+            |profile| {
+                let mut stages = profile.stages.clone();
+                stages.sort_by(|a, b| b.1.total_cmp(&a.1));
+                let stage_lines = stages.iter()
+                    .map(|(label, ms)| format!("  {:.4} ms | {}", ms, label))
+                    .collect::<Vec<_>>()
+                    .join("\\n");
+                format!(
+                    "available=true\\ntotal_gpu_ms={:.6}\\nclear_gpu_ms={:.6}\\ncomposite_body_gpu_ms={:.6}\\nstage_count={}/64\\npossible_stage_truncation={}\\nstages_slowest_first:\\n{}",
+                    profile.total_ms,
+                    profile.clear_ms,
+                    profile.body_ms,
+                    profile.stages.len(),
+                    profile.stages.len() >= 64,
+                    stage_lines,
+                )
+            },
+        );
+
+        let mut texture_set_gpu_resources = String::new();
+        for (index, set) in self.mesh.sets.iter().enumerate() {
+            let resident_engine = if index == self.sets.active {
+                Some(("ACTIVE", &self.engine))
+            } else {
+                self.sets.parked.get(index).and_then(Option::as_ref)
+                    .map(|parked| ("PARKED", &parked.engine))
+            };
+            if let Some((state, engine)) = resident_engine {
+                let categories = engine.gpu_resource_breakdown();
+                let total_bytes = categories.iter().map(|(_, bytes)| *bytes).sum::<u64>();
+                texture_set_gpu_resources.push_str(&format!(
+                    "  [{}] {} | state={} | total_bytes={}\\n",
+                    index, set.name, state, total_bytes
+                ));
+                for (category, bytes) in categories {
+                    texture_set_gpu_resources.push_str(&format!(
+                        "      {}={} bytes ({:.2} MiB)\\n",
+                        category, bytes, bytes as f64 / (1024.0 * 1024.0)
+                    ));
+                }
+            } else {
+                texture_set_gpu_resources.push_str(&format!(
+                    "  [{}] {} | state=NOT_RESIDENT\\n",
+                    index, set.name
+                ));
+            }
+        }
+
         format!(
             "MATERIAL PAINTER — DIAGNOSTIC SNAPSHOT\n\
              phase: {phase}\n\
@@ -3017,7 +3067,9 @@ impl PainterApp {
              engine_dirty: {}\n\
              F6_meter_enabled: {}\n\
              frame_time_ema_ms: {:.3}\n\
-             recent_frame_peak_ms: {:.3}\n",
+             recent_frame_peak_ms: {:.3}\n\
+             F5_FULL_COMPOSITE_GPU_PROFILE:\n{f5_gpu_profile}\n\
+             GPU_RESOURCE_ALLOCATION_BY_TEXTURE_SET:\n{texture_set_gpu_resources}",
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs()).unwrap_or(0),
             env!("CARGO_PKG_VERSION"),

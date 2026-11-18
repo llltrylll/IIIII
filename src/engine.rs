@@ -5410,32 +5410,34 @@ impl Engine {
         stroke + profile
     }
 
+    /// Exact application-side GPU allocation estimate by owned resource category.
+    /// Driver padding, shared renderer resources and the viewport mesh are excluded.
+    pub fn gpu_resource_breakdown(&self) -> [(&'static str, u64); 13] {
+        [
+            ("surface maps", self.pos.bytes() + self.nrm.bytes() + self.tan.bytes() + self.stroke.bytes()),
+            ("mesh maps and fixes", self.maps.iter().map(|t| t.bytes()).sum::<u64>()
+                + self.resolved.iter().flatten().map(|t| t.bytes()).sum::<u64>()
+                + self.map_fix.iter().flatten().map(|t| t.bytes()).sum::<u64>()),
+            ("custom maps", self.custom.iter().map(|t| t.bytes()).sum::<u64>() + self.custom_array_bytes()),
+            ("accumulation", self.accum.iter().flatten().map(|t| t.bytes()).sum::<u64>()),
+            ("folder cache", self.folder_below.iter().flatten().map(|t| t.bytes()).sum::<u64>()),
+            ("prefix cache", self.prefix_cache.as_ref().map_or(0, |set| set.iter().map(|t| t.bytes()).sum())),
+            ("filtered masks", self.mask_out.values().map(|t| t.bytes()).sum::<u64>()
+                + self.mask_scratch.as_ref().map_or(0, |set| set.iter().map(|t| t.bytes()).sum::<u64>())),
+            ("paint layers and masks", self.layers.iter().map(|l| l.vram_bytes()).sum::<u64>()),
+            ("fill images", self.fill_image_bytes()),
+            ("thumbnails", self.thumbs.vram_bytes()),
+            ("brush and fallback textures", self.brush_alpha.bytes() + self.brush_grain.bytes() + self.dummy.bytes()),
+            ("stroke snapshots", self.snap.iter().flatten().map(|t| t.bytes()).sum::<u64>()
+                + self.snap_mask.as_ref().map_or(0, |t| t.bytes())),
+            ("GPU buffers", self.gpu_buffer_bytes()),
+        ]
+    }
+
     /// Estimated GPU memory owned by this texture set: textures and known buffers.
     /// Driver padding, shared renderer resources and the viewport mesh are excluded.
     pub fn vram_bytes(&self) -> u64 {
-        self.pos.bytes()
-            + self.nrm.bytes()
-            + self.tan.bytes()
-            + self.stroke.bytes()
-            + self.maps.iter().map(|t| t.bytes()).sum::<u64>()
-            + self.resolved.iter().flatten().map(|t| t.bytes()).sum::<u64>()
-            + self.map_fix.iter().flatten().map(|t| t.bytes()).sum::<u64>()
-            + self.custom.iter().map(|t| t.bytes()).sum::<u64>()
-            + self.custom_array_bytes()
-            + self.accum.iter().flatten().map(|t| t.bytes()).sum::<u64>()
-            + self.folder_below.iter().flatten().map(|t| t.bytes()).sum::<u64>()
-            + self.prefix_cache.as_ref().map_or(0, |set| set.iter().map(|t| t.bytes()).sum())
-            + self.mask_out.values().map(|t| t.bytes()).sum::<u64>()
-            + self.mask_scratch.as_ref().map_or(0, |set| set.iter().map(|t| t.bytes()).sum::<u64>())
-            + self.snap.iter().flatten().map(|t| t.bytes()).sum::<u64>()
-            + self.snap_mask.as_ref().map_or(0, |t| t.bytes())
-            + self.brush_alpha.bytes()
-            + self.brush_grain.bytes()
-            + self.dummy.bytes()
-            + self.layers.iter().map(|l| l.vram_bytes()).sum::<u64>()
-            + self.fill_image_bytes()
-            + self.thumbs.vram_bytes()
-            + self.gpu_buffer_bytes()
+        self.gpu_resource_breakdown().iter().map(|(_, bytes)| *bytes).sum()
     }
 
     pub fn layer_vram_bytes(&self, idx: usize) -> u64 {
@@ -5444,24 +5446,10 @@ impl Engine {
     /// Where the texture memory goes, in MB (offscreen tests).
     #[cfg(test)]
     pub fn vram_breakdown(&self) -> Vec<(&'static str, u64)> {
-        let mb = |b: u64| b >> 20;
-        let unique_images = self.fill_image_bytes();
-        vec![
-            ("surface maps", mb(self.pos.bytes() + self.nrm.bytes() + self.tan.bytes() + self.stroke.bytes())),
-            ("mesh maps and fixes", mb(self.maps.iter().map(|t| t.bytes()).sum::<u64>() + self.resolved.iter().flatten().map(|t| t.bytes()).sum::<u64>() + self.map_fix.iter().flatten().map(|t| t.bytes()).sum::<u64>())),
-            ("custom maps", mb(self.custom.iter().map(|t| t.bytes()).sum::<u64>() + self.custom_array_bytes())),
-            ("accumulation", mb(self.accum.iter().flatten().map(|t| t.bytes()).sum())),
-            ("folder cache", mb(self.folder_below.iter().flatten().map(|t| t.bytes()).sum())),
-            ("prefix cache", mb(self.prefix_cache.as_ref().map_or(0, |set| set.iter().map(|t| t.bytes()).sum()))),
-            ("filtered masks", mb(self.mask_out.values().map(|t| t.bytes()).sum::<u64>()
-                + self.mask_scratch.as_ref().map_or(0, |set| set.iter().map(|t| t.bytes()).sum::<u64>()))),
-            ("paint layers and masks", mb(self.layers.iter().map(|l| l.vram_bytes()).sum())),
-            ("fill images", mb(unique_images)),
-            ("thumbnails", mb(self.thumbs.vram_bytes())),
-            ("brush and fallback textures", mb(self.brush_alpha.bytes() + self.brush_grain.bytes() + self.dummy.bytes())),
-            ("stroke snapshots", mb(self.snap.iter().flatten().map(|t| t.bytes()).sum::<u64>() + self.snap_mask.as_ref().map_or(0, |t| t.bytes()))),
-            ("GPU buffers", mb(self.gpu_buffer_bytes())),
-        ]
+        self.gpu_resource_breakdown()
+            .into_iter()
+            .map(|(category, bytes)| (category, bytes >> 20))
+            .collect()
     }
 }
 
