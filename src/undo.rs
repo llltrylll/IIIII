@@ -21,9 +21,10 @@ pub struct TexInfo {
     pub bpp: u32,
 }
 
-/// Reuses completed Undo readback buffers. The cache is deliberately small:
-/// it is shared across a document's Texture Sets and cannot retain more than
-/// 32 MiB of staging allocations after the compression worker releases them.
+/// Reuses completed Undo readback buffers across a document's Texture Sets.
+/// The 64 MiB cap can retain both before/after staging sets for the common
+/// 2K Base Color + Roughness + Metallic combination (32 MiB per snapshot),
+/// while remaining bounded for larger resolutions or additional channels.
 #[derive(Default)]
 pub struct SnapshotBufferPool {
     state: Mutex<SnapshotBufferPoolState>,
@@ -36,8 +37,8 @@ struct SnapshotBufferPoolState {
 }
 
 impl SnapshotBufferPool {
-    const MAX_PER_SIZE: usize = 2;
-    const MAX_CACHED_BYTES: u64 = 32 * 1024 * 1024;
+    const MAX_PER_SIZE: usize = 4;
+    const MAX_CACHED_BYTES: u64 = 64 * 1024 * 1024;
 
     fn can_recycle(size: u64, per_size: usize, cached_bytes: u64) -> bool {
         per_size < Self::MAX_PER_SIZE
@@ -622,9 +623,11 @@ mod tests {
 
     #[test]
     fn staging_buffer_pool_retention_is_bounded() {
+        const MIB: u64 = 1024 * 1024;
         assert!(SnapshotBufferPool::can_recycle(1024, 0, 0));
-        assert!(!SnapshotBufferPool::can_recycle(1024, SnapshotBufferPool::MAX_PER_SIZE, 0));
-        assert!(!SnapshotBufferPool::can_recycle(1024, 0, SnapshotBufferPool::MAX_CACHED_BYTES));
+        assert!(SnapshotBufferPool::can_recycle(8 * MIB, 3, 40 * MIB));
+        assert!(!SnapshotBufferPool::can_recycle(8 * MIB, SnapshotBufferPool::MAX_PER_SIZE, 0));
+        assert!(!SnapshotBufferPool::can_recycle(1, 0, SnapshotBufferPool::MAX_CACHED_BYTES));
         assert!(!SnapshotBufferPool::can_recycle(SnapshotBufferPool::MAX_CACHED_BYTES + 1, 0, 0));
     }
 
