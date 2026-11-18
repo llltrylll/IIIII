@@ -64,12 +64,27 @@ const INITIAL_MASK_FILTER_STEPS: u64 = 256;
 const MASK_FILTER_STRIDE: u64 = 256;
 
 fn mask_filter_buffer_capacity(current: u64, required: usize) -> u64 {
-    current.max((required.max(1) as u64).next_power_of_two())
+    let required = (required.max(1) as u64).next_power_of_two().max(INITIAL_MASK_FILTER_STEPS);
+    if required > current || (current > INITIAL_MASK_FILTER_STEPS && current >= required.saturating_mul(4)) {
+        required
+    } else {
+        current
+    }
+}
+
+fn layer_uniform_buffer_capacity(current: u64, required: usize) -> u64 {
+    const MIN_SLOTS: u64 = 16;
+    let required = (required.max(1) as u64).next_power_of_two().max(MIN_SLOTS);
+    if required > current || (current > MIN_SLOTS && current >= required.saturating_mul(4)) {
+        required
+    } else {
+        current
+    }
 }
 
 #[cfg(test)]
-mod mask_filter_capacity_tests {
-    use super::mask_filter_buffer_capacity;
+mod working_buffer_capacity_tests {
+    use super::{layer_uniform_buffer_capacity, mask_filter_buffer_capacity};
 
     #[test]
     fn filter_uniform_capacity_grows_without_clamping_steps() {
@@ -78,6 +93,21 @@ mod mask_filter_capacity_tests {
         assert_eq!(mask_filter_buffer_capacity(256, 257), 512);
         assert_eq!(mask_filter_buffer_capacity(512, 513), 1024);
         assert_eq!(mask_filter_buffer_capacity(1024, 300), 1024);
+    }
+
+    #[test]
+    fn filter_uniform_capacity_shrinks_after_large_stack_reduction() {
+        assert_eq!(mask_filter_buffer_capacity(4096, 300), 512);
+        assert_eq!(mask_filter_buffer_capacity(4096, 0), 256);
+        assert_eq!(mask_filter_buffer_capacity(1024, 300), 1024);
+    }
+
+    #[test]
+    fn layer_uniform_capacity_has_hysteresis_when_stack_shrinks() {
+        assert_eq!(layer_uniform_buffer_capacity(16, 0), 16);
+        assert_eq!(layer_uniform_buffer_capacity(16, 17), 32);
+        assert_eq!(layer_uniform_buffer_capacity(2048, 300), 512);
+        assert_eq!(layer_uniform_buffer_capacity(1024, 300), 1024);
     }
 }
 const STROKE_FORMAT: F = F::R16Float;
@@ -4752,15 +4782,6 @@ impl Engine {
             self.folder_below.push(set);
         }
 
-        if passes.len() as u64 > self.layer_ubuf_slots {
-            self.layer_ubuf_slots = (passes.len() as u64).next_power_of_two();
-            self.layer_ubuf = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("layer uniforms"),
-                size: UNIFORM_STRIDE * self.layer_ubuf_slots,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-        }
         // Layers with mask filters: their source pass reads the mask as usual
         // (an extra uniform slot after the passes'), their layer pass reads
         // the filtered texture instead (no smart mask on top).
@@ -4781,8 +4802,9 @@ impl Engine {
             next_slot += n;
         }
         let slots = next_slot;
-        if slots as u64 > self.layer_ubuf_slots {
-            self.layer_ubuf_slots = (slots as u64).next_power_of_two();
+        let required_layer_slots = layer_uniform_buffer_capacity(self.layer_ubuf_slots, slots);
+        if required_layer_slots != self.layer_ubuf_slots {
+            self.layer_ubuf_slots = required_layer_slots;
             self.layer_ubuf = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("layer uniforms"),
                 size: UNIFORM_STRIDE * self.layer_ubuf_slots,
@@ -4886,7 +4908,7 @@ impl Engine {
         // Grow for the complete active stack. Truncating here would silently make
         // later filters reuse the final uniform slot and render the wrong mask.
         let required_capacity = mask_filter_buffer_capacity(self.mask_filter_ubuf_slots, steps.len());
-        if required_capacity > self.mask_filter_ubuf_slots {
+        if required_capacity != self.mask_filter_ubuf_slots {
             self.mask_filter_ubuf_slots = required_capacity;
             self.mask_filter_ubuf = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("mask filter uniforms"),
