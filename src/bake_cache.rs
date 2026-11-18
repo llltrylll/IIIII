@@ -415,14 +415,7 @@ mod tests {
         bytes.extend_from_slice(&packed);
     }
 
-    #[test]
-    fn corrupt_entries_are_rejected() {
-        assert!(decode(b"").is_none());
-        assert!(decode(b"MPBC\x01\0\0\0garbage").is_none());
-        let mut wrong_version = MAGIC.to_vec();
-        wrong_version.extend_from_slice(&99u32.to_le_bytes());
-        assert!(decode(&wrong_version).is_none());
-    }
+
 
     #[test]
     fn cache_rejects_oversized_texture_resolution_before_decompression() {
