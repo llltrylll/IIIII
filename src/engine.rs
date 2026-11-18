@@ -92,7 +92,7 @@ fn retained_folder_depth(current: usize, required: usize) -> usize {
 
 #[cfg(test)]
 mod working_buffer_capacity_tests {
-    use super::{layer_uniform_buffer_capacity, mask_filter_buffer_capacity};
+    use super::{layer_uniform_buffer_capacity, mask_filter_buffer_capacity, retained_folder_depth};
 
     #[test]
     fn filter_uniform_capacity_grows_without_clamping_steps() {
