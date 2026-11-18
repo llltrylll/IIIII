@@ -290,7 +290,10 @@ impl PainterApp {
                     }
                     None => self.try_begin_stroke(kind, local(p)),
                 }
-            } else if down && self.stroke.as_ref().is_some_and(|s| s.view == kind) {
+            } else if self.stroke.as_ref().is_some_and(|s| s.view == kind) {
+                // Process the release-frame cursor position too. Otherwise,
+                // the last movement delivered with mouse-up is discarded
+                // immediately before end_stroke() captures the final state.
                 self.continue_stroke(local(p));
             }
         }
