@@ -94,6 +94,12 @@ impl ThumbGpu {
 }
 
 impl Thumbs {
+    /// Drops scratch render targets while preserving the already-shown thumbnails.
+    pub(super) fn release_scratch(&mut self) {
+        self.gpu = None;
+        self.small = None;
+    }
+
     /// GPU texture memory owned by the thumbnail system.
     pub(super) fn vram_bytes(&self) -> u64 {
         let gpu = self.gpu.as_ref().map_or(0, |g| {

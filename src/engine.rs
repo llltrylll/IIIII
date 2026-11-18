@@ -1761,6 +1761,9 @@ impl Engine {
         self.mask_out.clear();
         self.mask_final.clear();
         self.apply_bg = None;
+        // Keep the already-rendered UI thumbnails, but drop the 512²
+        // render targets and reduced surface maps used only to regenerate them.
+        self.thumbs.release_scratch();
     }
 
     fn ensure_composite_working_set(&mut self) {
