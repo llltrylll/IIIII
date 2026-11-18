@@ -3005,8 +3005,15 @@ impl PainterApp {
         let mut normals_aligned = 0u32;
         let mut normals_opposed = 0u32;
         let mut normals_mixed = 0u32;
-        let mut exact_uv_keys: HashMap<[i64; 6], u32> = HashMap::new();
-        let mut exact_uv_keys_by_set: HashMap<(usize, [i64; 6]), u32> = HashMap::new();
+        let mut exact_uv_valid_keys: HashMap<[i64; 6], u32> = HashMap::new();
+        let mut exact_uv_degenerate_keys: HashMap<[i64; 6], u32> = HashMap::new();
+        let mut exact_uv_valid_keys_by_set: HashMap<(usize, [i64; 6]), u32> = HashMap::new();
+        let mut exact_uv_degenerate_keys_by_set: HashMap<(usize, [i64; 6]), u32> = HashMap::new();
+        let mut exact_uv_valid_keys_by_object: HashMap<(usize, [i64; 6]), u32> = HashMap::new();
+        let mut exact_uv_degenerate_keys_by_object: HashMap<(usize, [i64; 6]), u32> = HashMap::new();
+        let mut set_uv_degenerate = vec![0u32; self.mesh.sets.len()];
+        let mut object_uv_degenerate = vec![0u32; self.mesh.objects.len()];
+        let mut uv_non_finite_triangles = 0u32;
         // Per object: triangles, zero normals, normal alignment classes,
         // positive/negative tangent handedness, and invalid tangent frames.
         let mut object_normal_stats = vec![[0u32; 8]; self.mesh.objects.len()];
@@ -3025,10 +3032,22 @@ impl PainterApp {
                 uv_max = uv_max.max(t);
             }
 
+            let uv_finite = uv.iter().all(|t| t.is_finite());
+            if !uv_finite {
+                uv_non_finite_triangles += 1;
+            }
             let signed_uv_area = (uv[1].x - uv[0].x) * (uv[2].y - uv[0].y)
                 - (uv[1].y - uv[0].y) * (uv[2].x - uv[0].x);
-            if signed_uv_area.abs() < 1.0e-10 {
+            let uv_degenerate = !uv_finite || signed_uv_area.abs() < 1.0e-10;
+            if uv_degenerate {
                 uv_degenerate_triangles += 1;
+                let set = self.mesh.set_of(tri as u32);
+                if let Some(count) = set_uv_degenerate.get_mut(set) { *count += 1; }
+                if let Some(&object) = self.mesh.tri_object.get(tri)
+                    && let Some(count) = object_uv_degenerate.get_mut(object as usize)
+                {
+                    *count += 1;
+                }
             } else if signed_uv_area > 0.0 {
                 uv_positive_triangles += 1;
             } else {
@@ -3091,19 +3110,82 @@ impl PainterApp {
             }
 
             // Exact UV triangle identity (quantized to 1e-6), independent of vertex order.
-            // This detects exact stacks, not partial triangle intersections.
-            let mut q = uv.map(|t| [(t.x * 1_000_000.0).round() as i64, (t.y * 1_000_000.0).round() as i64]);
-            q.sort_unstable();
-            let key = [q[0][0], q[0][1], q[1][0], q[1][1], q[2][0], q[2][1]];
-            *exact_uv_keys.entry(key).or_default() += 1;
-            *exact_uv_keys_by_set.entry((self.mesh.set_of(tri as u32), key)).or_default() += 1;
+            // Valid-area triangles and degenerate triangles are intentionally counted
+            // in separate maps so collapsed UV faces cannot inflate overlap statistics.
+            if uv_finite {
+                let mut q = uv.map(|t| [(t.x * 1_000_000.0).round() as i64, (t.y * 1_000_000.0).round() as i64]);
+                q.sort_unstable();
+                let key = [q[0][0], q[0][1], q[1][0], q[1][1], q[2][0], q[2][1]];
+                let set = self.mesh.set_of(tri as u32);
+                if uv_degenerate {
+                    *exact_uv_degenerate_keys.entry(key).or_default() += 1;
+                    *exact_uv_degenerate_keys_by_set.entry((set, key)).or_default() += 1;
+                    if let Some(&object) = self.mesh.tri_object.get(tri) {
+                        *exact_uv_degenerate_keys_by_object.entry((object as usize, key)).or_default() += 1;
+                    }
+                } else {
+                    *exact_uv_valid_keys.entry(key).or_default() += 1;
+                    *exact_uv_valid_keys_by_set.entry((set, key)).or_default() += 1;
+                    if let Some(&object) = self.mesh.tri_object.get(tri) {
+                        *exact_uv_valid_keys_by_object.entry((object as usize, key)).or_default() += 1;
+                    }
+                }
+            }
         }
 
-        let stacked_groups = exact_uv_keys.values().filter(|&&n| n > 1).count();
-        let stacked_faces = exact_uv_keys.values().filter(|&&n| n > 1).map(|&n| n as usize).sum::<usize>();
-        let same_set_stacked_groups = exact_uv_keys_by_set.values().filter(|&&n| n > 1).count();
-        let same_set_stacked_faces = exact_uv_keys_by_set.values().filter(|&&n| n > 1).map(|&n| n as usize).sum::<usize>();
-        let max_stack_depth = exact_uv_keys.values().copied().max().unwrap_or(0);
+        let duplicate_stats = |counts: Vec<u32>| {
+            let mut groups = 0u32;
+            let mut faces = 0u32;
+            let mut max_depth = 0u32;
+            for count in counts {
+                if count > 1 {
+                    groups += 1;
+                    faces += count;
+                    max_depth = max_depth.max(count);
+                }
+            }
+            (groups, faces, max_depth)
+        };
+        let global_valid = duplicate_stats(exact_uv_valid_keys.values().copied().collect());
+        let global_degenerate = duplicate_stats(exact_uv_degenerate_keys.values().copied().collect());
+        let same_set_valid = duplicate_stats(exact_uv_valid_keys_by_set.values().copied().collect());
+        let same_set_degenerate = duplicate_stats(exact_uv_degenerate_keys_by_set.values().copied().collect());
+        let by_set_valid = {
+            let mut stats = vec![[0u32; 3]; self.mesh.sets.len()];
+            for (&(set, _), &count) in &exact_uv_valid_keys_by_set {
+                if count > 1 && let Some(s) = stats.get_mut(set) {
+                    s[0] += 1; s[1] += count; s[2] = s[2].max(count);
+                }
+            }
+            stats
+        };
+        let by_set_degenerate = {
+            let mut stats = vec![[0u32; 3]; self.mesh.sets.len()];
+            for (&(set, _), &count) in &exact_uv_degenerate_keys_by_set {
+                if count > 1 && let Some(s) = stats.get_mut(set) {
+                    s[0] += 1; s[1] += count; s[2] = s[2].max(count);
+                }
+            }
+            stats
+        };
+        let by_object_valid = {
+            let mut stats = vec![[0u32; 3]; self.mesh.objects.len()];
+            for (&(object, _), &count) in &exact_uv_valid_keys_by_object {
+                if count > 1 && let Some(s) = stats.get_mut(object) {
+                    s[0] += 1; s[1] += count; s[2] = s[2].max(count);
+                }
+            }
+            stats
+        };
+        let by_object_degenerate = {
+            let mut stats = vec![[0u32; 3]; self.mesh.objects.len()];
+            for (&(object, _), &count) in &exact_uv_degenerate_keys_by_object {
+                if count > 1 && let Some(s) = stats.get_mut(object) {
+                    s[0] += 1; s[1] += count; s[2] = s[2].max(count);
+                }
+            }
+            stats
+        };
 
         let mut out = format!(
             "\nMESH / UV / NORMAL SUMMARY\n\
@@ -3115,6 +3197,8 @@ impl PainterApp {
              uv_max: {:?}\n\
              triangles_with_any_uv_outside_0_1: {}\n\
              uv_degenerate_triangles: {}\n\
+             uv_non_finite_triangles: {}\n\
+             uv_non_degenerate_triangles: {}\n\
              uv_positive_winding_triangles: {}\n\
              uv_negative_winding_triangles: {}\n\
              geometric_degenerate_triangles: {}\n\
@@ -3122,13 +3206,18 @@ impl PainterApp {
              triangle_normals_aligned_with_vertex_normals: {}\n\
              triangle_normals_opposed_to_vertex_normals: {}\n\
              triangle_normals_mixed_or_uncertain: {}\n\
-             exact_duplicate_uv_triangle_groups_global: {}\n\
-             triangles_in_exact_uv_groups_global: {}\n\
-             exact_duplicate_uv_triangle_groups_same_texture_set: {}\n\
-             triangles_in_exact_uv_groups_same_texture_set: {}\n\
-             maximum_exact_uv_stack_depth: {}\n\
+             exact_valid_uv_duplicate_groups_global: {}\n\
+             triangles_in_exact_valid_uv_groups_global: {}\n\
+             maximum_exact_valid_uv_stack_depth: {}\n\
+             exact_degenerate_uv_duplicate_groups_global: {}\n\
+             triangles_in_exact_degenerate_uv_groups_global: {}\n\
+             maximum_exact_degenerate_uv_stack_depth: {}\n\
+             exact_valid_uv_duplicate_groups_same_texture_set: {}\n\
+             triangles_in_exact_valid_uv_groups_same_texture_set: {}\n\
+             exact_degenerate_uv_duplicate_groups_same_texture_set: {}\n\
+             triangles_in_exact_degenerate_uv_groups_same_texture_set: {}\n\
              exact_stack_detection_tolerance: 1e-6 UV units\n\
-             note: exact duplicate UV triangle detection does not detect partial overlaps\n",
+             note: valid exact stacks exclude UV-degenerate and non-finite faces; partial overlaps are not detected\n",
             self.mesh.vertices.len(),
             self.mesh.triangle_count(),
             self.mesh.indices.len(),
@@ -3137,6 +3226,8 @@ impl PainterApp {
             uv_max,
             uv_outside_triangles,
             uv_degenerate_triangles,
+            uv_non_finite_triangles,
+            self.mesh.triangle_count() as u32 - uv_degenerate_triangles,
             uv_positive_triangles,
             uv_negative_triangles,
             geometry_degenerate_triangles,
@@ -3144,12 +3235,43 @@ impl PainterApp {
             normals_aligned,
             normals_opposed,
             normals_mixed,
-            stacked_groups,
-            stacked_faces,
-            same_set_stacked_groups,
-            same_set_stacked_faces,
-            max_stack_depth,
+            global_valid.0,
+            global_valid.1,
+            global_valid.2,
+            global_degenerate.0,
+            global_degenerate.1,
+            global_degenerate.2,
+            same_set_valid.0,
+            same_set_valid.1,
+            same_set_degenerate.0,
+            same_set_degenerate.1,
         );
+
+        out.push_str("texture_set_uv_stats:\\n");
+        for (index, set) in self.mesh.sets.iter().enumerate() {
+            let valid = by_set_valid.get(index).copied().unwrap_or([0; 3]);
+            let degenerate = by_set_degenerate.get(index).copied().unwrap_or([0; 3]);
+            let triangle_count = set.tris.end.saturating_sub(set.tris.start);
+            let uv_degenerate_count = set_uv_degenerate.get(index).copied().unwrap_or(0);
+            out.push_str(&format!(
+                "  [{}] {} | triangles={} uv_degenerate={} valid_duplicate_groups={} valid_duplicate_faces={} max_valid_stack={} degenerate_duplicate_groups={} degenerate_duplicate_faces={} max_degenerate_stack={}\\n",
+                index, set.name, triangle_count, uv_degenerate_count,
+                valid[0], valid[1], valid[2], degenerate[0], degenerate[1], degenerate[2]
+            ));
+        }
+
+        out.push_str("object_uv_stats:\\n");
+        for (index, name) in self.mesh.objects.iter().enumerate() {
+            let valid = by_object_valid.get(index).copied().unwrap_or([0; 3]);
+            let degenerate = by_object_degenerate.get(index).copied().unwrap_or([0; 3]);
+            let uv_degenerate_count = object_uv_degenerate.get(index).copied().unwrap_or(0);
+            let triangles = object_normal_stats.get(index).map_or(0, |stats| stats[0]);
+            out.push_str(&format!(
+                "  [{}] {} | triangles={} uv_degenerate={} valid_duplicate_groups={} valid_duplicate_faces={} max_valid_stack={} degenerate_duplicate_groups={} degenerate_duplicate_faces={} max_degenerate_stack={}\\n",
+                index, name, triangles, uv_degenerate_count,
+                valid[0], valid[1], valid[2], degenerate[0], degenerate[1], degenerate[2]
+            ));
+        }
 
         out.push_str("texture_set_ranges:\n");
         for (index, set) in self.mesh.sets.iter().enumerate() {
