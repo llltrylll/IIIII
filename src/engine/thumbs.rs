@@ -14,6 +14,7 @@
 //! baked maps, or a painting stroke on it.
 
 use super::*;
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
 /// Thumbnail size in texels.
@@ -31,6 +32,10 @@ pub(super) struct Thumbs {
     /// Position and normal maps at thumbnail size, for this `uv_version`.
     small: Option<(u64, Tex, Tex)>,
     entries: HashMap<u64, Entry>,
+    /// Reused layer-ID and work-list scratch; thumbnail checks run after every composite.
+    layer_ids_scratch: HashSet<u64>,
+    gone_ids_scratch: Vec<u64>,
+    todo_scratch: Vec<(usize, u64, bool)>,
     /// Thumbnail images rendered so far, content and mask counted apart (the F6 meter shows how many a stroke cost).
     renders: u32,
 }
@@ -168,15 +173,29 @@ impl Engine {
 
     /// Brings the thumbnails up to date with the stack; call after compositing.
     pub(super) fn update_thumbs(&mut self) {
-        // Forget layers that are gone.
-        let ids: std::collections::HashSet<u64> = self.layers.iter().map(|l| l.id).collect();
-        let gone: Vec<u64> = self.thumbs.entries.keys().copied().filter(|id| !ids.contains(id)).collect();
-        for id in gone {
-            if let Some(e) = self.thumbs.entries.remove(&id) {
+        // Reuse the ID set and removal list: this check runs after every
+        // composite, including ordinary paint frames where nothing is stale.
+        {
+            let layer_ids = &mut self.thumbs.layer_ids_scratch;
+            layer_ids.clear();
+            layer_ids.extend(self.layers.iter().map(|layer| layer.id));
+
+            let gone_ids = &mut self.thumbs.gone_ids_scratch;
+            gone_ids.clear();
+            gone_ids.extend(
+                self.thumbs.entries.keys().copied().filter(|id| !layer_ids.contains(id))
+            );
+        }
+        let mut gone_ids = std::mem::take(&mut self.thumbs.gone_ids_scratch);
+        for id in &gone_ids {
+            if let Some(e) = self.thumbs.entries.remove(id) {
                 self.free_shown(e.content);
                 self.free_shown(e.mask);
             }
         }
+        gone_ids.clear();
+        self.thumbs.gone_ids_scratch = gone_ids;
+
         // Nothing a thumbnail shows changes mid-stroke, and rebuilding them
         // every paint frame (a fill's is a full 512² composite) stalls the
         // GPU. end_stroke() marks what the stroke touched; it renders once on release.
@@ -188,7 +207,8 @@ impl Engine {
         // temporary bind groups/command encoding stay bounded; the remaining
         // entries remain stale and are picked up on later frames.
         const MAX_THUMBNAILS_PER_UPDATE: usize = 2;
-        let mut todo: Vec<(usize, u64, bool)> = Vec::with_capacity(MAX_THUMBNAILS_PER_UPDATE);
+        let mut todo = std::mem::take(&mut self.thumbs.todo_scratch);
+        todo.clear();
         for li in 0..self.layers.len() {
             let layer = &self.layers[li];
             let wants = matches!(layer.content, Content::Fill(_)) || layer.mask.is_some();
@@ -207,6 +227,7 @@ impl Engine {
             }
         }
         if todo.is_empty() {
+            self.thumbs.todo_scratch = todo;
             return;
         }
         if self.thumbs.gpu.is_none() {
@@ -214,10 +235,11 @@ impl Engine {
         }
         let mut encoder = self.device.create_command_encoder(&Default::default());
         self.shrink_surface(&mut encoder);
-        for (li, key, mask_only) in todo {
+        for &(li, key, mask_only) in &todo {
             self.render_thumbs(&mut encoder, li, key, mask_only);
         }
         self.queue.submit([encoder.finish()]);
+        self.thumbs.todo_scratch = todo;
     }
 
     fn free_shown(&self, shown: Option<Shown>) {
