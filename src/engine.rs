@@ -713,6 +713,7 @@ struct CompositeScratch {
 /// a reverse scan. Folder openings are bucketed by block start; iterating
 /// folder indices backwards preserves the old outermost-first order without
 /// allocating and sorting a temporary Vec for every layer.
+#[cfg(test)]
 fn composite_passes(layers: &[Layer]) -> (Vec<Pass>, usize) {
     composite_passes_with_scratch(layers, &mut CompositeScratch::default())
 }
