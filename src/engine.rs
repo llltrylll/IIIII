@@ -4393,7 +4393,7 @@ impl Engine {
             drop(pass);
             end_composite_profile_stage(encoder, profile_query, profile_slot, format!("Mask source · {}", layer_name), profile_labels);
         }
-        let mut filter = |encoder: &mut wgpu::CommandEncoder, step: usize, input: &Tex, other: &Tex, out: &Tex, rects: Option<&[[u32; 4]]>, label: String| {
+        let filter = |encoder: &mut wgpu::CommandEncoder, step: usize, input: &Tex, other: &Tex, out: &Tex, rects: Option<&[[u32; 4]]>, label: String, profile_stage_count: &mut usize, profile_labels: &mut Vec<String>| {
             let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("mask filter"),
                 layout: &self.p.mask_filter_bgl,
@@ -4427,7 +4427,7 @@ impl Engine {
             let rects = regions.as_ref().map(|r| &r[k + 1][..]);
             let op_label = op_labels.get(k).cloned().unwrap_or_else(|| format!("Mask op {}", k + 1));
             match *op {
-                MaskOp::Filter { step, .. } => filter(encoder, step, &scratch[cur], &scratch[2], out, rects, op_label),
+                MaskOp::Filter { step, .. } => filter(encoder, step, &scratch[cur], &scratch[2], out, rects, op_label, profile_stage_count, profile_labels),
                 MaskOp::Layer { uniform, combine } => {
                     // The mask layer's own values, then combined over the mask so far.
                     {
@@ -4439,7 +4439,7 @@ impl Engine {
                         drop(pass);
                         end_composite_profile_stage(encoder, profile_query, profile_slot, format!("Mask layer source · {}", op_label), profile_labels);
                     }
-                    filter(encoder, combine, &scratch[cur], &scratch[2], out, rects, format!("Mask layer combine · {}", op_label));
+                    filter(encoder, combine, &scratch[cur], &scratch[2], out, rects, format!("Mask layer combine · {}", op_label), profile_stage_count, profile_labels);
                 }
             }
             if !last { cur = 1 - cur; }
@@ -4979,6 +4979,9 @@ impl Engine {
             }
             let li = match *pass {
                 Pass::Begin => {
+                    let folder_snapshot_slot = begin_composite_profile_stage(
+                        &mut encoder, profile_query.as_deref(), &mut profile_stage_count,
+                    );
                     // Keep the stack below the folder to fade its result over.
                     fn at(t: &Tex, x: u32, y: u32) -> wgpu::TexelCopyTextureInfo<'_> {
                         wgpu::TexelCopyTextureInfo { origin: wgpu::Origin3d { x, y, z: 0 }, ..t.copy_info() }
@@ -4996,6 +4999,13 @@ impl Engine {
                         }
                     }
                     depth += 1;
+                    end_composite_profile_stage(
+                        &mut encoder,
+                        profile_query.as_deref(),
+                        folder_snapshot_slot,
+                        format!("Folder stack snapshot depth {}", depth),
+                        &mut profile_labels,
+                    );
                     continue;
                 }
                 Pass::Layer(li) => li,
