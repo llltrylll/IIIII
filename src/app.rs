@@ -469,6 +469,11 @@ struct StrokeMeter {
     end_cpu: Stat,
     end_engine_cpu: Stat,
     undo_push_cpu: Stat,
+    end_cleanup_cpu: Stat,
+    end_target_cpu: Stat,
+    end_snapshot_cpu: Stat,
+    end_submit_cpu: Stat,
+    end_thumbs_cpu: Stat,
     /// The recomposition right after letting go is still due.
     after_pending: bool,
     after_release_cpu: Stat,
@@ -536,7 +541,7 @@ impl StrokeMeter {
         let patch_percent = if texture_pixels == 0 { 0.0 } else { scissor_pixels as f64 * 100.0 / texture_pixels as f64 };
         let bbox_percent = if texture_pixels == 0 { 0.0 } else { bbox_pixels as f64 * 100.0 / texture_pixels as f64 };
         format!(
-            "F6 CPU avg/peak ms: steps/frame {}, resolve {}, region {}, stamp {}, begin {}, recomp {}, end {}, engine end {}, undo push {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {}, clear {}, pass body {} | screen tris {}/{} | paint {:.1}%/{} scissors | composite {:.1}% (bbox {:.1}%, {} scissors) | stack {}L/{}F | masks {}h/{}m/{}p | since F6: full recomps {full}, thumbnails {thumbs}",
+            "F6 CPU avg/peak ms: steps/frame {}, resolve {}, region {}, stamp {}, begin {}, recomp {}, end {}, engine end {}, undo push {}, end cleanup {}, target {}, snapshot {}, submit {}, thumbs {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {}, clear {}, pass body {} | screen tris {}/{} | paint {:.1}%/{} scissors | composite {:.1}% (bbox {:.1}%, {} scissors) | stack {}L/{}F | masks {}h/{}m/{}p | since F6: full recomps {full}, thumbnails {thumbs}",
             self.steps_per_frame.text(),
             self.resolve_cpu.text(),
             self.region_cpu.text(),
@@ -546,6 +551,11 @@ impl StrokeMeter {
             self.end_cpu.text(),
             self.end_engine_cpu.text(),
             self.undo_push_cpu.text(),
+            self.end_cleanup_cpu.text(),
+            self.end_target_cpu.text(),
+            self.end_snapshot_cpu.text(),
+            self.end_submit_cpu.text(),
+            self.end_thumbs_cpu.text(),
             self.after_release_cpu.text(),
             self.gpu_stamp.text(),
             self.gpu_apply.text(),
@@ -5327,6 +5337,7 @@ impl PainterApp {
             let engine_ending = Instant::now();
             let entry = self.engine.end_stroke();
             let engine_ms = engine_ending.elapsed().as_secs_f64() * 1000.0;
+            let end_parts = self.engine.last_end_stages_ms;
             let undo_started = Instant::now();
             if let Some(entry) = entry {
                 self.undo.push("Paint stroke", crate::undo::Edit::Stroke(entry));
@@ -5335,6 +5346,11 @@ impl PainterApp {
                 self.meter.end_cpu.add(ending.elapsed().as_secs_f64() * 1000.0);
                 self.meter.end_engine_cpu.add(engine_ms);
                 self.meter.undo_push_cpu.add(undo_started.elapsed().as_secs_f64() * 1000.0);
+                self.meter.end_cleanup_cpu.add(end_parts[0]);
+                self.meter.end_target_cpu.add(end_parts[1]);
+                self.meter.end_snapshot_cpu.add(end_parts[2]);
+                self.meter.end_submit_cpu.add(end_parts[3]);
+                self.meter.end_thumbs_cpu.add(end_parts[4]);
                 self.meter.after_pending = true;
             }
         }
