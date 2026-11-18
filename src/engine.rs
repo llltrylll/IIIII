@@ -4319,7 +4319,18 @@ impl Engine {
         self.apply_bg = None;
         self.stroke_layer = None;
         self.prefix = None;
-        self.prefix_cache = None;
+        // Keep the full-resolution prefix textures reusable between strokes.
+        // The next stroke rewrites their contents before reading them, so the
+        // old prefix itself is discarded above. At 4K the retained seven-target
+        // cache would cost roughly 272 MiB, so release it instead of pinning
+        // that much VRAM in the common idle state.
+        const MAX_RETAINED_PREFIX_CACHE_BYTES: u64 = 96 * 1024 * 1024;
+        let prefix_cache_bytes = u64::from(self.res)
+            * u64::from(self.res)
+            * ACCUM_FORMATS.iter().map(|&format| u64::from(gpu::bytes_per_texel(format))).sum::<u64>();
+        if prefix_cache_bytes > MAX_RETAINED_PREFIX_CACHE_BYTES {
+            self.prefix_cache = None;
+        }
         self.stroke_regions.clear();
         self.region_unknown = false;
         let Some(active) = self.active.take() else {
