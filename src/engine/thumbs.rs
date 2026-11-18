@@ -14,7 +14,6 @@
 //! baked maps, or a painting stroke on it.
 
 use super::*;
-use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
 /// Thumbnail size in texels.
