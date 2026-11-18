@@ -4863,7 +4863,11 @@ impl Engine {
                 self.mask_out.insert(*id, t);
             }
         }
-        if !filtered_ids.is_empty() && self.mask_scratch.as_ref().is_none_or(|set| set[0].width != res) {
+        if filtered_ids.is_empty() {
+            // These full-resolution ping-pong targets are only useful while at
+            // least one enabled mask layer/filter needs the filter pipeline.
+            self.mask_scratch = None;
+        } else if self.mask_scratch.as_ref().is_none_or(|set| set[0].width != res) {
             let t = || Tex::new(&self.device, "filtered mask scratch", res, res, MASK_FILTER_FORMAT, LAYER_USAGE);
             self.mask_scratch = Some([t(), t(), t()]);
         }
