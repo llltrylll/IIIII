@@ -628,4 +628,31 @@ mod memory_breakdown_tests {
         assert_eq!(mib(1024 * 1024), 1.0);
         assert_eq!(mib(3 * 512 * 1024), 1.5);
     }
+
+    #[test]
+    fn totals_saturate_instead_of_wrapping() {
+        let totals = MemoryTotals::of(&[
+            entry("Body", false, u64::MAX),
+            entry("Glass", true, u64::MAX),
+        ]);
+        assert_eq!(totals, MemoryTotals { active: u64::MAX, parked: u64::MAX, total: u64::MAX });
+    }
+
+    #[test]
+    fn settings_remove_non_adjacent_duplicate_metrics() {
+        let ui = TechnicalUi {
+            open: true,
+            bottom: vec![
+                TechnicalMetric::Fps,
+                TechnicalMetric::Bake,
+                TechnicalMetric::Fps,
+                TechnicalMetric::F6Meter,
+                TechnicalMetric::Bake,
+            ],
+        };
+        assert_eq!(
+            ui.sanitized().bottom,
+            vec![TechnicalMetric::Fps, TechnicalMetric::Bake, TechnicalMetric::F6Meter],
+        );
+    }
 }
