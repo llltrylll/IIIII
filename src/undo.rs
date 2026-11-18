@@ -405,6 +405,8 @@ pub struct Entry {
     pub serial: u64,
     /// The texture set the step edits (see `app::texture_sets`).
     pub set: usize,
+    /// Avoid traversing completed stroke snapshots while newer entries compress.
+    pending_snapshots: bool,
 }
 
 /// Linear history. Removed layers, masks and cleared paint live here (still
@@ -466,7 +468,7 @@ impl UndoStack {
         self.redo.clear();
         self.pending_snapshots |= pending;
         self.next_serial += 1;
-        self.undo.push(Entry { label: label.into(), edit, serial: self.next_serial, set: self.set });
+        self.undo.push(Entry { label: label.into(), edit, serial: self.next_serial, set: self.set, pending_snapshots: pending });
         self.enforce_limits();
     }
 
@@ -474,7 +476,7 @@ impl UndoStack {
     /// closes the outermost group.
     pub fn begin_group(&mut self, label: impl Into<String>) {
         if self.group_depth == 0 {
-            self.group = Some(Entry { label: label.into(), edit: Edit::Group(Vec::new()), serial: 0, set: self.set });
+            self.group = Some(Entry { label: label.into(), edit: Edit::Group(Vec::new()), serial: 0, set: self.set, pending_snapshots: false });
         }
         self.group_depth += 1;
     }
@@ -498,26 +500,36 @@ impl UndoStack {
         let mut delta = 0i128;
         let mut pending = false;
         for entry in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+            if !entry.pending_snapshots {
+                continue;
+            }
+            let mut entry_pending = false;
             entry.edit.for_each_stroke(&mut |stroke| {
                 stroke.before.update();
                 stroke.after.update();
                 delta += stroke.before.take_ram_delta();
                 delta += stroke.after.take_ram_delta();
-                pending |= stroke.before.is_pending() || stroke.after.is_pending();
+                entry_pending |= stroke.before.is_pending() || stroke.after.is_pending();
             });
+            entry.pending_snapshots = entry_pending;
+            pending |= entry_pending;
         }
 
         // An open group is not yet charged to the RAM budget, but its snapshots
         // still need compression and their accounted sizes must be current when committed.
-        if let Some(group) = &mut self.group {
-            group.edit.for_each_stroke(&mut |stroke| {
-                stroke.before.update();
-                stroke.after.update();
-                let _ = stroke.before.take_ram_delta();
-                let _ = stroke.after.take_ram_delta();
-                pending |= stroke.before.is_pending() || stroke.after.is_pending();
-            });
-        }
+        if let Some(group) = &mut self.group
+            && group.pending_snapshots {
+                let mut group_pending = false;
+                group.edit.for_each_stroke(&mut |stroke| {
+                    stroke.before.update();
+                    stroke.after.update();
+                    let _ = stroke.before.take_ram_delta();
+                    let _ = stroke.after.take_ram_delta();
+                    group_pending |= stroke.before.is_pending() || stroke.after.is_pending();
+                });
+                group.pending_snapshots = group_pending;
+                pending |= group_pending;
+            }
 
         if delta >= 0 {
             self.cached_ram_bytes = self.cached_ram_bytes.saturating_add(delta as usize);
@@ -682,8 +694,10 @@ mod tests {
         );
 
         assert_eq!(history.ram_bytes(), 134);
+        assert!(history.undo[0].pending_snapshots);
         history.update();
         assert_eq!(history.ram_bytes(), 6);
+        assert!(!history.undo[0].pending_snapshots);
         assert!(!history.pending_snapshots);
 
         // A ready history stays on the cached fast path.
