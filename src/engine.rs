@@ -4313,6 +4313,7 @@ impl Engine {
     /// Finishes the stroke and returns its undo record.
     pub fn end_stroke(&mut self) -> Option<UndoEntry> {
         self.last_end_stages_ms = [0.0; 5];
+        let mut stages = [0.0; 5];
         let phase = std::time::Instant::now();
 
         self.apply_bg = None;
@@ -4323,7 +4324,8 @@ impl Engine {
         self.region_unknown = false;
         let Some(active) = self.active.take() else {
             self.invalidate_thumbs();
-            self.last_end_stages_ms[0] = phase.elapsed().as_secs_f64() * 1000.0;
+            stages[0] = phase.elapsed().as_secs_f64() * 1000.0;
+            self.last_end_stages_ms = stages;
             return None;
         };
         // Content strokes only target Paint layers; their contents are not
@@ -4340,31 +4342,34 @@ impl Engine {
             }
             StrokeTarget::Content => false,
         };
-        self.last_end_stages_ms[0] = phase.elapsed().as_secs_f64() * 1000.0;
+        stages[0] = phase.elapsed().as_secs_f64() * 1000.0;
 
         let phase = std::time::Instant::now();
         let Some(textures) = self.target_textures(active.layer_id, active.target, &active.channels) else {
-            self.last_end_stages_ms[1] = phase.elapsed().as_secs_f64() * 1000.0;
+            stages[1] = phase.elapsed().as_secs_f64() * 1000.0;
+            self.last_end_stages_ms = stages;
             return None;
         };
-        self.last_end_stages_ms[1] = phase.elapsed().as_secs_f64() * 1000.0;
+        stages[1] = phase.elapsed().as_secs_f64() * 1000.0;
 
         let phase = std::time::Instant::now();
         let mut encoder = self.device.create_command_encoder(&Default::default());
         let after = Snapshot::encode(&self.device, &mut encoder, &textures, self.snapshot_buffer_pool.clone());
-        self.last_end_stages_ms[2] = phase.elapsed().as_secs_f64() * 1000.0;
+        stages[2] = phase.elapsed().as_secs_f64() * 1000.0;
+        drop(textures);
 
         let phase = std::time::Instant::now();
         self.queue.submit([encoder.finish()]);
         after.request_map();
-        self.last_end_stages_ms[3] = phase.elapsed().as_secs_f64() * 1000.0;
+        stages[3] = phase.elapsed().as_secs_f64() * 1000.0;
 
         let phase = std::time::Instant::now();
         // Refresh only when this stroke actually invalidated a thumbnail.
         if refresh_thumbnails {
             self.update_thumbs();
         }
-        self.last_end_stages_ms[4] = phase.elapsed().as_secs_f64() * 1000.0;
+        stages[4] = phase.elapsed().as_secs_f64() * 1000.0;
+        self.last_end_stages_ms = stages;
 
         Some(UndoEntry {
             layer_id: active.layer_id,
