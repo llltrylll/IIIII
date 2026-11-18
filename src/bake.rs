@@ -719,6 +719,34 @@ pub(crate) const HARD_EDGE: f32 = -1.0;
 /// normals are split along it (a smoothing-group edge); folds of a smooth
 /// shaded surface are left to its curvature.
 ///
+/// Inline storage for a triangle's at-most-three bevel edges.
+/// A sentinel marks unused pairs, keeping the per-triangle record at 24 bytes
+/// and avoiding one heap allocation per triangle with bevel edges.
+#[derive(Clone, Copy)]
+struct TriangleBevelEdges([u32; 6]);
+
+impl Default for TriangleBevelEdges {
+    fn default() -> Self {
+        Self([u32::MAX; 6])
+    }
+}
+
+impl TriangleBevelEdges {
+    fn push(&mut self, edge: (u32, u32)) {
+        let slot = self.0.chunks_exact_mut(2)
+            .find(|pair| pair[0] == u32::MAX)
+            .expect("a triangle cannot have more than three edges");
+        slot[0] = edge.0;
+        slot[1] = edge.1;
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.0.chunks_exact(2)
+            .take_while(|pair| pair[0] != u32::MAX)
+            .map(|pair| (pair[0], pair[1]))
+    }
+}
+
 /// Open borders and folded-back (double-sided) faces are skipped.
 #[cfg(test)]
 pub(crate) fn feature_edges(
@@ -765,8 +793,10 @@ fn feature_edges_cancellable(
         opposite: u32,
     }
     let empty = Side { tri: NONE, forward: false, opposite: 0 };
+    // Connected triangle meshes usually have about 1.5 unique edges per face.
+    // Reserve for 2 per face instead of 3; disconnected triangle soup can still grow.
     let mut edges: std::collections::HashMap<(u32, u32), [Side; 2]> =
-        std::collections::HashMap::with_capacity(indices.len());
+        std::collections::HashMap::with_capacity(indices.len().saturating_mul(2) / 3);
     for (t, tri) in indices.chunks_exact(3).enumerate() {
         if t.is_multiple_of(8192) { check_prepare_cancelled(cancel)?; }
         for k in 0..3 {
@@ -788,7 +818,9 @@ fn feature_edges_cancellable(
     let mut out = [Vec::new(), Vec::new()];
     // Bevel edges with their convexity, and the bevel edges of each triangle.
     let mut bevel: std::collections::HashMap<(u32, u32), bool> = std::collections::HashMap::new();
-    let mut tri_bevels: Vec<Vec<(u32, u32)>> = vec![Vec::new(); face_n.len()];
+    // Every triangle has only three edges. Store them inline rather than making
+    // a separate heap allocation for each triangle that contains a bevel edge.
+    let mut tri_bevels = vec![TriangleBevelEdges::default(); face_n.len()];
     for (edge_index, (&(a, b), &[s0, s1])) in edges.iter().enumerate() {
         if edge_index.is_multiple_of(8192) { check_prepare_cancelled(cancel)?; }
         if s1.tri == NONE {
@@ -860,8 +892,8 @@ fn feature_edges_cancellable(
             continue;
         }
         let (ta, tb) = (s0.tri as usize, s1.tri as usize);
-        for &ea in &tri_bevels[ta] {
-            for &eb in &tri_bevels[tb] {
+        for ea in tri_bevels[ta].iter() {
+            for eb in tri_bevels[tb].iter() {
                 let corners = [ea.0, ea.1, eb.0, eb.1];
                 let distinct = (0..4).all(|i| (i + 1..4).all(|j| corners[i] != corners[j]));
                 if !distinct || bevel[&ea] != bevel[&eb] {
@@ -2563,6 +2595,16 @@ pub(crate) mod tests {
     use crate::mesh::Primitive;
     use glam::Vec2;
     use std::path::Path;
+
+    #[test]
+    fn compact_triangle_bevel_storage_preserves_edge_order() {
+        let mut edges = TriangleBevelEdges::default();
+        assert_eq!(edges.iter().count(), 0);
+        edges.push((4, 9));
+        edges.push((2, 7));
+        edges.push((1, 3));
+        assert_eq!(edges.iter().collect::<Vec<_>>(), vec![(4, 9), (2, 7), (1, 3)]);
+    }
 
     /// Distance from p to the nearest convex feature, as the edge bake measures it.
     fn edge_distance(segs: &[EdgeSeg], p: Vec3) -> f32 {
