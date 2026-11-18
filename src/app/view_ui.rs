@@ -482,7 +482,8 @@ impl PainterApp {
         if self.engine.gpu_stroke_profile_pending() {
             ctx.request_repaint();
         }
-        if self.stroke.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
+        if self.stroke.as_ref().is_some_and(|stroke| stroke.view == kind)
+            && !ctx.input(|i| i.pointer.primary_down()) {
             self.end_stroke();
         }
         self.update_poly_highlight();
