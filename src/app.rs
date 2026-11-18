@@ -2971,9 +2971,9 @@ impl PainterApp {
                 let stage_lines = stages.iter()
                     .map(|(label, ms)| format!("  {:.4} ms | {}", ms, label))
                     .collect::<Vec<_>>()
-                    .join("\\n");
+                    .join("\n");
                 format!(
-                    "available=true\\ntotal_gpu_ms={:.6}\\nclear_gpu_ms={:.6}\\ncomposite_body_gpu_ms={:.6}\\nstage_count={}/64\\npossible_stage_truncation={}\\nstages_slowest_first:\\n{}",
+                    "available=true\ntotal_gpu_ms={:.6}\nclear_gpu_ms={:.6}\ncomposite_body_gpu_ms={:.6}\nstage_count={}/64\npossible_stage_truncation={}\nstages_slowest_first:\n{}",
                     profile.total_ms,
                     profile.clear_ms,
                     profile.body_ms,
@@ -2996,18 +2996,18 @@ impl PainterApp {
                 let categories = engine.gpu_resource_breakdown();
                 let total_bytes = categories.iter().map(|(_, bytes)| *bytes).sum::<u64>();
                 texture_set_gpu_resources.push_str(&format!(
-                    "  [{}] {} | state={} | total_bytes={}\\n",
+                    "  [{}] {} | state={} | total_bytes={}\n",
                     index, set.name, state, total_bytes
                 ));
                 for (category, bytes) in categories {
                     texture_set_gpu_resources.push_str(&format!(
-                        "      {}={} bytes ({:.2} MiB)\\n",
+                        "      {}={} bytes ({:.2} MiB)\n",
                         category, bytes, bytes as f64 / (1024.0 * 1024.0)
                     ));
                 }
             } else {
                 texture_set_gpu_resources.push_str(&format!(
-                    "  [{}] {} | state=NOT_RESIDENT\\n",
+                    "  [{}] {} | state=NOT_RESIDENT\n",
                     index, set.name
                 ));
             }
