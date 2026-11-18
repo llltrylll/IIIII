@@ -45,6 +45,11 @@ impl SnapshotBufferPool {
             && size <= Self::MAX_CACHED_BYTES.saturating_sub(cached_bytes)
     }
 
+    /// Cached GPU readback bytes retained across all Texture Sets in this document.
+    pub fn cached_bytes(&self) -> u64 {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).cached_bytes
+    }
+
     fn take(&self, device: &wgpu::Device, size: u64) -> wgpu::Buffer {
         let cached = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());

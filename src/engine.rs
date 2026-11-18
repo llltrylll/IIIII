@@ -5480,6 +5480,11 @@ impl Engine {
         self.gpu_resource_breakdown().iter().map(|(_, bytes)| *bytes).sum()
     }
 
+    /// Cached Undo staging buffers shared by all Texture Set Engines in this document.
+    pub fn snapshot_buffer_pool_cached_bytes(&self) -> u64 {
+        self.snapshot_buffer_pool.cached_bytes()
+    }
+
     pub fn layer_vram_bytes(&self, idx: usize) -> u64 {
         self.layers.get(idx).map_or(0, |l| l.vram_bytes())
     }
