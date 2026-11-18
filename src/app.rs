@@ -712,6 +712,7 @@ mod uv_diagnostic_tests {
 
 #[derive(Default)]
 struct CompositeGpuProfile {
+    wall_status: String,
     total_ms: f64,
     clear_ms: f64,
     body_ms: f64,
@@ -2978,7 +2979,8 @@ impl PainterApp {
                     .collect::<Vec<_>>()
                     .join("\n");
                 format!(
-                    "available=true\ntotal_gpu_ms={:.6}\nclear_gpu_ms={:.6}\ncomposite_body_gpu_ms={:.6}\nlayer_passes={}\nfolder_passes={}\nmask_cache_hits={}\nmask_cache_misses={}\nmask_gpu_passes={}\nstage_count={}/64\npossible_stage_truncation={}\nstages_slowest_first:\n{}",
+                    "available=true\noriginal_f5_wall_status={}\ntotal_gpu_ms={:.6}\nclear_gpu_ms={:.6}\ncomposite_body_gpu_ms={:.6}\nlayer_passes={}\nfolder_passes={}\nmask_cache_hits={}\nmask_cache_misses={}\nmask_gpu_passes={}\nstage_count={}/64\npossible_stage_truncation={}\nstages_slowest_first:\n{}",
+                    profile.wall_status.replace('\n', " | "),
                     profile.total_ms,
                     profile.clear_ms,
                     profile.body_ms,

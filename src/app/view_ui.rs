@@ -465,6 +465,7 @@ impl PainterApp {
                 let clear_ms = composite_clear_ms.unwrap_or(0.0);
                 let body_ms = composite_body_ms.unwrap_or(0.0);
                 self.last_composite_gpu_profile = Some(CompositeGpuProfile {
+                    wall_status: self.status.clone(),
                     total_ms,
                     clear_ms,
                     body_ms,
@@ -478,9 +479,9 @@ impl PainterApp {
                 if let Some(profile) = self.last_composite_gpu_profile.as_ref() {
                     let slowest = profile.stages.iter().max_by(|a, b| a.1.total_cmp(&b.1));
                     self.status = if let Some((label, ms)) = slowest {
-                        format!("F5 GPU breakdown: {:.2} ms total · clear {:.2} ms · body {:.2} ms · {} stages · slowest {} {:.2} ms", profile.total_ms, profile.clear_ms, profile.body_ms, profile.stages.len(), label, ms)
+                        format!("{} | GPU {:.2} ms total · clear {:.2} ms · body {:.2} ms · {} stages · slowest {} {:.2} ms", profile.wall_status, profile.total_ms, profile.clear_ms, profile.body_ms, profile.stages.len(), label, ms)
                     } else {
-                        format!("F5 GPU breakdown: {:.2} ms total · clear {:.2} ms · body {:.2} ms · no per-pass timestamps", profile.total_ms, profile.clear_ms, profile.body_ms)
+                        format!("{} | GPU timestamps collected · {:.2} ms total · no per-pass spans", profile.wall_status, profile.total_ms)
                     };
                 }
             } else if self.meter.on {
