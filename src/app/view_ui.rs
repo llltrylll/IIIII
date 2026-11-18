@@ -468,6 +468,11 @@ impl PainterApp {
                     total_ms,
                     clear_ms,
                     body_ms,
+                    layer_passes: self.engine.last_composite_layer_passes,
+                    folder_passes: self.engine.last_composite_folder_passes,
+                    mask_cache_hits: self.engine.last_mask_cache_hits,
+                    mask_cache_misses: self.engine.last_mask_cache_misses,
+                    mask_gpu_passes: self.engine.last_mask_gpu_passes,
                     stages: pass_times,
                 });
                 if let Some(profile) = self.last_composite_gpu_profile.as_ref() {

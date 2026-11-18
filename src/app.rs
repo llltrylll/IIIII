@@ -715,6 +715,11 @@ struct CompositeGpuProfile {
     total_ms: f64,
     clear_ms: f64,
     body_ms: f64,
+    layer_passes: u32,
+    folder_passes: u32,
+    mask_cache_hits: u32,
+    mask_cache_misses: u32,
+    mask_gpu_passes: u32,
     stages: Vec<(String, f64)>,
 }
 
@@ -2973,10 +2978,15 @@ impl PainterApp {
                     .collect::<Vec<_>>()
                     .join("\n");
                 format!(
-                    "available=true\ntotal_gpu_ms={:.6}\nclear_gpu_ms={:.6}\ncomposite_body_gpu_ms={:.6}\nstage_count={}/64\npossible_stage_truncation={}\nstages_slowest_first:\n{}",
+                    "available=true\ntotal_gpu_ms={:.6}\nclear_gpu_ms={:.6}\ncomposite_body_gpu_ms={:.6}\nlayer_passes={}\nfolder_passes={}\nmask_cache_hits={}\nmask_cache_misses={}\nmask_gpu_passes={}\nstage_count={}/64\npossible_stage_truncation={}\nstages_slowest_first:\n{}",
                     profile.total_ms,
                     profile.clear_ms,
                     profile.body_ms,
+                    profile.layer_passes,
+                    profile.folder_passes,
+                    profile.mask_cache_hits,
+                    profile.mask_cache_misses,
+                    profile.mask_gpu_passes,
                     profile.stages.len(),
                     profile.stages.len() >= 64,
                     stage_lines,
