@@ -49,6 +49,7 @@ mod cage_paint;
 mod color_picker;
 mod color_ui;
 mod bake_jobs;
+mod technical_ui;
 mod mask_ui;
 mod properties_ui;
 mod project_settings_ui;
@@ -724,6 +725,8 @@ pub struct PainterApp {
     docks: dock::Docks,
     /// Whether the fixed Project sidebar is open in the Paint workspace.
     project_panel_open: bool,
+    /// Technical report panel and user-selected status-bar metrics.
+    technical_ui: technical_ui::TechnicalUi,
     /// A 3D view drew this frame (else its depth is rendered offscreen).
     drew_3d: bool,
     pending: Vec<Action>,
@@ -750,6 +753,8 @@ pub struct PainterApp {
     /// A crash report the last run left, shown once.
     crash_report: Option<std::path::PathBuf>,
     frame_ms: f32,
+    /// Smoothed interval between UI/viewport frames, in milliseconds.
+    frame_interval_ms: f32,
     /// The slowest recent frame (decays), to spot stutter that the average hides.
     frame_peak_ms: f32,
     ppp: f32,
@@ -2274,6 +2279,7 @@ impl PainterApp {
             workspace: Workspace::Paint,
             docks: { let _s = crate::startup_trace::span("new: Docks::load"); dock::Docks::load() },
             project_panel_open: false,
+            technical_ui: technical_ui::TechnicalUi::load(),
             drew_3d: false,
             pending: Vec::new(),
             layer_clipboard: None,
@@ -2293,6 +2299,7 @@ impl PainterApp {
             preview: Default::default(),
             crash_report: crate::crash::take_report(),
             frame_ms: 0.0,
+            frame_interval_ms: 0.0,
             frame_peak_ms: 0.0,
             ppp: cc.egui_ctx.pixels_per_point(),
             mcp: None,
@@ -4018,6 +4025,20 @@ impl PainterApp {
         }
         if theme::icon_button(ui, icons::GEAR, self.project_panel_open, 34.0).on_hover_text("Project settings").clicked() {
             self.project_panel_open = !self.project_panel_open;
+            if self.project_panel_open {
+                self.technical_ui.open = false;
+                self.technical_ui.save();
+            }
+        }
+        if theme::icon_button(ui, icons::INFO, self.technical_ui.open, 34.0)
+            .on_hover_text("Technical information and diagnostic report")
+            .clicked()
+        {
+            self.technical_ui.open = !self.technical_ui.open;
+            if self.technical_ui.open {
+                self.project_panel_open = false;
+            }
+            self.technical_ui.save();
         }
         if theme::icon_button(ui, icons::EXPORT, self.export.open, 34.0).on_hover_text("Export textures… (Ctrl+Shift+E)").clicked() {
             self.export.open = !self.export.open;
@@ -4025,50 +4046,27 @@ impl PainterApp {
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_centered(|ui| {
-            ui.label(egui::RichText::new(&self.status).color(theme::TEXT_DIM));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if self.diagnostics.active {
-                    ui.label(egui::RichText::new("RAY CAPTURE ON  ·  Ctrl+F2 TO STOP").strong().color(theme::ACCENT));
-                }
-                let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{}{:.1} ms (peak {:.0})  │  GPU est. {:.0} MB  │  Undo {:.1}/{:.0} MB ({} steps)  │  {}²  │  {} tris",
-                        if self.meter.on { format!("{}  │  ", self.meter.text(
-                            self.engine.res,
-                            self.engine.last_paint_scissor_pixels,
-                            self.engine.last_paint_scissor_rects,
-                            self.engine.last_scissor_pixels,
-                            self.engine.last_scissor_bbox_pixels,
-                            self.engine.last_scissor_rects,
-                            self.engine.last_composite_layer_passes,
-                            self.engine.last_composite_folder_passes,
-                            self.engine.last_mask_cache_hits,
-                            self.engine.last_mask_cache_misses,
-                            self.engine.last_mask_gpu_passes
-                        )) } else { String::new() },
-                        self.frame_ms,
-                        self.frame_peak_ms,
-                        mb(self.engine.vram_bytes() + self.sets.parked.iter().flatten().map(|p| p.engine.vram_bytes()).sum::<u64>()),
-                        mb(self.undo.ram_bytes() as u64),
-                        mb(self.undo.max_ram_bytes as u64),
-                        self.undo.undo.len(),
-                        self.engine.res,
-                        self.mesh.triangle_count(),
-                    ))
-                    .color(theme::TEXT_DIM)
-                    .small(),
-                );
-                if let Some(server) = &self.mcp
-                    && server.enabled.load(std::sync::atomic::Ordering::Relaxed) {
+        let paint = self.workspace == Workspace::Paint;
+        ui.vertical(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal_centered(|ui| {
+                ui.label(egui::RichText::new(&self.status).color(theme::TEXT_DIM));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if self.diagnostics.active {
+                        ui.label(egui::RichText::new("RAY CAPTURE ON  ·  Ctrl+F2 TO STOP").strong().color(theme::ACCENT));
+                    }
+                    if let Some(server) = &self.mcp
+                        && server.enabled.load(std::sync::atomic::Ordering::Relaxed)
+                    {
                         ui.label(egui::RichText::new(format!("MCP :{}", server.port)).color(theme::ACCENT).small())
                             .on_hover_text(format!("AI agents can connect at {}", server.url()));
                     }
-                if let Some((p, what)) = self.bake_progress() {
-                    ui.add(egui::ProgressBar::new(p).desired_width(140.0).text(format!("{what} {:.0}%", p * 100.0)));
-                }
+                });
             });
+            if paint {
+                ui.separator();
+                self.technical_metrics_bar(ui);
+            }
         });
     }
 
@@ -5464,6 +5462,7 @@ impl eframe::App for PainterApp {
         let _trace_frame = crate::startup_trace::frame();
         let start = Instant::now();
         let ctx = ui.ctx().clone();
+        self.frame_interval_ms = ctx.input(|i| i.stable_dt.max(0.0) * 1000.0);
         self.ppp = ctx.pixels_per_point();
         let _ = self.rs.device.poll(wgpu::PollType::Poll);
         {
@@ -5530,12 +5529,21 @@ impl eframe::App for PainterApp {
                 .frame(theme::card(theme::PANEL).inner_margin(egui::Margin::symmetric(12, 4)))
                 .show(ui, |ui| self.context_toolbar(ui));
         }
-        egui::Panel::bottom("status").exact_size(24.0).frame(theme::bar()).show(ui, |ui| self.status_bar(ui));
+        egui::Panel::bottom("status")
+            .exact_size(if paint { 52.0 } else { 24.0 })
+            .frame(theme::bar())
+            .show(ui, |ui| self.status_bar(ui));
         if paint {
             egui::Panel::left("tools")
                 .exact_size(56.0)
                 .frame(theme::card(theme::PANEL).inner_margin(egui::Margin::symmetric(7, 10)))
                 .show(ui, |ui| self.tool_strip(ui));
+            if self.technical_ui.open {
+                egui::Panel::left("technical_info")
+                    .exact_size(340.0)
+                    .frame(theme::card(theme::PANEL).inner_margin(egui::Margin::same(10)))
+                    .show(ui, |ui| self.technical_info_panel(ui));
+            }
             if self.project_panel_open {
                 egui::Panel::left("project_settings")
                     .exact_size(320.0)
