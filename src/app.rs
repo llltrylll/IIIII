@@ -476,6 +476,8 @@ struct StrokeMeter {
     gpu_apply: Stat,
     gpu_composite: Stat,
     gpu_composite_total: Stat,
+    gpu_composite_clear: Stat,
+    gpu_composite_body: Stat,
     /// Candidate screen triangles submitted to the UV raster pass (avg/peak).
     screen_candidate_triangles: Stat,
     /// Active texture-set triangle count while measuring Screen strokes.
@@ -534,7 +536,7 @@ impl StrokeMeter {
         let patch_percent = if texture_pixels == 0 { 0.0 } else { scissor_pixels as f64 * 100.0 / texture_pixels as f64 };
         let bbox_percent = if texture_pixels == 0 { 0.0 } else { bbox_pixels as f64 * 100.0 / texture_pixels as f64 };
         format!(
-            "F6 CPU avg/peak ms: steps/frame {}, resolve {}, region {}, stamp {}, begin {}, recomp {}, end {}, engine end {}, undo push {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {} | screen tris {}/{} | paint {:.1}%/{} scissors | composite {:.1}% (bbox {:.1}%, {} scissors) | stack {}L/{}F | masks {}h/{}m/{}p | since F6: full recomps {full}, thumbnails {thumbs}",
+            "F6 CPU avg/peak ms: steps/frame {}, resolve {}, region {}, stamp {}, begin {}, recomp {}, end {}, engine end {}, undo push {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {}, clear {}, pass body {} | screen tris {}/{} | paint {:.1}%/{} scissors | composite {:.1}% (bbox {:.1}%, {} scissors) | stack {}L/{}F | masks {}h/{}m/{}p | since F6: full recomps {full}, thumbnails {thumbs}",
             self.steps_per_frame.text(),
             self.resolve_cpu.text(),
             self.region_cpu.text(),
@@ -549,6 +551,8 @@ impl StrokeMeter {
             self.gpu_apply.text(),
             self.gpu_composite.text(),
             self.gpu_composite_total.text(),
+            self.gpu_composite_clear.text(),
+            self.gpu_composite_body.text(),
             self.screen_candidate_triangles.text(),
             self.screen_total_triangles,
             paint_percent,
