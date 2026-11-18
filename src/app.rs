@@ -631,6 +631,14 @@ mod stroke_meter_tests {
 
 
 #[derive(Default)]
+struct CompositeGpuProfile {
+    total_ms: f64,
+    clear_ms: f64,
+    body_ms: f64,
+    stages: Vec<(String, f64)>,
+}
+
+#[derive(Default)]
 struct DiagnosticCapture {
     active: bool,
     started_context: String,
@@ -672,6 +680,8 @@ pub struct PainterApp {
     meter: StrokeMeter,
     /// Temporary ray-hit trace used only by the diagnostic hotkey.
     diagnostics: DiagnosticCapture,
+    /// Most recent F5 full-compositor GPU timestamp capture.
+    last_composite_gpu_profile: Option<CompositeGpuProfile>,
     /// Reused candidate index storage for consecutive screen-projection brush steps.
     screen_candidate_indices: Vec<u32>,
     /// Changes whenever the active Engine instance is replaced or swapped.
@@ -2242,6 +2252,7 @@ impl PainterApp {
             time_composite: false,
             meter: StrokeMeter::default(),
             diagnostics: DiagnosticCapture::default(),
+            last_composite_gpu_profile: None,
             screen_candidate_indices: Vec::new(),
             engine_epoch: 0,
             bake_id_only: false,
@@ -3515,9 +3526,15 @@ impl PainterApp {
             }
             if i.key_pressed(Key::F5) {
                 self.preview_update_at = None;
+                self.last_composite_gpu_profile = None;
+                let profile_armed = self.engine.request_composite_profile();
                 self.engine.mark_dirty();
                 self.time_composite = true;
-                self.status = "Preview recomposition forced (F5).".into();
+                self.status = if profile_armed {
+                    "Preview recomposition forced (F5); GPU timestamps requested.".into()
+                } else {
+                    "Preview recomposition forced (F5); detailed GPU timestamps unavailable or busy.".into()
+                };
             }
         });
         if ctx.input(|i| i.key_pressed(Key::F5) && !i.modifiers.any()) {
