@@ -107,12 +107,14 @@ impl PainterApp {
         }
     }
 
-    /// Composites the parked sets that changed (new mesh, bake, load).
-    pub(super) fn composite_parked(&mut self) {
+    /// Composites at most one changed parked set per frame to avoid a load-time spike.
+    pub(super) fn composite_parked(&mut self, ctx: &egui::Context) {
         for p in self.sets.parked.iter_mut().flatten() {
             if p.engine.dirty {
                 p.engine.composite();
                 p.engine.release_inactive_working_set();
+                ctx.request_repaint();
+                break;
             }
         }
     }

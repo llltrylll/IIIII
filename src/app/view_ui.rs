@@ -349,7 +349,6 @@ impl PainterApp {
                 );
             }
         }
-        self.composite_parked();
         let size = [(rect.width() * self.ppp).round() as u32, (rect.height() * self.ppp).round() as u32];
         let mut rt_view = None;
         match kind {
@@ -491,6 +490,7 @@ impl PainterApp {
             let engines = texture_sets::engines(&self.engine, &self.sets, self.mesh.sets.len());
             self.views.render_3d_with_object_visibility(&self.rs, size, &engines, &self.env, &self.gpu_mesh, self.mesh.as_ref(), &self.cam, &self.view, Some(&self.overlays), &self.hidden_objects);
         }
+        self.composite_parked(ctx);
         self.drew_3d = false;
     }
 

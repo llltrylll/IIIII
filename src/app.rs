@@ -2361,10 +2361,10 @@ impl PainterApp {
     /// order) instead of the default size.
     fn load_mesh_sized(&mut self, mesh: Mesh, ctx: &egui::Context, sizes: &[u32]) {
         let bvh = Arc::new(Bvh::from_mesh(&mesh));
-        self.load_mesh_sized_with_bvh(mesh, bvh, ctx, sizes);
+        self.load_mesh_sized_with_bvh(mesh, bvh, ctx, sizes, true);
     }
 
-    fn load_mesh_sized_with_bvh(&mut self, mesh: Mesh, bvh: Arc<Bvh>, ctx: &egui::Context, sizes: &[u32]) {
+    fn load_mesh_sized_with_bvh(&mut self, mesh: Mesh, bvh: Arc<Bvh>, ctx: &egui::Context, sizes: &[u32], start_auto_bake: bool) {
         if self.stroke.is_some() {
             return;
         }
@@ -2399,7 +2399,7 @@ impl PainterApp {
             self.bake_settings.cage_paint = None;
         }
         self.cam = OrbitCam { fov_y: self.cam.fov_y, ..OrbitCam::default() };
-        if self.prefs.bake_on_load {
+        if start_auto_bake && self.prefs.bake_on_load {
             self.start_bake_all(ctx);
         }
     }

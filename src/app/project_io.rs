@@ -1261,7 +1261,9 @@ impl PainterApp {
         // Only GPU mesh/engine creation remains on the device-owning thread.
         self.bake_settings = bs;
         let sizes: Vec<u32> = set_values.iter().map(|sv| sv["resolution"].as_u64().unwrap_or(2048) as u32).collect();
-        self.load_mesh_sized_with_bvh(mesh, bvh, ctx, &sizes);
+        // Release the previous document's snapshots before allocating the new one.
+        self.undo.clear();
+        self.load_mesh_sized_with_bvh(mesh, bvh, ctx, &sizes, false);
         self.hidden_objects = manifest["mesh"]["hidden_objects"]
             .as_array()
             .map(|hidden| hidden.iter().map(|value| value.as_bool().unwrap_or(false)).take(self.mesh.objects.len()).collect())
@@ -1279,9 +1281,8 @@ impl PainterApp {
         }
         for (k, sv) in set_values.iter().enumerate().take(set_count) {
             self.switch_set(k);
-            while !self.engine.layers.is_empty() {
-                self.engine.delete_layer(0, &mut self.undo);
-            }
+            // Replacing a document must drop old layer textures, not retain them in Undo.
+            self.engine.restore_layers(Vec::new());
             let res = sv["resolution"].as_u64().unwrap_or(2048) as u32;
             if res != self.engine.res {
                 self.engine.set_resolution(res, &self.gpu_mesh, &mut self.undo);
@@ -1459,6 +1460,9 @@ impl PainterApp {
             self.project_path = Some(path.to_path_buf());
             self.remember_recent(path);
             self.status = format!("Opened {}.", path.display());
+        }
+        if self.prefs.bake_on_load {
+            self.start_bake_all(ctx);
         }
         Ok(())
     }
