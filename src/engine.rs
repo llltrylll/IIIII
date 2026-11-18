@@ -1208,9 +1208,36 @@ struct GpuStrokeProfileResources {
 }
 
 const GPU_PROFILE_BASE_QUERY_COUNT: u32 = 10;
-const GPU_PROFILE_MAX_LAYER_PASSES: usize = 16;
+const GPU_PROFILE_MAX_LAYER_PASSES: usize = 64;
 const GPU_PROFILE_QUERY_COUNT: u32 = GPU_PROFILE_BASE_QUERY_COUNT + GPU_PROFILE_MAX_LAYER_PASSES as u32 * 2;
 const GPU_PROFILE_READBACK_SIZE: u64 = GPU_PROFILE_QUERY_COUNT as u64 * 8;
+
+fn begin_composite_profile_stage(
+    encoder: &mut wgpu::CommandEncoder,
+    query_set: Option<&wgpu::QuerySet>,
+    stage_count: &mut usize,
+) -> Option<usize> {
+    let query_set = query_set?;
+    if *stage_count >= GPU_PROFILE_MAX_LAYER_PASSES {
+        return None;
+    }
+    let slot = *stage_count;
+    *stage_count += 1;
+    encoder.write_timestamp(query_set, GPU_PROFILE_BASE_QUERY_COUNT + (slot as u32 * 2));
+    Some(slot)
+}
+
+fn end_composite_profile_stage(
+    encoder: &mut wgpu::CommandEncoder,
+    query_set: Option<&wgpu::QuerySet>,
+    slot: Option<usize>,
+    label: String,
+    labels: &mut Vec<String>,
+) {
+    let (Some(query_set), Some(slot)) = (query_set, slot) else { return; };
+    encoder.write_timestamp(query_set, GPU_PROFILE_BASE_QUERY_COUNT + (slot as u32 * 2) + 1);
+    labels.push(label);
+}
 
 struct GpuStrokeProfiler {
     resources: GpuStrokeProfileResources,
@@ -1338,6 +1365,10 @@ pub struct Engine {
     gpu_profiler: Option<GpuStrokeProfiler>,
     /// Holds the current sample until its layer composite pass is recorded.
     active_gpu_profile: Option<GpuStrokeProfileResources>,
+    /// F5 requests one complete-composite GPU timestamp capture.
+    composite_profile_requested: bool,
+    /// Distinguishes a forced F5 capture from the normal paint profiler readback.
+    forced_composite_profile: bool,
     /// Shared by the texture sets of a document.
     p: Arc<Pipelines>,
     /// Bounded readback-buffer cache shared by this document's Texture Sets.
@@ -1788,6 +1819,8 @@ impl Engine {
             rs: rs.clone(),
             gpu_profiler,
             active_gpu_profile: None,
+            composite_profile_requested: false,
+            forced_composite_profile: false,
             last_end_stages_ms: [0.0; 5],
             pos: Tex::new(&device, "position map", res, res, POS_FORMAT, LAYER_USAGE),
             nrm: Tex::new(&device, "normal map", res, res, NRM_FORMAT, LAYER_USAGE),
@@ -4060,12 +4093,13 @@ impl Engine {
     /// Returns completed GPU timings for stamp and apply; does not wait for the GPU.
     pub fn poll_gpu_stroke_times(
         &mut self,
-    ) -> Option<(f64, f64, f64, Option<f64>, Option<f64>, Option<f64>, Vec<(String, f64)>)> {
+    ) -> Option<(bool, f64, f64, f64, Option<f64>, Option<f64>, Option<f64>, Vec<(String, f64)>)> {
         let (stamp, apply, layer, total, clear, body, pass_ms) =
             self.gpu_profiler.as_mut()?.poll(&self.device, &self.queue)?;
+        let forced_composite = std::mem::take(&mut self.forced_composite_profile);
         let pass_labels = std::mem::take(&mut self.last_profiled_pass_labels);
         let pass_times = pass_labels.into_iter().zip(pass_ms).collect();
-        Some((stamp, apply, layer, total, clear, body, pass_times))
+        Some((forced_composite, stamp, apply, layer, total, clear, body, pass_times))
     }
 
     pub fn gpu_stroke_profile_pending(&self) -> bool {
@@ -4303,10 +4337,15 @@ impl Engine {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         layer_id: u64,
+        layer_name: &str,
         source_bg: &wgpu::BindGroup,
         source_offset: u32,
         ops: &[MaskOp],
+        op_labels: &[String],
         scissors: Option<&[[u32; 4]]>,
+        profile_query: Option<&wgpu::QuerySet>,
+        profile_stage_count: &mut usize,
+        profile_labels: &mut Vec<String>,
     ) -> &Tex {
         // Scratch 0 and 1 ping-pong; scratch 2 holds a mask layer's own
         // values. The per-mask result texture is kept separate from all scratch.
@@ -4346,12 +4385,15 @@ impl Engine {
         };
         let source_out = if steps == 0 { result } else { &scratch[0] };
         {
+            let profile_slot = begin_composite_profile_stage(encoder, profile_query, profile_stage_count);
             let mut pass = gpu::pass(encoder, "mask source", &[gpu::color_attachment(&source_out.view, load)]);
             pass.set_pipeline(&self.p.mask_source);
             pass.set_bind_group(0, source_bg, &[source_offset]);
             draw(&mut pass, regions.as_ref().map(|r| &r[0][..]));
+            drop(pass);
+            end_composite_profile_stage(encoder, profile_query, profile_slot, format!("Mask source · {}", layer_name), profile_labels);
         }
-        let filter = |encoder: &mut wgpu::CommandEncoder, step: usize, input: &Tex, other: &Tex, out: &Tex, rects: Option<&[[u32; 4]]>| {
+        let mut filter = |encoder: &mut wgpu::CommandEncoder, step: usize, input: &Tex, other: &Tex, out: &Tex, rects: Option<&[[u32; 4]]>, label: String| {
             let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("mask filter"),
                 layout: &self.p.mask_filter_bgl,
@@ -4369,28 +4411,35 @@ impl Engine {
                     wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&other.view) },
                 ],
             });
+            let profile_slot = begin_composite_profile_stage(encoder, profile_query, profile_stage_count);
             let mut pass = gpu::pass(encoder, "mask filter", &[gpu::color_attachment(&out.view, load)]);
             pass.set_pipeline(&self.p.mask_filter);
             let offset = u32::try_from(step as u64 * MASK_FILTER_STRIDE).expect("mask filter uniform offset fits in u32");
             pass.set_bind_group(0, &bg, &[offset]);
             draw(&mut pass, rects);
+            drop(pass);
+            end_composite_profile_stage(encoder, profile_query, profile_slot, label, profile_labels);
         };
         let mut cur = 0;
         for (k, op) in ops.iter().enumerate() {
             let last = k + 1 == steps;
             let out = if last { result } else { &scratch[1 - cur] };
             let rects = regions.as_ref().map(|r| &r[k + 1][..]);
+            let op_label = op_labels.get(k).cloned().unwrap_or_else(|| format!("Mask op {}", k + 1));
             match *op {
-                MaskOp::Filter { step, .. } => filter(encoder, step, &scratch[cur], &scratch[2], out, rects),
+                MaskOp::Filter { step, .. } => filter(encoder, step, &scratch[cur], &scratch[2], out, rects, op_label),
                 MaskOp::Layer { uniform, combine } => {
                     // The mask layer's own values, then combined over the mask so far.
                     {
+                        let profile_slot = begin_composite_profile_stage(encoder, profile_query, profile_stage_count);
                         let mut pass = gpu::pass(encoder, "mask layer", &[gpu::color_attachment(&scratch[2].view, load)]);
                         pass.set_pipeline(&self.p.mask_source);
                         pass.set_bind_group(0, source_bg, &[uniform]);
                         draw(&mut pass, rects);
+                        drop(pass);
+                        end_composite_profile_stage(encoder, profile_query, profile_slot, format!("Mask layer source · {}", op_label), profile_labels);
                     }
-                    filter(encoder, combine, &scratch[cur], &scratch[2], out, rects);
+                    filter(encoder, combine, &scratch[cur], &scratch[2], out, rects, format!("Mask layer combine · {}", op_label));
                 }
             }
             if !last { cur = 1 - cur; }
@@ -4604,6 +4653,18 @@ impl Engine {
         u
     }
 
+    /// Arm one full-stack GPU timestamp capture for the next composite.
+    /// Returns false if timestamp queries are unsupported or another capture is active.
+    pub fn request_composite_profile(&mut self) -> bool {
+        let Some(profiler) = self.gpu_profiler.as_ref() else { return false; };
+        if !profiler.encoder_timestamps || profiler.pending || self.active_gpu_profile.is_some() || self.active.is_some() {
+            return false;
+        }
+        self.composite_profile_requested = true;
+        self.forced_composite_profile = true;
+        true
+    }
+
     /// Re-composites the whole stack. Cheap enough to run every painting frame:
     /// one fullscreen pass per visible layer, plus one per faded or masked folder.
     /// Waits until the GPU has finished everything submitted so far.
@@ -4612,6 +4673,17 @@ impl Engine {
     }
 
     pub fn composite(&mut self) {
+        if self.composite_profile_requested {
+            self.composite_profile_requested = false;
+            if self.active_gpu_profile.is_none() {
+                self.active_gpu_profile = self.gpu_profiler.as_ref()
+                    .filter(|profiler| profiler.encoder_timestamps)
+                    .and_then(GpuStrokeProfiler::resources);
+            }
+            if self.active_gpu_profile.is_none() {
+                self.forced_composite_profile = false;
+            }
+        }
         self.ensure_composite_working_set();
         if self.maps_dirty {
             self.resolve_maps();
@@ -4726,8 +4798,10 @@ impl Engine {
         // Filter steps' uniforms, written up front: (kind, a, b, c), (dir x, dir y, scale).
         let mut steps: Vec<[f32; 8]> = Vec::new();
         let mut layer_ops: HashMap<usize, Vec<MaskOp>> = HashMap::new();
+        let mut layer_op_labels: HashMap<usize, Vec<String>> = HashMap::new();
         for &li in source_slot.keys() {
             let mut ops = Vec::new();
+            let mut op_labels = Vec::new();
             let scale = self.res as f32 / FILTER_REF_RES;
             let mask = self.layers[li].mask.as_ref().expect("filtered layers have masks");
             for (ml, &slot) in mask.layers.iter().filter(|ml| ml.enabled).zip(&item_slots[&li]) {
@@ -4736,6 +4810,7 @@ impl Engine {
                     MaskSource::Generator(_) => 1.0,
                 };
                 ops.push(MaskOp::Layer { uniform: (slot as u64 * UNIFORM_STRIDE) as u32, combine: steps.len() });
+                op_labels.push(format!("mask layer {}", op_labels.iter().filter(|s| s.starts_with("mask layer")).count() + 1));
                 steps.push([COMBINE_STEP, ml.blend as u32 as f32, ml.opacity, value, 0.0, 0.0, scale, 0.0]);
             }
             for f in self.layers[li].mask.as_ref().map_or(&[][..], |m| &m.filters[..]).iter().filter(|f| f.enabled) {
@@ -4745,13 +4820,17 @@ impl Engine {
                 if f.kind == FilterKind::Blur {
                     steps.push([kind, f.a, f.b, f.c, 1.0, 0.0, scale, 0.0]);
                     ops.push(MaskOp::Filter { step: steps.len() - 1, reach, wrap });
+                    op_labels.push("Blur horizontal".to_string());
                     steps.push([kind, f.a, f.b, f.c, 0.0, 1.0, scale, 0.0]);
                     ops.push(MaskOp::Filter { step: steps.len() - 1, reach, wrap });
+                    op_labels.push("Blur vertical".to_string());
                 } else {
                     steps.push([kind, f.a, f.b, f.c, 0.0, 0.0, scale, 0.0]);
                     ops.push(MaskOp::Filter { step: steps.len() - 1, reach, wrap });
+                    op_labels.push(format!("{:?}", f.kind));
                 }
             }
+            layer_op_labels.insert(li, op_labels);
             layer_ops.insert(li, ops);
         }
         // Grow for the complete active stack. Truncating here would silently make
@@ -4875,8 +4954,12 @@ impl Engine {
         };
         let mut finals: Vec<u64> = Vec::new();
         let profile_layer = self.stroke_layer;
-        let mut composite_profiled = false;
-        let mut profiled_layer_passes = 0usize;
+        let mut composite_profiled = self.active_gpu_profile.is_some();
+        let profile_query = self.active_gpu_profile.as_ref()
+            .filter(|_| self.gpu_profiler.as_ref().is_some_and(|profiler| profiler.encoder_timestamps))
+            .map(|profile| profile.query_set.clone());
+        let mut profile_stage_count = 0usize;
+        let mut profile_labels = Vec::new();
         if self.active_gpu_profile.is_some() {
             self.last_profiled_pass_labels.clear();
         }
@@ -5004,10 +5087,15 @@ impl Engine {
                         Some(self.encode_mask_filters(
                             &mut encoder,
                             layer.id,
+                            &layer.name,
                             &make_bg(mask),
                             (slot as u64 * UNIFORM_STRIDE) as u32,
                             ops,
+                            layer_op_labels.get(&li).map_or(&[][..], |labels| labels.as_slice()),
                             scissors.as_deref(),
+                            profile_query.as_deref(),
+                            &mut profile_stage_count,
+                            &mut profile_labels,
                         ))
                     }
                 }
@@ -5031,17 +5119,14 @@ impl Engine {
             ];
             let profile = self.active_gpu_profile.as_ref().filter(|_| profile_layer == Some(layer.id));
             composite_profiled |= profile.is_some();
-            let detailed_profile_slot = if self.gpu_profiler.as_ref().is_some_and(|p| p.encoder_timestamps)
-                && self.active_gpu_profile.is_some()
-                && profiled_layer_passes < GPU_PROFILE_MAX_LAYER_PASSES {
-                    let slot = profiled_layer_passes;
-                    if let Some(p) = &self.active_gpu_profile {
-                        encoder.write_timestamp(&p.query_set, GPU_PROFILE_BASE_QUERY_COUNT + (slot as u32 * 2));
-                    }
-                    Some(slot)
-                } else {
-                    None
-                };
+            let detailed_profile_slot = if profile_query.is_some() && profile_stage_count < GPU_PROFILE_MAX_LAYER_PASSES {
+                let slot = profile_stage_count;
+                profile_stage_count += 1;
+                encoder.write_timestamp(profile_query.as_deref().expect("query set checked"), GPU_PROFILE_BASE_QUERY_COUNT + (slot as u32 * 2));
+                Some(slot)
+            } else {
+                None
+            };
             let detailed_profile_label = detailed_profile_slot.map(|_| {
                 let kind = if matches!(*pass, Pass::End(_)) { "Folder merge" } else { "Layer" };
                 format!("{kind} #{} {}", li + 1, layer.name)
@@ -5070,18 +5155,16 @@ impl Engine {
             }
             drop(pass);
             if let Some(slot) = detailed_profile_slot {
-                if let Some(p) = &self.active_gpu_profile {
-                    encoder.write_timestamp(&p.query_set, GPU_PROFILE_BASE_QUERY_COUNT + (slot as u32 * 2) + 1);
-                }
+                encoder.write_timestamp(profile_query.as_deref().expect("profile slot requires query set"), GPU_PROFILE_BASE_QUERY_COUNT + (slot as u32 * 2) + 1);
                 if let Some(label) = detailed_profile_label {
-                    self.last_profiled_pass_labels.push(label);
+                    profile_labels.push(label);
                 }
-                profiled_layer_passes += 1;
             }
             src = dst;
             from_cache = false;
         }
         if composite_profiled {
+            self.last_profiled_pass_labels = profile_labels;
             if let Some(p) = &self.active_gpu_profile {
                 if self.gpu_profiler.as_ref().is_some_and(|profiler| profiler.encoder_timestamps) {
                     encoder.write_timestamp(&p.query_set, 9);
