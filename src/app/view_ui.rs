@@ -66,7 +66,11 @@ impl PainterApp {
                     i.key_down(egui::Key::Q),
                     i.modifiers.shift,
                     i.modifiers.ctrl,
-                    i.key_pressed(egui::Key::Escape),
+                    i.key_pressed(egui::Key::Escape)
+                        || i.events.iter().any(|event| matches!(
+                            event,
+                            egui::Event::PointerButton { pressed: true, .. }
+                        )),
                     i.smooth_scroll_delta.y,
                 ));
             if exit {
