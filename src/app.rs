@@ -2979,7 +2979,7 @@ impl PainterApp {
                     .collect::<Vec<_>>()
                     .join("\n");
                 format!(
-                    "available=true\noriginal_f5_wall_status={}\ntotal_gpu_ms={:.6}\nclear_gpu_ms={:.6}\ncomposite_body_gpu_ms={:.6}\nlayer_passes={}\nfolder_passes={}\nmask_cache_hits={}\nmask_cache_misses={}\nmask_gpu_passes={}\nstage_count={}/64\npossible_stage_truncation={}\nstages_slowest_first:\n{}",
+                    "available=true\noriginal_f5_wall_status={}\ncomposite_encoder_gpu_ms={:.6}\ncomposite_clear_gpu_ms={:.6}\ncomposite_body_gpu_ms={:.6}\nlayer_passes={}\nfolder_passes={}\nmask_cache_hits={}\nmask_cache_misses={}\nmask_gpu_passes={}\nstage_count={}/64\npossible_stage_truncation={}\nstages_slowest_first:\n{}",
                     profile.wall_status.replace('\n', " | "),
                     profile.total_ms,
                     profile.clear_ms,

@@ -2632,9 +2632,20 @@ impl Engine {
     }
 
     /// Applies levels and painted fixes to every packed texture that has any.
-    fn resolve_maps(&mut self) {
+    fn resolve_maps(
+        &mut self,
+        profile_query: Option<&wgpu::QuerySet>,
+        profile_stage_count: &mut usize,
+        profile_labels: &mut Vec<String>,
+    ) {
         self.maps_version += 1;
+        let resolve_count = (0..MAP_TEXTURES).filter(|&t| self.map_needs_resolve(t)).count();
         let mut encoder = self.device.create_command_encoder(&Default::default());
+        let profile_slot = if resolve_count > 0 {
+            begin_composite_profile_stage(&mut encoder, profile_query, profile_stage_count)
+        } else {
+            None
+        };
         for t in 0..MAP_TEXTURES {
             if !self.map_needs_resolve(t) {
                 self.resolved[t] = None;
@@ -2695,6 +2706,13 @@ impl Engine {
             pass.set_bind_group(0, &bg, &[]);
             pass.draw(0..3, 0..1);
         }
+        end_composite_profile_stage(
+            &mut encoder,
+            profile_query,
+            profile_slot,
+            format!("Mesh maps resolve ({resolve_count} packed textures)"),
+            profile_labels,
+        );
         self.queue.submit([encoder.finish()]);
         self.maps_dirty = false;
     }
@@ -4696,9 +4714,19 @@ impl Engine {
                 self.forced_composite_profile = false;
             }
         }
+        let composite_profiled = self.active_gpu_profile.is_some();
+        let profile_query = self.active_gpu_profile.as_ref()
+            .filter(|_| self.gpu_profiler.as_ref().is_some_and(|profiler| profiler.encoder_timestamps))
+            .map(|profile| profile.query_set.clone());
+        let mut profile_stage_count = 0usize;
+        let mut profile_labels = Vec::new();
+        if composite_profiled {
+            self.last_profiled_pass_labels.clear();
+        }
+
         self.ensure_composite_working_set();
         if self.maps_dirty {
-            self.resolve_maps();
+            self.resolve_maps(profile_query.as_deref(), &mut profile_stage_count, &mut profile_labels);
         }
         let (passes, max_depth) = composite_passes_with_scratch(&self.layers, &mut self.composite_scratch);
         self.last_composite_layer_passes = passes.iter().filter(|p| matches!(**p, Pass::Layer(_))).count() as u32;
@@ -4966,15 +4994,6 @@ impl Engine {
         };
         let mut finals: Vec<u64> = Vec::new();
         let profile_layer = self.stroke_layer;
-        let mut composite_profiled = self.active_gpu_profile.is_some();
-        let profile_query = self.active_gpu_profile.as_ref()
-            .filter(|_| self.gpu_profiler.as_ref().is_some_and(|profiler| profiler.encoder_timestamps))
-            .map(|profile| profile.query_set.clone());
-        let mut profile_stage_count = 0usize;
-        let mut profile_labels = Vec::new();
-        if self.active_gpu_profile.is_some() {
-            self.last_profiled_pass_labels.clear();
-        }
         for (k, pass) in passes.iter().enumerate().skip(start) {
             if record == Some(k) {
                 let input = if k + 1 < passes.len() {
@@ -5186,20 +5205,11 @@ impl Engine {
             from_cache = false;
         }
         if composite_profiled {
-            self.last_profiled_pass_labels = profile_labels;
-            if let Some(p) = &self.active_gpu_profile {
-                if self.gpu_profiler.as_ref().is_some_and(|profiler| profiler.encoder_timestamps) {
-                    encoder.write_timestamp(&p.query_set, 9);
-                    encoder.write_timestamp(&p.query_set, 7);
-                }
-                let query_count = if self.gpu_profiler.as_ref().is_some_and(|profiler| profiler.encoder_timestamps) {
-                    GPU_PROFILE_QUERY_COUNT
-                } else {
-                    6
-                };
-                let resolve_bytes = u64::from(query_count) * 8;
-                encoder.resolve_query_set(&p.query_set, 0..query_count, &p.resolve, 0);
-                encoder.copy_buffer_to_buffer(&p.resolve, 0, &p.readback, 0, resolve_bytes);
+            if let Some(p) = &self.active_gpu_profile
+                && self.gpu_profiler.as_ref().is_some_and(|profiler| profiler.encoder_timestamps)
+            {
+                encoder.write_timestamp(&p.query_set, 9);
+                encoder.write_timestamp(&p.query_set, 7);
             }
         }
         self.queue.submit([encoder.finish()]);
@@ -5223,7 +5233,32 @@ impl Engine {
         self.full_dirty = false;
         self.mask_final.retain(|id| self.mask_out.contains_key(id));
         self.mask_final.extend(finals);
-        self.update_thumbs();
+        self.update_thumbs_profiled(
+            profile_query.as_deref(),
+            &mut profile_stage_count,
+            &mut profile_labels,
+        );
+        if composite_profiled {
+            self.last_profiled_pass_labels = profile_labels;
+            if let Some(profile) = self.active_gpu_profile.clone() {
+                let query_count = if self.gpu_profiler.as_ref().is_some_and(|profiler| profiler.encoder_timestamps) {
+                    GPU_PROFILE_QUERY_COUNT
+                } else {
+                    6
+                };
+                let resolve_bytes = u64::from(query_count) * 8;
+                let mut resolve_encoder = self.device.create_command_encoder(&Default::default());
+                resolve_encoder.resolve_query_set(&profile.query_set, 0..query_count, &profile.resolve, 0);
+                resolve_encoder.copy_buffer_to_buffer(&profile.resolve, 0, &profile.readback, 0, resolve_bytes);
+                self.queue.submit([resolve_encoder.finish()]);
+            }
+            self.active_gpu_profile = None;
+            if let Some(profiler) = &mut self.gpu_profiler {
+                profiler.request_map();
+            }
+        } else {
+            self.active_gpu_profile = None;
+        }
         if let Some(rects) = scissors.take() {
             self.stroke_regions = rects;
             self.stroke_regions.clear();

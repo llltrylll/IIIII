@@ -172,6 +172,17 @@ impl Engine {
 
     /// Brings the thumbnails up to date with the stack; call after compositing.
     pub(super) fn update_thumbs(&mut self) {
+        let mut stage_count = 0usize;
+        let mut stage_labels = Vec::new();
+        self.update_thumbs_profiled(None, &mut stage_count, &mut stage_labels);
+    }
+
+    pub(super) fn update_thumbs_profiled(
+        &mut self,
+        profile_query: Option<&wgpu::QuerySet>,
+        profile_stage_count: &mut usize,
+        profile_labels: &mut Vec<String>,
+    ) {
         // Reuse the ID set and removal list: this check runs after every
         // composite, including ordinary paint frames where nothing is stale.
         {
@@ -233,10 +244,18 @@ impl Engine {
             self.thumbs.gpu = Some(ThumbGpu::new(&self.device));
         }
         let mut encoder = self.device.create_command_encoder(&Default::default());
+        let profile_slot = begin_composite_profile_stage(&mut encoder, profile_query, profile_stage_count);
         self.shrink_surface(&mut encoder);
         for &(li, key, mask_only) in &todo {
             self.render_thumbs(&mut encoder, li, key, mask_only);
         }
+        end_composite_profile_stage(
+            &mut encoder,
+            profile_query,
+            profile_slot,
+            format!("Layer thumbnails ({} renders)", todo.len()),
+            profile_labels,
+        );
         self.queue.submit([encoder.finish()]);
         self.thumbs.todo_scratch = todo;
     }
