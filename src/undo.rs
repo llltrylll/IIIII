@@ -157,7 +157,7 @@ impl Snapshot {
     /// released before the next image is copied/compressed, avoiding a second
     /// full-size collection of uncompressed snapshots in system RAM.
     pub fn update(&mut self) {
-        if matches!(self.state, SnapState::Ready(_)) {
+        if matches!(&self.state, SnapState::Ready(_)) {
             return;
         }
         let mut mapped_buffers = None;
@@ -287,7 +287,7 @@ impl Snapshot {
     }
 
     fn is_pending(&self) -> bool {
-        !matches!(self.state, SnapState::Ready(_))
+        !matches!(&self.state, SnapState::Ready(_))
     }
 
     /// Uploads the snapshot into `textures` (same order and sizes as captured).
