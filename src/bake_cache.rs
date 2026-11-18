@@ -7,7 +7,7 @@
 //! with a changed baker never serves stale maps. Entries are LZ4-compressed;
 //! the least recently used ones are dropped past [`MAX_BYTES`].
 
-use crate::bake::{BakeReport, BakeSettings, BakedMaps, CUSTOM_FORMAT, MAP_FORMATS, MAP_TEXTURES};
+use crate::bake::{BakeReport, BakeSettings, BakedMaps, CUSTOM_FORMAT, CUSTOM_PER_TEXTURE, MAP_FORMATS, MAP_TEXTURES, MAX_BAKE_RES, MAX_CUSTOM_MAPS};
 use crate::gpu::{self, LAYER_USAGE, Tex};
 use crate::mesh::Mesh;
 use eframe::wgpu;
@@ -143,7 +143,16 @@ fn path(key: &Key) -> Option<PathBuf> {
 /// in which case it is removed).
 pub fn load(key: &Key) -> Option<Entry> {
     let path = path(key)?;
+    let metadata = fs::metadata(&path).ok()?;
+    if metadata.len() > MAX_BYTES {
+        let _ = fs::remove_file(&path);
+        return None;
+    }
     let bytes = fs::read(&path).ok()?;
+    if bytes.len() as u64 > MAX_BYTES {
+        let _ = fs::remove_file(&path);
+        return None;
+    }
     match decode(&bytes) {
         Some(entry) => {
             // Mark it recently used, for eviction.
@@ -174,22 +183,59 @@ fn decode(mut b: &[u8]) -> Option<Entry> {
     if take(&mut b, 4)? != MAGIC || u32_(&mut b)? != FORMAT_VERSION {
         return None;
     }
-    let json_len = u32_(&mut b)? as usize;
-    let report: serde_json::Value = serde_json::from_slice(take(&mut b, json_len)?).ok()?;
-    let report = BakeReport::from_cache_json(&report)?;
+    let json_len = usize::try_from(u32_(&mut b)?).ok()?;
+    let report_json: serde_json::Value = serde_json::from_slice(take(&mut b, json_len)?).ok()?;
+    let report = BakeReport::from_cache_json(&report_json)?;
+    if report.resolution == 0 || report.resolution > MAX_BAKE_RES {
+        return None;
+    }
+
     let texture = |b: &mut &[u8], format: wgpu::TextureFormat| -> Option<(u32, Vec<u8>)> {
         let res = u32_(b)?;
-        let len = u32_(b)? as usize;
-        let data = lz4_flex::decompress_size_prepended(take(b, len)?).ok()?;
-        let expected = (res as usize).pow(2) * gpu::bytes_per_texel(format) as usize;
-        (res != 0 && data.len() == expected).then_some((res, data))
+        if res == 0 || res > MAX_BAKE_RES {
+            return None;
+        }
+        let packed_len = usize::try_from(u32_(b)?).ok()?;
+        let packed = take(b, packed_len)?;
+        let expected = (res as usize)
+            .checked_mul(res as usize)?
+            .checked_mul(gpu::bytes_per_texel(format) as usize)?;
+        // Check the LZ4 size prefix before decompression to reject forged,
+        // oversized allocations from tiny/corrupt cache entries.
+        if packed.len() < 4 {
+            return None;
+        }
+        let declared = u32::from_le_bytes(packed[..4].try_into().ok()?) as usize;
+        if declared != expected {
+            return None;
+        }
+        let data = lz4_flex::decompress_size_prepended(packed).ok()?;
+        (data.len() == expected).then_some((res, data))
     };
+
     let mut maps: [(u32, Vec<u8>); MAP_TEXTURES] = Default::default();
     for (i, slot) in maps.iter_mut().enumerate() {
         *slot = texture(&mut b, MAP_FORMATS[i])?;
     }
-    let count = u32_(&mut b)? as usize;
-    let custom = (0..count).map(|_| texture(&mut b, CUSTOM_FORMAT)).collect::<Option<Vec<_>>>()?;
+    let resolution = maps[0].0;
+    if maps.iter().any(|(res, _)| *res != resolution) {
+        return None;
+    }
+    let count = usize::try_from(u32_( &mut b)?).ok()?;
+    let max_custom_textures = MAX_CUSTOM_MAPS.div_ceil(CUSTOM_PER_TEXTURE);
+    let expected_custom_textures = report.custom.len().div_ceil(CUSTOM_PER_TEXTURE);
+    if count > max_custom_textures || count != expected_custom_textures {
+        return None;
+    }
+    let custom = (0..count)
+        .map(|_| texture(&mut b, CUSTOM_FORMAT))
+        .collect::<Option<Vec<_>>>()?;
+    if report.resolution != resolution
+        || custom.iter().any(|(res, _)| *res != resolution)
+        || !b.is_empty()
+    {
+        return None;
+    }
     Some(Entry { report, maps, custom })
 }
 
@@ -328,6 +374,104 @@ mod tests {
         let mut wrong_version = MAGIC.to_vec();
         wrong_version.extend_from_slice(&99u32.to_le_bytes());
         assert!(decode(&wrong_version).is_none());
+    }
+
+    fn test_report_json() -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "source": "test",
+            "triangles": 1,
+            "parts": 1,
+            "hard_edges": 0,
+            "resolution": 1,
+            "rays_per_texel": 1,
+            "prep_seconds": 0.0,
+            "edge_max_distance": 1.0,
+            "id_regions": [],
+            "matched_names": 0,
+            "used_cage": false,
+            "baked": 0,
+            "custom": [],
+            "gpu_seconds": 0.0,
+            "valid_texels": 0,
+            "missed_texels": 0,
+            "filled_texels": 0
+        })).unwrap()
+    }
+
+    fn test_cache_header() -> Vec<u8> {
+        let report = test_report_json();
+        let mut bytes = MAGIC.to_vec();
+        bytes.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&(report.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&report);
+        bytes
+    }
+
+    fn append_test_texture(bytes: &mut Vec<u8>, res: u32, format: wgpu::TextureFormat) {
+        let raw = vec![0u8; (res as usize).pow(2) * gpu::bytes_per_texel(format) as usize];
+        let packed = lz4_flex::compress_prepend_size(&raw);
+        bytes.extend_from_slice(&res.to_le_bytes());
+        bytes.extend_from_slice(&(packed.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&packed);
+    }
+
+    #[test]
+    fn corrupt_entries_are_rejected() {
+        assert!(decode(b"").is_none());
+        assert!(decode(b"MPBC\x01\0\0\0garbage").is_none());
+        let mut wrong_version = MAGIC.to_vec();
+        wrong_version.extend_from_slice(&99u32.to_le_bytes());
+        assert!(decode(&wrong_version).is_none());
+    }
+
+    #[test]
+    fn cache_rejects_oversized_texture_resolution_before_decompression() {
+        let mut bytes = test_cache_header();
+        bytes.extend_from_slice(&(MAX_BAKE_RES + 1).to_le_bytes());
+        assert!(decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn cache_rejects_too_many_custom_texture_arrays() {
+        let mut bytes = test_cache_header();
+        for format in MAP_FORMATS {
+            append_test_texture(&mut bytes, 1, format);
+        }
+        let too_many = (MAX_CUSTOM_MAPS.div_ceil(CUSTOM_PER_TEXTURE) + 1) as u32;
+        bytes.extend_from_slice(&too_many.to_le_bytes());
+        assert!(decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn cache_rejects_trailing_bytes() {
+        let mut bytes = test_cache_header();
+        for format in MAP_FORMATS {
+            append_test_texture(&mut bytes, 1, format);
+        }
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(b"unexpected");
+        assert!(decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn cache_rejects_report_and_texture_resolution_mismatch() {
+        let mut bytes = test_cache_header();
+        for format in MAP_FORMATS {
+            append_test_texture(&mut bytes, 2, format);
+        }
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        assert!(decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn cache_rejects_custom_texture_count_mismatch() {
+        let mut bytes = test_cache_header();
+        for format in MAP_FORMATS {
+            append_test_texture(&mut bytes, 1, format);
+        }
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        append_test_texture(&mut bytes, 1, CUSTOM_FORMAT);
+        assert!(decode(&bytes).is_none());
     }
 
     /// A real bake survives the trip through the cache format bit for bit,
