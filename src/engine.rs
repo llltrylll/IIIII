@@ -5441,6 +5441,19 @@ mod composite_pass_tests {
     }
 
     #[test]
+    fn gpu_timestamp_readback_covers_every_profiled_query() {
+        assert_eq!(
+            GPU_PROFILE_READBACK_SIZE,
+            u64::from(GPU_PROFILE_QUERY_COUNT) * 8,
+        );
+        assert_eq!(
+            GPU_PROFILE_QUERY_COUNT,
+            GPU_PROFILE_BASE_QUERY_COUNT + GPU_PROFILE_MAX_LAYER_PASSES as u32 * 2,
+        );
+        assert!(GPU_PROFILE_QUERY_COUNT > 10);
+    }
+
+    #[test]
     fn empty_layer_stack_has_no_composite_passes() {
         assert_eq!(composite_passes(&[]), (Vec::new(), 0));
     }
