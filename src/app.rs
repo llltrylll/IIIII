@@ -630,6 +630,86 @@ mod stroke_meter_tests {
 }
 
 
+fn exact_uv_triangle_key(uv: [Vec2; 3]) -> Option<([i64; 6], bool)> {
+    if !uv.iter().all(|point| point.is_finite()) {
+        return None;
+    }
+    let signed_area = (uv[1].x - uv[0].x) * (uv[2].y - uv[0].y)
+        - (uv[1].y - uv[0].y) * (uv[2].x - uv[0].x);
+    let degenerate = signed_area.abs() < 1.0e-10;
+    let mut quantized = uv.map(|point| [
+        (f64::from(point.x) * 1_000_000.0).round() as i64,
+        (f64::from(point.y) * 1_000_000.0).round() as i64,
+    ]);
+    quantized.sort_unstable();
+    Some((
+        [
+            quantized[0][0], quantized[0][1],
+            quantized[1][0], quantized[1][1],
+            quantized[2][0], quantized[2][1],
+        ],
+        degenerate,
+    ))
+}
+
+fn duplicate_uv_group_summary(counts: impl Iterator<Item = u32>) -> (u32, u32, u32) {
+    let mut groups = 0u32;
+    let mut faces = 0u32;
+    let mut max_depth = 0u32;
+    for count in counts {
+        if count > 1 {
+            groups += 1;
+            faces += count;
+            max_depth = max_depth.max(count);
+        }
+    }
+    (groups, faces, max_depth)
+}
+
+#[cfg(test)]
+mod uv_diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn exact_uv_key_is_independent_of_triangle_vertex_order() {
+        let a = Vec2::new(0.0, 0.0);
+        let b = Vec2::new(1.0, 0.0);
+        let c = Vec2::new(0.0, 1.0);
+        let first = exact_uv_triangle_key([a, b, c]).unwrap();
+        let reordered = exact_uv_triangle_key([c, a, b]).unwrap();
+        assert_eq!(first, reordered);
+        assert!(!first.1);
+    }
+
+    #[test]
+    fn exact_uv_key_marks_collapsed_uv_triangles_as_degenerate() {
+        let key = exact_uv_triangle_key([
+            Vec2::new(0.1, 0.2),
+            Vec2::new(0.4, 0.2),
+            Vec2::new(0.8, 0.2),
+        ]).unwrap();
+        assert!(key.1);
+    }
+
+    #[test]
+    fn non_finite_uv_triangles_never_enter_duplicate_maps() {
+        assert!(exact_uv_triangle_key([
+            Vec2::ZERO,
+            Vec2::new(f32::NAN, 0.0),
+            Vec2::ONE,
+        ]).is_none());
+    }
+
+    #[test]
+    fn duplicate_summary_counts_only_repeated_keys_and_reports_depth() {
+        assert_eq!(
+            duplicate_uv_group_summary([1, 2, 2, 5].into_iter()),
+            (3, 9, 5),
+        );
+        assert_eq!(duplicate_uv_group_summary([1, 1, 0].into_iter()), (0, 0, 0));
+    }
+}
+
 #[derive(Default)]
 struct CompositeGpuProfile {
     total_ms: f64,
@@ -3112,15 +3192,11 @@ impl PainterApp {
                 stats[7] += triangle_tangent_invalid;
             }
 
-            // Exact UV triangle identity (quantized to 1e-6), independent of vertex order.
-            // Valid-area triangles and degenerate triangles are intentionally counted
-            // in separate maps so collapsed UV faces cannot inflate overlap statistics.
-            if uv_finite {
-                let mut q = uv.map(|t| [(t.x * 1_000_000.0).round() as i64, (t.y * 1_000_000.0).round() as i64]);
-                q.sort_unstable();
-                let key = [q[0][0], q[0][1], q[1][0], q[1][1], q[2][0], q[2][1]];
+            // Degenerate and valid-area triangles use independent maps. Non-finite
+            // coordinates are rejected and can never collide after quantization.
+            if let Some((key, key_degenerate)) = exact_uv_triangle_key(uv) {
                 let set = self.mesh.set_of(tri as u32);
-                if uv_degenerate {
+                if key_degenerate {
                     *exact_uv_degenerate_keys.entry(key).or_default() += 1;
                     *exact_uv_degenerate_keys_by_set.entry((set, key)).or_default() += 1;
                     if let Some(&object) = self.mesh.tri_object.get(tri) {
@@ -3136,23 +3212,10 @@ impl PainterApp {
             }
         }
 
-        let duplicate_stats = |counts: Vec<u32>| {
-            let mut groups = 0u32;
-            let mut faces = 0u32;
-            let mut max_depth = 0u32;
-            for count in counts {
-                if count > 1 {
-                    groups += 1;
-                    faces += count;
-                    max_depth = max_depth.max(count);
-                }
-            }
-            (groups, faces, max_depth)
-        };
-        let global_valid = duplicate_stats(exact_uv_valid_keys.values().copied().collect());
-        let global_degenerate = duplicate_stats(exact_uv_degenerate_keys.values().copied().collect());
-        let same_set_valid = duplicate_stats(exact_uv_valid_keys_by_set.values().copied().collect());
-        let same_set_degenerate = duplicate_stats(exact_uv_degenerate_keys_by_set.values().copied().collect());
+        let global_valid = duplicate_uv_group_summary(exact_uv_valid_keys.values().copied());
+        let global_degenerate = duplicate_uv_group_summary(exact_uv_degenerate_keys.values().copied());
+        let same_set_valid = duplicate_uv_group_summary(exact_uv_valid_keys_by_set.values().copied());
+        let same_set_degenerate = duplicate_uv_group_summary(exact_uv_degenerate_keys_by_set.values().copied());
         let by_set_valid = {
             let mut stats = vec![[0u32; 3]; self.mesh.sets.len()];
             for (&(set, _), &count) in &exact_uv_valid_keys_by_set {
