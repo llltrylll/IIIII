@@ -1292,9 +1292,13 @@ impl GpuStrokeProfiler {
         let read = |i: usize| u64::from_ne_bytes(data[i * 8..i * 8 + 8].try_into().expect("timestamp is 8 bytes"));
         let (s0, s1, a0, a1, c0, c1, t0, t1, clear_end, body_end) =
             (read(0), read(1), read(2), read(3), read(4), read(5), read(6), read(7), read(8), read(9));
-        let layer_pass_ms = (0..GPU_PROFILE_MAX_LAYER_PASSES)
-            .map(|i| read(10 + i * 2 + 1).wrapping_sub(read(10 + i * 2)) as f64)
-            .collect::<Vec<_>>();
+        let layer_pass_ms = if self.encoder_timestamps {
+            (0..GPU_PROFILE_MAX_LAYER_PASSES)
+                .map(|i| read(10 + i * 2 + 1).wrapping_sub(read(10 + i * 2)) as f64)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         drop(data);
         self.resources.readback.unmap();
         let period_ns = queue.get_timestamp_period();
