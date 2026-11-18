@@ -653,6 +653,57 @@ mod tests {
     }
 
     #[test]
+    fn cached_ram_total_tracks_async_compression_without_recounting_history() {
+        let snapshot = || {
+            let (tx, receiver) = mpsc::sync_channel(1);
+            drop(tx);
+            Snapshot {
+                infos: vec![TexInfo { width: 4, height: 4, bpp: 4 }],
+                state: SnapState::Compressing {
+                    receiver,
+                    packed: vec![vec![1, 2, 3]],
+                    pending_raw_bytes: 64,
+                    total: 1,
+                },
+                pool: Arc::new(SnapshotBufferPool::default()),
+                accounted_bytes: 67,
+            }
+        };
+        let mut history = UndoStack::default();
+        history.push(
+            "compressed later",
+            Edit::Stroke(UndoEntry {
+                layer_id: 1,
+                target: StrokeTarget::Content,
+                channels: vec![0],
+                before: snapshot(),
+                after: snapshot(),
+            }),
+        );
+
+        assert_eq!(history.ram_bytes(), 134);
+        history.update();
+        assert_eq!(history.ram_bytes(), 6);
+        assert!(!history.pending_snapshots);
+
+        // A ready history stays on the cached fast path.
+        history.update();
+        assert_eq!(history.ram_bytes(), 6);
+    }
+
+    #[test]
+    fn clearing_history_resets_cached_ram_accounting() {
+        let mut history = UndoStack::default();
+        history.push("one", stroke_with_snapshot_bytes(6));
+        assert_eq!(history.ram_bytes(), 12);
+
+        history.clear();
+
+        assert_eq!(history.ram_bytes(), 0);
+        assert!(!history.pending_snapshots);
+    }
+
+    #[test]
     fn pending_snapshot_memory_is_counted_before_compression_finishes() {
         let (_tx, receiver) = mpsc::sync_channel(1);
         let snapshot = Snapshot {
