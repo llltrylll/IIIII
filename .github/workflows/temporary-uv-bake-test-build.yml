@@ -1,0 +1,61 @@
+name: Temporary UV bake test build
+
+on:
+  push:
+    branches:
+      - build/uv-bake-test-20261118
+
+permissions:
+  contents: read
+
+jobs:
+  windows-package:
+    name: Windows portable package
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Unit tests
+        run: cargo test --locked
+      - name: Build portable package
+        shell: pwsh
+        run: ./scripts/package.ps1
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: uv-bake-test-windows-x64
+          path: dist/MaterialPainter-*-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 3
+
+  uv-bake-gpu-test:
+    name: Dedicated UV bake GPU test (Lavapipe)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      WGPU_BACKEND: vulkan
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Vulkan software driver and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libvulkan1 mesa-vulkan-drivers vulkan-tools \
+            pkg-config libxkbcommon-dev libwayland-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libgtk-3-dev
+      - name: Select Mesa Lavapipe
+        shell: bash
+        run: |
+          icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -name 'lvp_icd*.json' -print -quit)"
+          if [[ -z "$icd" ]]; then
+            echo "Mesa Lavapipe ICD was not installed"
+            exit 1
+          fi
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+          vulkaninfo --summary
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run the exact UV bake skip regression
+        run: cargo test --locked --bin material_painter preview_test::set_triangles_skips_only_identical_uv_bakes -- --ignored --exact --nocapture --test-threads 1
