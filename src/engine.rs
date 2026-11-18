@@ -4018,7 +4018,7 @@ impl Engine {
                 multiview_mask: None,
             }).forget_lifetime();
             pass.set_pipeline(&self.p.stamp);
-            pass.set_bind_group(0, &stamp_bg, &[]);
+            pass.set_bind_group(0, &*stamp_bg, &[]);
             if let Some(rects) = &frame_scissors {
                 for &[x0, y0, x1, y1] in rects {
                     pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
