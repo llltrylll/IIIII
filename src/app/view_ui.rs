@@ -457,10 +457,26 @@ impl PainterApp {
     /// After every view drew: strokes end when the button is released, and
     /// the 3D depth the brush reads stays valid when no 3D view is showing.
     pub(super) fn views_end_frame(&mut self, ctx: &egui::Context) {
-        if let Some((stamp_ms, apply_ms, composite_ms, composite_total_ms, composite_clear_ms, composite_body_ms, pass_times)) =
+        if let Some((forced_composite, stamp_ms, apply_ms, composite_ms, composite_total_ms, composite_clear_ms, composite_body_ms, pass_times)) =
             self.engine.poll_gpu_stroke_times()
         {
-            if self.meter.on {
+            if forced_composite {
+                let total_ms = composite_total_ms.unwrap_or(0.0);
+                let clear_ms = composite_clear_ms.unwrap_or(0.0);
+                let body_ms = composite_body_ms.unwrap_or(0.0);
+                let slowest = pass_times.iter().max_by(|a, b| a.1.total_cmp(&b.1)).map(|(label, ms)| (label.clone(), *ms));
+                self.last_composite_gpu_profile = Some(CompositeGpuProfile {
+                    total_ms,
+                    clear_ms,
+                    body_ms,
+                    stages: pass_times,
+                });
+                self.status = if let Some((label, ms)) = slowest {
+                    format!("F5 GPU breakdown: {:.2} ms total · clear {:.2} ms · body {:.2} ms · slowest {} {:.2} ms", total_ms, clear_ms, body_ms, label, ms)
+                } else {
+                    format!("F5 GPU breakdown: {:.2} ms total · clear {:.2} ms · body {:.2} ms · no per-pass timestamps", total_ms, clear_ms, body_ms)
+                };
+            } else if self.meter.on {
                 self.meter.gpu_stamp.add(stamp_ms);
                 self.meter.gpu_apply.add(apply_ms);
                 self.meter.gpu_composite.add(composite_ms);
