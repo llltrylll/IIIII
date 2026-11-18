@@ -703,6 +703,7 @@ struct CompositeScratch {
     shown: Vec<bool>,
     isolates: Vec<bool>,
     opening_at: Vec<Vec<usize>>,
+    passes: Vec<Pass>,
 }
 
 /// Builds the composite pass list in linear time.
@@ -796,7 +797,9 @@ fn composite_passes_with_scratch(
         }
     }
 
-    let mut passes = Vec::with_capacity(n + folder_count * 2);
+    let mut passes = std::mem::take(&mut scratch.passes);
+    passes.clear();
+    passes.reserve(n + folder_count * 2);
     let (mut depth, mut max_depth) = (0usize, 0usize);
     for (i, layer) in layers.iter().enumerate() {
         // Buckets were populated in reverse index order: outer folders first.
@@ -4787,6 +4790,7 @@ impl Engine {
                 self.stroke_regions = rects;
                 self.stroke_regions.clear();
             }
+            self.composite_scratch.passes = passes;
             return;
         }
         if scissors.is_none() {
@@ -5017,6 +5021,7 @@ impl Engine {
             self.stroke_regions = rects;
             self.stroke_regions.clear();
         }
+        self.composite_scratch.passes = passes;
     }
 
     /// Whether any visible layer sets opacity: only then can the result be
