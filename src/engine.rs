@@ -1761,6 +1761,31 @@ impl Engine {
         self.mask_out.clear();
         self.mask_final.clear();
         self.apply_bg = None;
+
+        // Parked Engines never encode layer or mask-filter passes. Return their
+        // dynamic uniform buffers to the small baseline; they grow lazily again
+        // if this Engine is reactivated and needs the larger working set.
+        let layer_slots = layer_uniform_buffer_capacity(self.layer_ubuf_slots, 0);
+        if layer_slots != self.layer_ubuf_slots {
+            self.layer_ubuf_slots = layer_slots;
+            self.layer_ubuf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("parked layer uniforms"),
+                size: UNIFORM_STRIDE * self.layer_ubuf_slots,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        let mask_slots = mask_filter_buffer_capacity(self.mask_filter_ubuf_slots, 0);
+        if mask_slots != self.mask_filter_ubuf_slots {
+            self.mask_filter_ubuf_slots = mask_slots;
+            self.mask_filter_ubuf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("parked mask filter uniforms"),
+                size: MASK_FILTER_STRIDE * self.mask_filter_ubuf_slots,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+
         // Keep the already-rendered UI thumbnails, but drop the 512²
         // render targets and reduced surface maps used only to regenerate them.
         self.thumbs.release_scratch();
