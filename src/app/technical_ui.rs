@@ -65,7 +65,7 @@ impl TechnicalMetric {
             Self::FrameInterval => "Time between UI frames; useful for detecting stutter.",
             Self::CpuFrame => "Time spent in the application's UI frame, with recent peak.",
             Self::Bake => "Shows live bake progress, then the latest GPU and CPU preparation times.",
-            Self::GpuMemoryEstimate => "Application-side estimate of active and parked texture memory, not hardware telemetry.",
+            Self::GpuMemoryEstimate => "Application-side estimate of active and parked Engine textures and known buffers; shared Fill images may appear in more than one per-Engine subtotal. Shared Undo staging memory is shown separately.",
             Self::UndoMemory => "Undo history memory and configured limit.",
             Self::TextureResolution => "Resolution of the active texture set.",
             Self::Triangles => "Triangle count in the imported mesh.",
@@ -133,6 +133,41 @@ impl TechnicalMetric {
     }
 }
 
+/// Bytes as MiB (1024 * 1024).
+fn mib(bytes: u64) -> f64 {
+    bytes as f64 / (1024.0 * 1024.0)
+}
+
+/// One resident Engine in the memory breakdown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SetMemory {
+    name: String,
+    parked: bool,
+    bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct MemoryTotals {
+    active: u64,
+    parked: u64,
+    total: u64,
+}
+
+impl MemoryTotals {
+    fn of(entries: &[SetMemory]) -> Self {
+        let mut totals = Self::default();
+        for entry in entries {
+            if entry.parked {
+                totals.parked = totals.parked.saturating_add(entry.bytes);
+            } else {
+                totals.active = totals.active.saturating_add(entry.bytes);
+            }
+        }
+        totals.total = totals.active.saturating_add(totals.parked);
+        totals
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub(super) struct TechnicalUi {
     pub(super) open: bool,
@@ -164,11 +199,13 @@ impl TechnicalUi {
     }
 
     fn sanitized(mut self) -> Self {
-        self.bottom.dedup();
-        self.bottom.retain(|metric| TechnicalMetric::ALL.contains(metric));
-        if self.bottom.len() > TechnicalMetric::ALL.len() {
-            self.bottom.truncate(TechnicalMetric::ALL.len());
+        let mut unique = Vec::with_capacity(self.bottom.len().min(TechnicalMetric::ALL.len()));
+        for metric in self.bottom.drain(..) {
+            if TechnicalMetric::ALL.contains(&metric) && !unique.contains(&metric) {
+                unique.push(metric);
+            }
         }
+        self.bottom = unique;
         self
     }
 
@@ -206,6 +243,28 @@ impl TechnicalUi {
 }
 
 impl PainterApp {
+    /// The active Engine first, then each parked Engine that is still loaded.
+    /// Read-only: it only queries `vram_bytes()`.
+    fn gpu_memory_entries(&self) -> Vec<SetMemory> {
+        let name = |index: usize| {
+            self.mesh.sets.get(index).map_or_else(|| format!("(missing set {index})"), |set| set.name.clone())
+        };
+        let mut entries = vec![SetMemory {
+            name: name(self.sets.active),
+            parked: false,
+            bytes: self.engine.vram_bytes(),
+        }];
+        for (index, slot) in self.sets.parked.iter().enumerate() {
+            if index == self.sets.active {
+                continue;
+            }
+            if let Some(parked) = slot {
+                entries.push(SetMemory { name: name(index), parked: true, bytes: parked.engine.vram_bytes() });
+            }
+        }
+        entries
+    }
+
     pub(super) fn technical_info_panel(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -287,11 +346,35 @@ impl PainterApp {
             egui::CollapsingHeader::new("Memory and undo")
                 .default_open(true)
                 .show(ui, |ui| {
-                    let gpu_bytes = self.engine.vram_bytes()
-                        + self.sets.parked.iter().flatten().map(|parked| parked.engine.vram_bytes()).sum::<u64>();
                     let mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
-                    ui.label(format!("GPU texture allocation estimate: {:.1} MB", mb(gpu_bytes)));
-                    ui.label("This is an application-side estimate, not live hardware VRAM usage.");
+                    let entries = self.gpu_memory_entries();
+                    let totals = MemoryTotals::of(&entries);
+                    ui.label(format!("GPU resource allocation estimate: {:.1} MiB", mib(totals.total)));
+                    ui.label(RichText::new("Internal application-side estimate of textures and known buffers for resident Engines; it is not a direct reading of physical VRAM. Driver padding, shared renderer resources and the viewport mesh are excluded.")
+                        .small().color(theme::TEXT_DIM));
+                    ui.label(RichText::new("Shared Fill image textures can appear in more than one per-Engine subtotal. The document-wide Undo readback cache is shown separately.")
+                        .small().color(theme::TEXT_DIM));
+                    egui::Grid::new("technical_gpu_memory_by_set").num_columns(3).striped(true).show(ui, |ui| {
+                        ui.label(RichText::new("Texture set").strong());
+                        ui.label(RichText::new("State").strong());
+                        ui.label(RichText::new("Estimate").strong());
+                        ui.end_row();
+                        for entry in &entries {
+                            ui.label(&entry.name);
+                            ui.label(if entry.parked { "PARKED" } else { "ACTIVE" });
+                            ui.label(format!("{:.1} MiB", mib(entry.bytes)));
+                            ui.end_row();
+                        }
+                    });
+                    ui.label(format!("Active Engine subtotal: {:.1} MiB", mib(totals.active)));
+                    ui.label(format!("Parked Engines subtotal: {:.1} MiB", mib(totals.parked)));
+                    ui.label(format!("Total of known resident Engines: {:.1} MiB", mib(totals.total)));
+                    ui.label(format!(
+                        "Document-shared Undo readback cache: {:.1} MiB",
+                        mib(self.engine.snapshot_buffer_pool_cached_bytes()),
+                    ));
+                    ui.label(RichText::new("Host-visible staging buffers; physical memory location depends on the graphics backend and driver.")
+                        .small().color(theme::TEXT_DIM));
                     ui.label(format!("Undo RAM: {:.1} MB / {:.1} MB", mb(self.undo.ram_bytes() as u64), mb(self.undo.max_ram_bytes as u64)));
                     ui.label(format!("Undo steps retained: {}", self.undo.undo.len()));
                     ui.label(format!("Active texture resolution: {}²", self.engine.res));
@@ -508,5 +591,41 @@ impl PainterApp {
             f6,
             self.diagnostic_mesh_report(),
         )
+    }
+}
+
+#[cfg(test)]
+mod memory_breakdown_tests {
+    use super::*;
+
+    fn entry(name: &str, parked: bool, bytes: u64) -> SetMemory {
+        SetMemory { name: name.into(), parked, bytes }
+    }
+
+    #[test]
+    fn totals_split_active_and_parked() {
+        let totals = MemoryTotals::of(&[
+            entry("Body", false, 100),
+            entry("Wheels", true, 30),
+            entry("Glass", true, 12),
+        ]);
+        assert_eq!(totals, MemoryTotals { active: 100, parked: 42, total: 142 });
+    }
+
+    #[test]
+    fn single_set_has_no_parked_bytes() {
+        let totals = MemoryTotals::of(&[entry("Body", false, 5)]);
+        assert_eq!(totals, MemoryTotals { active: 5, parked: 0, total: 5 });
+    }
+
+    #[test]
+    fn no_entries_gives_zero() {
+        assert_eq!(MemoryTotals::of(&[]), MemoryTotals::default());
+    }
+
+    #[test]
+    fn mib_uses_binary_units() {
+        assert_eq!(mib(1024 * 1024), 1.0);
+        assert_eq!(mib(3 * 512 * 1024), 1.5);
     }
 }
