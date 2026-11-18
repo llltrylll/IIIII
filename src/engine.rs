@@ -4102,7 +4102,7 @@ impl Engine {
         let Some((stamp, apply, layer, total, clear, body, pass_ms)) = profile_result else {
             // A failed readback ends the request too. Do not let a stale F5
             // marker turn a later brush-stroke profile into an F5 capture.
-            if !still_pending {
+            if !still_pending && self.active_gpu_profile.is_none() && !self.composite_profile_requested {
                 self.forced_composite_profile = false;
                 self.last_profiled_pass_labels.clear();
             }
