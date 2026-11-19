@@ -671,7 +671,14 @@ impl PainterApp {
             let engines = texture_sets::engines(&self.engine, &self.sets, self.mesh.sets.len());
             self.views.render_3d_with_object_visibility(&self.rs, size, &engines, &self.env, &self.gpu_mesh, self.mesh.as_ref(), &self.cam, &self.view, Some(&self.overlays), &self.hidden_objects);
         }
-        self.composite_parked_one(ctx);
+        // Parked Texture Sets can need a full-resolution composite after a
+        // switch or property edit. Do not let that background work compete
+        // with a live brush stroke, camera navigation, or an active pointer
+        // drag; the visible Engine is composited synchronously when selected.
+        let pointer_busy = ctx.input(|i| i.pointer.any_down());
+        if self.stroke.is_none() && !self.walk_navigation && !pointer_busy {
+            self.composite_parked_one(ctx);
+        }
         self.drew_3d = false;
     }
 
