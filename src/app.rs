@@ -4469,20 +4469,22 @@ impl PainterApp {
 
         ui.allocate_ui_with_layout(
             vec2(width, 24.0),
-            egui::Layout::left_to_right(egui::Align::Center),
+            egui::Layout::right_to_left(egui::Align::Center),
             |ui| {
-                ui.label(egui::RichText::new(&self.status).color(theme::TEXT_DIM));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if self.diagnostics.active {
-                        ui.label(egui::RichText::new("RAY CAPTURE ON  ·  Ctrl+F2 TO STOP").strong().color(theme::ACCENT));
-                    }
-                    if let Some(server) = &self.mcp
-                        && server.enabled.load(std::sync::atomic::Ordering::Relaxed)
-                    {
-                        ui.label(egui::RichText::new(format!("MCP :{}", server.port)).color(theme::ACCENT).small())
-                            .on_hover_text(format!("AI agents can connect at {}", server.url()));
-                    }
-                });
+                // Keep save/status text docked at the far right. Leave the left
+                // side free for the upcoming recent/favorite color strip.
+                let status = ui.label(egui::RichText::new(&self.status).color(theme::TEXT_DIM));
+                status.on_hover_text(&self.status);
+
+                if self.diagnostics.active {
+                    ui.label(egui::RichText::new("RAY CAPTURE ON  ·  Ctrl+F2 TO STOP").strong().color(theme::ACCENT));
+                }
+                if let Some(server) = &self.mcp
+                    && server.enabled.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    ui.label(egui::RichText::new(format!("MCP :{}", server.port)).color(theme::ACCENT).small())
+                        .on_hover_text(format!("AI agents can connect at {}", server.url()));
+                }
             },
         );
         if paint {
