@@ -4467,12 +4467,15 @@ impl PainterApp {
         let width = ui.available_width().max(1.0);
         ui.set_min_size(vec2(width, if paint { 56.0 } else { 22.0 }));
 
+        // Reserve the rightmost strip for recent/favorite color swatches.
+        // Status messages sit at the right edge of the remaining area, leaving
+        // both the old left-hand position and the marked color strip available.
+        let color_strip_width = if width >= 900.0 { 420.0 } else { width * 0.30 };
+        let status_row_width = (width - color_strip_width).max(1.0);
         ui.allocate_ui_with_layout(
-            vec2(width, 24.0),
+            vec2(status_row_width, 24.0),
             egui::Layout::right_to_left(egui::Align::Center),
             |ui| {
-                // Keep save/status text docked at the far right. Leave the left
-                // side free for the upcoming recent/favorite color strip.
                 let status = ui.label(egui::RichText::new(&self.status).color(theme::TEXT_DIM));
                 status.on_hover_text(&self.status);
 
