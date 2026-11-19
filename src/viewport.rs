@@ -831,6 +831,11 @@ pub struct ViewRenderer {
     /// Skip raster work when the complete set of visible inputs is unchanged.
     view3d_cache_key: Option<View3dCacheKey>,
     view2d_cache_key: Option<View2dCacheKey>,
+    /// Test-only counters prove the cache hits unchanged frames and misses changed ones.
+    #[cfg(test)]
+    pub(crate) view3d_cache_hits: u64,
+    #[cfg(test)]
+    pub(crate) view2d_cache_hits: u64,
     /// Reused visibility scratch storage; avoids a fresh Vec on every viewport frame.
     shown_sets: Vec<usize>,
     sampler: wgpu::Sampler,
@@ -1088,6 +1093,10 @@ impl ViewRenderer {
             view2d_bind_group: None,
             view3d_cache_key: None,
             view2d_cache_key: None,
+            #[cfg(test)]
+            view3d_cache_hits: 0,
+            #[cfg(test)]
+            view2d_cache_hits: 0,
             shown_sets: Vec::new(),
             sampler: gpu::linear_sampler(device, wgpu::AddressMode::ClampToEdge),
             view3d: ViewTarget::new(rs, true),
@@ -1406,6 +1415,8 @@ impl ViewRenderer {
                 overlay_generation, update_screen_paint_depth, source_mesh.is_some(),
             )
         }) {
+            #[cfg(test)]
+            { self.view3d_cache_hits = self.view3d_cache_hits.saturating_add(1); }
             return;
         }
         let vp = cam.view_proj(size[0] as f32 / size[1] as f32);
@@ -1711,6 +1722,8 @@ impl ViewRenderer {
             settings: *settings,
         };
         if self.view2d_cache_key == Some(cache_key) {
+            #[cfg(test)]
+            { self.view2d_cache_hits = self.view2d_cache_hits.saturating_add(1); }
             return;
         }
         let mut g = Self::base_globals(engine, settings, size, settings.uv_mode);
