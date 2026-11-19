@@ -1142,6 +1142,70 @@ fn ui_screenshots() {
     harness.render().expect("renders").save(dir.join("mask_custom.png")).unwrap();
 }
 
+/// Smart-mask generators are cached separately from material compositing.
+/// Repeated composites reuse the exact mask; editing the generator invalidates it.
+#[test]
+#[ignore]
+fn smart_mask_generator_cache_matches_uncached_result_and_invalidates_on_change() {
+    use crate::engine::{FillParams, GenKind, GEN_INPUT_COUNT, MatValues};
+    use crate::undo::UndoStack;
+
+    let mesh = crate::mesh::Primitive::RoundedCube.build();
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let res = 128;
+    let fill = FillParams {
+        mat: MatValues {
+            enabled: [true, false, false, false, false, false, false, false],
+            color: [0.9, 0.08, 0.04],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut generator = GenKind::EdgeWear.default_generator();
+    generator.weights = [0.0; GEN_INPUT_COUNT];
+    // Exercise the expensive projected-scratches procedural input.
+    generator.weights[18] = 1.0;
+    generator.noise = 0.0;
+    generator.level = 0.45;
+    generator.contrast = 0.3;
+
+    let mut cached = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+    let mut undo = UndoStack::default();
+    let layer = cached.add_fill_layer(0, None, "Scratches".into(), fill, &mut undo);
+    cached.add_mask(layer, true, Some(generator), &mut undo);
+
+    cached.composite();
+    assert_eq!(cached.last_mask_cache_misses, 1, "the first composite must render the generator mask");
+    assert_eq!(cached.last_mask_gpu_passes, 1, "a generator-only mask needs one source pass");
+    let first = read_texture(&rs.device, &rs.queue, cached.final_tex(0));
+
+    cached.mark_dirty();
+    cached.composite();
+    assert_eq!(cached.last_mask_cache_hits, 1, "an unchanged smart mask should be reused");
+    assert_eq!(cached.last_mask_cache_misses, 0);
+    assert_eq!(cached.last_mask_gpu_passes, 0, "a cache hit must not rerun the generator");
+    assert_eq!(first, read_texture(&rs.device, &rs.queue, cached.final_tex(0)));
+
+    let mut changed = generator;
+    changed.seed += 3.0;
+    cached.set_mask_source(layer, Some(changed), None, &mut undo);
+    cached.composite();
+    assert_eq!(cached.last_mask_cache_misses, 1, "editing a generator must invalidate its result");
+    assert_eq!(cached.last_mask_gpu_passes, 1, "the edited generator must be evaluated again");
+    let actual = read_texture(&rs.device, &rs.queue, cached.final_tex(0));
+
+    let mut reference = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+    let mut reference_undo = UndoStack::default();
+    let reference_layer = reference.add_fill_layer(0, None, "Scratches".into(), fill, &mut reference_undo);
+    reference.add_mask(reference_layer, true, Some(changed), &mut reference_undo);
+    reference.composite();
+    let expected = read_texture(&rs.device, &rs.queue, reference.final_tex(0));
+    assert_eq!(actual, expected, "cached generator output must match a fresh uncached evaluation");
+
+    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+}
+
 /// Mask filters change what a layer covers: a white mask shows the layer
 /// everywhere, Invert hides it, noise breakup eats into it, blur on a flat
 /// mask changes nothing.
