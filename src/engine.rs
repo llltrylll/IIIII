@@ -4501,10 +4501,62 @@ impl Engine {
         compact_scissors(&mut self.stroke_regions);
     }
 
-    /// The layer's mask has filters that are on.
+    /// The layer's mask has filters or extra mask layers that need a cached result.
     fn has_mask_filters(&self, li: usize) -> bool {
         let l = &self.layers[li];
         l.mask.as_ref().is_some_and(|m| m.filters.iter().any(|f| f.enabled) || m.layers.iter().any(|ml| ml.enabled))
+    }
+
+    /// A smart generator is expensive per texel and independent of the material
+    /// channels below it, so cache its full mask result between composites.
+    fn needs_mask_cache(&self, li: usize) -> bool {
+        self.has_mask_filters(li)
+            || self.layers[li].mask.as_ref().is_some_and(|mask| mask.generator.is_some())
+    }
+
+    /// Renders a cached mask source with no post-source filters.
+    fn encode_mask_source(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        layer_name: &str,
+        source_bg: &wgpu::BindGroup,
+        source_offset: u32,
+        result: &Tex,
+        scissors: Option<&[[u32; 4]]>,
+        profile_query: Option<&wgpu::QuerySet>,
+        profile_stage_count: &mut usize,
+        profile_labels: &mut Vec<String>,
+    ) -> &Tex {
+        let load = if scissors.is_some() {
+            wgpu::LoadOp::Load
+        } else {
+            wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+        };
+        let profile_slot = begin_composite_profile_stage(encoder, profile_query, profile_stage_count);
+        let mut pass = gpu::pass(
+            encoder,
+            "cached smart mask",
+            &[gpu::color_attachment(&result.view, load)],
+        );
+        pass.set_pipeline(&self.p.mask_source);
+        pass.set_bind_group(0, source_bg, &[source_offset]);
+        if let Some(rects) = scissors {
+            for &[x0, y0, x1, y1] in rects {
+                pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                pass.draw(0..3, 0..1);
+            }
+        } else {
+            pass.draw(0..3, 0..1);
+        }
+        drop(pass);
+        end_composite_profile_stage(
+            encoder,
+            profile_query,
+            profile_slot,
+            format!("Mask generator · {layer_name}"),
+            profile_labels,
+        );
+        result
     }
 
     /// Renders a layer's mask (painting times smart mask) and runs its
@@ -4896,13 +4948,13 @@ impl Engine {
             self.folder_below.push(set);
         }
 
-        // Layers with mask filters: their source pass reads the mask as usual
-        // (an extra uniform slot after the passes'), their layer pass reads
-        // the filtered texture instead (no smart mask on top).
+        // Cached mask sources get an extra uniform slot after the layer passes.
+        // Filtered masks run their filter stack after the source; generator-only
+        // masks go directly into the persistent result texture.
         let mut source_slot: HashMap<usize, usize> = HashMap::new();
         for pass in &passes {
             if let Pass::Layer(li) | Pass::End(li) = *pass
-                && self.has_mask_filters(li) {
+                && self.needs_mask_cache(li) {
                     source_slot.insert(li, passes.len() + source_slot.len());
                 }
         }
@@ -4961,25 +5013,27 @@ impl Engine {
             }
         }
         self.queue.write_buffer(&self.layer_ubuf, 0, &data);
-        // One persistent result per filtered mask; intermediate ping-pong
-        // textures are shared by this engine and reused sequentially in the encoder.
-        let filtered_ids: Vec<u64> = source_slot.keys().map(|&li| self.layers[li].id).collect();
+        // One persistent result per cached mask. Only masks with actual filter
+        // operations need the three full-resolution ping-pong scratch targets.
+        let cached_ids: Vec<u64> = source_slot.keys().map(|&li| self.layers[li].id).collect();
+        let filter_ids: Vec<u64> = source_slot.keys()
+            .filter(|&&li| self.has_mask_filters(li))
+            .map(|&li| self.layers[li].id)
+            .collect();
         let res = self.res;
         let mask_final = &mut self.mask_final;
         self.mask_out.retain(|id, t| {
-            let keep = filtered_ids.contains(id) && t.width == res;
+            let keep = cached_ids.contains(id) && t.width == res;
             if !keep { mask_final.remove(id); }
             keep
         });
-        for id in &filtered_ids {
+        for id in &cached_ids {
             if !self.mask_out.contains_key(id) {
-                let t = Tex::new(&self.device, "filtered mask result", res, res, MASK_FILTER_FORMAT, LAYER_USAGE);
+                let t = Tex::new(&self.device, "cached mask result", res, res, MASK_FILTER_FORMAT, LAYER_USAGE);
                 self.mask_out.insert(*id, t);
             }
         }
-        if filtered_ids.is_empty() {
-            // These full-resolution ping-pong targets are only useful while at
-            // least one enabled mask layer/filter needs the filter pipeline.
+        if filter_ids.is_empty() {
             self.mask_scratch = None;
         } else if self.mask_scratch.as_ref().is_none_or(|set| set[0].width != res) {
             let t = || Tex::new(&self.device, "filtered mask scratch", res, res, MASK_FILTER_FORMAT, LAYER_USAGE);
@@ -4990,6 +5044,9 @@ impl Engine {
         let mut layer_ops: HashMap<usize, Vec<MaskOp>> = HashMap::new();
         let mut layer_op_labels: HashMap<usize, Vec<String>> = HashMap::new();
         for &li in source_slot.keys() {
+            if !self.has_mask_filters(li) {
+                continue;
+            }
             let mut ops = Vec::new();
             let mut op_labels: Vec<String> = Vec::new();
             let scale = self.res as f32 / FILTER_REF_RES;
@@ -5270,24 +5327,40 @@ impl Engine {
                         Some(&self.mask_out[&layer.id])
                     } else {
                         mask_cache_misses += 1;
-                        let ops = layer_ops.get(&li).map_or(&[][..], |o| &o[..]);
-                        mask_gpu_passes += 1 + ops.iter().map(|op| match op {
-                            MaskOp::Layer { .. } => 2,
-                            MaskOp::Filter { .. } => 1,
-                        }).sum::<u32>();
-                        Some(self.encode_mask_filters(
-                            &mut encoder,
-                            layer.id,
-                            &layer.name,
-                            &make_bg(mask),
-                            (slot as u64 * UNIFORM_STRIDE) as u32,
-                            ops,
-                            layer_op_labels.get(&li).map_or(&[][..], |labels| labels.as_slice()),
-                            scissors.as_deref(),
-                            profile_query.as_deref(),
-                            &mut profile_stage_count,
-                            &mut profile_labels,
-                        ))
+                        let source_bg = make_bg(mask);
+                        if self.has_mask_filters(li) {
+                            let ops = layer_ops.get(&li).map_or(&[][..], |o| &o[..]);
+                            mask_gpu_passes += 1 + ops.iter().map(|op| match op {
+                                MaskOp::Layer { .. } => 2,
+                                MaskOp::Filter { .. } => 1,
+                            }).sum::<u32>();
+                            Some(self.encode_mask_filters(
+                                &mut encoder,
+                                layer.id,
+                                &layer.name,
+                                &source_bg,
+                                (slot as u64 * UNIFORM_STRIDE) as u32,
+                                ops,
+                                layer_op_labels.get(&li).map_or(&[][..], |labels| labels.as_slice()),
+                                scissors.as_deref(),
+                                profile_query.as_deref(),
+                                &mut profile_stage_count,
+                                &mut profile_labels,
+                            ))
+                        } else {
+                            mask_gpu_passes += 1;
+                            Some(self.encode_mask_source(
+                                &mut encoder,
+                                &layer.name,
+                                &source_bg,
+                                (slot as u64 * UNIFORM_STRIDE) as u32,
+                                &self.mask_out[&layer.id],
+                                scissors.as_deref(),
+                                profile_query.as_deref(),
+                                &mut profile_stage_count,
+                                &mut profile_labels,
+                            ))
+                        }
                     }
                 }
                 _ => None,
