@@ -1594,7 +1594,7 @@ mod walk_navigation_tests {
         cam.walk_look(Vec2::new(-48.0, 16.0), 0.0025);
         let eye_before = cam.eye();
         let forward_before = (cam.target - eye_before).normalize();
-        cam.finish_walk_navigation(None);
+        cam.finish_walk_navigation(None, 1.0);
         let eye_after = cam.eye();
         let forward_after = (cam.target - eye_after).normalize();
         assert!(eye_before.distance(eye_after) < 1e-5);
