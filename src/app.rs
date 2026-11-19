@@ -43,6 +43,10 @@ mod welcome;
 mod mcp_tools;
 pub(crate) mod prefs;
 mod project_io;
+/// The GPU shelf renderer stays compiled for its shared image-preparation
+/// helpers, but is intentionally not started; CPU previews are the live path.
+#[allow(dead_code)]
+mod shelf_previews;
 mod texture_sets;
 mod cage_paint;
 mod color_picker;

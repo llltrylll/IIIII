@@ -308,6 +308,9 @@ impl PainterApp {
     /// Exports synchronously (agents wait for the files).
     pub(super) fn export_now(&mut self, template: usize, settings: &export::Settings) -> Result<Vec<PathBuf>, String> {
         let selected_sets: HashSet<String> = self.mesh.sets.iter().map(|set| set.name.clone()).collect();
+        // The agent-facing export intentionally includes every set, so keep the
+        // previous all-parked composite behavior on this full-export path.
+        self.composite_parked();
         let mut files = Vec::new();
         for (snapshot, settings) in self.export_snapshots(settings, &selected_sets) {
             files.extend(export::export(&snapshot, &self.export.templates[template], &settings)?);
