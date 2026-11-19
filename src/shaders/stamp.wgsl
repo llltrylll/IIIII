@@ -161,19 +161,21 @@ fn project_uv(
         // for the face's subpixel depth slope.
         let surface_linear = lin_depth(ndc.z);
         var closest_depth_difference = 1e30;
+        var nearest_sample_depth = 1e30;
         let sample_count = textureNumSamples(depth_map);
         for (var sample = 0u; sample < sample_count; sample++) {
             let sample_depth = lin_depth(textureLoad(depth_map, sp, i32(sample)));
             closest_depth_difference = min(closest_depth_difference, abs(surface_linear - sample_depth));
+            nearest_sample_depth = min(nearest_sample_depth, sample_depth);
         }
         let slope_slack = subpixel_depth_slack(clip, ndc, world_dx, world_dy);
         let epsilon = max(max(0.0005, surface_linear * 0.0001), slope_slack);
-        // The target surface is visible if at least one MSAA sample in this
-        // pixel matches its depth. Other samples may legitimately belong to a
-        // thin foreground edge. Rejecting the whole pixel because one sample
-        // is closer creates holes in visible paint at subpixel overlaps.
-        // A fully occluded surface has no matching sample and is still rejected.
-        if (closest_depth_difference > epsilon) {
+        // At least one sample must belong to the target surface, but a nearer
+        // sample means a foreground occluder covers part of this screen pixel.
+        // Treat partially covered occluders conservatively: otherwise the
+        // matching background sample lets UV-rasterized painting leak through
+        // the thin edge. Far/clear samples do not count as occluders.
+        if (closest_depth_difference > epsilon || nearest_sample_depth < surface_linear - epsilon) {
             return vec3<f32>(0.0);
         }
     }
