@@ -1738,7 +1738,7 @@ impl ViewRenderer {
                 "2d view",
                 &[gpu::color_attachment(&self.view2d.color.view, wgpu::LoadOp::Clear(bg_color))],
             );
-            pass.set_bind_group(0, &bg, &[]);
+            pass.set_bind_group(0, bg, &[]);
             pass.set_pipeline(&self.quad);
             pass.draw(0..6, 0..1);
             pass.set_vertex_buffer(0, mesh.vertices.slice(..));
