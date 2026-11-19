@@ -5058,3 +5058,45 @@ fn multi_scissor_matches_full_composite() {
     assert!(most_rects >= 2, "no scenario exercised more than one scissor (max {most_rects})");
     assert!(failures.is_empty(), "incremental != full:\n{}", failures.join("\n"));
 }
+
+
+/// A click/missed stroke with no stamps must not generate an identical
+/// after-snapshot or an Undo entry.
+#[test]
+#[ignore]
+fn empty_stroke_does_not_create_undo_record() {
+    use crate::engine::{BrushPaint, Engine, MatValues, StampUniform};
+    use crate::mesh::set_tests::split_plane;
+    use crate::undo::{StrokeTarget, UndoStack};
+    use crate::viewport::{FAR, NEAR, ViewRenderer};
+    use glam::Mat4;
+
+    let mesh = Arc::new(split_plane());
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 128);
+    let mut undo = UndoStack::default();
+    engine.add_paint_layer(0, None, None, &mut undo);
+    assert!(engine.begin_stroke(0, StrokeTarget::Content, [true, false, false, false, false, false, false, false], false));
+
+    let views = ViewRenderer::new(&rs);
+    let su = StampUniform {
+        view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+        cam_pos: [0.0, 0.0, 0.0, 1.0],
+        view: [64.0, 64.0, 0.0, 0.0],
+        view2d: [0.0; 4],
+        brush: [8.0, 0.6, 1.0, 0.0],
+        clip: [NEAR, FAR, 0.0, 0.0],
+        proj: [0.0; 4],
+    };
+    let paint = BrushPaint {
+        mat: MatValues::default(),
+        mask_value: 1.0,
+        opacity: 1.0,
+        erase: false,
+        grain: [0.0; 4],
+    };
+    // An empty stamp list returns before encoding any paint pass.
+    engine.stroke_step(&[], su, views.view3d.depth_view(), &paint, None);
+    assert!(engine.end_stroke().is_none(), "empty strokes must not create Undo snapshots");
+}
