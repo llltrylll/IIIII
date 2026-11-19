@@ -162,6 +162,10 @@ impl PainterApp {
                                         }
                                     }
                                 }
+                                if !self.active_channels[ch] {
+                                    ui.colored_label(Color32::from_rgb(245, 180, 65), "! OFF")
+                                        .on_hover_text("Project output is disabled. This channel's image/data is still retained.");
+                                }
                                 // Any shelf texture can feed the channel.
                                 ui.menu_button("Texture ▾", |ui| {
                                     ui.label(egui::RichText::new(format!("Shelf texture as {}", label.to_lowercase())).small().color(theme::TEXT_DIM));

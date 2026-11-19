@@ -2,6 +2,17 @@
 use super::*;
 
 impl PainterApp {
+    fn finish_walk_navigation(&mut self) {
+        let eye = self.cam.eye();
+        let forward = (self.cam.target - eye).normalize_or_zero();
+        let focus = if forward.length_squared() > 0.5 {
+            self.bvh.raycast(eye, forward).map(|hit| hit.pos)
+        } else {
+            None
+        };
+        self.cam.finish_walk_navigation(focus);
+    }
+
     pub(super) fn view_input(&mut self, ui: &egui::Ui, kind: ViewKind, rect: Rect, resp: &egui::Response) {
         let (hover, pressed, down, mods, delta, scroll, x_down, z_down) = ui.input(|i| {
             (
@@ -40,7 +51,7 @@ impl PainterApp {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorVisible(false));
                 self.status = "First-person navigation: WASD move, mouse look, E/Q vertical, Shift faster, Esc exit.".into();
             } else {
-                self.cam.finish_walk_navigation();
+                self.finish_walk_navigation();
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorGrab(
                     egui::viewport::CursorGrab::None,
                 ));
@@ -76,7 +87,7 @@ impl PainterApp {
                 ));
             if exit {
                 self.walk_navigation = false;
-                self.cam.finish_walk_navigation();
+                self.finish_walk_navigation();
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorGrab(
                     egui::viewport::CursorGrab::None,
                 ));

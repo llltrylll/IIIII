@@ -22,6 +22,18 @@ pub(super) fn effective_channel_mask(
     std::array::from_fn(|ch| brush_enabled[ch] && active[ch])
 }
 
+/// Whether a layer still contains source data for a channel.
+fn layer_has_channel_data(layer: &Layer, ch: usize) -> bool {
+    if ch >= crate::engine::CHANNELS {
+        return false;
+    }
+    match &layer.content {
+        Content::Paint(channels) => channels[ch].is_some(),
+        Content::Fill(fill) => fill.mat.enabled[ch] || layer.images[ch].is_some(),
+        Content::Folder(_) => false,
+    }
+}
+
 /// Fixed-size mask of channels that contain data while disabled in Project.
 /// This is display-only and does not strip or alter imported material data.
 pub(super) fn disabled_map_flags(
@@ -32,11 +44,7 @@ pub(super) fn disabled_map_flags(
         if active[ch] {
             return false;
         }
-        match &layer.content {
-            Content::Paint(channels) => channels[ch].is_some(),
-            Content::Fill(fill) => fill.mat.enabled[ch] || layer.images[ch].is_some(),
-            Content::Folder(_) => false,
-        }
+        layer_has_channel_data(layer, ch)
     })
 }
 
@@ -200,44 +208,52 @@ impl PainterApp {
 
             section(ui, "Channels");
             ui.label(
-                egui::RichText::new("Inactive channels stay stored in their layers, but are excluded from the material output.")
+                egui::RichText::new("All channels remain listed. Amber ! means output is OFF while source data is still stored.")
                     .small()
                     .color(theme::TEXT_DIM),
             );
-            let mut disable_channel = None;
-            ui.menu_button(theme::with_icon(icons::PLUS, "Enable Channel"), |ui| {
-                let mut added = None;
-                for ch in CHANNEL_ORDER {
-                    if !self.active_channels[ch] && ui.button(CHANNEL_LABELS[ch]).clicked() {
-                        added = Some(ch);
-                        ui.close();
-                    }
-                }
-                if let Some(ch) = added {
-                    self.enable_project_channel(ch);
-                }
+
+            let engines = self.set_engines();
+            let stored_counts: [usize; crate::engine::CHANNELS] = std::array::from_fn(|ch| {
+                engines.iter()
+                    .map(|engine| engine.layers.iter().filter(|layer| layer_has_channel_data(layer, ch)).count())
+                    .sum()
             });
+            let mut disable_channel = None;
+            let mut enable_channel = None;
 
             let active_count = self.active_channels.iter().filter(|active| **active).count();
             if active_count == 0 {
-                ui.colored_label(Color32::from_rgb(240, 170, 80), "No channels are active. Add at least one before painting.");
+                ui.colored_label(Color32::from_rgb(240, 170, 80), "No channels are active. Enable at least one before painting.");
             }
             for ch in CHANNEL_ORDER {
-                if !self.active_channels[ch] {
-                    continue;
-                }
+                let active = self.active_channels[ch];
                 ui.horizontal(|ui| {
-                    ui.label(CHANNEL_LABELS[ch]);
+                    ui.label(egui::RichText::new(CHANNEL_LABELS[ch]).color(if active { theme::TEXT } else { theme::TEXT_DIM }));
+                    if !active {
+                        if stored_counts[ch] > 0 {
+                            ui.colored_label(
+                                Color32::from_rgb(245, 180, 65),
+                                format!("! {} layer(s) stored", stored_counts[ch]),
+                            ).on_hover_text("Excluded from output, but source maps/paint remain resident.");
+                        } else {
+                            ui.label(egui::RichText::new("OFF").small().color(theme::TEXT_DIM));
+                        }
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("×").on_hover_text(format!("Disable {} output but preserve its maps", CHANNEL_LABELS[ch])).clicked() {
-                            disable_channel = Some(ch);
+                        if active {
+                            if ui.small_button("×").on_hover_text(format!("Disable {} output; preserve its maps", CHANNEL_LABELS[ch])).clicked() {
+                                disable_channel = Some(ch);
+                            }
+                        } else if ui.small_button("+").on_hover_text(format!("Re-enable {} output", CHANNEL_LABELS[ch])).clicked() {
+                            enable_channel = Some(ch);
                         }
                     });
                 });
             }
             ui.add_space(3.0);
             ui.label(
-                egui::RichText::new("Disabling a channel only hides its output. Its maps and paint remain stored and are restored when it is enabled again.")
+                egui::RichText::new("OFF hides a channel from material output; it does not free that channel's GPU textures. Existing maps are retained for re-enabling.")
                     .small()
                     .color(theme::TEXT_DIM),
             );
@@ -318,6 +334,9 @@ impl PainterApp {
 
             if let Some(ch) = disable_channel {
                 self.pending_channel_disable = Some(ch);
+            }
+            if let Some(ch) = enable_channel {
+                self.enable_project_channel(ch);
             }
         });
 

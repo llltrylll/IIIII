@@ -61,7 +61,7 @@ impl TechnicalMetric {
 
     fn description(self) -> &'static str {
         match self {
-            Self::Fps => "Update rate measured from egui's frame interval.",
+            Self::Fps => "Estimated throughput from the larger of UI frame work time and egui's frame interval.",
             Self::FrameInterval => "Time between UI frames; useful for detecting stutter.",
             Self::CpuFrame => "Time spent in the application's UI frame, with recent peak.",
             Self::Bake => "Shows live bake progress, then the latest GPU and CPU preparation times.",
@@ -82,8 +82,9 @@ impl TechnicalMetric {
         let mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
         match self {
             Self::Fps => {
-                if app.frame_interval_ms > 0.01 {
-                    format!("{:.0} FPS", 1000.0 / app.frame_interval_ms)
+                let interval = app.frame_interval_ms.max(app.frame_ms);
+                if interval > 0.01 {
+                    format!("{:.0} FPS", 1000.0 / interval)
                 } else {
                     "FPS —".into()
                 }
@@ -178,9 +179,8 @@ impl Default for TechnicalUi {
     fn default() -> Self {
         Self {
             open: false,
-            // The compact bottom row starts with exactly the two items most
-            // useful during bake testing. Everything else is opt-in.
-            bottom: vec![TechnicalMetric::Fps, TechnicalMetric::Bake],
+            // Keep performance and bake indicators visible by default.
+            bottom: vec![TechnicalMetric::Fps, TechnicalMetric::CpuFrame, TechnicalMetric::Bake],
         }
     }
 }
@@ -205,7 +205,11 @@ impl TechnicalUi {
                 unique.push(metric);
             }
         }
-        self.bottom = unique;
+        self.bottom = if unique.is_empty() {
+            vec![TechnicalMetric::Fps, TechnicalMetric::CpuFrame, TechnicalMetric::Bake]
+        } else {
+            unique
+        };
         self
     }
 

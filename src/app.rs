@@ -1972,23 +1972,33 @@ fn swap_brushes(active: &mut Brush, other: &mut Brush) {
     active.angle_limit = left.angle_limit;
     active.stabilize = left.stabilize;
 }
-/// Channel toggles in Substance order: color, height, rough, metal, opacity.
+/// Channel toggles in Substance order. Project-disabled channels remain visible,
+/// marked amber, but are controlled from Project > Channels.
 fn channel_toggles_filtered(ui: &mut egui::Ui, enabled: &mut [bool; crate::engine::CHANNELS], active: &[bool; crate::engine::CHANNELS]) -> bool {
     let mut changed = false;
     ui.horizontal_wrapped(|ui| {
         use crate::engine::{NORMAL, SPECULAR};
+        let warning = Color32::from_rgb(245, 180, 65);
         for (c, name) in [(0, "color"), (3, "height"), (1, "rough"), (2, "metal"), (SPECULAR, "specular"), (NORMAL, "normal"), (4, "opacity"), (5, "emission")] {
-            if !active[c] { continue; }
             let on = enabled[c];
-            let text = egui::RichText::new(name).color(if on { Color32::WHITE } else { theme::TEXT_DIM });
-            let b = egui::Button::new(text).fill(if on { theme::ACCENT_DIM } else { theme::WIDGET }).min_size(vec2(56.0, 20.0));
-            let b = ui.add(b);
-            let b = match c {
-                NORMAL => b.on_hover_text("Normal detail from a normal-map image (fill layers). A brush paints it flat, smoothing the layer's normal detail away."),
-                SPECULAR => b.on_hover_text("How much non-metals reflect: 0.5 is the usual 4%"),
-                _ => b,
+            let project_on = active[c];
+            let label = if project_on { name.to_string() } else { format!("{name} !") };
+            let color = if !project_on { warning } else if on { Color32::WHITE } else { theme::TEXT_DIM };
+            let fill = if !project_on { theme::WIDGET } else if on { theme::ACCENT_DIM } else { theme::WIDGET };
+            let button = egui::Button::new(egui::RichText::new(label).color(color))
+                .fill(fill)
+                .min_size(vec2(56.0, 20.0));
+            let response = ui.add_enabled(project_on, button);
+            let response = if !project_on {
+                response.on_hover_text("Output disabled in Project. Re-enable it in Project > Channels; source data is preserved.")
+            } else {
+                match c {
+                    NORMAL => response.on_hover_text("Normal detail from a normal-map image (fill layers). A brush paints it flat, smoothing the layer's normal detail away."),
+                    SPECULAR => response.on_hover_text("How much non-metals reflect: 0.5 is the usual 4%"),
+                    _ => response,
+                }
             };
-            if b.clicked() {
+            if response.clicked() {
                 enabled[c] = !on;
                 changed = true;
             }
@@ -5799,27 +5809,26 @@ impl PainterApp {
     fn poll_cpu_shelf_previews(&mut self, ctx: &egui::Context) {
         let Some(rx) = self.cpu_preview_rx.as_ref() else { return };
         let mut finished = false;
-        loop {
-            match rx.try_recv() {
-                Ok(update) => {
-                    let handle = match update.target {
-                        CpuShelfPreviewTarget::Smart(i) => &mut self.shelf.smart[i],
-                        CpuShelfPreviewTarget::Material(i) => &mut self.shelf.materials[i],
-                        CpuShelfPreviewTarget::Generator(i) => &mut self.shelf.generators[i],
-                    };
-                    {
-                        let _s = crate::startup_trace::span("cpu preview: TextureHandle::set (UI thread)");
-                        handle.set(update.image, egui::TextureOptions::LINEAR);
-                    }
-                    crate::startup_trace::event("cpu preview applied");
-                    ctx.request_repaint();
+        // At most one image upload per UI frame; the old drain loop could follow
+        // a refilled channel and apply the entire preview backlog in one frame.
+        match rx.try_recv() {
+            Ok(update) => {
+                let handle = match update.target {
+                    CpuShelfPreviewTarget::Smart(i) => &mut self.shelf.smart[i],
+                    CpuShelfPreviewTarget::Material(i) => &mut self.shelf.materials[i],
+                    CpuShelfPreviewTarget::Generator(i) => &mut self.shelf.generators[i],
+                };
+                {
+                    let _s = crate::startup_trace::span("cpu preview: TextureHandle::set (UI thread)");
+                    handle.set(update.image, egui::TextureOptions::LINEAR);
                 }
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    crate::startup_trace::event("all cpu previews applied (worker finished)");
-                    finished = true;
-                    break;
-                }
+                crate::startup_trace::event("cpu preview applied");
+                ctx.request_repaint();
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                crate::startup_trace::event("all cpu previews applied (worker finished)");
+                finished = true;
             }
         }
         if finished {
