@@ -539,7 +539,11 @@ fn mesh_shade_inputs(in: MeshOut, front: bool) -> Shade {
     c.l = normalize(g.sun.xyz);
     c.light = g.sun_c.rgb * g.sun.w * g.sun_c.w;
     c.shadow = 1.0;
-    if (g.sun_c.w > 0.5) {
+    // The Normal view is unlit, and built-in PBR contributes no key light
+    // when its shading normal faces away. Skip the expensive shadow PCF in
+    // both cases; custom graph shaders still receive the full shadow input.
+    let custom_preview = g.bg2.w > 0.5;
+    if (g.sun_c.w > 0.5 && (custom_preview || (mode == 0 && dot(c.n, g.sun.xyz) > 0.0))) {
         c.shadow = key_shadow(in.wpos, c.gn);
     }
     c.uv = in.uv;
