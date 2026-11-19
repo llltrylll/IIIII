@@ -150,10 +150,33 @@ impl OrbitCam {
     }
 
     /// Rotate in first-person mode without moving the camera position.
+    /// Sensitivity follows the vertical FOV so screen-space look speed is
+    /// consistent as the camera lens changes. A per-frame angular cap rejects
+    /// large cursor-lock/warp deltas instead of snapping the view.
     pub fn walk_look(&mut self, delta: Vec2, sensitivity: f32) {
+        if !delta.is_finite() || !sensitivity.is_finite() {
+            return;
+        }
         let eye = self.eye();
-        self.yaw -= delta.x * sensitivity;
-        self.pitch = (self.pitch + delta.y * sensitivity).clamp(-1.55, 1.55);
+        let reference_fov = 38.0_f32.to_radians();
+        let fov = if self.fov_y.is_finite() {
+            self.fov_y.clamp(10.0_f32.to_radians(), 90.0_f32.to_radians())
+        } else {
+            reference_fov
+        };
+        let fov_scale = (fov * 0.5).tan() / (reference_fov * 0.5).tan();
+        const MAX_LOOK_STEP_RADIANS: f32 = 0.22;
+        let yaw_delta = (delta.x * sensitivity * fov_scale).clamp(
+            -MAX_LOOK_STEP_RADIANS,
+            MAX_LOOK_STEP_RADIANS,
+        );
+        let pitch_delta = (delta.y * sensitivity * fov_scale).clamp(
+            -MAX_LOOK_STEP_RADIANS,
+            MAX_LOOK_STEP_RADIANS,
+        );
+
+        self.yaw -= yaw_delta;
+        self.pitch = (self.pitch + pitch_delta).clamp(-1.55, 1.55);
         let (sy, cy) = self.yaw.sin_cos();
         let (sp, cp) = self.pitch.sin_cos();
         let forward = Vec3::new(-cp * sy, -sp, -cp * cy);
@@ -170,14 +193,16 @@ impl OrbitCam {
         let eye = self.eye();
         let offset = eye - focus;
         let distance = offset.length();
-        if !distance.is_finite() || distance < 1e-4 {
+        if !distance.is_finite() || !(0.05..=40.0).contains(&distance) {
             return;
         }
 
         let direction = offset / distance;
         self.yaw = direction.x.atan2(direction.z);
         self.pitch = direction.y.clamp(-1.0, 1.0).asin().clamp(-1.55, 1.55);
-        self.dist = distance.clamp(0.05, 40.0);
+        // Keep the exact eye-to-focus distance. Clamping here would teleport
+        // the camera whenever a picked focus lies outside the orbit range.
+        self.dist = distance;
         self.target = focus;
     }
 
@@ -1553,6 +1578,57 @@ mod walk_navigation_tests {
         assert!(eye_before.distance(eye_after) < 1e-5);
         assert!(forward_before.distance(forward_after) > 0.05);
         assert!((forward_after.length() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn walk_look_scales_with_fov_without_moving_the_eye() {
+        let mut narrow = OrbitCam::default();
+        let mut wide = OrbitCam { fov_y: 90.0_f32.to_radians(), ..OrbitCam::default() };
+        let narrow_eye = narrow.eye();
+        let wide_eye = wide.eye();
+
+        narrow.walk_look(Vec2::new(20.0, 10.0), 0.0025);
+        wide.walk_look(Vec2::new(20.0, 10.0), 0.0025);
+
+        assert!(narrow.eye().distance(narrow_eye) < 1e-5);
+        assert!(wide.eye().distance(wide_eye) < 1e-5);
+        assert!(wide.yaw.abs() > narrow.yaw.abs());
+    }
+
+    #[test]
+    fn walk_look_clamps_extreme_mouse_delta_without_teleporting() {
+        let mut cam = OrbitCam::default();
+        let eye_before = cam.eye();
+
+        cam.walk_look(Vec2::splat(1_000_000.0), 0.0025);
+
+        assert!(cam.eye().distance(eye_before) < 1e-5);
+        assert!((cam.target - eye_before).length() > 0.0);
+        assert!(cam.yaw.abs() < 1.0);
+    }
+
+    #[test]
+    fn walk_look_ignores_non_finite_mouse_delta() {
+        let mut cam = OrbitCam::default();
+        let eye_before = cam.eye();
+        let target_before = cam.target;
+
+        cam.walk_look(Vec2::new(f32::NAN, 0.0), 0.0025);
+
+        assert!(cam.eye().distance(eye_before) < 1e-5);
+        assert_eq!(cam.target, target_before);
+    }
+
+    #[test]
+    fn focus_on_rejects_far_focus_without_moving_camera() {
+        let mut cam = OrbitCam::default();
+        let eye_before = cam.eye();
+        let target_before = cam.target;
+
+        cam.focus_on(eye_before + Vec3::Z * 100.0);
+
+        assert!(cam.eye().distance(eye_before) < 1e-5);
+        assert_eq!(cam.target, target_before);
     }
 
     #[test]

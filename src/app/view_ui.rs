@@ -32,15 +32,20 @@ fn stroke_opacity_turn_segments(radius: f32) -> f32 {
 
 impl PainterApp {
     fn finish_walk_navigation(&mut self) {
+        // The first-person camera already maintains a virtual focus point on
+        // its look ray. Re-anchor to a real surface only when the hit is
+        // plausible; never fall back to the mesh bounds center/origin.
         let eye = self.cam.eye();
         let forward = (self.cam.target - eye).normalize_or_zero();
-        let focus = if forward.length_squared() > 0.5 {
-            self.bvh.raycast(eye, forward).map(|hit| hit.pos)
-        } else {
-            None
+        if forward.length_squared() < 0.5 {
+            return;
         }
-        .unwrap_or_else(|| (self.mesh.bounds_min + self.mesh.bounds_max) * 0.5);
-        self.cam.focus_on(focus);
+        if let Some(hit) = self.bvh.raycast(eye, forward) {
+            let distance = eye.distance(hit.pos);
+            if distance.is_finite() && (0.05..=40.0).contains(&distance) {
+                self.cam.focus_on(hit.pos);
+            }
+        }
     }
 
     pub(super) fn view_input(&mut self, ui: &egui::Ui, kind: ViewKind, rect: Rect, resp: &egui::Response) {
@@ -75,12 +80,14 @@ impl PainterApp {
         if toggle_walk {
             self.walk_navigation = !self.walk_navigation;
             if self.walk_navigation {
+                self.walk_skip_mouse_delta = true;
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorGrab(
                     egui::viewport::CursorGrab::Locked,
                 ));
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorVisible(false));
                 self.status = "First-person navigation: WASD move, mouse look, E/Q vertical, Shift faster, Esc exit.".into();
             } else {
+                self.walk_skip_mouse_delta = false;
                 self.finish_walk_navigation();
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorGrab(
                     egui::viewport::CursorGrab::None,
@@ -117,6 +124,7 @@ impl PainterApp {
                 ));
             if exit {
                 self.walk_navigation = false;
+                self.walk_skip_mouse_delta = false;
                 self.finish_walk_navigation();
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorGrab(
                     egui::viewport::CursorGrab::None,
@@ -124,7 +132,12 @@ impl PainterApp {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
                 self.status = "First-person navigation ended.".into();
             } else {
-                self.cam.walk_look(Vec2::new(look_delta.x, look_delta.y), 0.0025);
+                let look_delta = if std::mem::take(&mut self.walk_skip_mouse_delta) {
+                    Vec2::ZERO
+                } else {
+                    look_delta
+                };
+                self.cam.walk_look(look_delta, 0.0025);
                 if scroll != 0.0 {
                     self.walk_speed = (self.walk_speed * (scroll * 0.004).exp()).clamp(0.25, 24.0);
                     self.status = format!("First-person speed: {:.1}", self.walk_speed);

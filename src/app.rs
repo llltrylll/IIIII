@@ -913,6 +913,8 @@ pub struct PainterApp {
     cam: OrbitCam,
     /// Blender-style first-person navigation, active only over the 3D viewport.
     walk_navigation: bool,
+    /// Discard the stale/warp motion that can arrive immediately after cursor lock.
+    walk_skip_mouse_delta: bool,
     walk_speed: f32,
     cam2d: Cam2d,
     layout: Layout,
@@ -2486,6 +2488,7 @@ impl PainterApp {
             bake_id_only: false,
             cam: OrbitCam::default(),
             walk_navigation: false,
+            walk_skip_mouse_delta: false,
             walk_speed: 1.5,
             cam2d: Cam2d::default(),
             layout: Layout::Split,
