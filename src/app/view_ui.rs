@@ -40,6 +40,7 @@ impl PainterApp {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorVisible(false));
                 self.status = "First-person navigation: WASD move, mouse look, E/Q vertical, Shift faster, Esc exit.".into();
             } else {
+                self.cam.finish_walk_navigation();
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorGrab(
                     egui::viewport::CursorGrab::None,
                 ));
@@ -75,6 +76,7 @@ impl PainterApp {
                 ));
             if exit {
                 self.walk_navigation = false;
+                self.cam.finish_walk_navigation();
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorGrab(
                     egui::viewport::CursorGrab::None,
                 ));

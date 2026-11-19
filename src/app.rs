@@ -43,7 +43,6 @@ mod welcome;
 mod mcp_tools;
 pub(crate) mod prefs;
 mod project_io;
-mod shelf_previews;
 mod texture_sets;
 mod cage_paint;
 mod color_picker;
@@ -936,8 +935,6 @@ pub struct PainterApp {
     shelf: Shelf,
     /// CPU-only material and generator previews arrive from a worker.
     cpu_preview_rx: Option<mpsc::Receiver<CpuShelfPreview>>,
-    /// Renders the shelf thumbnails on a baked material ball; gone once done.
-    shelf_previews: Option<shelf_previews::ShelfPreviews>,
     export: ExportDialog,
     prefs: Preferences,
     /// The preferences in effect (and saved); `prefs` is what the UI edits.
@@ -2439,10 +2436,6 @@ impl PainterApp {
             .collect()
         };
 
-        let _s_sp = crate::startup_trace::span("new: ShelfPreviews::start");
-        let shelf_previews = shelf_previews::ShelfPreviews::start(ctx, mesh.clone());
-        drop(_s_sp);
-
         let mut app = PainterApp {
             rs,
             mesh,
@@ -2496,7 +2489,6 @@ impl PainterApp {
             show_bake: false,
             shelf: Shelf { cat: ShelfCat::SmartMaterials, search: String::new(), kind: None, icon_size: 72.0, smart, materials, generators, brushes, textures },
             cpu_preview_rx: Some(cpu_preview_rx),
-            shelf_previews: Some(shelf_previews),
             export: ExportDialog::new("MaterialBall".into()),
             prefs_applied: prefs.clone(),
             prefs,
@@ -5828,6 +5820,7 @@ impl PainterApp {
         }
         if finished {
             self.cpu_preview_rx = None;
+            crate::startup_trace::shelf_done();
         }
     }
 }
@@ -5877,15 +5870,6 @@ impl eframe::App for PainterApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.window_title = title;
         }
-        let pumped = self.shelf_previews.is_some();
-        let keep = {
-            let _s = crate::startup_trace::span("frame: shelf pump (UI thread)");
-            self.shelf_previews.as_mut().is_none_or(|p| p.pump(&self.rs, &ctx, &mut self.shelf, &self.env_baker, &self.gpu_mesh, &self.engine))
-        };
-        if pumped && !keep {
-            self.shelf_previews = None;
-            crate::startup_trace::shelf_done();
-        }
         {
             let _s = crate::startup_trace::span("frame: shortcuts/actions/MCP");
             self.path_keys(&ctx);
@@ -5905,7 +5889,7 @@ impl eframe::App for PainterApp {
                 .show(ui, |ui| self.context_toolbar(ui));
         }
         egui::Panel::bottom("status")
-            .exact_size(if paint { 52.0 } else { 24.0 })
+            .exact_size(if paint { 64.0 } else { 24.0 })
             .frame(theme::bar())
             .show(ui, |ui| self.status_bar(ui));
         if paint {

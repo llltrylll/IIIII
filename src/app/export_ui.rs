@@ -7,10 +7,19 @@ use super::{PainterApp, labeled, section};
 use crate::export::{self, Chan, Depth, Format, Layout, OutputMap, Padding, Source, Template};
 use crate::theme;
 use eframe::egui;
+use std::collections::HashSet;
 use egui::{Color32, vec2};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::mpsc;
+
+fn selected_template_maps(template: &Template, enabled: &[bool]) -> Template {
+    let mut selected = template.clone();
+    selected.maps = template.maps.iter().cloned().zip(enabled.iter().copied())
+        .filter_map(|(map, on)| on.then_some(map))
+        .collect();
+    selected
+}
 
 pub(super) struct ExportDialog {
     pub open: bool,
@@ -20,6 +29,10 @@ pub(super) struct ExportDialog {
     saved_custom: Vec<Template>,
     /// `$mesh` in file names.
     pub mesh_name: String,
+    selected_sets: HashSet<String>,
+    known_sets: Vec<String>,
+    selected_template: String,
+    selected_maps: Vec<bool>,
     job: Option<mpsc::Receiver<Result<Vec<PathBuf>, String>>>,
     pub result: Option<Result<String, String>>,
 }
@@ -39,7 +52,18 @@ impl ExportDialog {
         let custom = load_custom();
         let mut templates = export::builtin_templates();
         templates.extend(custom.iter().cloned());
-        ExportDialog { open: false, templates, saved_custom: custom, mesh_name, job: None, result: None }
+        ExportDialog {
+            open: false,
+            templates,
+            saved_custom: custom,
+            mesh_name,
+            selected_sets: HashSet::new(),
+            known_sets: Vec::new(),
+            selected_template: String::new(),
+            selected_maps: Vec::new(),
+            job: None,
+            result: None,
+        }
     }
 
     pub fn find(&self, name: &str) -> Option<usize> {
@@ -226,29 +250,46 @@ impl PainterApp {
         }
     }
 
-    /// Every texture set's maps, read back now (after compositing), with
-    /// the settings that name its files.
-    fn export_snapshots(&mut self, settings: &export::Settings) -> Vec<(export::Snapshot, export::Settings)> {
-        if self.engine.dirty {
-            self.engine.composite();
+    /// Read back only the selected Texture Sets, leaving unselected Engines untouched.
+    fn export_snapshots(
+        &mut self,
+        settings: &export::Settings,
+        selected_sets: &HashSet<String>,
+    ) -> Vec<(export::Snapshot, export::Settings)> {
+        let selected_indices: Vec<usize> = self.mesh.sets.iter().enumerate()
+            .filter_map(|(i, set)| selected_sets.contains(&set.name).then_some(i))
+            .collect();
+
+        for &index in &selected_indices {
+            if index == self.sets.active {
+                if self.engine.dirty {
+                    self.engine.composite();
+                }
+            } else if let Some(parked) = self.sets.parked.get_mut(index).and_then(Option::as_mut)
+                && parked.engine.dirty
+            {
+                parked.engine.composite();
+                parked.engine.release_inactive_working_set();
+            }
         }
-        self.composite_parked();
+
+        let mesh = self.mesh.clone();
         let engines = self.set_engines();
-        self.mesh
-            .sets
-            .iter()
-            .zip(engines)
-            .map(|(set, engine)| {
-                let snapshot = export::snapshot(engine, &self.rs.device, &self.rs.queue, self.mesh.clone());
-                (snapshot, export::Settings { set_name: set.name.replace(' ', ""), ..settings.clone() })
-            })
-            .collect()
+        selected_indices.into_iter().filter_map(|index| {
+            let set = mesh.sets.get(index)?;
+            let engine = engines.get(index)?;
+            let snapshot = export::snapshot(engine, &self.rs.device, &self.rs.queue, mesh.clone());
+            Some((snapshot, export::Settings {
+                set_name: set.name.replace(' ', ""),
+                ..settings.clone()
+            }))
+        }).collect()
     }
 
-    /// Reads the maps back now and writes the files on a worker thread.
-    fn start_export(&mut self, template: Template, ctx: &egui::Context) {
+    /// Read the chosen maps and write their files on a worker thread.
+    fn start_export(&mut self, template: Template, selected_sets: HashSet<String>, ctx: &egui::Context) {
         let settings = self.export_settings();
-        let jobs = self.export_snapshots(&settings);
+        let jobs = self.export_snapshots(&settings, &selected_sets);
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
@@ -266,8 +307,9 @@ impl PainterApp {
 
     /// Exports synchronously (agents wait for the files).
     pub(super) fn export_now(&mut self, template: usize, settings: &export::Settings) -> Result<Vec<PathBuf>, String> {
+        let selected_sets: HashSet<String> = self.mesh.sets.iter().map(|set| set.name.clone()).collect();
         let mut files = Vec::new();
-        for (snapshot, settings) in self.export_snapshots(settings) {
+        for (snapshot, settings) in self.export_snapshots(settings, &selected_sets) {
             files.extend(export::export(&snapshot, &self.export.templates[template], &settings)?);
         }
         Ok(files)
@@ -293,6 +335,26 @@ impl PainterApp {
         if !self.export.open {
             return;
         }
+
+        let current_sets: Vec<String> = self.mesh.sets.iter().map(|set| set.name.clone()).collect();
+        if self.export.known_sets != current_sets {
+            let known: HashSet<String> = self.export.known_sets.iter().cloned().collect();
+            for name in current_sets.iter().filter(|name| !known.contains(*name)) {
+                self.export.selected_sets.insert(name.clone());
+            }
+            self.export.selected_sets.retain(|name| current_sets.contains(name));
+            self.export.known_sets = current_sets.clone();
+        }
+        let template_index = self.export.find(&self.prefs.export_template).unwrap_or(0);
+        let template_name = self.export.templates[template_index].name.clone();
+        let map_count = self.export.templates[template_index].maps.len();
+        if self.export.selected_template != template_name {
+            self.export.selected_template = template_name;
+            self.export.selected_maps = vec![true; map_count];
+        } else {
+            self.export.selected_maps.resize(map_count, true);
+        }
+
         let mut open = true;
         egui::Window::new("Export Textures")
             .open(&mut open)
@@ -359,6 +421,34 @@ impl PainterApp {
                         labeled(ui, "$mesh", |ui| ui.add(egui::TextEdit::singleline(&mut self.export.mesh_name).desired_width(ui.available_width())));
                         format_controls(ui, &mut self.prefs);
                         ui.checkbox(&mut self.prefs.export_open_folder, "Open folder when done");
+
+                        section(ui, "Texture Sets");
+                        ui.horizontal(|ui| {
+                            if ui.small_button("All").clicked() {
+                                self.export.selected_sets = current_sets.iter().cloned().collect();
+                            }
+                            if ui.small_button("None").clicked() {
+                                self.export.selected_sets.clear();
+                            }
+                            if ui.small_button("Active only").clicked() {
+                                if let Some(name) = current_sets.get(self.sets.active) {
+                                    self.export.selected_sets = [name.clone()].into_iter().collect();
+                                }
+                            }
+                        });
+                        egui::ScrollArea::vertical().id_salt("export_texture_sets").max_height(112.0).show(ui, |ui| {
+                            for name in &current_sets {
+                                let mut enabled = self.export.selected_sets.contains(name);
+                                if ui.checkbox(&mut enabled, name).changed() {
+                                    if enabled {
+                                        self.export.selected_sets.insert(name.clone());
+                                    } else {
+                                        self.export.selected_sets.remove(name);
+                                    }
+                                }
+                            }
+                        });
+
                         let doc = self.engine.res;
                         let out = self.prefs.export_size.unwrap_or(doc);
                         if out > doc {
@@ -366,29 +456,46 @@ impl PainterApp {
                         }
 
                         section(ui, "Files");
-                        let settings = self.export_settings();
+                        let mut settings = self.export_settings();
+                        if let Some(name) = current_sets.iter().find(|name| self.export.selected_sets.contains(*name)) {
+                            settings.set_name = name.replace(' ', "");
+                        }
                         let t = self.export.templates[sel].clone();
+                        if self.export.selected_template != t.name {
+                            self.export.selected_template = t.name.clone();
+                            self.export.selected_maps = vec![true; t.maps.len()];
+                        } else {
+                            self.export.selected_maps.resize(t.maps.len(), true);
+                        }
                         egui::ScrollArea::vertical().id_salt("files").max_height(170.0).show(ui, |ui| {
-                            for m in &t.maps {
+                            for (i, m) in t.maps.iter().enumerate() {
                                 let depth = match settings.format.depths() {
                                     d if m.force_16 && d.contains(&Depth::U16) && settings.depth == Depth::U8 => "16-bit",
                                     _ => settings.depth.name(),
                                 };
-                                ui.add(egui::Label::new(egui::RichText::new(format!("{}  ·  {}  {depth}", settings.file_name(m), m.layout.name())).small()).wrap());
+                                let label = format!("{}  ·  {}  {depth}", settings.file_name(m), m.layout.name());
+                                if let Some(enabled) = self.export.selected_maps.get_mut(i) {
+                                    ui.checkbox(enabled, label);
+                                }
                             }
                         });
                         ui.add_space(8.0);
                         let busy = self.export.job.is_some();
-                        let can = !busy && !t.maps.is_empty();
+                        let any_set = current_sets.iter().any(|name| self.export.selected_sets.contains(name));
+                        let any_map = self.export.selected_maps.iter().any(|selected| *selected);
+                        let can = !busy && !t.maps.is_empty() && any_set && any_map;
                         ui.horizontal(|ui| {
                             let button = egui::Button::new(egui::RichText::new(theme::with_icon(crate::icons::EXPORT, "Export")).strong()).min_size(vec2(110.0, 28.0));
                             if ui.add_enabled(can, button).clicked() {
-                                let template = t.clone();
-                                self.start_export(template, ui.ctx());
+                                let template = selected_template_maps(&t, &self.export.selected_maps);
+                                let selected_sets = self.export.selected_sets.clone();
+                                self.start_export(template, selected_sets, ui.ctx());
                             }
                             if busy {
                                 ui.spinner();
                                 ui.label("Writing…");
+                            } else if !any_set || !any_map {
+                                ui.label(egui::RichText::new("Select at least one Texture Set and one output map.").small().color(theme::TEXT_DIM));
                             }
                         });
                         match &self.export.result {
@@ -430,8 +537,12 @@ impl PainterApp {
                             }
                             if let Some(i) = remove {
                                 t.maps.remove(i);
+                                if i < self.export.selected_maps.len() {
+                                    self.export.selected_maps.remove(i);
+                                }
                             }
                             if !builtin && ui.button(theme::with_icon(crate::icons::SPARKLE, "Add output map")).clicked() {
+                                self.export.selected_maps.push(true);
                                 t.maps.push(OutputMap {
                                     name: format!("$mesh_Map{}", t.maps.len() + 1),
                                     layout: Layout::Rgb,
@@ -447,5 +558,49 @@ impl PainterApp {
             && let Err(e) = self.export.save_custom_if_changed() {
                 self.status = format!("Couldn't save export templates: {e}");
             }
+    }
+}
+
+#[cfg(test)]
+mod export_selection_tests {
+    use super::*;
+    use crate::export::{Chan, Layout, OutputMap, Source};
+
+    fn output_map(name: &str) -> OutputMap {
+        OutputMap {
+            name: name.into(),
+            layout: Layout::Gray,
+            chans: [
+                Chan::of(Source::Roughness, 0),
+                Chan::of(Source::Zero, 0),
+                Chan::of(Source::Zero, 0),
+                Chan::of(Source::One, 0),
+            ],
+            force_16: false,
+        }
+    }
+
+    #[test]
+    fn selected_template_contains_only_checked_output_maps() {
+        let template = Template {
+            name: "Test".into(),
+            maps: vec![output_map("Color"), output_map("Roughness"), output_map("Normal")],
+            builtin: false,
+        };
+        let selected = selected_template_maps(&template, &[true, false, true]);
+        assert_eq!(
+            selected.maps.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            ["Color", "Normal"]
+        );
+    }
+
+    #[test]
+    fn no_selected_output_maps_produces_empty_template() {
+        let template = Template {
+            name: "Test".into(),
+            maps: vec![output_map("Color"), output_map("Roughness")],
+            builtin: false,
+        };
+        assert!(selected_template_maps(&template, &[false, false]).maps.is_empty());
     }
 }

@@ -160,6 +160,17 @@ impl OrbitCam {
         self.target = eye + forward * self.dist;
     }
 
+    /// On exit, keep camera position and direction but bring the orbit pivot close.
+    pub fn finish_walk_navigation(&mut self) {
+        let eye = self.eye();
+        let forward = (self.target - eye).normalize_or_zero();
+        if forward.length_squared() < 0.5 {
+            return;
+        }
+        self.dist = self.dist.clamp(0.25, 1.5);
+        self.target = eye + forward * self.dist;
+    }
+
     /// Move in first-person mode: WASD on the horizontal plane, E/Q vertically.
     pub fn walk_move(&mut self, forward: f32, right: f32, vertical: f32, dt: f32, speed: f32) {
         let look = (self.target - self.eye()).normalize_or_zero();
@@ -1532,6 +1543,22 @@ mod walk_navigation_tests {
         assert!(eye_before.distance(eye_after) < 1e-5);
         assert!(forward_before.distance(forward_after) > 0.05);
         assert!((forward_after.length() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn finishing_walk_keeps_eye_and_direction_but_closes_orbit_pivot() {
+        let mut cam = OrbitCam::default();
+        cam.walk_look(Vec2::new(135.0, -42.0), 0.0025);
+        cam.walk_move(1.0, 0.2, 0.0, 2.0, 2.0);
+        let eye_before = cam.eye();
+        let forward_before = (cam.target - eye_before).normalize();
+        cam.finish_walk_navigation();
+        let eye_after = cam.eye();
+        let forward_after = (cam.target - eye_after).normalize();
+        assert!(eye_before.distance(eye_after) < 1e-5);
+        assert!(forward_before.distance(forward_after) < 1e-5);
+        assert!(cam.dist <= 1.5);
+        assert!((eye_after.distance(cam.target) - cam.dist).abs() < 1e-5);
     }
 
     #[test]
