@@ -135,7 +135,7 @@ impl PainterApp {
                 let look_delta = if std::mem::take(&mut self.walk_skip_mouse_delta) {
                     Vec2::ZERO
                 } else {
-                    look_delta
+                    Vec2::new(look_delta.x, look_delta.y)
                 };
                 self.cam.walk_look(look_delta, 0.0025);
                 if scroll != 0.0 {
