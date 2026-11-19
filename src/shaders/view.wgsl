@@ -109,45 +109,105 @@ struct Surface {
 
 fn sample_surface(uv: vec2<f32>) -> Surface {
     var s: Surface;
-    let col = textureSampleLevel(t_color, samp, uv, 0.0);
-    s.albedo = col.rgb;
-    s.alpha = col.a;
-    s.emission = textureSampleLevel(t_emission, samp, uv, 0.0).rgb;
-    s.rough = textureSampleLevel(t_rough, samp, uv, 0.0).r;
-    s.metal = textureSampleLevel(t_metal, samp, uv, 0.0).r;
-    s.height = textureSampleLevel(t_height, samp, uv, 0.0).r;
-    s.spec = textureSampleLevel(t_spec, samp, uv, 0.0).r;
-    s.a = textureSampleLevel(map_a, samp, uv, 0.0);
-    s.b = textureSampleLevel(map_b, samp, uv, 0.0);
-    s.c = textureSampleLevel(map_c, samp, uv, 0.0);
-    s.d = textureSampleLevel(map_d, samp, uv, 0.0);
-    s.e = textureSampleLevel(map_e, samp, uv, 0.0);
-    let ci = max(i32(g.extra.z), 0);
-    s.f = vec4<f32>(textureSampleLevel(custom_maps, samp, uv, ci / 4, 0.0)[ci % 4]);
-    s.wnrm = textureSampleLevel(t_wnrm, samp, uv, 0.0).xyz * 2.0 - 1.0;
-    s.wpos = textureSampleLevel(t_wpos, samp, uv, 0.0).xyz;
-    let tx = g.params.z;
-    let hl = textureSampleLevel(t_height, samp, uv - vec2<f32>(tx, 0.0), 0.0).r;
-    let hr = textureSampleLevel(t_height, samp, uv + vec2<f32>(tx, 0.0), 0.0).r;
-    let hd = textureSampleLevel(t_height, samp, uv - vec2<f32>(0.0, tx), 0.0).r;
-    let hb = textureSampleLevel(t_height, samp, uv + vec2<f32>(0.0, tx), 0.0).r;
-    // Height slope per texel, scaled so the look is resolution-independent.
-    let k = g.params.y * g.params.w / 256.0;
-    let hu = (hr - hl) * 0.5 * k;
-    let ht = (hb - hd) * 0.5 * k;
-    var base = vec3<f32>(0.0, 0.0, 1.0);
-    if (g.extra.x > 0.5) {
-        let bx = s.d.x;
-        let by = s.d.y;
-        base = vec3<f32>(bx, by, sqrt(max(1.0 - bx * bx - by * by, 0.0)));
+    let mode = i32(g.params.x);
+    // The built-in material and custom graph need the full surface. Single-map
+    // display modes need only the channel they show; fetching every baked map,
+    // world map and material channel for every fragment was wasted bandwidth.
+    let custom_preview = g.bg2.w > 0.5;
+    let material = mode == 0 || custom_preview;
+    let normal_view = mode == 5;
+
+    s.albedo = vec3<f32>(0.0);
+    s.alpha = 1.0;
+    s.emission = vec3<f32>(0.0);
+    s.rough = 0.0;
+    s.metal = 0.0;
+    s.height = 0.0;
+    s.spec = 0.0;
+    s.ts = vec3<f32>(0.0, 0.0, 1.0);
+    s.a = vec4<f32>(0.0);
+    s.b = vec4<f32>(0.0);
+    s.c = vec4<f32>(0.0);
+    s.d = vec4<f32>(0.0);
+    s.e = vec4<f32>(0.0);
+    s.f = vec4<f32>(0.0);
+    s.wnrm = vec3<f32>(0.0, 0.0, 1.0);
+    s.wpos = vec3<f32>(0.0);
+
+    if (material || mode == 1 || mode == 23) {
+        let col = textureSampleLevel(t_color, samp, uv, 0.0);
+        s.albedo = col.rgb;
+        s.alpha = col.a;
     }
-    // Whiteout blends: the painted normal on the baked one, then height detail.
-    let pn = normalize(textureSampleLevel(t_normal, samp, uv, 0.0).xyz * 2.0 - 1.0);
-    base = normalize(vec3<f32>(base.xy + pn.xy, base.z * pn.z));
-    s.ts = normalize(vec3<f32>(base.xy + vec2<f32>(-hu, ht), base.z));
+    if (material || mode == 24) {
+        s.emission = textureSampleLevel(t_emission, samp, uv, 0.0).rgb;
+    }
+    if (material || mode == 2) {
+        s.rough = textureSampleLevel(t_rough, samp, uv, 0.0).r;
+    }
+    if (material || mode == 3) {
+        s.metal = textureSampleLevel(t_metal, samp, uv, 0.0).r;
+    }
+    if (material || mode == 4) {
+        s.height = textureSampleLevel(t_height, samp, uv, 0.0).r;
+    }
+    if (material || mode == 25) {
+        s.spec = textureSampleLevel(t_spec, samp, uv, 0.0).r;
+    }
+
+    let need_map_a = custom_preview || (material && g.size.z > 0.0)
+        || (mode >= 6 && mode <= 9) || mode == 21;
+    let need_map_b = custom_preview || (mode >= 10 && mode <= 13);
+    let need_map_c = custom_preview || mode == 14 || mode == 15;
+    let need_map_d = custom_preview || ((material || normal_view) && g.extra.x > 0.5)
+        || mode == 16 || mode == 17 || mode == 21;
+    let need_map_e = custom_preview || mode == 18;
+    if (need_map_a) { s.a = textureSampleLevel(map_a, samp, uv, 0.0); }
+    if (need_map_b) { s.b = textureSampleLevel(map_b, samp, uv, 0.0); }
+    if (need_map_c) { s.c = textureSampleLevel(map_c, samp, uv, 0.0); }
+    if (need_map_d) { s.d = textureSampleLevel(map_d, samp, uv, 0.0); }
+    if (need_map_e) { s.e = textureSampleLevel(map_e, samp, uv, 0.0); }
+
+    if (custom_preview || mode == 22) {
+        let ci = max(i32(g.extra.z), 0);
+        s.f = vec4<f32>(textureSampleLevel(custom_maps, samp, uv, ci / 4, 0.0)[ci % 4]);
+    }
+    if (custom_preview || mode == 19) {
+        s.wnrm = textureSampleLevel(t_wnrm, samp, uv, 0.0).xyz * 2.0 - 1.0;
+    }
+    if (custom_preview || mode == 20) {
+        s.wpos = textureSampleLevel(t_wpos, samp, uv, 0.0).xyz;
+    }
+
+    // Tangent-space normal reconstruction is needed only for Material and
+    // Normal views (or a custom shader). Raw map views bypass it entirely.
+    if (material || normal_view) {
+        var hu = 0.0;
+        var ht = 0.0;
+        if (g.params.y > 0.0) {
+            let tx = g.params.z;
+            let hl = textureSampleLevel(t_height, samp, uv - vec2<f32>(tx, 0.0), 0.0).r;
+            let hr = textureSampleLevel(t_height, samp, uv + vec2<f32>(tx, 0.0), 0.0).r;
+            let hd = textureSampleLevel(t_height, samp, uv - vec2<f32>(0.0, tx), 0.0).r;
+            let hb = textureSampleLevel(t_height, samp, uv + vec2<f32>(0.0, tx), 0.0).r;
+            // Height slope per texel, scaled so the look is resolution-independent.
+            let k = g.params.y * g.params.w / 256.0;
+            hu = (hr - hl) * 0.5 * k;
+            ht = (hb - hd) * 0.5 * k;
+        }
+        var base = vec3<f32>(0.0, 0.0, 1.0);
+        if (g.extra.x > 0.5) {
+            let bx = s.d.x;
+            let by = s.d.y;
+            base = vec3<f32>(bx, by, sqrt(max(1.0 - bx * bx - by * by, 0.0)));
+        }
+        // Whiteout blends: the painted normal on the baked one, then height detail.
+        let pn = normalize(textureSampleLevel(t_normal, samp, uv, 0.0).xyz * 2.0 - 1.0);
+        base = normalize(vec3<f32>(base.xy + pn.xy, base.z * pn.z));
+        s.ts = normalize(vec3<f32>(base.xy + vec2<f32>(-hu, ht), base.z));
+    }
     return s;
 }
-
 fn hue(h: f32) -> vec3<f32> {
     let k = vec3<f32>(1.0, 2.0 / 3.0, 1.0 / 3.0);
     let p = abs(fract(vec3<f32>(h) + k) * 6.0 - 3.0);
@@ -379,6 +439,21 @@ struct Shade {
 fn mesh_shade_inputs(in: MeshOut, front: bool) -> Shade {
     var c: Shade;
     c.s = sample_surface(in.uv);
+
+    // Raw channel/map views do not use lighting or a shading frame. Avoid
+    // derivative reconstruction and the 3x3 shadow PCF on these unlit modes.
+    let mode = i32(g.params.x);
+    if (mode != 0 && mode != 5 && g.bg2.w < 0.5) {
+        c.n = vec3<f32>(0.0, 0.0, 1.0);
+        c.gn = vec3<f32>(0.0, 0.0, 1.0);
+        c.v = vec3<f32>(0.0, 0.0, 1.0);
+        c.l = vec3<f32>(0.0, 1.0, 0.0);
+        c.light = vec3<f32>(0.0);
+        c.shadow = 1.0;
+        c.uv = in.uv;
+        c.wpos = in.wpos;
+        return c;
+    }
 
     // Face-forward the true geometric normal toward the camera. The raster
     // path previously called the interpolated shading normal "geometric",

@@ -1237,6 +1237,9 @@ impl ViewRenderer {
                 continue;
             }
             let mut g = Self::base_globals(engine, settings, size, settings.mode);
+            // The custom preview shader can consume every Surface input. The
+            // built-in material path uses only its PBR channels and selected maps.
+            g.bg2[3] = if self.custom_mesh.is_some() && settings.mode == ViewMode::Material { 1.0 } else { 0.0 };
             g.size[3] = self.set_looks.get(k).map_or(0.0, |l| l.highlight);
             g.view_proj = vp.to_cols_array_2d();
             g.inv_view_proj = vp.inverse().to_cols_array_2d();
