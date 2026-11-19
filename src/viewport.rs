@@ -1178,7 +1178,7 @@ impl ViewRenderer {
         settings: &ViewSettings,
         overlays: Option<&Overlays>,
     ) {
-        self.render_3d_internal(rs, size, engines, env, mesh, cam, settings, overlays, None, &[]);
+        self.render_3d_internal(rs, size, engines, env, mesh, cam, settings, overlays, None, &[], true);
     }
 
     /// Draws the mesh while excluding hidden imported objects from color, depth,
@@ -1197,7 +1197,30 @@ impl ViewRenderer {
         overlays: Option<&Overlays>,
         hidden_objects: &[bool],
     ) {
-        self.render_3d_internal(rs, size, engines, env, mesh, cam, settings, overlays, Some(source_mesh), hidden_objects);
+        self.render_3d_internal(rs, size, engines, env, mesh, cam, settings, overlays, Some(source_mesh), hidden_objects, true);
+    }
+
+    /// Same draw, with optional refresh of the auxiliary depth target sampled
+    /// by screen-projected brush strokes. Callers must refresh it before the
+    /// next screen-projected stroke after deferring an update.
+    pub fn render_3d_with_object_visibility_and_paint_depth(
+        &mut self,
+        rs: &egui_wgpu::RenderState,
+        size: [u32; 2],
+        engines: &[&Engine],
+        env: &Environment,
+        mesh: &GpuMesh,
+        source_mesh: &crate::mesh::Mesh,
+        cam: &OrbitCam,
+        settings: &ViewSettings,
+        overlays: Option<&Overlays>,
+        hidden_objects: &[bool],
+        update_screen_paint_depth: bool,
+    ) {
+        self.render_3d_internal(
+            rs, size, engines, env, mesh, cam, settings, overlays, Some(source_mesh),
+            hidden_objects, update_screen_paint_depth,
+        );
     }
 
     fn render_3d_internal(
@@ -1212,6 +1235,7 @@ impl ViewRenderer {
         overlays: Option<&Overlays>,
         source_mesh: Option<&crate::mesh::Mesh>,
         hidden_objects: &[bool],
+        update_screen_paint_depth: bool,
     ) {
         self.view3d.ensure_size(rs, size);
         self.ensure_object_draw_buffers(&rs.device, mesh, source_mesh, hidden_objects);
@@ -1264,47 +1288,55 @@ impl ViewRenderer {
         let t = &self.view3d;
         let mut encoder = rs.device.create_command_encoder(&Default::default());
 
-        // This buffer is separate from viewport depth: a surface whose imported
-        // normal points away from the camera must not block screen painting.
-        // Camera, mesh and visibility changes invalidate it; material edits do not.
-        Self::screen_paint_depth_key(vp, size, mesh, shown, &mut self.paint_depth_key_scratch);
-        self.paint_depth_key_scratch.extend([mesh.mesh_id as u32, (mesh.mesh_id >> 32) as u32]);
-        self.paint_depth_key_scratch.extend(hidden_objects.iter().map(|hidden| if *hidden { 1 } else { 0 }));
-        if self.paint_depth_key.as_ref() != Some(&self.paint_depth_key_scratch) {
-            self.paint_depth_key.get_or_insert_with(Vec::new).clone_from(&self.paint_depth_key_scratch);
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("screen paint depth"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: t.paint_depth_view(),
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.paint_depth);
-            pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-            if let Some(draw) = self.object_draw.as_ref() {
-                pass.set_index_buffer(draw.triangles.slice(..), wgpu::IndexFormat::Uint32);
-                for &k in shown {
-                    if let (Some(bg), Some(range)) = (self.view_bind_groups.get(k).and_then(Option::as_ref).map(|cached| &cached.bind_group), draw.triangle_ranges.get(k))
-                        && range.start < range.end {
-                        pass.set_bind_group(0, bg, &[]);
-                        pass.draw_indexed(range.clone(), 0, 0..1);
+        if update_screen_paint_depth {
+            // This buffer is separate from viewport depth: a surface whose imported
+            // normal points away from the camera must not block screen painting.
+            // Camera, mesh and visibility changes invalidate it; material edits do not.
+            Self::screen_paint_depth_key(vp, size, mesh, shown, &mut self.paint_depth_key_scratch);
+            self.paint_depth_key_scratch.extend([mesh.mesh_id as u32, (mesh.mesh_id >> 32) as u32]);
+            self.paint_depth_key_scratch.extend(hidden_objects.iter().map(|hidden| if *hidden { 1 } else { 0 }));
+            if self.paint_depth_key.as_ref() != Some(&self.paint_depth_key_scratch) {
+                self.paint_depth_key.get_or_insert_with(Vec::new).clone_from(&self.paint_depth_key_scratch);
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("screen paint depth"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: t.paint_depth_view(),
+                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&self.paint_depth);
+                pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                if let Some(draw) = self.object_draw.as_ref() {
+                    pass.set_index_buffer(draw.triangles.slice(..), wgpu::IndexFormat::Uint32);
+                    for &k in shown {
+                        if let (Some(bg), Some(range)) = (self.view_bind_groups.get(k).and_then(Option::as_ref).map(|cached| &cached.bind_group), draw.triangle_ranges.get(k))
+                            && range.start < range.end {
+                            pass.set_bind_group(0, bg, &[]);
+                            pass.draw_indexed(range.clone(), 0, 0..1);
+                        }
+                    }
+                } else {
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    for &k in shown {
+                        if let Some(bg) = self.view_bind_groups.get(k).and_then(Option::as_ref).map(|cached| &cached.bind_group) {
+                            pass.set_bind_group(0, bg, &[]);
+                            pass.draw_indexed(mesh.sets[k].index_range(), 0, 0..1);
+                        }
                     }
                 }
-            } else {
-                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                for &k in shown {
-                    if let Some(bg) = self.view_bind_groups.get(k).and_then(Option::as_ref).map(|cached| &cached.bind_group) {
-                        pass.set_bind_group(0, bg, &[]);
-                        pass.draw_indexed(mesh.sets[k].index_range(), 0, 0..1);
-                    }
-                }
+                drop(pass);
             }
-            drop(pass);
+    
+    
+        } else {
+            // Camera navigation cannot paint. Invalidate the key so the target
+            // is regenerated on the first interactive frame after navigation.
+            self.paint_depth_key = None;
         }
 
         if settings.key.on {

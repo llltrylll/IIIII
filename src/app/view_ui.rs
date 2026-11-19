@@ -445,7 +445,11 @@ impl PainterApp {
             ViewKind::V3d => {
                 self.views.set_looks = self.set_looks(ui.ctx());
                 let engines = texture_sets::engines(&self.engine, &self.sets, self.mesh.sets.len());
-                self.views.render_3d_with_object_visibility(&self.rs, size, &engines, &self.env, &self.gpu_mesh, self.mesh.as_ref(), &self.cam, &self.view, Some(&self.overlays), &self.hidden_objects);
+                self.views.render_3d_with_object_visibility_and_paint_depth(
+                    &self.rs, size, &engines, &self.env, &self.gpu_mesh, self.mesh.as_ref(),
+                    &self.cam, &self.view, Some(&self.overlays), &self.hidden_objects,
+                    !self.walk_navigation,
+                );
                 self.drew_3d = true;
                 // Path tracing replaces the 3D view while it's idle. Painting and
                 // the map display modes use the raster view, which reacts instantly.
@@ -669,7 +673,11 @@ impl PainterApp {
         if !self.drew_3d {
             let size = self.views.view3d.size;
             let engines = texture_sets::engines(&self.engine, &self.sets, self.mesh.sets.len());
-            self.views.render_3d_with_object_visibility(&self.rs, size, &engines, &self.env, &self.gpu_mesh, self.mesh.as_ref(), &self.cam, &self.view, Some(&self.overlays), &self.hidden_objects);
+            self.views.render_3d_with_object_visibility_and_paint_depth(
+                    &self.rs, size, &engines, &self.env, &self.gpu_mesh, self.mesh.as_ref(),
+                    &self.cam, &self.view, Some(&self.overlays), &self.hidden_objects,
+                    !self.walk_navigation,
+                );
         }
         // Parked Texture Sets can need a full-resolution composite after a
         // switch or property edit. Do not let that background work compete
