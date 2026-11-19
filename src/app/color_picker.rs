@@ -195,10 +195,25 @@ pub(crate) fn mix_strip(ui: &mut egui::Ui, a: Rgb, b: Rgb) -> Option<(Rgb, bool)
     swatch_strip(ui, &colors, 18.0)
 }
 
+/// Colors related to `base` by hue: two triadic, two analogous and the complement.
+pub(crate) fn harmony_colors(base: Rgb) -> [Rgb; HARMONY.len()] {
+    HARMONY.map(|degrees| rotate_hue(base, degrees))
+}
+
+/// Seven steps from dark to light with `base` in the middle: three shades
+/// (toward black) and three tints (toward white).
+pub(crate) fn shade_ramp(base: Rgb) -> [Rgb; 7] {
+    std::array::from_fn(|i| match i {
+        0..=2 => mix(base, [0.0; 3], (3 - i) as f32 * 0.25),
+        3 => base,
+        _ => mix(base, [1.0; 3], (i - 3) as f32 * 0.25),
+    })
+}
+
 /// Colors related to `base` by hue: analogous, triadic and the complement.
 pub(crate) fn harmony_row(ui: &mut egui::Ui, base: Rgb) -> Option<(Rgb, bool)> {
     caption(ui, "Harmony (analogous, triadic, complement)");
-    let colors = HARMONY.map(|degrees| rotate_hue(base, degrees));
+    let colors = harmony_colors(base);
     swatch_strip(ui, &colors, 18.0)
 }
 
@@ -370,5 +385,28 @@ mod tests {
         let out = std::env::var("PREVIEW_OUT").unwrap_or_else(|_| "target/color_picker_preview.png".into());
         img.save(&out).unwrap();
         println!("wrote {out}");
+    }
+
+    #[test]
+    fn shade_ramp_darkens_then_lightens_around_the_base() {
+        let base = [0.8, 0.4, 0.2];
+        let ramp = shade_ramp(base);
+        assert_eq!(ramp[3], base);
+        for i in 0..3 {
+            assert!(ramp[i].iter().sum::<f32>() < ramp[i + 1].iter().sum::<f32>(), "step {i}");
+        }
+        for i in 3..6 {
+            assert!(ramp[i].iter().sum::<f32>() < ramp[i + 1].iter().sum::<f32>(), "step {i}");
+        }
+        assert!(close(shade_ramp([0.0; 3])[0], [0.0; 3]) && close(shade_ramp([1.0; 3])[6], [1.0; 3]));
+    }
+
+    #[test]
+    fn harmony_colors_match_the_offsets() {
+        let base = [0.8, 0.3, 0.2];
+        let colors = harmony_colors(base);
+        assert_eq!(colors.len(), 5);
+        assert!(close(colors[4], rotate_hue(base, 180.0)));
+        assert!(close(colors[1], rotate_hue(base, -30.0)));
     }
 }

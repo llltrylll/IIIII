@@ -3828,21 +3828,6 @@ impl PainterApp {
             }
             ctx.request_repaint();
         }
-        // A opens the Color HUD on its picker. Same gate as G: not while a text
-        // field or slider has the keyboard (returned above) and never during
-        // first-person walking, where A is "move left".
-        if self.workspace == Workspace::Paint
-            && !self.walk_navigation
-            && matches!(self.tool, Tool::Paint | Tool::Picker)
-            && self.target == StrokeTarget::Content
-            && ctx.input_mut(|i| i.key_pressed(Key::A) && !i.modifiers.any())
-        {
-            if !self.color_hud_open {
-                self.color_hud_open = true;
-                self.color_sliders.opened = self.active_color();
-            }
-            ctx.request_repaint();
-        }
         // While walking, WASD/E/Q and other viewport keys belong exclusively
         // to camera navigation, not to global tools or layer shortcuts.
         if self.walk_navigation {
@@ -3878,7 +3863,8 @@ impl PainterApp {
             if i.key_pressed(Key::CloseBracket) {
                 self.brush.size = (self.brush.size * 1.15).min(800.0);
             }
-            if i.key_pressed(Key::I) {
+            // I or A: the Color Picker (eyedropper) tool.
+            if i.key_pressed(Key::I) || i.key_pressed(Key::A) {
                 self.set_tool(Tool::Picker);
             }
             if i.key_pressed(Key::Num3) || i.key_pressed(Key::P) {
@@ -4194,7 +4180,7 @@ impl PainterApp {
                 // Ray trace remains in View and on F10; this toolbar slot opens the Color HUD.
                 if matches!(self.tool, Tool::Paint | Tool::Picker) && self.target == StrokeTarget::Content {
                     let color_btn=ui.add(theme::selectable(self.color_hud_open,theme::with_icon(icons::DROP,"Color")))
-                        .on_hover_text("Open the color HUD (G, or A to open): picker, eyedropper, second color and HEX");
+                        .on_hover_text("Open the color HUD (G): picker, eyedropper, second color and HEX");
                     if color_btn.clicked() {
                         self.color_hud_open = !self.color_hud_open;
                         if self.color_hud_open {
@@ -4428,7 +4414,7 @@ impl PainterApp {
             (Tool::Eraser, icons::ERASER, "Eraser (2)"),
             (Tool::PolyFill, icons::POLYGON, "Polygon fill: triangles, quads, mesh parts or UV islands (3 / P)"),
             (Tool::Path, icons::PATH, "Path: place points, then paint along them; stitches, seams, panel lines (4 / L)"),
-            (Tool::Picker, icons::EYEDROPPER, "Pick material from the surface (I)"),
+            (Tool::Picker, icons::EYEDROPPER, "Pick material from the surface (I or A)"),
         ] {
             if theme::icon_button(ui, icon, self.tool == tool, 34.0).on_hover_text(tip).clicked() {
                 self.set_tool(tool);

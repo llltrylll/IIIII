@@ -493,9 +493,6 @@ impl PainterApp {
             if self.tool == Tool::PolyFill && !alt {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             } else if !alt {
-                // Snap the ring center to a pixel center so the 1 px outlines stay
-                // crisp instead of straddling two pixel rows.
-                let p = pos2(painter.round_to_pixel_center(p.x), painter.round_to_pixel_center(p.y));
                 let r = self.brush.size * 0.5;
                 painter.circle_stroke(p, r + 1.0, Stroke::new(1.0, Color32::from_black_alpha(140)));
                 painter.circle_stroke(p, r, Stroke::new(1.0, Color32::from_white_alpha(220)));

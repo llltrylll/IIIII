@@ -205,7 +205,7 @@ impl PainterApp {
             ui.spacing_mut().item_spacing.x=3.0;
             let mut active=self.active_color();
             if color_button(ui,&mut active,Some("Active layer / brush color")){self.set_active_color(active);}
-            if theme::icon_button(ui,icons::EYEDROPPER,false,20.0).on_hover_text("Pick material color from the mesh (I)").clicked(){self.set_tool(Tool::Picker);}
+            if theme::icon_button(ui,icons::EYEDROPPER,false,20.0).on_hover_text("Pick material color from the mesh (I or A)").clicked(){self.set_tool(Tool::Picker);}
             if swap_button(ui).on_hover_text("Swap the active color and the second color (S)").clicked(){self.swap_colors();}
             color_button(ui,&mut self.color2,Some("Second color"));
         });
@@ -217,7 +217,7 @@ impl PainterApp {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Color").strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
-                ui.label(egui::RichText::new("G closes · A opens").small().color(theme::TEXT_DIM));
+                ui.label(egui::RichText::new("G to close").small().color(theme::TEXT_DIM));
             });
         });
         ui.add_space(2.0);
@@ -283,57 +283,104 @@ impl PainterApp {
         let color=color.map(|v|v as f32/255.0);
         if as_second{self.color2=color;}else{self.set_active_color(color);}
     }
-    /// Recent and favorite colors in one row for the status bar, using the
-    /// whole row: recents as round swatches (newest first, with the limit
-    /// control), then the 8 favorite slots as rounded squares. On narrow
-    /// windows the captions go away before the swatches shrink.
+    /// The color row of the status bar, using the whole row. From the left:
+    /// color picker tool and swap, the two current colors with the active HEX
+    /// (click copies it), recent colors (round, newest first, with the limit),
+    /// the 8 favorite slots (rounded squares), then shades and harmonies of
+    /// the active color. Sections that do not fit are left out, last first.
     pub(super) fn color_history_bar(&mut self,ui:&mut egui::Ui){
-        let current=rgb8(self.active_color());
+        let active=self.active_color();
+        let current=rgb8(active);
         let shift=ui.input(|i|i.modifiers.shift);
-        let room=ui.available_width();
-        let (captions,size)=if room>=640.0{(true,18.0)}else if room>=470.0{(false,18.0)}else{(false,13.0)};
+        let size=18.0;
         let (mut pick,mut pick_recent,mut store,mut remove)=(None,None,None,None);
         ui.spacing_mut().item_spacing.x=4.0;
-        if captions{strip_caption(ui,"Recent");}
-        for color in self.prefs.color_history.clone() {
-            let response=hud_swatch(ui,color,color==current,true,size)
-                .on_hover_text(format!("Recent color #{:02x}{:02x}{:02x}\nClick: brush color\nShift+click: second color",color[0],color[1],color[2]));
-            if response.clicked(){pick_recent=Some(color);}
+
+        // Tool, swap, current colors and HEX.
+        if theme::icon_button(ui,icons::EYEDROPPER,self.tool==Tool::Picker,20.0).on_hover_text("Color picker tool (I or A): click the surface to pick its material").clicked(){
+            self.set_tool(Tool::Picker);
         }
-        if self.prefs.color_history.is_empty()&&captions{
-            ui.label(egui::RichText::new("none yet").small().color(theme::TEXT_DIM));
-        }
-        let mut limit=self.prefs.color_history_limit;
-        if ui.add(egui::DragValue::new(&mut limit).range(prefs::COLOR_HISTORY_MIN..=prefs::COLOR_HISTORY_MAX).prefix("max "))
-            .on_hover_text("How many recent colors to keep (5 to 10)").changed() {
-            self.prefs.color_history_limit=limit;
-            self.prefs.color_history.truncate(limit);
+        if swap_button(ui).on_hover_text("Swap the active color and the second color (S)").clicked(){self.swap_colors();}
+        hud_swatch(ui,current,false,false,size).on_hover_text("Active color");
+        if hud_swatch(ui,rgb8(self.color2),false,false,size).on_hover_text("Second color\nClick: swap with the active color").clicked(){self.swap_colors();}
+        let hex=color_picker::hex_string(active);
+        if ui.add(egui::Label::new(egui::RichText::new(&hex).monospace().small().color(theme::TEXT)).sense(egui::Sense::click()))
+            .on_hover_text("Active color HEX\nClick: copy").clicked() {
+            ui.ctx().copy_text(hex.clone());
+            self.status=format!("Copied {hex}");
         }
         ui.separator();
-        if captions{strip_caption(ui,"Favorites");}
-        for slot in 0..prefs::FAVORITE_SLOTS {
-            match self.prefs.favorite_colors[slot] {
-                Some(color)=>{
-                    let response=hud_swatch(ui,color,color==current,false,size)
-                        .on_hover_text(format!("Favorite #{:02x}{:02x}{:02x}\nClick: brush color\nShift+click: second color\nRight-click: replace or remove",color[0],color[1],color[2]));
-                    if response.clicked(){pick=Some(color);}
-                    response.context_menu(|ui|{
-                        if ui.button("Replace with brush color").clicked(){store=Some(slot);ui.close();}
-                        if ui.button("Remove").clicked(){remove=Some(slot);ui.close();}
-                    });
-                }
-                None=>{
-                    let response=empty_favorite_slot(ui,size).on_hover_text("Empty favorite slot\nClick: save the brush color here");
-                    if response.clicked(){store=Some(slot);}
+
+        // Recent colors.
+        if ui.available_width()>=300.0 {
+            strip_caption(ui,"Recent");
+            for color in self.prefs.color_history.clone() {
+                let response=hud_swatch(ui,color,color==current,true,size)
+                    .on_hover_text(format!("Recent color #{:02x}{:02x}{:02x}\nClick: brush color\nShift+click: second color",color[0],color[1],color[2]));
+                if response.clicked(){pick_recent=Some(color);}
+            }
+            if self.prefs.color_history.is_empty(){
+                ui.label(egui::RichText::new("none yet").small().color(theme::TEXT_DIM));
+            }
+            let mut limit=self.prefs.color_history_limit;
+            if ui.add(egui::DragValue::new(&mut limit).range(prefs::COLOR_HISTORY_MIN..=prefs::COLOR_HISTORY_MAX).prefix("max "))
+                .on_hover_text("How many recent colors to keep (5 to 10)").changed() {
+                self.prefs.color_history_limit=limit;
+                self.prefs.color_history.truncate(limit);
+            }
+            ui.separator();
+        }
+
+        // Favorites.
+        if ui.available_width()>=260.0 {
+            strip_caption(ui,"Favorites");
+            for slot in 0..prefs::FAVORITE_SLOTS {
+                match self.prefs.favorite_colors[slot] {
+                    Some(color)=>{
+                        let response=hud_swatch(ui,color,color==current,false,size)
+                            .on_hover_text(format!("Favorite #{:02x}{:02x}{:02x}\nClick: brush color\nShift+click: second color\nRight-click: replace or remove",color[0],color[1],color[2]));
+                        if response.clicked(){pick=Some(color);}
+                        response.context_menu(|ui|{
+                            if ui.button("Replace with brush color").clicked(){store=Some(slot);ui.close();}
+                            if ui.button("Remove").clicked(){remove=Some(slot);ui.close();}
+                        });
+                    }
+                    None=>{
+                        let response=empty_favorite_slot(ui,size).on_hover_text("Empty favorite slot\nClick: save the brush color here");
+                        if response.clicked(){store=Some(slot);}
+                    }
                 }
             }
         }
+
+        // Shades and harmonies of the active color.
+        let mut derived=None;
+        if ui.available_width()>=230.0 {
+            ui.separator();
+            strip_caption(ui,"Shades");
+            for (index,color) in color_picker::shade_ramp(active).into_iter().enumerate() {
+                let color=rgb8(color);
+                let hint=if index==3{"Active color".to_string()}else{format!("{} #{:02x}{:02x}{:02x}\nClick: brush color\nShift+click: second color",if index<3{"Shade"}else{"Tint"},color[0],color[1],color[2])};
+                if hud_swatch(ui,color,index==3,false,size).on_hover_text(hint).clicked()&&index!=3{derived=Some(color);}
+            }
+        }
+        if ui.available_width()>=200.0 {
+            ui.separator();
+            strip_caption(ui,"Harmony");
+            for color in color_picker::harmony_colors(active) {
+                let color=rgb8(color);
+                if hud_swatch(ui,color,false,true,size)
+                    .on_hover_text(format!("Harmony #{:02x}{:02x}{:02x}\nAnalogous, triadic and complement of the active color\nClick: brush color\nShift+click: second color",color[0],color[1],color[2]))
+                    .clicked(){derived=Some(color);}
+            }
+        }
+
         if let Some(color)=pick_recent{
             self.apply_strip_color(color,shift);
             // Picking from the recent strip must not reshuffle it under the cursor.
             self.recent_color_pending=None;
         }
-        if let Some(color)=pick{self.apply_strip_color(color,shift);}
+        if let Some(color)=pick.or(derived){self.apply_strip_color(color,shift);}
         if let Some(slot)=store{self.prefs.favorite_colors[slot]=Some(current);}
         if let Some(slot)=remove{self.prefs.favorite_colors[slot]=None;}
     }
