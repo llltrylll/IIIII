@@ -38,6 +38,64 @@ fn map_mode(name: &str) -> ViewMode {
 
 #[test]
 #[ignore]
+fn viewport_cache_reuses_unchanged_images_and_invalidates_changes() {
+    use crate::mesh::Primitive;
+    use crate::viewport::Cam2d;
+    use glam::Vec2;
+
+    let mesh = Primitive::RoundedCube.build();
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 64);
+    engine.composite();
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+    let mut views = ViewRenderer::new(&rs);
+    let size = [320, 240];
+    let settings = ViewSettings::default();
+    let cam_a = OrbitCam::default();
+
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam_a, &settings, None);
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam_a, &settings, None);
+    assert_eq!(views.view3d_cache_hits, 1, "unchanged 3D view should reuse its raster image");
+
+    let cam_b = OrbitCam { yaw: cam_a.yaw + 0.2, ..cam_a };
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam_b, &settings, None);
+    assert_eq!(views.view3d_cache_hits, 1, "camera movement must invalidate the 3D cache");
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam_b, &settings, None);
+    assert_eq!(views.view3d_cache_hits, 2, "the new camera should then become cacheable");
+
+    let mut undo = crate::undo::UndoStack::default();
+    engine.add_paint_layer(0, None, None, &mut undo);
+    engine.composite();
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam_b, &settings, None);
+    assert_eq!(views.view3d_cache_hits, 2, "a material composite must invalidate the 3D cache");
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam_b, &settings, None);
+    assert_eq!(views.view3d_cache_hits, 3, "the updated material should become cacheable");
+
+    let uv_a = Cam2d { zoom: 120.0, pan: Vec2::ZERO };
+    views.render_2d(&rs, size, &engine, &env, &gpu_mesh, 0, &uv_a, &settings);
+    views.render_2d(&rs, size, &engine, &env, &gpu_mesh, 0, &uv_a, &settings);
+    assert_eq!(views.view2d_cache_hits, 1, "unchanged UV view should reuse its raster image");
+
+    let uv_b = Cam2d { zoom: 150.0, ..uv_a };
+    views.render_2d(&rs, size, &engine, &env, &gpu_mesh, 0, &uv_b, &settings);
+    assert_eq!(views.view2d_cache_hits, 1, "UV camera movement must invalidate the 2D cache");
+    views.render_2d(&rs, size, &engine, &env, &gpu_mesh, 0, &uv_b, &settings);
+    assert_eq!(views.view2d_cache_hits, 2, "the new UV camera should then become cacheable");
+
+    engine.add_paint_layer(0, None, None, &mut undo);
+    engine.composite();
+    views.render_2d(&rs, size, &engine, &env, &gpu_mesh, 0, &uv_b, &settings);
+    assert_eq!(views.view2d_cache_hits, 2, "a material composite must invalidate the UV cache");
+    views.render_2d(&rs, size, &engine, &env, &gpu_mesh, 0, &uv_b, &settings);
+    assert_eq!(views.view2d_cache_hits, 3, "the updated UV material should become cacheable");
+
+    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+}
+
+#[test]
+#[ignore]
 fn preview_mesh() {
     let mesh = match std::env::var("MP_PREVIEW_MESH").as_deref() {
         Ok("ball") => crate::mesh::Primitive::MaterialBall.build(),
@@ -2948,12 +3006,12 @@ fn screen_projection_rejects_close_occluded_uv_surface() {
     assert_eq!(hidden_chart, 0, "the nearby hidden chart must remain untouched, got {hidden_chart}");
 }
 
-/// A sub-pixel foreground bar must still occlude the back surface.
-/// This catches choosing any matching MSAA sample: a pixel partially covered
-/// by the bar may also contain samples from the background plane.
+/// A sub-pixel foreground bar must occlude the hidden fraction without
+/// erasing the background's still-visible MSAA samples. Partially covered
+/// background texels receive proportionally reduced paint.
 #[test]
 #[ignore]
-fn screen_projection_rejects_back_surface_behind_thin_occluder() {
+fn screen_projection_weights_partial_msaa_occlusion() {
     use crate::app::{BrushProjection, resolve_stamps, screen_stroke_plan};
     use crate::engine::{BrushPaint, Content, Engine, MatValues, StampUniform};
     use crate::mesh::{Mesh, Vertex};
@@ -3071,25 +3129,27 @@ fn screen_projection_rejects_back_surface_behind_thin_occluder() {
     let Content::Paint(channels) = &engine.layers[0].content else { panic!("expected paint layer") };
     let color = channels[0].as_ref().expect("base color channel was allocated");
     let rgba = read_texture(&rs.device, &rs.queue, color);
-    let painted = |x: usize, y: usize| {
-        let i = (y * res as usize + x) * 4;
-        rgba[i + 3] > 0
-    };
+    let alpha_at = |x: usize, y: usize| rgba[(y * res as usize + x) * 4 + 3];
     let back_chart_count = rgba.chunks_exact(4).enumerate()
         .filter(|(index, pixel)| *index % (res as usize) < (res as usize / 2) && pixel[3] > 0)
         .count();
     let bar_chart_count = rgba.chunks_exact(4).enumerate()
         .filter(|(index, pixel)| *index % (res as usize) >= (res as usize / 2) && pixel[3] > 0)
         .count();
-    let hidden_column = (0..res as usize).filter(|&y| (96..=160).contains(&y))
-        .filter(|&y| painted(70, y))
-        .count();
+    let partial_column: Vec<u8> = (96..=160).map(|y| alpha_at(70, y)).filter(|&alpha| alpha > 0 && alpha < 255).collect();
+    let back_edge_alpha = alpha_at(70, 128);
+    let bar_alpha = alpha_at(185, 128);
 
-    println!("  thin occluder: back chart {back_chart_count}, bar chart {bar_chart_count}, painted texels under bar {hidden_column}");
+    println!(
+        "  thin occluder: back chart {back_chart_count}, bar chart {bar_chart_count}, partial back-edge texels {}, sample alpha back/bar {back_edge_alpha}/{bar_alpha}",
+        partial_column.len()
+    );
     assert!(back_chart_count > 500, "the visible back plane must still paint around the bar");
     assert!(bar_chart_count > 10, "the thin visible bar should paint its own UV chart");
-    assert_eq!(hidden_column, 0,
-        "the back UV chart must not paint through the partially covered screen pixels");
+    assert!(!partial_column.is_empty(),
+        "partially visible back-face texels should keep a reduced MSAA coverage instead of becoming holes");
+    assert!(back_edge_alpha < bar_alpha,
+        "the partly occluded back surface must receive less paint than the fully visible foreground bar");
 }
 
 /// A visible sloped face must remain paintable when MSAA samples do not
