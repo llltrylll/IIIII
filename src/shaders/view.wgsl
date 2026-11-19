@@ -148,7 +148,8 @@ fn sample_surface(uv: vec2<f32>) -> Surface {
     if (material || mode == 3) {
         s.metal = textureSampleLevel(t_metal, samp, uv, 0.0).r;
     }
-    if (material || mode == 4) {
+    // Built-in PBR uses the height gradient below, not the center height value.
+    if (custom_preview || mode == 4) {
         s.height = textureSampleLevel(t_height, samp, uv, 0.0).r;
     }
     if (material || mode == 25) {
