@@ -683,7 +683,10 @@ impl PainterApp {
 
 #[cfg(test)]
 mod cursor_opacity_tests {
-    use super::{stroke_opacity_arc_points, stroke_opacity_arc_points_dense, stroke_opacity_turn_segments};
+    use super::{
+        stroke_opacity_arc_points, stroke_opacity_arc_points_dense, stroke_opacity_label,
+        stroke_opacity_marker_position, stroke_opacity_turn_segments,
+    };
     use eframe::egui::pos2;
 
     #[test]
