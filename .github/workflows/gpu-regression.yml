@@ -6,6 +6,7 @@ on:
     branches:
       - gpt/stacked-uv-visible-pass
       - gpt/integrated-three-fronts
+      - feat/composite-uv-diagnostics-20261118
   workflow_dispatch:
 
 permissions:
@@ -78,6 +79,12 @@ jobs:
 
       - name: GPU parity - raster face-forward shading normals
         run: "cargo test --locked --bin material_painter preview_test::raster_view_is_stable_with_inverted_shading_normals -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU viewport - built-in material and map views
+        run: "cargo test --locked --bin material_painter preview_test::preview_mesh -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU viewport - custom shading graph previews
+        run: "cargo test --locked --bin material_painter preview_test::preview_shaders_compile_and_render -- --ignored --exact --nocapture --test-threads 1"
 
       - name: GPU parity - inverted normals with tangent-space detail
         run: "cargo test --locked --bin material_painter preview_test::raster_normal_map_is_stable_with_inverted_imported_normals -- --ignored --exact --nocapture --test-threads 1"
