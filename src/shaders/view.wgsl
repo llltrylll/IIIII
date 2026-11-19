@@ -579,12 +579,15 @@ fn fs_mesh(in: MeshOut, @builtin(front_facing) front: bool) -> @location(0) vec4
 // The see-through part of the mesh, blended (after everything opaque).
 @fragment
 fn fs_mesh_t(in: MeshOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
-    let c = mesh_shade_inputs(in, front);
-    let a = view_alpha(c.s);
+    // This pass exists only for the built-in Material view. Reject opaque
+    // texels using only the base-color alpha before loading the other material
+    // channels, reconstructing normals, or evaluating PBR lighting.
+    let a = textureSampleLevel(t_color, samp, in.uv, 0.0).a;
     if (a >= OPAQUE) {
         discard;
     }
-    return vec4<f32>(highlighted(shade(c.s, c.n, c.v, c.shadow)), a);
+    let c = mesh_shade_inputs(in, front);
+    return vec4<f32>(highlighted(shade(c.s, c.n, c.v, c.shadow)), c.s.alpha);
 }
 
 // ---------------------------------------------------------------- 2D view

@@ -3545,7 +3545,7 @@ fn texture_sets_paint_apart() {
         views.render_3d(&rs, size, &[&left, &right], &env, &gpu_mesh, &cam, &settings, None);
         read_texture(&rs.device, &rs.queue, views.view3d.image())
     };
-    use crate::viewport::SetLook;
+    use crate::viewport::{SetLook, ViewMode};
     let hidden = looks(&mut views, [SetLook::default(), SetLook { hidden: true, highlight: 0.0 }]);
     let bluish_hidden = hidden.chunks(4).filter(|p| p[2] as i32 > p[0] as i32 + 40 && p[2] as i32 > p[1] as i32 + 40).count();
     println!("  right set hidden: {bluish_hidden} blue pixels");
@@ -4042,6 +4042,25 @@ fn transparency_paints_shows_and_exports() {
     image::save_buffer(dir.join("transparency_glass.png"), &see_through, size[0], size[1], image::ExtendedColorType::Rgba8).unwrap();
     println!("  see-through set vs hidden set: largest difference {diff}");
     assert!(diff <= 2, "opacity 0 shows what's behind, as if hidden ({diff})");
+
+    // Diagnostic modes intentionally ignore material opacity. The see-through
+    // set must still show its blue Base Color; hiding that set must remove it.
+    let map_settings = ViewSettings { mode: ViewMode::BaseColor, ..settings };
+    let map_frame = |views: &mut ViewRenderer, looks: Vec<SetLook>| {
+        views.set_looks = looks;
+        views.render_3d(&rs, size, &[&left, &right], &env, &gpu_mesh, &cam, &map_settings, None);
+        read_texture(&rs.device, &rs.queue, views.view3d.image())
+    };
+    let map_visible = map_frame(&mut views, Vec::new());
+    let map_hidden = map_frame(
+        &mut views,
+        vec![SetLook::default(), SetLook { hidden: true, highlight: 0.0 }],
+    );
+    let map_diff = map_visible.iter().zip(&map_hidden)
+        .map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs())
+        .max().unwrap_or(0);
+    println!("  Base Color ignores opacity: visible vs hidden maximum difference {map_diff}");
+    assert!(map_diff > 20, "Base Color diagnostics must show the see-through set's blue texture");
 
     // A stroke on the left set's opacity channel only: see-through along it.
     let mut only_opacity = [false; CHANNELS];

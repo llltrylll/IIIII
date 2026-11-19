@@ -1395,7 +1395,7 @@ impl ViewRenderer {
             }
             // See-through texels, over everything opaque (the built-in look
             // only; a preview shader cuts them out at half opacity).
-            if self.custom_mesh.is_none() || settings.mode != ViewMode::Material {
+            if settings.mode == ViewMode::Material && self.custom_mesh.is_none() {
                 pass.set_pipeline(&self.mesh_t);
                 if let Some(draw) = self.object_draw.as_ref() {
                     pass.set_index_buffer(draw.triangles.slice(..), wgpu::IndexFormat::Uint32);
