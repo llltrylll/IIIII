@@ -1,6 +1,21 @@
 //! The 3D and 2D viewports: input, drawing of the panes and end-of-frame bookkeeping.
 use super::*;
 
+fn stroke_opacity_arc_points(center: egui::Pos2, radius: f32, opacity: f32) -> Vec<egui::Pos2> {
+    let opacity = opacity.clamp(0.0, 1.0);
+    if opacity <= 0.0 || !radius.is_finite() || radius <= 0.0 {
+        return Vec::new();
+    }
+    let segments = ((48.0 * opacity).ceil() as usize).max(1);
+    let sweep = std::f32::consts::TAU * opacity;
+    (0..=segments)
+        .map(|step| {
+            let angle = -std::f32::consts::FRAC_PI_2 + sweep * step as f32 / segments as f32;
+            pos2(center.x + radius * angle.cos(), center.y + radius * angle.sin())
+        })
+        .collect()
+}
+
 impl PainterApp {
     fn finish_walk_navigation(&mut self) {
         // First-person movement already keeps the orbit target on the look ray.
@@ -453,6 +468,20 @@ impl PainterApp {
                 if inner > 2.0 {
                     painter.circle_stroke(p, inner, Stroke::new(1.0, Color32::from_white_alpha(70)));
                 }
+
+                // Extra visual for Stroke opacity: a thin progress arc around
+                // the existing brush outline. The numeric toolbar control stays.
+                let opacity_radius = r + 5.0;
+                painter.circle_stroke(
+                    p,
+                    opacity_radius,
+                    Stroke::new(1.0, Color32::from_white_alpha(55)),
+                );
+                let opacity_arc = stroke_opacity_arc_points(p, opacity_radius, self.brush.opacity);
+                if opacity_arc.len() >= 2 {
+                    painter.add(egui::Shape::line(opacity_arc, Stroke::new(2.2, theme::ACCENT)));
+                }
+
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
                 if let Some(s) = self.stroke.as_ref().filter(|s| s.view == kind && self.brush.stabilize > 0.0) {
                     let lazy = rect.min + vec2(s.lazy.x, s.lazy.y) / self.ppp;
@@ -460,6 +489,20 @@ impl PainterApp {
                     painter.circle_filled(lazy, 2.5, Color32::WHITE);
                 }
             }
+        }
+
+        if kind == ViewKind::V3d && self.color_hud_open {
+            let width = 436.0;
+            let left = (rect.right() - width - 8.0).max(rect.left() + 8.0);
+            egui::Area::new(egui::Id::new("color_hud_overlay"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(pos2(left, rect.top() + 8.0))
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_width(420.0);
+                        self.color_hud(ui);
+                    });
+                });
         }
     }
 
@@ -536,3 +579,38 @@ impl PainterApp {
         0.0015 * self.prefs.zoom_speed * if self.prefs.invert_zoom { -1.0 } else { 1.0 }
     }
 }
+
+#[cfg(test)]
+mod cursor_opacity_tests {
+    use super::stroke_opacity_arc_points;
+    use egui::pos2;
+
+    #[test]
+    fn zero_opacity_has_no_progress_arc() {
+        assert!(stroke_opacity_arc_points(pos2(10.0, 20.0), 12.0, 0.0).is_empty());
+    }
+
+    #[test]
+    fn half_opacity_draws_half_a_ring() {
+        let points = stroke_opacity_arc_points(pos2(0.0, 0.0), 10.0, 0.5);
+        assert_eq!(points.len(), 25);
+        assert!(points.first().unwrap().y < 0.0);
+        assert!(points.last().unwrap().y > 0.0);
+    }
+
+    #[test]
+    fn full_opacity_draws_a_complete_ring() {
+        let points = stroke_opacity_arc_points(pos2(0.0, 0.0), 10.0, 1.0);
+        assert_eq!(points.len(), 49);
+        assert!(points.first().unwrap().distance(*points.last().unwrap()) < 1e-4);
+    }
+
+    #[test]
+    fn opacity_is_clamped_to_supported_range() {
+        let over = stroke_opacity_arc_points(pos2(0.0, 0.0), 10.0, 2.0);
+        let full = stroke_opacity_arc_points(pos2(0.0, 0.0), 10.0, 1.0);
+        assert_eq!(over, full);
+        assert!(stroke_opacity_arc_points(pos2(0.0, 0.0), 10.0, -1.0).is_empty());
+    }
+}
+

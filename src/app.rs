@@ -884,6 +884,8 @@ pub struct PainterApp {
     other_brush: Brush,
     color2: [f32; 3],
     color_sliders: ColorSliders,
+    /// Floating color HUD opened by G or the Color toolbar button.
+    color_hud_open: bool,
     /// Target mask generator while sampling a vertex ID from the 3D mesh.
     id_color_pick_target: Option<(usize, Option<usize>)>,
     /// Whether imported per-vertex colors are currently shown over the 3D mesh.
@@ -2467,6 +2469,7 @@ impl PainterApp {
             other_brush: Brush::default(),
             color2: [0.95, 0.95, 0.95],
             color_sliders: ColorSliders::default(),
+            color_hud_open: false,
             id_color_pick_target: None,
             vertex_id: Default::default(),
             baked_id_source: IdSource::MeshParts,
@@ -3806,6 +3809,18 @@ impl PainterApp {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
+        if self.workspace == Workspace::Paint
+            && !self.walk_navigation
+            && matches!(self.tool, Tool::Paint | Tool::Picker)
+            && self.target == StrokeTarget::Content
+            && ctx.input_mut(|i| i.key_pressed(Key::G) && !i.modifiers.any())
+        {
+            self.color_hud_open = !self.color_hud_open;
+            if self.color_hud_open {
+                self.color_sliders.opened = self.active_color();
+            }
+            ctx.request_repaint();
+        }
         // While walking, WASD/E/Q and other viewport keys belong exclusively
         // to camera navigation, not to global tools or layer shortcuts.
         if self.walk_navigation {
@@ -4156,12 +4171,14 @@ impl PainterApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Ray trace remains in View and on F10; this toolbar slot opens the Color HUD.
                 if matches!(self.tool, Tool::Paint | Tool::Picker) && self.target == StrokeTarget::Content {
-                    let color_btn=ui.add(theme::selectable(false,theme::with_icon(icons::DROP,"Color")))
-                        .on_hover_text("Two colors, HSV, temperature, channel values and saved swatches");
-                    if color_btn.clicked() { self.color_sliders.opened=self.active_color(); }
-                    egui::Popup::from_toggle_button_response(&color_btn)
-                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                        .show(|ui|self.color_hud(ui));
+                    let color_btn=ui.add(theme::selectable(self.color_hud_open,theme::with_icon(icons::DROP,"Color")))
+                        .on_hover_text("Open the color HUD (G): picker, eyedropper, second color and saved swatches");
+                    if color_btn.clicked() {
+                        self.color_hud_open = !self.color_hud_open;
+                        if self.color_hud_open {
+                            self.color_sliders.opened = self.active_color();
+                        }
+                    }
                 }
                 if ui
                     .add(theme::selectable(self.view.show_wire, theme::with_icon(icons::GRID_FOUR, "UV wire")))
