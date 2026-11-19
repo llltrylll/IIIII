@@ -497,10 +497,10 @@ impl PainterApp {
         egui::ScrollArea::horizontal()
             .id_salt("technical_bottom_metrics")
             .auto_shrink([false, false])
-            .max_height(22.0)
+            .max_height(24.0)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.set_min_height(18.0);
+                    ui.set_min_height(22.0);
                     for (index, metric) in metrics.into_iter().enumerate() {
                         if index > 0 {
                             ui.separator();

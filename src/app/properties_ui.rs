@@ -1,6 +1,41 @@
 //! The Properties panel: layer, fill material, brush and map-level controls.
 use super::*;
 
+fn active_fill_image_channels(
+    active: &[bool; crate::engine::CHANNELS],
+) -> impl Iterator<Item = (usize, &'static str)> + '_ {
+    const LABELS: [&str; crate::engine::CHANNELS] = [
+        "Color", "Roughness", "Metallic", "Height",
+        "Opacity", "Emission", "Normal", "Specular",
+    ];
+    LABELS.into_iter().enumerate().filter_map(|(ch, label)| active[ch].then_some((ch, label)))
+}
+
+#[cfg(test)]
+mod fill_image_channel_tests {
+    use super::active_fill_image_channels;
+
+    #[test]
+    fn project_disabled_channels_are_omitted_from_images_section() {
+        let mut active = [true; crate::engine::CHANNELS];
+        active[3] = false;
+        active[4] = false;
+        active[5] = false;
+        active[7] = false;
+        let visible: Vec<usize> = active_fill_image_channels(&active).map(|(ch, _)| ch).collect();
+        assert_eq!(visible, [0, 1, 2, 6]);
+    }
+
+    #[test]
+    fn reenabled_channels_reappear_in_images_section() {
+        let mut active = [false; crate::engine::CHANNELS];
+        active[3] = true;
+        active[6] = true;
+        let visible: Vec<usize> = active_fill_image_channels(&active).map(|(ch, _)| ch).collect();
+        assert_eq!(visible, [3, 6]);
+    }
+}
+
 impl PainterApp {
     pub(super) fn fix_properties(&mut self, ui: &mut egui::Ui, map: usize) {
         let info = &MAPS[map];
@@ -129,24 +164,12 @@ impl PainterApp {
                     if let Content::Fill(f) = &mut self.engine.layers[idx].content {
                         section(ui, "Fill material");
                         dirty |= material_controls(ui, &mut f.mat, true, &self.active_channels);
-                        if self.active_channels.iter().any(|active| !*active) {
-                            ui.label(
-                                egui::RichText::new("Dimmed channels are disabled in Project. Their maps remain stored.")
-                                    .small()
-                                    .color(theme::TEXT_DIM),
-                            );
-                        }
                         if graph_name.is_none() {
-                        section(ui, "Images");
-                        let shelf_textures = &self.shelf.textures;
-                        for (ch, label) in ["Color", "Roughness", "Metallic", "Height", "Opacity", "Emission", "Normal", "Specular"].into_iter().enumerate() {
-                            let display_label = if self.active_channels[ch] {
-                                label.to_string()
-                            } else {
-                                format!("{label} · disabled")
-                            };
-                            // A shelf texture dropped on the row feeds the channel, even while disabled.
-                            let row = ui.scope(|ui| labeled(ui, &display_label, |ui| {
+                            section(ui, "Images");
+                            let shelf_textures = &self.shelf.textures;
+                            let image_channels: Vec<_> = active_fill_image_channels(&self.active_channels).collect();
+                            for (ch, label) in image_channels {
+                                let row = ui.scope(|ui| labeled(ui, label, |ui| {
                                 match &names[ch] {
                                     Some(name) => {
                                         ui.add(egui::Label::new(name.as_str()).truncate()).on_hover_text(name.as_str());
@@ -162,11 +185,7 @@ impl PainterApp {
                                         }
                                     }
                                 }
-                                if !self.active_channels[ch] {
-                                    ui.colored_label(Color32::from_rgb(245, 180, 65), "! OFF")
-                                        .on_hover_text("Project output is disabled. This channel's image/data is still retained.");
-                                }
-                                // Any shelf texture can feed the channel.
+                                // Any shelf texture can feed an active channel.
                                 ui.menu_button("Texture ▾", |ui| {
                                     ui.label(egui::RichText::new(format!("Shelf texture as {}", label.to_lowercase())).small().color(theme::TEXT_DIM));
                                     egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
@@ -199,10 +218,14 @@ impl PainterApp {
                                 self.pending.push(Action::TextureToChannel { texture: *texture, ch });
                             }
                         }
-                        if names[crate::engine::NORMAL].is_some() {
+                        if self.active_channels[crate::engine::NORMAL]
+                            && names[crate::engine::NORMAL].is_some()
+                        {
                             dirty |= slider(ui, "Normal strength", &mut f.mat.normal, 0.0..=2.0);
                         }
-                        if names.iter().any(Option::is_some) {
+                        let has_active_image = names.iter().enumerate()
+                            .any(|(ch, name)| self.active_channels[ch] && name.is_some());
+                        if has_active_image {
                             labeled(ui, "Projection", |ui| {
                                 egui::ComboBox::from_id_salt("projection").selected_text(f.projection.name()).show_ui(ui, |ui| {
                                     for p in Projection::ALL {

@@ -4428,9 +4428,13 @@ impl PainterApp {
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         let paint = self.workspace == Workspace::Paint;
-        ui.vertical(|ui| {
-            ui.set_min_width(ui.available_width());
-            ui.horizontal_centered(|ui| {
+        let width = ui.available_width().max(1.0);
+        ui.set_min_size(vec2(width, if paint { 56.0 } else { 22.0 }));
+
+        ui.allocate_ui_with_layout(
+            vec2(width, 24.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
                 ui.label(egui::RichText::new(&self.status).color(theme::TEXT_DIM));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if self.diagnostics.active {
@@ -4443,12 +4447,16 @@ impl PainterApp {
                             .on_hover_text(format!("AI agents can connect at {}", server.url()));
                     }
                 });
-            });
-            if paint {
-                ui.add_space(1.0);
-                self.technical_metrics_bar(ui);
-            }
-        });
+            },
+        );
+        if paint {
+            ui.add_space(2.0);
+            ui.allocate_ui_with_layout(
+                vec2(width, 26.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| self.technical_metrics_bar(ui),
+            );
+        }
     }
 
     // ------------------------------------------------------------------ layers
@@ -5902,7 +5910,7 @@ impl eframe::App for PainterApp {
                 .show(ui, |ui| self.context_toolbar(ui));
         }
         egui::Panel::bottom("status")
-            .exact_size(if paint { 64.0 } else { 24.0 })
+            .exact_size(if paint { 76.0 } else { 24.0 })
             .frame(theme::bar())
             .show(ui, |ui| self.status_bar(ui));
         if paint {

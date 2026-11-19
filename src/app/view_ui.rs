@@ -10,7 +10,9 @@ impl PainterApp {
         } else {
             None
         };
-        self.cam.finish_walk_navigation(focus);
+        let model_diagonal = (self.mesh.bounds_max - self.mesh.bounds_min).length();
+        let minimum_orbit_distance = (model_diagonal * 0.6).clamp(1.0, 2.5);
+        self.cam.finish_walk_navigation(focus, minimum_orbit_distance);
     }
 
     pub(super) fn view_input(&mut self, ui: &egui::Ui, kind: ViewKind, rect: Rect, resp: &egui::Response) {

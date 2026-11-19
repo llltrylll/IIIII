@@ -160,21 +160,22 @@ impl OrbitCam {
         self.target = eye + forward * self.dist;
     }
 
-    /// On exit, anchor orbit at the surface point under the center of the view.
-    /// The camera eye and look direction are preserved exactly.
-    pub fn finish_walk_navigation(&mut self, focus: Option<Vec3>) {
+    /// On exit, retain the center ray but keep the orbit pivot far enough ahead
+    /// to avoid tiny, unstable orbit radii after close-up first-person movement.
+    pub fn finish_walk_navigation(&mut self, focus: Option<Vec3>, minimum_distance: f32) {
         let eye = self.eye();
         let forward = (self.target - eye).normalize_or_zero();
         if forward.length_squared() < 0.5 {
             return;
         }
-        let requested = focus
-            .filter(|point| point.is_finite() && eye.distance(*point) > 0.05)
-            .unwrap_or_else(|| eye + forward * self.dist.clamp(0.3, 40.0));
-        let offset = requested - eye;
-        let distance = offset.length().clamp(0.3, 40.0);
+        let hit_distance = focus
+            .filter(|point| point.is_finite())
+            .map(|point| (point - eye).dot(forward))
+            .filter(|distance| *distance > 0.05)
+            .unwrap_or(self.dist);
+        let distance = hit_distance.max(minimum_distance.max(0.3)).clamp(0.3, 40.0);
         self.dist = distance;
-        self.target = eye + offset.normalize_or_zero() * distance;
+        self.target = eye + forward * distance;
     }
 
     /// Move in first-person mode: WASD on the horizontal plane, E/Q vertically.
@@ -1559,13 +1560,32 @@ mod walk_navigation_tests {
         let eye_before = cam.eye();
         let forward_before = (cam.target - eye_before).normalize();
         let focus = eye_before + forward_before * 2.75;
-        cam.finish_walk_navigation(Some(focus));
+        cam.finish_walk_navigation(Some(focus), 1.0);
         let eye_after = cam.eye();
         let forward_after = (cam.target - eye_after).normalize();
         assert!(eye_before.distance(eye_after) < 1e-5);
         assert!(forward_before.distance(forward_after) < 1e-5);
         assert!(cam.target.distance(focus) < 1e-5);
         assert!((cam.dist - 2.75).abs() < 1e-5);
+    }
+
+    #[test]
+    fn close_surface_hit_is_expanded_to_minimum_orbit_radius() {
+        let mut cam = OrbitCam::default();
+        cam.walk_look(Vec2::new(25.0, -10.0), 0.0025);
+        cam.walk_move(0.0, 0.0, 0.0, 0.0, 1.0);
+        let eye_before = cam.eye();
+        let forward_before = (cam.target - eye_before).normalize();
+        let close_hit = eye_before + forward_before * 0.466;
+
+        cam.finish_walk_navigation(Some(close_hit), 1.5);
+
+        let eye_after = cam.eye();
+        let forward_after = (cam.target - eye_after).normalize();
+        assert!(eye_before.distance(eye_after) < 1e-5);
+        assert!(forward_before.distance(forward_after) < 1e-5);
+        assert!((cam.dist - 1.5).abs() < 1e-5);
+        assert!((cam.target.distance(eye_after) - 1.5).abs() < 1e-5);
     }
 
     #[test]
