@@ -69,6 +69,12 @@ pub struct Preferences {
     pub brush_hardness: f32,
     pub brush_spacing: f32,
     pub swatches: Vec<[u8; 3]>,
+    /// Colors used lately, newest first (see `push_recent_color`).
+    pub color_history: Vec<[u8; 3]>,
+    /// How many recent colors are kept, `COLOR_HISTORY_MIN..=COLOR_HISTORY_MAX`.
+    pub color_history_limit: usize,
+    /// Favorite colors the user pinned; empty slots stay `None`.
+    pub favorite_colors: [Option<[u8; 3]>; FAVORITE_SLOTS],
     /// Texels of padding polygon fill adds past UV island borders.
     pub poly_padding: f32,
     // Baking
@@ -115,6 +121,9 @@ impl Default for Preferences {
             brush_hardness: 0.55,
             brush_spacing: 0.08,
             swatches: Vec::new(),
+            color_history: Vec::new(),
+            color_history_limit: COLOR_HISTORY_DEFAULT,
+            favorite_colors: [None; FAVORITE_SLOTS],
             poly_padding: 2.0,
             bake_quality: Quality::Standard,
             bake_match_by_name: true,
@@ -137,6 +146,32 @@ impl Default for Preferences {
 const FILE: &str = "preferences.json";
 pub const RESOLUTIONS: [u32; 6] = [256, 512, 1024, 2048, 4096, 8192];
 pub const MAX_SWATCHES:usize=32;
+pub const FAVORITE_SLOTS: usize = 8;
+pub const COLOR_HISTORY_DEFAULT: usize = 8;
+pub const COLOR_HISTORY_MIN: usize = 5;
+pub const COLOR_HISTORY_MAX: usize = 10;
+
+/// Puts `color` first in the recent list. An identical color already in the
+/// list moves to the front instead of repeating, and the list is cut to `limit`.
+pub fn push_recent_color(history: &mut Vec<[u8; 3]>, color: [u8; 3], limit: usize) {
+    history.retain(|c| *c != color);
+    history.insert(0, color);
+    history.truncate(limit.clamp(COLOR_HISTORY_MIN, COLOR_HISTORY_MAX));
+}
+
+fn rgb_from_json(c: &Value) -> Option<[u8; 3]> {
+    let byte = |x: Option<&Value>| x.and_then(Value::as_u64).map(|n| n.min(255) as u8);
+    Some([byte(c.get(0))?, byte(c.get(1))?, byte(c.get(2))?])
+}
+
+/// Favorites from a saved file. A file without the key (older versions) starts
+/// them from the first saved swatches, so nothing the user kept is lost.
+fn favorites_from_json(v: &Value, swatches: &[[u8; 3]]) -> [Option<[u8; 3]>; FAVORITE_SLOTS] {
+    match v.as_array() {
+        Some(list) => std::array::from_fn(|slot| list.get(slot).and_then(rgb_from_json)),
+        None => std::array::from_fn(|slot| swatches.get(slot).copied()),
+    }
+}
 fn swatches_from_json(v:&Value)->Vec<[u8;3]>{
 let byte=|x:Option<&Value>|x.and_then(Value::as_u64).map(|n|n.min(255) as u8);
 v.as_array().map_or_else(Vec::new,|list|list.iter().filter_map(|c|Some([byte(c.get(0))?,byte(c.get(1))?,byte(c.get(2))?])).take(MAX_SWATCHES).collect())
@@ -179,6 +214,9 @@ impl Preferences {
             "brush_hardness": self.brush_hardness,
             "brush_spacing": self.brush_spacing,
             "swatches": self.swatches,
+            "color_history": self.color_history,
+            "color_history_limit": self.color_history_limit,
+            "favorite_colors": self.favorite_colors,
             "poly_padding": self.poly_padding,
             "bake_quality": self.bake_quality.name(),
             "bake_match_by_name": self.bake_match_by_name,
@@ -227,6 +265,13 @@ impl Preferences {
             brush_hardness: f("brush_hardness", d.brush_hardness, 0.0, 1.0),
             brush_spacing: f("brush_spacing", d.brush_spacing, 0.01, 2.0),
             swatches: swatches_from_json(&v["swatches"]),
+            color_history: {
+                let mut history = swatches_from_json(&v["color_history"]);
+                history.truncate(u("color_history_limit", d.color_history_limit as u64, COLOR_HISTORY_MIN as u64, COLOR_HISTORY_MAX as u64) as usize);
+                history
+            },
+            color_history_limit: u("color_history_limit", d.color_history_limit as u64, COLOR_HISTORY_MIN as u64, COLOR_HISTORY_MAX as u64) as usize,
+            favorite_colors: favorites_from_json(&v["favorite_colors"], &swatches_from_json(&v["swatches"])),
             poly_padding: f("poly_padding", d.poly_padding, 0.0, 16.0),
             bake_quality: v["bake_quality"].as_str().and_then(|n| Quality::ALL.into_iter().find(|q| q.name() == n)).unwrap_or(d.bake_quality),
             bake_match_by_name: b("bake_match_by_name", d.bake_match_by_name),
@@ -545,4 +590,68 @@ mod swatch_tests{
 use super::*;
 #[test]fn swatches_round_trip(){let p=Preferences{swatches:vec![[255,0,0],[10,20,30]],..Preferences::default()};assert_eq!(Preferences::from_json(&p.to_json()).swatches,p.swatches);}
 #[test]fn malformed_swatches_skip(){let v=json!({"swatches":[[1,2,3],[1,2],"red",[300,0,0],null]});assert_eq!(Preferences::from_json(&v).swatches,vec![[1,2,3],[255,0,0]]);}
+#[test]fn recent_colors_enter_first_and_do_not_repeat(){
+    let mut h=Vec::new();
+    push_recent_color(&mut h,[1,1,1],8);push_recent_color(&mut h,[2,2,2],8);
+    assert_eq!(h,vec![[2,2,2],[1,1,1]]);
+    push_recent_color(&mut h,[2,2,2],8);
+    assert_eq!(h,vec![[2,2,2],[1,1,1]],"an identical consecutive color is not added again");
+    push_recent_color(&mut h,[1,1,1],8);
+    assert_eq!(h,vec![[1,1,1],[2,2,2]],"an older identical color moves to the front");
+}
+#[test]fn recent_colors_respect_the_limit(){
+    let mut h=Vec::new();
+    for n in 0..20u8{push_recent_color(&mut h,[n,0,0],8);}
+    assert_eq!(h.len(),8);assert_eq!(h[0],[19,0,0]);assert_eq!(h[7],[12,0,0]);
+    push_recent_color(&mut h,[99,0,0],10);
+    assert_eq!(h.len(),9,"a larger limit keeps more");
+    push_recent_color(&mut h,[98,0,0],1);
+    assert_eq!(h.len(),COLOR_HISTORY_MIN,"limit is clamped to 5..=10");
+    for n in 0..30u8{push_recent_color(&mut h,[n,1,0],99);}
+    assert_eq!(h.len(),COLOR_HISTORY_MAX);
+}
+#[test]fn defaults_are_eight_recent_and_eight_empty_favorites(){
+    let p=Preferences::default();
+    assert_eq!(p.color_history_limit,8);assert!(p.color_history.is_empty());
+    assert_eq!(p.favorite_colors.len(),8);assert!(p.favorite_colors.iter().all(Option::is_none));
+}
+#[test]fn recent_and_favorite_colors_persist(){
+    let mut p=Preferences::default();
+    p.color_history=vec![[9,8,7],[1,2,3]];p.color_history_limit=6;
+    p.favorite_colors[0]=Some([255,0,0]);p.favorite_colors[5]=Some([0,128,255]);
+    let back=Preferences::from_json(&p.to_json());
+    assert_eq!(back.color_history,p.color_history);
+    assert_eq!(back.color_history_limit,6);
+    assert_eq!(back.favorite_colors,p.favorite_colors);
+}
+#[test]fn favorites_replace_and_remove_persist(){
+    let mut p=Preferences::default();
+    p.favorite_colors[2]=Some([1,1,1]);
+    p.favorite_colors[2]=Some([2,2,2]);
+    p.favorite_colors[4]=Some([3,3,3]);
+    p.favorite_colors[4]=None;
+    let back=Preferences::from_json(&p.to_json());
+    assert_eq!(back.favorite_colors[2],Some([2,2,2]));
+    assert_eq!(back.favorite_colors[4],None);
+}
+#[test]fn out_of_range_limit_and_bad_entries_are_repaired(){
+    let v=json!({"color_history_limit":99,"color_history":[[1,2,3],[1,2],"x",[4,5,6]],"favorite_colors":[[1,2,3],null,"red",[9,9]]});
+    let p=Preferences::from_json(&v);
+    assert_eq!(p.color_history_limit,COLOR_HISTORY_MAX);
+    assert_eq!(p.color_history,vec![[1,2,3],[4,5,6]]);
+    assert_eq!(p.favorite_colors,[Some([1,2,3]),None,None,None,None,None,None,None]);
+    let low=Preferences::from_json(&json!({"color_history_limit":1,"color_history":[[1,1,1],[2,2,2],[3,3,3],[4,4,4],[5,5,5],[6,6,6],[7,7,7]]}));
+    assert_eq!(low.color_history_limit,COLOR_HISTORY_MIN);assert_eq!(low.color_history.len(),COLOR_HISTORY_MIN);
+}
+#[test]fn old_files_start_favorites_from_saved_swatches(){
+    let v=json!({"swatches":[[1,1,1],[2,2,2],[3,3,3],[4,4,4],[5,5,5],[6,6,6],[7,7,7],[8,8,8],[9,9,9]]});
+    let p=Preferences::from_json(&v);
+    assert_eq!(p.favorite_colors[0],Some([1,1,1]));assert_eq!(p.favorite_colors[7],Some([8,8,8]));
+    assert_eq!(p.swatches.len(),9,"the old saved colors stay in the file");
+    assert_eq!(p.color_history_limit,8);assert!(p.color_history.is_empty());
+    let empty=Preferences::from_json(&json!({}));
+    assert!(empty.favorite_colors.iter().all(Option::is_none));
+    let explicit_empty=Preferences::from_json(&json!({"swatches":[[1,1,1]],"favorite_colors":[null,null,null,null,null,null,null,null]}));
+    assert!(explicit_empty.favorite_colors.iter().all(Option::is_none),"saved favorites win over swatches");
+}
 }

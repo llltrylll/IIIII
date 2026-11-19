@@ -886,6 +886,8 @@ pub struct PainterApp {
     color_sliders: ColorSliders,
     /// Floating color HUD opened by G or the Color toolbar button.
     color_hud_open: bool,
+    /// Last color the user chose, waiting to join the recent-colors strip.
+    recent_color_pending: Option<[u8; 3]>,
     /// Target mask generator while sampling a vertex ID from the 3D mesh.
     id_color_pick_target: Option<(usize, Option<usize>)>,
     /// Whether imported per-vertex colors are currently shown over the 3D mesh.
@@ -2470,6 +2472,7 @@ impl PainterApp {
             color2: [0.95, 0.95, 0.95],
             color_sliders: ColorSliders::default(),
             color_hud_open: false,
+            recent_color_pending: None,
             id_color_pick_target: None,
             vertex_id: Default::default(),
             baked_id_source: IdSource::MeshParts,
@@ -3738,6 +3741,7 @@ impl PainterApp {
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
         use egui::{Key, KeyboardShortcut, Modifiers};
+        self.flush_recent_color(ctx);
         let mut capture_view_snapshot = false;
         let mut toggle_ray_capture = false;
         ctx.input_mut(|i| {
@@ -3817,6 +3821,21 @@ impl PainterApp {
         {
             self.color_hud_open = !self.color_hud_open;
             if self.color_hud_open {
+                self.color_sliders.opened = self.active_color();
+            }
+            ctx.request_repaint();
+        }
+        // A opens the Color HUD on its picker. Same gate as G: not while a text
+        // field or slider has the keyboard (returned above) and never during
+        // first-person walking, where A is "move left".
+        if self.workspace == Workspace::Paint
+            && !self.walk_navigation
+            && matches!(self.tool, Tool::Paint | Tool::Picker)
+            && self.target == StrokeTarget::Content
+            && ctx.input_mut(|i| i.key_pressed(Key::A) && !i.modifiers.any())
+        {
+            if !self.color_hud_open {
+                self.color_hud_open = true;
                 self.color_sliders.opened = self.active_color();
             }
             ctx.request_repaint();
@@ -4172,7 +4191,7 @@ impl PainterApp {
                 // Ray trace remains in View and on F10; this toolbar slot opens the Color HUD.
                 if matches!(self.tool, Tool::Paint | Tool::Picker) && self.target == StrokeTarget::Content {
                     let color_btn=ui.add(theme::selectable(self.color_hud_open,theme::with_icon(icons::DROP,"Color")))
-                        .on_hover_text("Open the color HUD (G): picker, eyedropper, second color and saved swatches");
+                        .on_hover_text("Open the color HUD (G, or A to open): picker, eyedropper, second color, recent and favorite colors");
                     if color_btn.clicked() {
                         self.color_hud_open = !self.color_hud_open;
                         if self.color_hud_open {
@@ -5595,6 +5614,7 @@ impl PainterApp {
         let engines = self.set_engines();
         let (color, rough, metal) = engines.get(set).unwrap_or(&&self.engine).sample_final(uv);
         self.brush.mat.color = color;
+        self.note_color_used(color);
         self.brush.mat.rough = rough;
         self.brush.mat.metal = metal;
         self.set_tool(Tool::Paint);

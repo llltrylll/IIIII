@@ -188,6 +188,7 @@ impl PainterApp {
         self.brush.mat.color
     }
     pub(super) fn set_active_color(&mut self, color: [f32; 3]) {
+        self.note_color_used(color);
         if self.target == StrokeTarget::Content
             && let Some(layer) = self.engine.layers.get_mut(self.selected)
                 && let Content::Fill(fill) = &mut layer.content {
@@ -215,7 +216,7 @@ impl PainterApp {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Color").strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
-                ui.label(egui::RichText::new("G to close").small().color(theme::TEXT_DIM));
+                ui.label(egui::RichText::new("G closes · A opens").small().color(theme::TEXT_DIM));
             });
         });
         ui.add_space(2.0);
@@ -263,46 +264,130 @@ impl PainterApp {
             material_changed
         }).inner;
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            hud_caption(ui,"SAVED COLORS");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
-                ui.label(egui::RichText::new(format!("{}/{}",self.prefs.swatches.len(),prefs::MAX_SWATCHES)).small().color(theme::TEXT_DIM));
-            });
+        // Pinned below the scrolling area so both strips are always in reach.
+        hud_group(ui,|ui|{
+            self.recent_color_strip(ui);
+            ui.add_space(4.0);
+            self.favorite_color_strip(ui);
         });
-        hud_group(ui,|ui|self.swatch_tray(ui));
         if fill_target && (material_changed || self.active_color()!=initial_active_color) {
             self.schedule_preview_update(ui.ctx());
         }
     }
-    pub(super) fn swatch_tray(&mut self,ui:&mut egui::Ui) {
-        let current=self.active_color().map(|v|(v.clamp(0.0,1.0)*255.0).round() as u8);
-        let shift=ui.input(|i|i.modifiers.shift); let (mut pick,mut remove,mut add)=(None,None,false);
-        ui.horizontal_wrapped(|ui|{
-            ui.spacing_mut().item_spacing=vec2(4.0,4.0);
-            for (index,color) in self.prefs.swatches.iter().enumerate() {
-                let (rect,response)=ui.allocate_exact_size(vec2(20.0,20.0),egui::Sense::click());
-                let selected=*color==current;
-                ui.painter().rect_filled(rect,3.0,Color32::from_rgb(color[0],color[1],color[2]));
-                let outline=if selected{egui::Stroke::new(2.0,Color32::WHITE)}else if response.hovered(){egui::Stroke::new(1.5,theme::TEXT)}else{egui::Stroke::new(1.0,theme::OUTLINE)};
-                ui.painter().rect_stroke(rect,3.0,outline,egui::StrokeKind::Inside);
-                let hint=format!("#{:02x}{:02x}{:02x}\nClick: brush color\nShift+click: second color\nRight-click: remove",color[0],color[1],color[2]);
-                let response=response.on_hover_text(hint);
-                if response.clicked(){pick=Some((index,shift));}
-                if response.secondary_clicked(){remove=Some(index);}
-            }
-            let can_add=self.prefs.swatches.len()<prefs::MAX_SWATCHES&&!self.prefs.swatches.contains(&current);
-            let plus=egui::Button::new(icons::PLUS).min_size(vec2(20.0,20.0));
-            if ui.add_enabled(can_add,plus).on_hover_text("Save the brush color in the tray").clicked(){add=true;}
-        });
-        if self.prefs.swatches.is_empty(){ui.label(egui::RichText::new("Press + to keep the brush color here.").small().color(theme::TEXT_DIM));}
-        if let Some((index,second))=pick {
-            let c=self.prefs.swatches[index].map(|v|v as f32/255.0);
-            if second{self.color2=c;}else{self.set_active_color(c);}
+    /// Remembers a color the user chose. It joins the recent strip once the
+    /// pointer is released, so a drag across the picker leaves one entry.
+    pub(super) fn note_color_used(&mut self,color:[f32;3]){
+        self.recent_color_pending=Some(rgb8(color));
+    }
+    pub(super) fn flush_recent_color(&mut self,ctx:&egui::Context){
+        if self.recent_color_pending.is_none()||ctx.input(|i|i.pointer.any_down()){return;}
+        if let Some(color)=self.recent_color_pending.take(){
+            let limit=self.prefs.color_history_limit;
+            prefs::push_recent_color(&mut self.prefs.color_history,color,limit);
         }
-        if let Some(index)=remove{self.prefs.swatches.remove(index);}
-        if add{self.prefs.swatches.push(current);}
+    }
+    fn apply_strip_color(&mut self,color:[u8;3],as_second:bool){
+        let color=color.map(|v|v as f32/255.0);
+        if as_second{self.color2=color;}else{self.set_active_color(color);}
+    }
+    /// Recent colors as round swatches, newest first.
+    fn recent_color_strip(&mut self,ui:&mut egui::Ui){
+        let current=rgb8(self.active_color());
+        let shift=ui.input(|i|i.modifiers.shift);
+        let mut pick=None;
+        ui.horizontal(|ui|{
+            ui.spacing_mut().item_spacing.x=4.0;
+            strip_caption(ui,"RECENT");
+            for color in self.prefs.color_history.clone() {
+                let response=hud_swatch(ui,color,color==current,true,18.0)
+                    .on_hover_text(format!("#{:02x}{:02x}{:02x}\nClick: brush color\nShift+click: second color",color[0],color[1],color[2]));
+                if response.clicked(){pick=Some(color);}
+            }
+            if self.prefs.color_history.is_empty(){
+                ui.label(egui::RichText::new("Colors you use appear here").small().color(theme::TEXT_DIM));
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
+                let mut limit=self.prefs.color_history_limit;
+                if ui.add(egui::DragValue::new(&mut limit).range(prefs::COLOR_HISTORY_MIN..=prefs::COLOR_HISTORY_MAX).prefix("max "))
+                    .on_hover_text("How many recent colors to keep (5 to 10)").changed() {
+                    self.prefs.color_history_limit=limit;
+                    self.prefs.color_history.truncate(limit);
+                }
+            });
+        });
+        if let Some(color)=pick{
+            self.apply_strip_color(color,shift);
+            // Picking from the strip must not reshuffle it under the cursor.
+            self.recent_color_pending=None;
+        }
+    }
+    /// Favorite colors as rounded squares in fixed slots.
+    fn favorite_color_strip(&mut self,ui:&mut egui::Ui){
+        let current=rgb8(self.active_color());
+        let shift=ui.input(|i|i.modifiers.shift);
+        let (mut pick,mut store,mut remove)=(None,None,None);
+        ui.horizontal(|ui|{
+            ui.spacing_mut().item_spacing.x=4.0;
+            strip_caption(ui,"FAVORITES");
+            for slot in 0..prefs::FAVORITE_SLOTS {
+                match self.prefs.favorite_colors[slot] {
+                    Some(color)=>{
+                        let response=hud_swatch(ui,color,color==current,false,20.0)
+                            .on_hover_text(format!("#{:02x}{:02x}{:02x}\nClick: brush color\nShift+click: second color\nRight-click: replace or remove",color[0],color[1],color[2]));
+                        if response.clicked(){pick=Some(color);}
+                        response.context_menu(|ui|{
+                            if ui.button("Replace with brush color").clicked(){store=Some(slot);ui.close();}
+                            if ui.button("Remove").clicked(){remove=Some(slot);ui.close();}
+                        });
+                    }
+                    None=>{
+                        let response=empty_favorite_slot(ui,20.0).on_hover_text("Empty slot\nClick: save the brush color here");
+                        if response.clicked(){store=Some(slot);}
+                    }
+                }
+            }
+        });
+        if let Some(color)=pick{self.apply_strip_color(color,shift);}
+        if let Some(slot)=store{self.prefs.favorite_colors[slot]=Some(current);}
+        if let Some(slot)=remove{self.prefs.favorite_colors[slot]=None;}
     }
 
+}
+
+/// The color as 8-bit channels, the way strips and preferences store it.
+fn rgb8(color:[f32;3])->[u8;3]{color.map(|v|(v.clamp(0.0,1.0)*255.0).round() as u8)}
+
+fn strip_caption(ui:&mut egui::Ui,text:&str){
+    ui.add_sized([66.0,20.0],egui::Label::new(egui::RichText::new(text).small().strong().color(theme::TEXT_DIM)));
+}
+
+/// One color of a strip. Recent colors are round, favorites are rounded squares.
+/// The current color gets a thin accent ring; hover adds a light outline.
+fn hud_swatch(ui:&mut egui::Ui,color:[u8;3],selected:bool,round:bool,size:f32)->egui::Response{
+    let (rect,response)=ui.allocate_exact_size(vec2(size,size),egui::Sense::click());
+    let fill=Color32::from_rgb(color[0],color[1],color[2]);
+    let painter=ui.painter();
+    if round{
+        painter.circle_filled(rect.center(),size*0.5,fill);
+        painter.circle_stroke(rect.center(),size*0.5,egui::Stroke::new(1.0,theme::OUTLINE));
+        if selected{painter.circle_stroke(rect.center(),size*0.5+2.0,egui::Stroke::new(1.5,theme::ACCENT));}
+        else if response.hovered(){painter.circle_stroke(rect.center(),size*0.5+1.0,egui::Stroke::new(1.0,theme::TEXT));}
+    }else{
+        painter.rect_filled(rect,4.0,fill);
+        painter.rect_stroke(rect,4.0,egui::Stroke::new(1.0,theme::OUTLINE),egui::StrokeKind::Inside);
+        if selected{painter.rect_stroke(rect.expand(2.0),5.0,egui::Stroke::new(1.5,theme::ACCENT),egui::StrokeKind::Outside);}
+        else if response.hovered(){painter.rect_stroke(rect.expand(1.0),5.0,egui::Stroke::new(1.0,theme::TEXT),egui::StrokeKind::Outside);}
+    }
+    response
+}
+
+/// An unused favorite slot: a faint frame with a plus.
+fn empty_favorite_slot(ui:&mut egui::Ui,size:f32)->egui::Response{
+    let (rect,response)=ui.allocate_exact_size(vec2(size,size),egui::Sense::click());
+    let tone=if response.hovered(){theme::TEXT}else{theme::OUTLINE};
+    ui.painter().rect_stroke(rect,4.0,egui::Stroke::new(1.0,tone),egui::StrokeKind::Inside);
+    ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,"+",egui::FontId::proportional(12.0),tone);
+    response
 }
 
 #[cfg(test)]
