@@ -4515,18 +4515,18 @@ impl Engine {
     }
 
     /// Renders a cached mask source with no post-source filters.
-    fn encode_mask_source(
+    fn encode_mask_source<'a>(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         layer_name: &str,
         source_bg: &wgpu::BindGroup,
         source_offset: u32,
-        result: &Tex,
+        result: &'a Tex,
         scissors: Option<&[[u32; 4]]>,
         profile_query: Option<&wgpu::QuerySet>,
         profile_stage_count: &mut usize,
         profile_labels: &mut Vec<String>,
-    ) -> &Tex {
+    ) -> &'a Tex {
         let load = if scissors.is_some() {
             wgpu::LoadOp::Load
         } else {
