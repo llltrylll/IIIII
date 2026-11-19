@@ -165,6 +165,21 @@ pub(super) fn hud_body(ui:&mut egui::Ui,state:&mut ColorSliders,active:[f32;3],s
     color
 }
 
+/// A small dim caption above a group of HUD controls.
+fn hud_caption(ui:&mut egui::Ui,text:&str) {
+    ui.label(egui::RichText::new(text).small().strong().color(theme::TEXT_DIM));
+}
+/// A rounded, slightly darker block so the HUD reads as separate sections.
+fn hud_group<R>(ui:&mut egui::Ui,add:impl FnOnce(&mut egui::Ui)->R)->R {
+    egui::Frame::NONE
+        .fill(theme::PANEL_DARK)
+        .stroke(egui::Stroke::new(1.0,theme::OUTLINE))
+        .corner_radius(6.0)
+        .inner_margin(egui::Margin::same(8))
+        .show(ui,|ui|{ ui.set_width(ui.available_width()); add(ui) })
+        .inner
+}
+
 impl PainterApp {
     pub(super) fn active_color(&self) -> [f32; 3] {
         if self.target == StrokeTarget::Content
@@ -197,64 +212,86 @@ impl PainterApp {
         let fill_target=self.target==StrokeTarget::Content && self.engine.layers.get(self.selected).is_some_and(|layer|matches!(&layer.content,Content::Fill(_)));
         let initial_active_color=self.active_color();
         ui.set_width(420.0);
-        egui::ScrollArea::vertical().max_height(620.0).show(ui, |ui| {
-        self.color_slots(ui); ui.add_space(4.0);
-        let mut state=std::mem::take(&mut self.color_sliders);
-        let mut second=self.color2;
-        let color=hud_body(ui,&mut state,self.active_color(),&mut second);
-        self.color2=second;
-        if color != self.active_color() {
-            self.set_active_color(color);
-            // The next frame (sliders, preview) follows right away, not on the next mouse move.
-            ui.ctx().request_repaint();
-            if self.active_color().iter().zip(color).any(|(a,b)|(a-b).abs()>0.002) {
-                self.status="The color could not be applied to this layer.".into();
-            }
-        }
-        state.out=color; self.color_sliders=state;
-        ui.separator();
-        let mut material_changed=false;
-        if fill_target {
-            if let Some(layer)=self.engine.layers.get_mut(self.selected)
-                && let Content::Fill(fill)=&mut layer.content {
-                    let material=&mut fill.mat;
-                    material_changed |= slider(ui,"Opacity",&mut material.opacity,0.0..=1.0);
-                    material_changed |= channel_toggles_filtered(ui, &mut material.enabled, &self.active_channels);
-                    if material.enabled[3] { material_changed |= slider(ui,"Height",&mut material.height,-1.0..=1.0); }
-                    if material.enabled[1] { material_changed |= slider(ui,"Roughness",&mut material.rough,0.0..=1.0); }
-                    if material.enabled[2] { material_changed |= slider(ui,"Metallic",&mut material.metal,0.0..=1.0); }
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Color").strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
+                ui.label(egui::RichText::new("G to close").small().color(theme::TEXT_DIM));
+            });
+        });
+        ui.add_space(2.0);
+        // Colors and material scroll; the saved-colors tray below stays pinned in view.
+        let material_changed=egui::ScrollArea::vertical().max_height(520.0).show(ui, |ui| {
+            hud_group(ui,|ui|{
+                self.color_slots(ui); ui.add_space(4.0);
+                let mut state=std::mem::take(&mut self.color_sliders);
+                let mut second=self.color2;
+                let color=hud_body(ui,&mut state,self.active_color(),&mut second);
+                self.color2=second;
+                if color != self.active_color() {
+                    self.set_active_color(color);
+                    // The next frame (sliders, preview) follows right away, not on the next mouse move.
+                    ui.ctx().request_repaint();
+                    if self.active_color().iter().zip(color).any(|(a,b)|(a-b).abs()>0.002) {
+                        self.status="The color could not be applied to this layer.".into();
+                    }
                 }
-        } else {
-            let material=&mut self.brush.mat;
-            slider(ui,"Opacity",&mut material.opacity,0.0..=1.0);
-            channel_toggles_filtered(ui, &mut material.enabled, &self.active_channels);
-            if material.enabled[3] { slider(ui,"Height",&mut material.height,-1.0..=1.0); }
-            if material.enabled[1] { slider(ui,"Roughness",&mut material.rough,0.0..=1.0); }
-            if material.enabled[2] { slider(ui,"Metallic",&mut material.metal,0.0..=1.0); }
-        }
-        ui.separator(); self.swatch_tray(ui);
+                state.out=color; self.color_sliders=state;
+            });
+            ui.add_space(6.0);
+            hud_caption(ui,"MATERIAL");
+            let mut material_changed=false;
+            hud_group(ui,|ui|{
+                if fill_target {
+                    if let Some(layer)=self.engine.layers.get_mut(self.selected)
+                        && let Content::Fill(fill)=&mut layer.content {
+                            let material=&mut fill.mat;
+                            material_changed |= slider(ui,"Opacity",&mut material.opacity,0.0..=1.0);
+                            material_changed |= channel_toggles_filtered(ui, &mut material.enabled, &self.active_channels);
+                            if material.enabled[3] { material_changed |= slider(ui,"Height",&mut material.height,-1.0..=1.0); }
+                            if material.enabled[1] { material_changed |= slider(ui,"Roughness",&mut material.rough,0.0..=1.0); }
+                            if material.enabled[2] { material_changed |= slider(ui,"Metallic",&mut material.metal,0.0..=1.0); }
+                        }
+                } else {
+                    let material=&mut self.brush.mat;
+                    slider(ui,"Opacity",&mut material.opacity,0.0..=1.0);
+                    channel_toggles_filtered(ui, &mut material.enabled, &self.active_channels);
+                    if material.enabled[3] { slider(ui,"Height",&mut material.height,-1.0..=1.0); }
+                    if material.enabled[1] { slider(ui,"Roughness",&mut material.rough,0.0..=1.0); }
+                    if material.enabled[2] { slider(ui,"Metallic",&mut material.metal,0.0..=1.0); }
+                }
+            });
+            material_changed
+        }).inner;
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            hud_caption(ui,"SAVED COLORS");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
+                ui.label(egui::RichText::new(format!("{}/{}",self.prefs.swatches.len(),prefs::MAX_SWATCHES)).small().color(theme::TEXT_DIM));
+            });
+        });
+        hud_group(ui,|ui|self.swatch_tray(ui));
         if fill_target && (material_changed || self.active_color()!=initial_active_color) {
             self.schedule_preview_update(ui.ctx());
         }
-        });
     }
     pub(super) fn swatch_tray(&mut self,ui:&mut egui::Ui) {
         let current=self.active_color().map(|v|(v.clamp(0.0,1.0)*255.0).round() as u8);
         let shift=ui.input(|i|i.modifiers.shift); let (mut pick,mut remove,mut add)=(None,None,false);
         ui.horizontal_wrapped(|ui|{
-            ui.spacing_mut().item_spacing=vec2(3.0,3.0);
+            ui.spacing_mut().item_spacing=vec2(4.0,4.0);
             for (index,color) in self.prefs.swatches.iter().enumerate() {
-                let (rect,response)=ui.allocate_exact_size(vec2(18.0,18.0),egui::Sense::click());
+                let (rect,response)=ui.allocate_exact_size(vec2(20.0,20.0),egui::Sense::click());
                 let selected=*color==current;
-                ui.painter().rect_filled(rect,2.0,Color32::from_rgb(color[0],color[1],color[2]));
-                ui.painter().rect_stroke(rect,2.0,egui::Stroke::new(if selected{2.0}else{1.0},if selected{Color32::WHITE}else{Color32::from_gray(80)}),egui::StrokeKind::Inside);
+                ui.painter().rect_filled(rect,3.0,Color32::from_rgb(color[0],color[1],color[2]));
+                let outline=if selected{egui::Stroke::new(2.0,Color32::WHITE)}else if response.hovered(){egui::Stroke::new(1.5,theme::TEXT)}else{egui::Stroke::new(1.0,theme::OUTLINE)};
+                ui.painter().rect_stroke(rect,3.0,outline,egui::StrokeKind::Inside);
                 let hint=format!("#{:02x}{:02x}{:02x}\nClick: brush color\nShift+click: second color\nRight-click: remove",color[0],color[1],color[2]);
                 let response=response.on_hover_text(hint);
                 if response.clicked(){pick=Some((index,shift));}
                 if response.secondary_clicked(){remove=Some(index);}
             }
             let can_add=self.prefs.swatches.len()<prefs::MAX_SWATCHES&&!self.prefs.swatches.contains(&current);
-            let plus=egui::Button::new(icons::PLUS).min_size(vec2(18.0,18.0));
+            let plus=egui::Button::new(icons::PLUS).min_size(vec2(20.0,20.0));
             if ui.add_enabled(can_add,plus).on_hover_text("Save the brush color in the tray").clicked(){add=true;}
         });
         if self.prefs.swatches.is_empty(){ui.label(egui::RichText::new("Press + to keep the brush color here.").small().color(theme::TEXT_DIM));}

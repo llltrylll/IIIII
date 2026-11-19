@@ -16,6 +16,30 @@ fn stroke_opacity_arc_points(center: egui::Pos2, radius: f32, opacity: f32) -> V
         .collect()
 }
 
+/// Short tick marks on the opacity track at 0, 25, 50 and 75 %, as
+/// (inner, outer) point pairs, so the arc can be read against a scale.
+fn stroke_opacity_tick_segments(center: egui::Pos2, radius: f32) -> Vec<(egui::Pos2, egui::Pos2)> {
+    if !radius.is_finite() || radius <= 0.0 {
+        return Vec::new();
+    }
+    (0..4)
+        .map(|quarter| {
+            let angle = -std::f32::consts::FRAC_PI_2 + std::f32::consts::FRAC_PI_2 * quarter as f32;
+            let (cos, sin) = (angle.cos(), angle.sin());
+            (
+                pos2(center.x + (radius - 1.5) * cos, center.y + (radius - 1.5) * sin),
+                pos2(center.x + (radius + 2.5) * cos, center.y + (radius + 2.5) * sin),
+            )
+        })
+        .collect()
+}
+
+/// The percentage written next to the cursor while the ring is not full.
+fn stroke_opacity_label(opacity: f32) -> Option<String> {
+    let percent = (opacity.clamp(0.0, 1.0) * 100.0).round() as u32;
+    (percent < 100).then(|| format!("{percent}%"))
+}
+
 impl PainterApp {
     fn finish_walk_navigation(&mut self) {
         // First-person movement already keeps the orbit target on the look ray.
@@ -469,17 +493,29 @@ impl PainterApp {
                     painter.circle_stroke(p, inner, Stroke::new(1.0, Color32::from_white_alpha(70)));
                 }
 
-                // Extra visual for Stroke opacity: a thin progress arc around
-                // the existing brush outline. The numeric toolbar control stays.
-                let opacity_radius = r + 5.0;
-                painter.circle_stroke(
-                    p,
-                    opacity_radius,
-                    Stroke::new(1.0, Color32::from_white_alpha(55)),
-                );
-                let opacity_arc = stroke_opacity_arc_points(p, opacity_radius, self.brush.opacity);
+                // Stroke opacity: a progress ring set apart from the size and
+                // hardness circles (blue, thicker, with ticks and a percentage).
+                // The numeric toolbar control stays.
+                let opacity_radius = r + 6.0;
+                let opacity = self.brush.opacity;
+                painter.circle_stroke(p, opacity_radius, Stroke::new(3.0, Color32::from_black_alpha(90)));
+                painter.circle_stroke(p, opacity_radius, Stroke::new(1.0, Color32::from_white_alpha(60)));
+                for (inner, outer) in stroke_opacity_tick_segments(p, opacity_radius) {
+                    painter.line_segment([inner, outer], Stroke::new(1.0, Color32::from_white_alpha(120)));
+                }
+                let opacity_arc = stroke_opacity_arc_points(p, opacity_radius, opacity);
                 if opacity_arc.len() >= 2 {
-                    painter.add(egui::Shape::line(opacity_arc, Stroke::new(2.2, theme::ACCENT)));
+                    let end = *opacity_arc.last().unwrap();
+                    // Dark halo under the arc keeps it readable on light and dark surfaces.
+                    painter.add(egui::Shape::line(opacity_arc.clone(), Stroke::new(5.0, Color32::from_black_alpha(150))));
+                    painter.add(egui::Shape::line(opacity_arc, Stroke::new(3.0, theme::ACCENT)));
+                    painter.circle_filled(end, 2.6, Color32::WHITE);
+                }
+                if let Some(text) = stroke_opacity_label(opacity) {
+                    let at = p + vec2(opacity_radius * 0.72 + 6.0, opacity_radius * 0.72 + 4.0);
+                    let font = egui::FontId::proportional(11.0);
+                    painter.text(at + vec2(1.0, 1.0), egui::Align2::LEFT_TOP, &text, font.clone(), Color32::from_black_alpha(200));
+                    painter.text(at, egui::Align2::LEFT_TOP, text, font, Color32::WHITE);
                 }
 
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -582,8 +618,8 @@ impl PainterApp {
 
 #[cfg(test)]
 mod cursor_opacity_tests {
-    use super::stroke_opacity_arc_points;
-    use egui::pos2;
+    use super::{stroke_opacity_arc_points, stroke_opacity_label, stroke_opacity_tick_segments};
+    use eframe::egui::pos2;
 
     #[test]
     fn zero_opacity_has_no_progress_arc() {
@@ -612,5 +648,29 @@ mod cursor_opacity_tests {
         assert_eq!(over, full);
         assert!(stroke_opacity_arc_points(pos2(0.0, 0.0), 10.0, -1.0).is_empty());
     }
-}
 
+    #[test]
+    fn ticks_mark_the_four_quarters_outside_the_inner_edge() {
+        let ticks = stroke_opacity_tick_segments(pos2(0.0, 0.0), 10.0);
+        assert_eq!(ticks.len(), 4);
+        // 0 % at the top, 25 % at the right, 50 % at the bottom, 75 % at the left.
+        assert!(ticks[0].1.y < -10.0 && ticks[0].1.x.abs() < 1e-4);
+        assert!(ticks[1].1.x > 10.0);
+        assert!(ticks[2].1.y > 10.0);
+        assert!(ticks[3].1.x < -10.0);
+        for (inner, outer) in &ticks {
+            assert!(inner.to_vec2().length() < outer.to_vec2().length());
+        }
+        assert!(stroke_opacity_tick_segments(pos2(0.0, 0.0), 0.0).is_empty());
+    }
+
+    #[test]
+    fn label_shows_the_rounded_percentage_until_full() {
+        assert_eq!(stroke_opacity_label(0.0).as_deref(), Some("0%"));
+        assert_eq!(stroke_opacity_label(0.654).as_deref(), Some("65%"));
+        assert_eq!(stroke_opacity_label(0.996), None);
+        assert_eq!(stroke_opacity_label(1.0), None);
+        assert_eq!(stroke_opacity_label(3.0), None);
+        assert_eq!(stroke_opacity_label(-1.0).as_deref(), Some("0%"));
+    }
+}
