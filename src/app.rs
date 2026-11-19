@@ -1163,7 +1163,7 @@ mod cpu_shelf_preview_tests {
 }
 
 /// Wait until material controls have been idle before rebuilding the preview.
-const MATERIAL_PREVIEW_DELAY: Duration = Duration::from_millis(650);
+const MATERIAL_PREVIEW_DELAY: Duration = Duration::from_millis(200);
 
 fn srgb_u8(c: [f32; 3]) -> Color32 {
     Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8)

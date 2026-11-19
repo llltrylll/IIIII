@@ -42,10 +42,15 @@ fn stroke_opacity_label(opacity: f32) -> Option<String> {
 
 impl PainterApp {
     fn finish_walk_navigation(&mut self) {
-        // First-person movement already keeps the orbit target on the look ray.
-        // Do not snap the pivot to a BVH surface hit or scale its radius by the
-        // model bounds: either can move the orbit center farther away on exit.
-        self.cam.finish_walk_navigation(None, 0.3);
+        let eye = self.cam.eye();
+        let forward = (self.cam.target - eye).normalize_or_zero();
+        let focus = if forward.length_squared() > 0.5 {
+            self.bvh.raycast(eye, forward).map(|hit| hit.pos)
+        } else {
+            None
+        }
+        .unwrap_or_else(|| (self.mesh.bounds_min + self.mesh.bounds_max) * 0.5);
+        self.cam.focus_on(focus);
     }
 
     pub(super) fn view_input(&mut self, ui: &egui::Ui, kind: ViewKind, rect: Rect, resp: &egui::Response) {
@@ -208,7 +213,7 @@ impl PainterApp {
                         let size = Vec2::new(self.views.view3d.size[0] as f32, self.views.view3d.size[1] as f32);
                         let (o, d) = self.cam.ray(local(p), size);
                         if let Some(hit) = self.bvh.raycast(o, d) {
-                            self.cam.target = hit.pos;
+                            self.cam.focus_on(hit.pos);
                         }
                     }
             }
