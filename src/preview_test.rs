@@ -1814,7 +1814,7 @@ fn layer_thumbnails() {
 #[test]
 #[ignore]
 fn content_stroke_keeps_unrelated_thumbnails() {
-    use crate::engine::FillParams;
+    use crate::engine::{BrushPaint, FillParams, MatValues, PolyGeometry};
     use crate::undo::{StrokeTarget, UndoStack};
 
     let mesh = crate::mesh::Primitive::Plane.build();
@@ -1831,7 +1831,23 @@ fn content_stroke_keeps_unrelated_thumbnails() {
     let settled = engine.thumb_renders();
     assert_eq!(settled, 2, "the fill owns a content thumbnail and a mask thumbnail");
     assert!(engine.begin_stroke(paint, StrokeTarget::Content, [true, false, false, false, false, false, false, false], false));
-    let _undo = engine.end_stroke().expect("content stroke produces an undo record");
+    let geometry = PolyGeometry {
+        faces: vec![[0.15, 0.15], [0.45, 0.15], [0.30, 0.45]],
+        padding: Vec::new(),
+    };
+    let brush_paint = BrushPaint {
+        mat: MatValues {
+            color: [0.9, 0.08, 0.04],
+            enabled: [true, false, false, false, false, false, false, false],
+            ..Default::default()
+        },
+        mask_value: 1.0,
+        opacity: 1.0,
+        erase: false,
+        grain: [0.0; 4],
+    };
+    engine.stroke_polys(&geometry, &brush_paint);
+    let _undo = engine.end_stroke().expect("a content stroke with submitted paint produces an undo record");
     assert_eq!(engine.thumb_renders(), settled, "painting a separate layer must not rebuild the fill's thumbnails");
 }
 
