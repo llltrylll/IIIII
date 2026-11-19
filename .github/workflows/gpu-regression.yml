@@ -86,6 +86,9 @@ jobs:
       - name: GPU viewport - built-in material and map views
         run: "cargo test --locked --bin material_painter preview_test::preview_mesh -- --ignored --exact --nocapture --test-threads 1"
 
+      - name: GPU viewport - cached image invalidation
+        run: "cargo test --locked --bin material_painter preview_test::viewport_cache_reuses_unchanged_images_and_invalidates_changes -- --ignored --exact --nocapture --test-threads 1"
+
       - name: GPU viewport - custom shading graph previews
         run: "cargo test --locked --bin material_painter preview_test::preview_shaders_compile_and_render -- --ignored --exact --nocapture --test-threads 1"
 
