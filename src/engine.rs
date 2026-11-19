@@ -1212,6 +1212,8 @@ struct ActiveStroke {
     target: StrokeTarget,
     channels: Vec<usize>,
     before: Snapshot,
+    /// Becomes true only after a non-empty paint/apply pass is submitted.
+    changed: bool,
 }
 
 struct Pipelines {
@@ -3990,7 +3992,7 @@ impl Engine {
         self.queue.submit([encoder.finish()]);
         before.request_map();
         self.apply_bg = None;
-        self.active = Some(ActiveStroke { layer_id, target, channels, before });
+        self.active = Some(ActiveStroke { layer_id, target, channels, before, changed: false });
         true
     }
 
@@ -4211,6 +4213,9 @@ impl Engine {
         }
         self.encode_apply(&mut encoder, paint, profile.as_ref(), frame_scissors.as_deref());
         self.queue.submit([encoder.finish()]);
+        if let Some(active) = &mut self.active {
+            active.changed = true;
+        }
     }
 
     /// Returns completed GPU timings for stamp and apply; does not wait for the GPU.
@@ -4285,6 +4290,9 @@ impl Engine {
         }
         self.encode_apply(&mut encoder, paint, None, None);
         self.queue.submit([encoder.finish()]);
+        if let Some(active) = &mut self.active {
+            active.changed = true;
+        }
     }
 
     /// Brush grain (`size`² grayscale, tileable), or `None` for no grain.
@@ -4634,6 +4642,14 @@ impl Engine {
             self.last_end_stages_ms = stages;
             return None;
         };
+        // Empty/missed strokes never submit a paint pass. Their before snapshot
+        // is discarded with the active stroke; do not read back an identical
+        // after-state or add a no-op entry to Undo history.
+        if !active.changed {
+            stages[0] = phase.elapsed().as_secs_f64() * 1000.0;
+            self.last_end_stages_ms = stages;
+            return None;
+        }
         // Content strokes only target Paint layers; their contents are not
         // shown in layer thumbnails. Avoid scanning and hashing the whole stack
         // at release when the stroke cannot have invalidated a thumbnail.
