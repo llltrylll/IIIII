@@ -154,32 +154,36 @@ fn project_uv(
     if (face <= 0.0) {
         return vec3<f32>(0.0);
     }
+    var visibility = 1.0;
     if (u.proj.y < 0.5) {
         let sp = clamp(vec2<i32>(screen), vec2<i32>(0), vec2<i32>(u.view.xy) - 1);
         // The UV-rasterized point does not generally coincide with an MSAA
-        // sample. Compare it against the closest sample, then account only
-        // for the face's subpixel depth slope.
+        // sample. Account for the face's subpixel depth slope, then estimate
+        // how much of this screen pixel is actually covered by the target.
         let surface_linear = lin_depth(ndc.z);
-        var closest_depth_difference = 1e30;
-        var nearest_sample_depth = 1e30;
-        let sample_count = textureNumSamples(depth_map);
-        for (var sample = 0u; sample < sample_count; sample++) {
-            let sample_depth = lin_depth(textureLoad(depth_map, sp, i32(sample)));
-            closest_depth_difference = min(closest_depth_difference, abs(surface_linear - sample_depth));
-            nearest_sample_depth = min(nearest_sample_depth, sample_depth);
-        }
         let slope_slack = subpixel_depth_slack(clip, ndc, world_dx, world_dy);
         let epsilon = max(max(0.0005, surface_linear * 0.0001), slope_slack);
-        // At least one sample must belong to the target surface, but a nearer
-        // sample means a foreground occluder covers part of this screen pixel.
-        // Treat partially covered occluders conservatively: otherwise the
-        // matching background sample lets UV-rasterized painting leak through
-        // the thin edge. Far/clear samples do not count as occluders.
-        if (closest_depth_difference > epsilon || nearest_sample_depth < surface_linear - epsilon) {
+        let sample_count = textureNumSamples(depth_map);
+        if (sample_count == 0u) {
             return vec3<f32>(0.0);
         }
+        var visible_samples = 0u;
+        for (var sample = 0u; sample < sample_count; sample++) {
+            let sample_depth = lin_depth(textureLoad(depth_map, sp, i32(sample)));
+            if (abs(surface_linear - sample_depth) <= epsilon) {
+                visible_samples += 1u;
+            }
+        }
+        // A closer sample means the pixel is only partially covered by a
+        // foreground occluder; it must not discard the visible samples too.
+        // Scale paint by the matching-sample fraction. Fully hidden surfaces
+        // still have zero matches and remain unpaintable.
+        if (visible_samples == 0u) {
+            return vec3<f32>(0.0);
+        }
+        visibility = f32(visible_samples) / f32(sample_count);
     }
-    return vec3<f32>(screen, face);
+    return vec3<f32>(screen, face * visibility);
 }
 
 // Brush falloff at `off` (in brush radii from the stamp center), with the tip
