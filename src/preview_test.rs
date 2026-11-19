@@ -5124,8 +5124,8 @@ fn empty_stroke_does_not_create_undo_record() {
 #[test]
 #[ignore]
 fn first_paint_pass_lazily_captures_undo_before_snapshot() {
-    use crate::engine::{BrushPaint, Content, Edit, Engine, FillParams, MatValues, PolyGeometry};
-    use crate::undo::{StrokeTarget, UndoStack};
+    use crate::engine::{BrushPaint, Content, Engine, MatValues, PolyGeometry};
+    use crate::undo::{Edit, StrokeTarget, UndoStack};
 
     let mesh = Arc::new(crate::mesh::Primitive::Plane.build());
     let rs = render_state();

@@ -4159,6 +4159,9 @@ impl Engine {
         if let Some(p) = &profile {
             self.active_gpu_profile = Some(p.clone());
         }
+        // A parked Engine may still have its 1x1 placeholder stroke target.
+        // Restore it before taking the attachment view for the first paint pass.
+        self.ensure_stroke_target();
         let stamp_attachments = [gpu::color_attachment(&self.stroke.view, wgpu::LoadOp::Load)];
         let mut encoder = device.create_command_encoder(&Default::default());
         let before = self.encode_lazy_stroke_start(&mut encoder);
