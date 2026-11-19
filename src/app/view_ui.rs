@@ -43,6 +43,24 @@ fn stroke_opacity_marker_position(center: egui::Pos2, radius: f32, opacity: f32)
     Some(pos2(center.x + radius * angle.cos(), center.y + radius * angle.sin()))
 }
 
+/// Short tick marks on the opacity track at 0, 25, 50 and 75 %, as
+/// (inner, outer) point pairs, so the arc can be read against a scale.
+fn stroke_opacity_tick_segments(center: egui::Pos2, radius: f32) -> Vec<(egui::Pos2, egui::Pos2)> {
+    if !radius.is_finite() || radius <= 0.0 {
+        return Vec::new();
+    }
+    (0..4)
+        .map(|quarter| {
+            let angle = -std::f32::consts::FRAC_PI_2 + std::f32::consts::FRAC_PI_2 * quarter as f32;
+            let (cos, sin) = (angle.cos(), angle.sin());
+            (
+                pos2(center.x + (radius - 1.5) * cos, center.y + (radius - 1.5) * sin),
+                pos2(center.x + (radius + 2.5) * cos, center.y + (radius + 2.5) * sin),
+            )
+        })
+        .collect()
+}
+
 /// Full opacity is self-evident from the closed ring, so only partial values
 /// need a nearby percentage label.
 fn stroke_opacity_label(opacity: f32) -> Option<String> {
@@ -551,6 +569,9 @@ impl PainterApp {
                     opacity_radius,
                     Stroke::new(1.0, Color32::from_white_alpha(85)),
                 );
+                for (inner, outer) in stroke_opacity_tick_segments(p, opacity_radius) {
+                    painter.line_segment([inner, outer], Stroke::new(1.0, Color32::from_white_alpha(120)));
+                }
                 let opacity_arc = stroke_opacity_arc_points_dense(
                     p,
                     opacity_radius,
@@ -767,5 +788,16 @@ mod cursor_opacity_tests {
         assert_eq!(stroke_opacity_label(0.65).as_deref(), Some("65%"));
         assert_eq!(stroke_opacity_label(1.0), None);
         assert_eq!(stroke_opacity_label(1.5), None);
+    }
+
+    #[test]
+    fn ticks_mark_the_four_quarters_outside_the_inner_edge() {
+        let ticks = super::stroke_opacity_tick_segments(pos2(0.0, 0.0), 10.0);
+        assert_eq!(ticks.len(), 4);
+        assert!(ticks[0].1.y < -10.0 && ticks[0].1.x.abs() < 1e-4);
+        assert!(ticks[1].1.x > 10.0);
+        assert!(ticks[2].1.y > 10.0);
+        assert!(ticks[3].1.x < -10.0);
+        assert!(super::stroke_opacity_tick_segments(pos2(0.0, 0.0), 0.0).is_empty());
     }
 }

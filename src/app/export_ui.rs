@@ -193,6 +193,13 @@ fn export_side_widths(width: f32) -> (f32, f32) {
     (templates, settings)
 }
 
+/// Width left for the output-map editor between the two side columns. The
+/// slack covers the window frame and the gaps around the panels.
+fn export_center_width(dialog_width: f32) -> f32 {
+    let (templates, settings) = export_side_widths(dialog_width);
+    (dialog_width - templates - settings - 36.0).max(250.0)
+}
+
 /// Editor for one output map; returns true to delete it.
 fn map_editor(ui: &mut egui::Ui, i: usize, m: &mut OutputMap, editable: bool) -> bool {
     let mut delete = false;
@@ -379,6 +386,7 @@ impl PainterApp {
         let mut open = true;
         let dialog_rect = export_dialog_rect(self.custom_ui.view_rect, ctx.content_rect());
         let (template_width, settings_width) = export_side_widths(dialog_rect.width());
+        let center_width = export_center_width(dialog_rect.width());
         egui::Window::new("Export Textures")
             .open(&mut open)
             .collapsible(false)
@@ -536,6 +544,12 @@ impl PainterApp {
                         }
                     });
                 egui::CentralPanel::default().frame(egui::Frame::new()).show(ui, |ui| {
+                    // Keep the map editors inside their column so they never
+                    // draw over the Settings and Files columns.
+                    let max_w = center_width.min(ui.available_width());
+                    ui.set_max_width(max_w);
+                    let column = egui::Rect::from_min_size(ui.max_rect().min, vec2(max_w, ui.max_rect().height()));
+                    ui.set_clip_rect(ui.clip_rect().intersect(column));
                     let sel = self.export.find(&self.prefs.export_template).unwrap_or(0);
                         let builtin = self.export.templates[sel].builtin;
                         section(ui, "Output maps");
@@ -631,7 +645,7 @@ mod export_selection_tests {
 
 #[cfg(test)]
 mod export_window_layout_tests {
-    use super::{export_dialog_rect, export_side_widths};
+    use super::{export_center_width, export_dialog_rect, export_side_widths};
     use eframe::egui::{pos2, vec2, Rect};
 
     #[test]
@@ -660,6 +674,16 @@ mod export_window_layout_tests {
             assert!((128.0..=226.0).contains(&left));
             assert!((168.0..=330.0).contains(&right));
             assert!(width - left - right > 250.0, "center column too narrow at {width}px");
+        }
+    }
+
+    #[test]
+    fn export_center_never_overlaps_the_side_columns() {
+        for width in [620.0, 760.0, 980.0, 1400.0] {
+            let (left, right) = export_side_widths(width);
+            let center = export_center_width(width);
+            assert!(center >= 250.0);
+            assert!(left + center + right <= width + 1e-3 || center == 250.0, "overlap at {width}px");
         }
     }
 }
