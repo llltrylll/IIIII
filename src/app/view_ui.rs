@@ -3,16 +3,10 @@ use super::*;
 
 impl PainterApp {
     fn finish_walk_navigation(&mut self) {
-        let eye = self.cam.eye();
-        let forward = (self.cam.target - eye).normalize_or_zero();
-        let focus = if forward.length_squared() > 0.5 {
-            self.bvh.raycast(eye, forward).map(|hit| hit.pos)
-        } else {
-            None
-        };
-        let model_diagonal = (self.mesh.bounds_max - self.mesh.bounds_min).length();
-        let minimum_orbit_distance = (model_diagonal * 0.6).clamp(1.0, 2.5);
-        self.cam.finish_walk_navigation(focus, minimum_orbit_distance);
+        // First-person movement already keeps the orbit target on the look ray.
+        // Do not snap the pivot to a BVH surface hit or scale its radius by the
+        // model bounds: either can move the orbit center farther away on exit.
+        self.cam.finish_walk_navigation(None, 0.3);
     }
 
     pub(super) fn view_input(&mut self, ui: &egui::Ui, kind: ViewKind, rect: Rect, resp: &egui::Response) {
