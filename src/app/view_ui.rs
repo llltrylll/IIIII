@@ -530,7 +530,7 @@ impl PainterApp {
         if kind == ViewKind::V3d && self.color_hud_open {
             let width = 436.0;
             let left = (rect.right() - width - 8.0).max(rect.left() + 8.0);
-            egui::Area::new(egui::Id::new("color_hud_overlay"))
+            egui::Area::new(egui::Id::unique("color_hud_overlay"))
                 .order(egui::Order::Foreground)
                 .fixed_pos(pos2(left, rect.top() + 8.0))
                 .show(ui.ctx(), |ui| {
