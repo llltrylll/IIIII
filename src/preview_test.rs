@@ -38,6 +38,64 @@ fn map_mode(name: &str) -> ViewMode {
 
 #[test]
 #[ignore]
+fn viewport_cache_reuses_unchanged_images_and_invalidates_changes() {
+    use crate::mesh::Primitive;
+    use crate::viewport::Cam2d;
+    use glam::Vec2;
+
+    let mesh = Primitive::RoundedCube.build();
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 64);
+    engine.composite();
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+    let mut views = ViewRenderer::new(&rs);
+    let size = [320, 240];
+    let settings = ViewSettings::default();
+    let cam_a = OrbitCam::default();
+
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam_a, &settings, None);
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam_a, &settings, None);
+    assert_eq!(views.view3d_cache_hits, 1, "unchanged 3D view should reuse its raster image");
+
+    let cam_b = OrbitCam { yaw: cam_a.yaw + 0.2, ..cam_a };
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam_b, &settings, None);
+    assert_eq!(views.view3d_cache_hits, 1, "camera movement must invalidate the 3D cache");
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam_b, &settings, None);
+    assert_eq!(views.view3d_cache_hits, 2, "the new camera should then become cacheable");
+
+    let mut undo = crate::undo::UndoStack::default();
+    engine.add_paint_layer(0, None, None, &mut undo);
+    engine.composite();
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam_b, &settings, None);
+    assert_eq!(views.view3d_cache_hits, 2, "a material composite must invalidate the 3D cache");
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam_b, &settings, None);
+    assert_eq!(views.view3d_cache_hits, 3, "the updated material should become cacheable");
+
+    let uv_a = Cam2d { zoom: 120.0, pan: Vec2::ZERO };
+    views.render_2d(&rs, size, &engine, &env, &gpu_mesh, 0, &uv_a, &settings);
+    views.render_2d(&rs, size, &engine, &env, &gpu_mesh, 0, &uv_a, &settings);
+    assert_eq!(views.view2d_cache_hits, 1, "unchanged UV view should reuse its raster image");
+
+    let uv_b = Cam2d { zoom: 150.0, ..uv_a };
+    views.render_2d(&rs, size, &engine, &env, &gpu_mesh, 0, &uv_b, &settings);
+    assert_eq!(views.view2d_cache_hits, 1, "UV camera movement must invalidate the 2D cache");
+    views.render_2d(&rs, size, &engine, &env, &gpu_mesh, 0, &uv_b, &settings);
+    assert_eq!(views.view2d_cache_hits, 2, "the new UV camera should then become cacheable");
+
+    engine.add_paint_layer(0, None, None, &mut undo);
+    engine.composite();
+    views.render_2d(&rs, size, &engine, &env, &gpu_mesh, 0, &uv_b, &settings);
+    assert_eq!(views.view2d_cache_hits, 2, "a material composite must invalidate the UV cache");
+    views.render_2d(&rs, size, &engine, &env, &gpu_mesh, 0, &uv_b, &settings);
+    assert_eq!(views.view2d_cache_hits, 3, "the updated UV material should become cacheable");
+
+    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+}
+
+#[test]
+#[ignore]
 fn preview_mesh() {
     let mesh = match std::env::var("MP_PREVIEW_MESH").as_deref() {
         Ok("ball") => crate::mesh::Primitive::MaterialBall.build(),
