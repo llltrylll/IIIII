@@ -4191,7 +4191,7 @@ impl PainterApp {
                 // Ray trace remains in View and on F10; this toolbar slot opens the Color HUD.
                 if matches!(self.tool, Tool::Paint | Tool::Picker) && self.target == StrokeTarget::Content {
                     let color_btn=ui.add(theme::selectable(self.color_hud_open,theme::with_icon(icons::DROP,"Color")))
-                        .on_hover_text("Open the color HUD (G, or A to open): picker, eyedropper, second color, recent and favorite colors");
+                        .on_hover_text("Open the color HUD (G, or A to open): picker, eyedropper, second color and HEX");
                     if color_btn.clicked() {
                         self.color_hud_open = !self.color_hud_open;
                         if self.color_hud_open {
@@ -4472,6 +4472,7 @@ impl PainterApp {
         // both the old left-hand position and the marked color strip available.
         let color_strip_width = if width >= 900.0 { 420.0 } else { width * 0.30 };
         let status_row_width = (width - color_strip_width).max(1.0);
+        let row_origin = ui.cursor().min;
         ui.allocate_ui_with_layout(
             vec2(status_row_width, 24.0),
             egui::Layout::right_to_left(egui::Align::Center),
@@ -4491,6 +4492,13 @@ impl PainterApp {
             },
         );
         if paint {
+            // Recent and favorite colors use the whole status row (the status
+            // message is being moved to the bottom-right corner).
+            let strip = Rect::from_min_size(row_origin, vec2(width, 24.0));
+            ui.scope_builder(
+                egui::UiBuilder::new().max_rect(strip).layout(egui::Layout::left_to_right(egui::Align::Center)),
+                |ui| self.color_history_bar(ui),
+            );
             ui.add_space(2.0);
             ui.allocate_ui_with_layout(
                 vec2(width, 26.0),
