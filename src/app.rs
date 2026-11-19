@@ -4467,43 +4467,70 @@ impl PainterApp {
         let width = ui.available_width().max(1.0);
         ui.set_min_size(vec2(width, if paint { 56.0 } else { 22.0 }));
 
-        // Reserve the rightmost strip for recent/favorite color swatches.
-        // Status messages sit at the right edge of the remaining area, leaving
-        // both the old left-hand position and the marked color strip available.
-        let color_strip_width = if width >= 900.0 { 420.0 } else { width * 0.30 };
-        let status_row_width = (width - color_strip_width).max(1.0);
+        // Keep the complete first row available to the recent/favorite colors.
+        // Status and diagnostic indicators live on the lower row instead.
         let row_origin = ui.cursor().min;
-        ui.allocate_ui_with_layout(
-            vec2(status_row_width, 24.0),
-            egui::Layout::right_to_left(egui::Align::Center),
-            |ui| {
-                let status = ui.label(egui::RichText::new(&self.status).color(theme::TEXT_DIM));
-                status.on_hover_text(&self.status);
+        let mut status_text = self.status.clone();
+        if self.diagnostics.active {
+            status_text.push_str(" · RAY CAPTURE ON · Ctrl+F2 TO STOP");
+        }
+        if let Some(server) = &self.mcp
+            && server.enabled.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            status_text.push_str(&format!(" · MCP :{}", server.port));
+        }
 
-                if self.diagnostics.active {
-                    ui.label(egui::RichText::new("RAY CAPTURE ON  ·  Ctrl+F2 TO STOP").strong().color(theme::ACCENT));
-                }
-                if let Some(server) = &self.mcp
-                    && server.enabled.load(std::sync::atomic::Ordering::Relaxed)
-                {
-                    ui.label(egui::RichText::new(format!("MCP :{}", server.port)).color(theme::ACCENT).small())
-                        .on_hover_text(format!("AI agents can connect at {}", server.url()));
-                }
-            },
-        );
         if paint {
-            // Recent and favorite colors use the whole status row (the status
-            // message is being moved to the bottom-right corner).
+            // Reserve line 1 for the color tray; the overlay below uses this exact row.
+            ui.allocate_space(vec2(width, 24.0));
             let strip = Rect::from_min_size(row_origin, vec2(width, 24.0));
             ui.scope_builder(
                 egui::UiBuilder::new().max_rect(strip).layout(egui::Layout::left_to_right(egui::Align::Center)),
                 |ui| self.color_history_bar(ui),
             );
+
             ui.add_space(2.0);
             ui.allocate_ui_with_layout(
                 vec2(width, 26.0),
                 egui::Layout::left_to_right(egui::Align::Center),
-                |ui| self.technical_metrics_bar(ui),
+                |ui| {
+                    // The metrics stay on the left; the status is anchored to
+                    // the lower-right and gets a bounded width on narrow windows.
+                    let status_width = (width * 0.38).clamp(120.0, 380.0).min(width);
+                    let metrics_width = (width - status_width).max(0.0);
+                    ui.allocate_ui_with_layout(
+                        vec2(metrics_width, 26.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| self.technical_metrics_bar(ui),
+                    );
+                    ui.allocate_ui_with_layout(
+                        vec2(status_width, 26.0),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            let label = ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(status_text.clone()).small().color(theme::TEXT_DIM)
+                                ).truncate()
+                            );
+                            label.on_hover_text(status_text.clone());
+                        },
+                    );
+                },
+            );
+        } else {
+            // Other workspaces have no color/metrics row; keep status at the
+            // right edge of their single-line footer.
+            ui.allocate_ui_with_layout(
+                vec2(width, 22.0),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    let label = ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(status_text.clone()).small().color(theme::TEXT_DIM)
+                        ).truncate()
+                    );
+                    label.on_hover_text(status_text.clone());
+                },
             );
         }
     }
