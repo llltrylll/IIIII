@@ -953,7 +953,7 @@ impl ViewRenderer {
             return Ok(());
         };
         let src = format!(
-            "{}\n{code}\n@fragment\nfn fs_mesh_custom(in: MeshOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {{\n    let c = mesh_shade_inputs(in, front);\n    if (view_alpha(c.s) < 0.5) {{\n        discard;\n    }}\n    return vec4<f32>(highlighted(max(custom_shade(c), vec3<f32>(0.0))), 1.0);\n}}\n",
+            "{}\n{code}\n@fragment\nfn fs_mesh_custom(in: MeshOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {{\n    // Custom preview is cut out at 50% opacity; reject those fragments before\n    // building the full Surface input set or evaluating custom lighting.\n    if (textureSampleLevel(t_color, samp, in.uv, 0.0).a < 0.5) {{ discard; }}\n    let c = mesh_shade_inputs(in, front);\n    if (view_alpha(c.s) < 0.5) {{\n        discard;\n    }}\n    return vec4<f32>(highlighted(max(custom_shade(c), vec3<f32>(0.0))), 1.0);\n}}\n",
             include_str!("shaders/view.wgsl")
         );
         let (pipeline, err) = crate::graph::runtime::validation_scope(device, || {

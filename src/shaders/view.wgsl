@@ -573,6 +573,12 @@ fn view_alpha(s: Surface) -> f32 {
 
 @fragment
 fn fs_mesh(in: MeshOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    // The opaque Material pass discards transparent texels. Test alpha before
+    // reconstructing normals or evaluating PBR/shadows for fragments that
+    // will be redrawn by the see-through pass.
+    if (i32(g.params.x) == 0 && textureSampleLevel(t_color, samp, in.uv, 0.0).a < OPAQUE) {
+        discard;
+    }
     let c = mesh_shade_inputs(in, front);
     if (view_alpha(c.s) < OPAQUE) {
         discard;
