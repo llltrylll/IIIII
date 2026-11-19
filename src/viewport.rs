@@ -728,7 +728,8 @@ impl View3dCacheKey {
         self.settings = *settings;
         self.engines.clear();
         self.engines.extend(engines.iter().map(|engine| ViewEngineStamp::new(engine)));
-        self.looks.clone_from(&looks.to_vec());
+        self.looks.clear();
+        self.looks.extend_from_slice(looks);
         self.hidden_objects.clear();
         self.hidden_objects.extend_from_slice(hidden_objects);
         self.overlay_generation = overlay_generation;
