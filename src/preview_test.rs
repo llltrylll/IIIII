@@ -5116,3 +5116,54 @@ fn empty_stroke_does_not_create_undo_record() {
     engine.stroke_step(&[], su, views.view3d.depth_view(), &paint, None);
     assert!(engine.end_stroke().is_none(), "empty strokes must not create Undo snapshots");
 }
+
+
+/// The first real paint pass captures the before-state; Undo and Redo must
+/// reproduce the exact texture even when the paint channel did not exist
+/// when the pointer went down.
+#[test]
+#[ignore]
+fn first_paint_pass_lazily_captures_undo_before_snapshot() {
+    use crate::engine::{BrushPaint, Content, Edit, Engine, FillParams, MatValues, PolyGeometry};
+    use crate::undo::{StrokeTarget, UndoStack};
+
+    let mesh = Arc::new(crate::mesh::Primitive::Plane.build());
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 128);
+    let mut undo = UndoStack::default();
+    engine.add_paint_layer(0, None, None, &mut undo);
+    engine.composite();
+    let baseline = read_texture(&rs.device, &rs.queue, engine.final_tex(0));
+
+    let channels = [true, false, false, false, false, false, false, false];
+    assert!(engine.begin_stroke(0, StrokeTarget::Content, channels, false));
+    let Content::Paint(before_begin) = &engine.layers[0].content else { panic!("expected paint layer") };
+    assert!(before_begin[0].is_none(), "beginning a stroke must not allocate an unused channel");
+    let paint = BrushPaint {
+        mat: MatValues { color: [0.9, 0.08, 0.04], enabled: channels, ..Default::default() },
+        mask_value: 1.0,
+        opacity: 1.0,
+        erase: false,
+        grain: [0.0; 4],
+    };
+    engine.stroke_polys(
+        &PolyGeometry { faces: vec![[0.15, 0.15], [0.85, 0.15], [0.5, 0.85]], padding: Vec::new() },
+        &paint,
+    );
+    let entry = engine.end_stroke().expect("a submitted paint pass must capture an Undo before-state");
+    undo.push("Paint stroke", Edit::Stroke(entry));
+    engine.composite();
+    let painted = read_texture(&rs.device, &rs.queue, engine.final_tex(0));
+    assert_ne!(painted, baseline, "the first stroke must change the composite");
+
+    engine.undo(&mut undo);
+    engine.composite();
+    let undone = read_texture(&rs.device, &rs.queue, engine.final_tex(0));
+    assert_eq!(undone, baseline, "Undo must restore the pre-stroke texture exactly");
+
+    engine.redo(&mut undo);
+    engine.composite();
+    let redone = read_texture(&rs.device, &rs.queue, engine.final_tex(0));
+    assert_eq!(redone, painted, "Redo must restore the exact painted texture");
+}

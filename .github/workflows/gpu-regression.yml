@@ -118,6 +118,9 @@ jobs:
       - name: GPU regression - empty strokes skip final Undo readback
         run: "cargo test --locked --bin material_painter preview_test::empty_stroke_does_not_create_undo_record -- --ignored --exact --nocapture --test-threads 1"
 
+      - name: GPU regression - lazy Undo before-snapshot roundtrip
+        run: "cargo test --locked --bin material_painter preview_test::first_paint_pass_lazily_captures_undo_before_snapshot -- --ignored --exact --nocapture --test-threads 1"
+
       - name: GPU parity - nested folders and masks
         run: "cargo test --locked --bin material_painter preview_test::multi_scissor_nested_folder_matches_full -- --ignored --exact --nocapture --test-threads 1"
 

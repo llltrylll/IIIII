@@ -1211,9 +1211,8 @@ struct ActiveStroke {
     layer_id: u64,
     target: StrokeTarget,
     channels: Vec<usize>,
-    before: Snapshot,
-    /// Becomes true only after a non-empty paint/apply pass is submitted.
-    changed: bool,
+    /// Captured on the first valid paint pass, not when the pointer goes down.
+    before: Option<Snapshot>,
 }
 
 struct Pipelines {
@@ -3925,16 +3924,11 @@ impl Engine {
     /// Starts a stroke on the content or mask of layer `idx`. Returns false if
     /// there is nothing paintable there.
     pub fn begin_stroke(&mut self, idx: usize, target: StrokeTarget, enabled: [bool; CHANNELS], erase: bool) -> bool {
-        self.ensure_stroke_target();
         if let StrokeTarget::BakeFix(map) = target {
             if !self.begin_fix_stroke(map, erase) {
                 return false;
             }
-            let c = Self::FIX_CHANNEL;
-            if self.snap[c].is_none() {
-                self.snap[c] = Some(Tex::new(&self.device, "snapshot", self.res, self.res, PAINT_FORMATS[c], LAYER_USAGE));
-            }
-            return self.encode_stroke_start(0, target, vec![c]);
+            return self.encode_stroke_start(0, target, vec![Self::FIX_CHANNEL]);
         }
         let Some(layer) = self.layers.get(idx) else { return false };
         let layer_id = layer.id;
@@ -3953,47 +3947,75 @@ impl Engine {
         if target == StrokeTarget::Content && channels.is_empty() {
             return false;
         }
+        // Texture creation, stroke-mask clearing, and Undo readback are deferred
+        // until the first paint pass has valid stamps and non-empty UV scissors.
+        // A click/miss therefore performs no snapshot submit and allocates no
+        // previously-unused channel or mask texture.
+        self.encode_stroke_start(layer_id, target, channels)
+    }
+
+    /// Starts the logical stroke only. GPU resources and the before-snapshot
+    /// are prepared lazily in the first valid paint encoder.
+    fn encode_stroke_start(&mut self, layer_id: u64, target: StrokeTarget, channels: Vec<usize>) -> bool {
+        self.stamp_bg = [None, None];
+        self.apply_bg = None;
+        self.active = Some(ActiveStroke { layer_id, target, channels, before: None });
+        true
+    }
+
+    /// Encodes the initial stroke clear, target-to-snapshot copies and Undo
+    /// readback into the same command buffer as the first real paint pass.
+    /// Returns the pending before-snapshot, which must be installed and mapped
+    /// only after that command buffer has been submitted.
+    fn encode_lazy_stroke_start(&mut self, encoder: &mut wgpu::CommandEncoder) -> Option<Snapshot> {
+        let (layer_id, target, channels) = self.active.as_ref()
+            .filter(|active| active.before.is_none())
+            .map(|active| (active.layer_id, active.target, active.channels.clone()))?;
+
         match target {
             StrokeTarget::Content => {
-                for &c in &channels {
-                    self.ensure_channel(idx, c);
-                    if self.snap[c].is_none() {
-                        self.snap[c] =
-                            Some(Tex::new(&self.device, "snapshot", self.res, self.res, PAINT_FORMATS[c], LAYER_USAGE));
+                let idx = self.layers.iter().position(|layer| layer.id == layer_id)
+                    .expect("active paint layer still exists");
+                for &channel in &channels {
+                    self.ensure_channel(idx, channel);
+                    if self.snap[channel].is_none() {
+                        self.snap[channel] = Some(Tex::new(
+                            &self.device, "snapshot", self.res, self.res, PAINT_FORMATS[channel], LAYER_USAGE,
+                        ));
                     }
                 }
             }
             StrokeTarget::Mask => {
+                let idx = self.layers.iter().position(|layer| layer.id == layer_id)
+                    .expect("active mask layer still exists");
                 self.ensure_mask_paint(idx);
                 if self.snap_mask.is_none() {
-                    self.snap_mask =
-                        Some(Tex::new(&self.device, "mask snapshot", self.res, self.res, MASK_FORMAT, LAYER_USAGE));
+                    self.snap_mask = Some(Tex::new(
+                        &self.device, "mask snapshot", self.res, self.res, MASK_FORMAT, LAYER_USAGE,
+                    ));
                 }
             }
-            StrokeTarget::BakeFix(_) => unreachable!("handled above"),
+            StrokeTarget::BakeFix(_) => {
+                let channel = Self::FIX_CHANNEL;
+                if self.snap[channel].is_none() {
+                    self.snap[channel] = Some(Tex::new(
+                        &self.device, "snapshot", self.res, self.res, PAINT_FORMATS[channel], LAYER_USAGE,
+                    ));
+                }
+            }
         }
-        self.encode_stroke_start(layer_id, target, channels)
-    }
 
-    /// Snapshots the stroke target (stroke base + undo "before") and clears the stroke mask.
-    fn encode_stroke_start(&mut self, layer_id: u64, target: StrokeTarget, channels: Vec<usize>) -> bool {
-        self.stamp_bg = [None, None];
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        gpu::clear_texture(&mut encoder, &self.stroke, wgpu::Color::TRANSPARENT);
+        self.ensure_stroke_target();
+        gpu::clear_texture(encoder, &self.stroke, wgpu::Color::TRANSPARENT);
         let textures = self.target_textures(layer_id, target, &channels).expect("stroke target exists");
         let snaps: Vec<&Tex> = match target {
-            StrokeTarget::Mask => vec![self.snap_mask.as_ref().unwrap()],
-            _ => channels.iter().map(|&c| self.snap[c].as_ref().unwrap()).collect(),
+            StrokeTarget::Mask => vec![self.snap_mask.as_ref().expect("mask snapshot was allocated")],
+            _ => channels.iter().map(|&channel| self.snap[channel].as_ref().expect("channel snapshot was allocated")).collect(),
         };
-        for (src, dst) in textures.iter().zip(&snaps) {
-            encoder.copy_texture_to_texture(src.copy_info(), dst.copy_info(), src.extent());
+        for (source, snapshot) in textures.iter().zip(&snaps) {
+            encoder.copy_texture_to_texture(source.copy_info(), snapshot.copy_info(), source.extent());
         }
-        let before = Snapshot::encode(&self.device, &mut encoder, &textures, self.snapshot_buffer_pool.clone());
-        self.queue.submit([encoder.finish()]);
-        before.request_map();
-        self.apply_bg = None;
-        self.active = Some(ActiveStroke { layer_id, target, channels, before, changed: false });
-        true
+        Some(Snapshot::encode(&self.device, encoder, &textures, self.snapshot_buffer_pool.clone()))
     }
 
     fn apply_pipeline(&self, mask: u8) -> wgpu::RenderPipeline {
@@ -4139,6 +4161,7 @@ impl Engine {
         }
         let stamp_attachments = [gpu::color_attachment(&self.stroke.view, wgpu::LoadOp::Load)];
         let mut encoder = device.create_command_encoder(&Default::default());
+        let before = self.encode_lazy_stroke_start(&mut encoder);
         if let Some(mesh) = screen_mesh {
             // Keep UV geometry and padding in one render pass. Both write the
             // same stroke target and padding excludes original island texels,
@@ -4213,8 +4236,11 @@ impl Engine {
         }
         self.encode_apply(&mut encoder, paint, profile.as_ref(), frame_scissors.as_deref());
         self.queue.submit([encoder.finish()]);
-        if let Some(active) = &mut self.active {
-            active.changed = true;
+        if let Some(mut before) = before {
+            before.request_map();
+            if let Some(active) = &mut self.active {
+                active.before = Some(before);
+            }
         }
     }
 
@@ -4272,6 +4298,7 @@ impl Engine {
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.pos.view) }],
         });
         let mut encoder = self.device.create_command_encoder(&Default::default());
+        let before = self.encode_lazy_stroke_start(&mut encoder);
         {
             let mut pass = gpu::pass(
                 &mut encoder,
@@ -4290,8 +4317,11 @@ impl Engine {
         }
         self.encode_apply(&mut encoder, paint, None, None);
         self.queue.submit([encoder.finish()]);
-        if let Some(active) = &mut self.active {
-            active.changed = true;
+        if let Some(mut before) = before {
+            before.request_map();
+            if let Some(active) = &mut self.active {
+                active.before = Some(before);
+            }
         }
     }
 
@@ -4642,14 +4672,13 @@ impl Engine {
             self.last_end_stages_ms = stages;
             return None;
         };
-        // Empty/missed strokes never submit a paint pass. Their before snapshot
-        // is discarded with the active stroke; do not read back an identical
-        // after-state or add a no-op entry to Undo history.
-        if !active.changed {
+        // Empty/missed strokes never prepare a before-snapshot. They do not
+        // generate an after readback or a no-op entry in Undo history.
+        let Some(before) = active.before else {
             stages[0] = phase.elapsed().as_secs_f64() * 1000.0;
             self.last_end_stages_ms = stages;
             return None;
-        }
+        };
         // Content strokes only target Paint layers; their contents are not
         // shown in layer thumbnails. Avoid scanning and hashing the whole stack
         // at release when the stroke cannot have invalidated a thumbnail.
@@ -4697,7 +4726,7 @@ impl Engine {
             layer_id: active.layer_id,
             target: active.target,
             channels: active.channels,
-            before: active.before,
+            before,
             after,
         })
     }
