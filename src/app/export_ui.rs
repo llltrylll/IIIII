@@ -175,6 +175,24 @@ fn chan_picker(ui: &mut egui::Ui, id: (usize, usize), label: &str, c: &mut Chan)
     changed
 }
 
+/// The export editor belongs to the 3D work area, not the full application
+/// window. Keeping it inside the viewport leaves the shelf and layer docks usable.
+fn export_dialog_rect(view_rect: Option<egui::Rect>, content_rect: egui::Rect) -> egui::Rect {
+    let viewport_is_usable = view_rect.is_some_and(|rect| rect.width() >= 620.0 && rect.height() >= 380.0);
+    let bounds = if viewport_is_usable {
+        view_rect.unwrap()
+    } else {
+        content_rect
+    };
+    bounds.shrink(8.0)
+}
+
+fn export_side_widths(width: f32) -> (f32, f32) {
+    let templates = (width * 0.21).clamp(128.0, 226.0);
+    let settings = (width * 0.27).clamp(168.0, 330.0);
+    (templates, settings)
+}
+
 /// Editor for one output map; returns true to delete it.
 fn map_editor(ui: &mut egui::Ui, i: usize, m: &mut OutputMap, editable: bool) -> bool {
     let mut delete = false;
@@ -359,17 +377,20 @@ impl PainterApp {
         }
 
         let mut open = true;
+        let dialog_rect = export_dialog_rect(self.custom_ui.view_rect, ctx.content_rect());
+        let (template_width, settings_width) = export_side_widths(dialog_rect.width());
         egui::Window::new("Export Textures")
             .open(&mut open)
             .collapsible(false)
-            .default_size([980.0, 600.0])
-            .min_size([760.0, 420.0])
+            .fixed_pos(dialog_rect.min)
+            .fixed_size(dialog_rect.size())
+            .resizable(false)
             .show(ctx, |ui| {
                 let sel = self.export.find(&self.prefs.export_template).unwrap_or(0);
                 // Side panels of fixed width and a middle that takes what the
                 // window has left, so the window keeps the size it is given.
                 egui::Panel::left("export templates")
-                    .exact_size(226.0)
+                    .exact_size(template_width)
                     .frame(egui::Frame::new().inner_margin(egui::Margin { right: 10, ..Default::default() }))
                     .show(ui, |ui| {
                         section(ui, "Output templates");
@@ -381,7 +402,7 @@ impl PainterApp {
                                     ui.label(egui::RichText::new("Your templates").small().color(theme::TEXT_DIM));
                                 }
                                 last_builtin = t.builtin;
-                                if ui.add_sized([204.0, 22.0], theme::selectable(t.name == self.prefs.export_template, t.name.as_str())).clicked() {
+                                if ui.add_sized([ui.available_width(), 22.0], theme::selectable(t.name == self.prefs.export_template, t.name.as_str())).clicked() {
                                     self.prefs.export_template = t.name.clone();
                                 }
                             }
@@ -407,7 +428,7 @@ impl PainterApp {
                         });
                     });
                 egui::Panel::right("export settings")
-                    .exact_size(330.0)
+                    .exact_size(settings_width)
                     .frame(egui::Frame::new().inner_margin(egui::Margin { left: 12, ..Default::default() }))
                     .show(ui, |ui| {
                     let sel = self.export.find(&self.prefs.export_template).unwrap_or(0);
@@ -607,3 +628,39 @@ mod export_selection_tests {
         assert!(selected_template_maps(&template, &[false, false]).maps.is_empty());
     }
 }
+
+#[cfg(test)]
+mod export_window_layout_tests {
+    use super::{export_dialog_rect, export_side_widths};
+    use eframe::egui::{pos2, vec2, Rect};
+
+    #[test]
+    fn export_dialog_stays_inside_the_3d_view_and_leaves_dock_space_clear() {
+        let view = Rect::from_min_size(pos2(360.0, 70.0), vec2(900.0, 720.0));
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(1600.0, 900.0));
+        let dialog = export_dialog_rect(Some(view), screen);
+        assert!(view.contains(dialog.min));
+        assert!(view.contains(dialog.max));
+        assert_eq!(dialog.min, view.min + vec2(8.0, 8.0));
+    }
+
+    #[test]
+    fn export_dialog_falls_back_to_content_when_no_usable_3d_view_exists() {
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0));
+        let tiny_view = Rect::from_min_size(pos2(100.0, 100.0), vec2(300.0, 200.0));
+        let dialog = export_dialog_rect(Some(tiny_view), screen);
+        assert_eq!(dialog.min, screen.min + vec2(8.0, 8.0));
+        assert_eq!(dialog.max, screen.max - vec2(8.0, 8.0));
+    }
+
+    #[test]
+    fn export_side_columns_stay_bounded_and_leave_a_center_editor() {
+        for width in [620.0, 760.0, 980.0, 1400.0] {
+            let (left, right) = export_side_widths(width);
+            assert!((128.0..=226.0).contains(&left));
+            assert!((168.0..=330.0).contains(&right));
+            assert!(width - left - right > 250.0, "center column too narrow at {width}px");
+        }
+    }
+}
+
