@@ -4161,10 +4161,10 @@ impl Engine {
         }
         // A parked Engine may still have its 1x1 placeholder stroke target.
         // Restore it before taking the attachment view for the first paint pass.
-        self.ensure_stroke_target();
-        let stamp_attachments = [gpu::color_attachment(&self.stroke.view, wgpu::LoadOp::Load)];
         let mut encoder = device.create_command_encoder(&Default::default());
         let before = self.encode_lazy_stroke_start(&mut encoder);
+        self.ensure_stroke_target();
+        let stamp_attachments = [gpu::color_attachment(&self.stroke.view, wgpu::LoadOp::Load)];
         if let Some(mesh) = screen_mesh {
             // Keep UV geometry and padding in one render pass. Both write the
             // same stroke target and padding excludes original island texels,
@@ -4239,7 +4239,7 @@ impl Engine {
         }
         self.encode_apply(&mut encoder, paint, profile.as_ref(), frame_scissors.as_deref());
         self.queue.submit([encoder.finish()]);
-        if let Some(mut before) = before {
+        if let Some(before) = before {
             before.request_map();
             if let Some(active) = &mut self.active {
                 active.before = Some(before);
@@ -4320,7 +4320,7 @@ impl Engine {
         }
         self.encode_apply(&mut encoder, paint, None, None);
         self.queue.submit([encoder.finish()]);
-        if let Some(mut before) = before {
+        if let Some(before) = before {
             before.request_map();
             if let Some(active) = &mut self.active {
                 active.before = Some(before);
