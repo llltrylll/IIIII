@@ -1592,7 +1592,9 @@ mod walk_navigation_tests {
 
         assert!(narrow.eye().distance(narrow_eye) < 1e-5);
         assert!(wide.eye().distance(wide_eye) < 1e-5);
-        assert!(wide.yaw.abs() > narrow.yaw.abs());
+        let narrow_rotation = (narrow.yaw - 0.6).abs();
+        let wide_rotation = (wide.yaw - 0.6).abs();
+        assert!(wide_rotation > narrow_rotation);
     }
 
     #[test]
