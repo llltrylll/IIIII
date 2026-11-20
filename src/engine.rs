@@ -5317,7 +5317,7 @@ impl Engine {
                 &[gpu::color_attachment(&target.view, wgpu::LoadOp::Clear(wgpu::Color::BLACK))],
             );
             pass.set_pipeline(variation_pipeline.expect("variation pipeline created for cache misses"));
-            pass.set_bind_group(0, &bg, &[(slot as u64 * UNIFORM_STRIDE) as u32]);
+            pass.set_bind_group(0, bg, &[(slot as u64 * UNIFORM_STRIDE) as u32]);
             pass.draw(0..3, 0..1);
             drop(pass);
             end_composite_profile_stage(
