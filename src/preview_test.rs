@@ -4825,6 +4825,13 @@ fn bloom_glows_around_red_emission() {
     // Exercise target replacement while the cached post/Bloom bind groups exist,
     // then return to the original dimensions and require identical pixels.
     drop(frame);
+    let mut threshold_settings = ViewSettings::default();
+    threshold_settings.post.bloom = 1.0;
+    threshold_settings.post.bloom_threshold = 0.2;
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &threshold_settings, None);
+    let low_threshold = read_texture(&rs.device, &rs.queue, views.view3d.image());
+    assert_ne!(low_threshold, glow, "changing the Bloom threshold must update its cached uniform");
+
     let mut resize_settings = ViewSettings::default();
     resize_settings.post.bloom = 1.0;
     views.render_3d(&rs, [384, 384], &[&engine], &env, &gpu_mesh, &cam, &resize_settings, None);
