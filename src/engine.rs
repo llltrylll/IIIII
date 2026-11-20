@@ -5219,7 +5219,12 @@ impl Engine {
     /// Whether the current layer stack can read packed baked-map groups B/C.
     /// This lets ordinary paint-only composites run while those maps stay evicted.
     pub(crate) fn composite_needs_baked_map_groups(&self) -> bool {
-        self.layers.iter().any(|layer| {
+        // Levels and painted fixes can be changed after a group was evicted.
+        // Resolving those adjusted maps also requires the original B/C source.
+        let adjusted_baked_maps = (4..=9).any(|index| {
+            self.map_fix[index].is_some() || self.map_levels[index] != Levels::default()
+        });
+        adjusted_baked_maps || self.layers.iter().any(|layer| {
             let fill_needs_maps = matches!(
                 &layer.content,
                 Content::Fill(fill) if fill.part_var.abs() > 1e-4 || fill.graph.is_some()
