@@ -19,6 +19,8 @@ pub struct TexInfo {
     pub width: u32,
     pub height: u32,
     pub bpp: u32,
+    /// Byte offset of this texture's tightly packed pixels in the shared staging buffer.
+    pub offset: u64,
 }
 
 /// Reuses completed Undo readback buffers across a document's Texture Sets.
@@ -85,13 +87,8 @@ impl SnapshotBufferPool {
 }
 
 enum SnapState {
-    Mapping { buffers: Vec<wgpu::Buffer>, remaining: Arc<AtomicUsize> },
-    Compressing {
-        receiver: mpsc::Receiver<Vec<u8>>,
-        packed: Vec<Vec<u8>>,
-        pending_raw_bytes: usize,
-        total: usize,
-    },
+    Mapping { buffer: Option<wgpu::Buffer>, remaining: Arc<AtomicUsize> },
+    Compressing { receiver: mpsc::Receiver<Vec<Vec<u8>>>, pending_raw_bytes: usize },
     Ready(Vec<Vec<u8>>),
 }
 
@@ -104,51 +101,59 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    /// Encodes copies of `textures` into fresh staging buffers. Call
-    /// [`Snapshot::request_map`] after the encoder has been submitted.
+    /// Encodes all texture copies into one contiguous staging buffer. Keeping
+    /// one mapped allocation per snapshot avoids repeated driver allocations
+    /// and map callbacks when a stroke touches several paint channels.
+    /// Call [`Snapshot::request_map`] after the encoder has been submitted.
     pub fn encode(
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         textures: &[&Tex],
         pool: Arc<SnapshotBufferPool>,
     ) -> Snapshot {
-        let mut infos = Vec::new();
-        let mut buffers = Vec::new();
+        let mut infos = Vec::with_capacity(textures.len());
+        let mut total_bytes = 0u64;
         for tex in textures {
             let bpp = bytes_per_texel(tex.format);
             let row = tex.width * bpp;
             debug_assert!(row.is_multiple_of(256), "texture rows must be 256-byte aligned for readback");
-            let buffer = pool.take(device, (row * tex.height) as u64);
+            let size = u64::from(row) * u64::from(tex.height);
+            infos.push(TexInfo { width: tex.width, height: tex.height, bpp, offset: total_bytes });
+            total_bytes = total_bytes.saturating_add(size);
+        }
+        let accounted_bytes = infos.iter().fold(0usize, |sum, info| {
+            sum.saturating_add(info.width as usize * info.height as usize * info.bpp as usize)
+        });
+        if total_bytes == 0 {
+            return Snapshot { infos, state: SnapState::Ready(Vec::new()), pool, accounted_bytes };
+        }
+
+        let buffer = pool.take(device, total_bytes);
+        for (tex, info) in textures.iter().zip(&infos) {
+            let row = tex.width * info.bpp;
             encoder.copy_texture_to_buffer(
                 tex.copy_info(),
                 wgpu::TexelCopyBufferInfo {
                     buffer: &buffer,
                     layout: wgpu::TexelCopyBufferLayout {
-                        offset: 0,
+                        offset: info.offset,
                         bytes_per_row: Some(row),
                         rows_per_image: Some(tex.height),
                     },
                 },
                 tex.extent(),
             );
-            infos.push(TexInfo { width: tex.width, height: tex.height, bpp });
-            buffers.push(buffer);
         }
-        let remaining = Arc::new(AtomicUsize::new(buffers.len()));
-        let accounted_bytes = infos.iter().fold(0usize, |sum, info| {
-            sum.saturating_add(info.width as usize * info.height as usize * info.bpp as usize)
-        });
-        Snapshot { infos, state: SnapState::Mapping { buffers, remaining }, pool, accounted_bytes }
+        let remaining = Arc::new(AtomicUsize::new(1));
+        Snapshot { infos, state: SnapState::Mapping { buffer: Some(buffer), remaining }, pool, accounted_bytes }
     }
 
     pub fn request_map(&self) {
-        if let SnapState::Mapping { buffers, remaining } = &self.state {
-            for b in buffers {
-                let remaining = remaining.clone();
-                b.slice(..).map_async(wgpu::MapMode::Read, move |_| {
-                    remaining.fetch_sub(1, Ordering::AcqRel);
-                });
-            }
+        if let SnapState::Mapping { buffer: Some(buffer), remaining } = &self.state {
+            let remaining = remaining.clone();
+            buffer.slice(..).map_async(wgpu::MapMode::Read, move |_| {
+                remaining.fetch_sub(1, Ordering::AcqRel);
+            });
         }
     }
 
@@ -158,72 +163,47 @@ impl Snapshot {
         })
     }
 
-    /// Advances the state machine without blocking. Compression runs one
-    /// texture at a time and uses a one-item channel: the raw image can be
-    /// released before the next image is copied/compressed, avoiding a second
-    /// full-size collection of uncompressed snapshots in system RAM.
+    /// Advances the state machine without blocking. One mapped allocation is
+    /// compressed texture-by-texture on a worker, then returned to the pool.
     pub fn update(&mut self) {
         if matches!(&self.state, SnapState::Ready(_)) {
             return;
         }
-        let mut mapped_buffers = None;
-        if let SnapState::Mapping { buffers, remaining } = &mut self.state
+        let mut mapped_buffer = None;
+        if let SnapState::Mapping { buffer, remaining } = &mut self.state
             && remaining.load(Ordering::Acquire) == 0 {
-                mapped_buffers = Some(std::mem::take(buffers));
+                mapped_buffer = buffer.take();
             }
 
-        if let Some(buffers) = mapped_buffers {
-            let total = buffers.len();
+        if let Some(buffer) = mapped_buffer {
+            let infos = self.infos.clone();
             let pending_raw_bytes = self.uncompressed_bytes();
-            // One-item back-pressure keeps the worker from getting ahead of
-            // the UI while allowing non-blocking try_recv() polling each frame.
             let (tx, receiver) = mpsc::sync_channel(1);
             let pool = self.pool.clone();
             rayon::spawn(move || {
-                for buffer in buffers {
-                    // Compress directly from the mapped staging memory. A
-                    // separate raw Vec would duplicate an entire texture
-                    // while the mapped buffer still owns the same pixels.
-                    let compressed = {
-                        let mapped = buffer.slice(..).get_mapped_range().expect("staging buffer is mapped");
-                        lz4_flex::compress_prepend_size(&mapped)
-                    };
-                    buffer.unmap();
-                    pool.recycle(buffer);
-                    if tx.send(compressed).is_err() {
-                        break;
-                    }
-                }
+                let compressed = {
+                    let mapped = buffer.slice(..).get_mapped_range().expect("staging buffer is mapped");
+                    infos.iter().map(|info| {
+                        let size = u64::from(info.width) * u64::from(info.height) * u64::from(info.bpp);
+                        let start = info.offset as usize;
+                        let end = start.saturating_add(size as usize);
+                        lz4_flex::compress_prepend_size(&mapped[start..end])
+                    }).collect::<Vec<_>>()
+                };
+                buffer.unmap();
+                pool.recycle(buffer);
+                let _ = tx.send(compressed);
             });
-            self.state = SnapState::Compressing {
-                receiver,
-                packed: Vec::with_capacity(total),
-                pending_raw_bytes,
-                total,
-            };
+            self.state = SnapState::Compressing { receiver, pending_raw_bytes };
             return;
         }
 
         let mut ready = None;
-        if let SnapState::Compressing { receiver, packed, pending_raw_bytes, total } = &mut self.state {
-            loop {
-                match receiver.try_recv() {
-                    Ok(data) => {
-                        if let Some(info) = self.infos.get(packed.len()) {
-                            let raw_bytes = info.width as usize * info.height as usize * info.bpp as usize;
-                            *pending_raw_bytes = pending_raw_bytes.saturating_sub(raw_bytes);
-                        }
-                        packed.push(data);
-                    }
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        ready = Some(std::mem::take(packed));
-                        break;
-                    }
-                }
-            }
-            if packed.len() >= *total {
-                ready = Some(std::mem::take(packed));
+        if let SnapState::Compressing { receiver, .. } = &mut self.state {
+            match receiver.try_recv() {
+                Ok(data) => ready = Some(data),
+                Err(mpsc::TryRecvError::Disconnected) => ready = Some(Vec::new()),
+                Err(mpsc::TryRecvError::Empty) => {}
             }
         }
         if let Some(data) = ready {
@@ -243,21 +223,8 @@ impl Snapshot {
                         let _ = device.poll(wgpu::PollType::wait_indefinitely());
                     }
                 }
-                SnapState::Compressing { receiver, packed, pending_raw_bytes, total } => {
-                    match receiver.recv() {
-                        Ok(data) => {
-                            let index = packed.len();
-                            if let Some(info) = self.infos.get(index) {
-                                let raw_bytes = info.width as usize * info.height as usize * info.bpp as usize;
-                                *pending_raw_bytes = pending_raw_bytes.saturating_sub(raw_bytes);
-                            }
-                            packed.push(data);
-                            if packed.len() >= *total {
-                                ready = Some(std::mem::take(packed));
-                            }
-                        }
-                        Err(_) => ready = Some(std::mem::take(packed)),
-                    }
+                SnapState::Compressing { receiver, .. } => {
+                    ready = Some(receiver.recv().unwrap_or_default());
                 }
                 SnapState::Ready(_) => return,
             }
@@ -682,7 +649,7 @@ mod tests {
         let pending_snapshot = || Snapshot {
             infos: Vec::new(),
             state: SnapState::Mapping {
-                buffers: Vec::new(),
+                buffer: None,
                 remaining: Arc::new(std::sync::atomic::AtomicUsize::new(1)),
             },
             pool: Arc::new(SnapshotBufferPool::default()),
@@ -715,12 +682,10 @@ mod tests {
             let (tx, receiver) = mpsc::sync_channel(1);
             drop(tx);
             Snapshot {
-                infos: vec![TexInfo { width: 4, height: 4, bpp: 4 }],
+                infos: vec![TexInfo { width: 4, height: 4, bpp: 4, offset: 0 }],
                 state: SnapState::Compressing {
                     receiver,
-                    packed: vec![vec![1, 2, 3]],
                     pending_raw_bytes: 64,
-                    total: 1,
                 },
                 pool: Arc::new(SnapshotBufferPool::default()),
                 accounted_bytes: 67,
@@ -766,7 +731,7 @@ mod tests {
     fn pending_snapshot_memory_is_counted_before_compression_finishes() {
         let (_tx, receiver) = mpsc::sync_channel(1);
         let snapshot = Snapshot {
-            infos: vec![TexInfo { width: 4, height: 4, bpp: 4 }],
+            infos: vec![TexInfo { width: 4, height: 4, bpp: 4, offset: 0 }],
             state: SnapState::Compressing {
                 receiver,
                 packed: vec![vec![1, 2, 3]],
