@@ -108,6 +108,9 @@ impl PainterApp {
                 }
                 let icon = self.shelf.icon_size;
                 let search = self.shelf.search.to_lowercase();
+                // The common unfiltered shelf view should not allocate a lowercase
+                // copy for every asset on every frame.
+                let matches_search = |name: &str| search.is_empty() || name.to_lowercase().contains(&search);
                 let kind = self.shelf.kind;
                 let wanted = |k: presets::MaterialType| kind.is_none_or(|f| f == k);
                 // The type's name as a heading of its own when the type changes
@@ -150,7 +153,7 @@ impl PainterApp {
                                 }
                                 let fallback = self.shelf.materials.first().map(|t| t.id());
                                 for (i, g) in self.graphs.shelf.iter().enumerate() {
-                                    if !g.name.to_lowercase().contains(&search) {
+                                    if !matches_search(&g.name) {
                                         continue;
                                     }
                                     let Some(tex) = g.thumb.as_ref().map(|t| t.id()).or(fallback) else { continue };
@@ -180,7 +183,7 @@ impl PainterApp {
                                 let fallback = self.shelf.materials.first().map(|t| t.id());
                                 let kinds: Vec<presets::MaterialType> = self.library.local.iter().map(|m| presets::MaterialType::of(&m.name, None)).collect();
                                 let mut order: Vec<usize> = (0..self.library.local.len())
-                                    .filter(|&i| self.library.local[i].name.to_lowercase().contains(&search) && wanted(kinds[i]))
+                                    .filter(|&i| matches_search(&self.library.local[i].name) && wanted(kinds[i]))
                                     .collect();
                                 order.sort_by_key(|&i| kinds[i]);
                                 let mut last = None;
@@ -205,7 +208,7 @@ impl PainterApp {
                                 let fallback = self.shelf.smart.first().map(|t| t.id());
                                 for i in 0..self.user_smarts.len() {
                                     let s = &self.user_smarts[i];
-                                    if !s.name.to_lowercase().contains(&search) || !wanted(presets::MaterialType::of(&s.name, None)) {
+                                    if !matches_search(&s.name) || !wanted(presets::MaterialType::of(&s.name, None)) {
                                         continue;
                                     }
                                     let Some(tex) = s.thumb.as_ref().map(|t| t.id()).or(fallback) else { continue };
@@ -226,7 +229,7 @@ impl PainterApp {
                                     }
                                 }
                                 let mut order: Vec<usize> = (0..presets::SMART_MATERIALS.len())
-                                    .filter(|&i| presets::SMART_MATERIALS[i].name.to_lowercase().contains(&search) && wanted(presets::SMART_MATERIALS[i].kind()))
+                                    .filter(|&i| matches_search(presets::SMART_MATERIALS[i].name) && wanted(presets::SMART_MATERIALS[i].kind()))
                                     .collect();
                                 order.sort_by_key(|&i| presets::SMART_MATERIALS[i].kind());
                                 // Your own stay first, apart from the groups.
@@ -267,7 +270,7 @@ impl PainterApp {
                             }
                             ShelfCat::Materials => {
                                 let mut order: Vec<usize> =
-                                    (0..presets::MATERIALS.len()).filter(|&i| presets::MATERIALS[i].name.to_lowercase().contains(&search) && wanted(presets::MATERIALS[i].kind())).collect();
+                                    (0..presets::MATERIALS.len()).filter(|&i| matches_search(presets::MATERIALS[i].name) && wanted(presets::MATERIALS[i].kind())).collect();
                                 order.sort_by_key(|&i| presets::MATERIALS[i].kind());
                                 let mut last = None;
                                 for (i, m) in order.into_iter().map(|i| (i, &presets::MATERIALS[i])) {
@@ -304,7 +307,7 @@ impl PainterApp {
                             }
                             ShelfCat::Brushes => {
                                 for (i, b) in crate::brushes::BRUSH_ALPHAS.iter().enumerate() {
-                                    if !b.name.to_lowercase().contains(&search) {
+                                    if !matches_search(b.name) {
                                         continue;
                                     }
                                     let resp = Self::swatch(ui, self.shelf.brushes[i].id(), b.name, icon);
@@ -321,7 +324,7 @@ impl PainterApp {
                             }
                             ShelfCat::Textures => {
                                 for (i, t) in crate::textures::TEXTURES.iter().enumerate() {
-                                    if !t.name.to_lowercase().contains(&search) && !t.category.to_lowercase().contains(&search) {
+                                    if !matches_search(t.name) && !matches_search(t.category) {
                                         continue;
                                     }
                                     let resp = Self::swatch(ui, self.shelf.textures[i].id(), t.name, icon);
@@ -348,7 +351,7 @@ impl PainterApp {
                             }
                             ShelfCat::Generators => {
                                 for (i, g) in GenKind::ALL.iter().enumerate() {
-                                    if !g.name().to_lowercase().contains(&search) {
+                                    if !matches_search(g.name()) {
                                         continue;
                                     }
                                     let tex = self.shelf.generators[i].id();
