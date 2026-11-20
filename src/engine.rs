@@ -5200,8 +5200,8 @@ impl Engine {
                 };
                 ops.push(MaskOp::Layer { uniform: (slot as u64 * UNIFORM_STRIDE) as u32, combine: steps.len() });
                 if profile_query.is_some() {
-                op_labels.push(format!("mask layer {mask_layer_number}"));
-            }
+                    op_labels.push(format!("mask layer {mask_layer_number}"));
+                }
                 steps.push([COMBINE_STEP, ml.blend as u32 as f32, ml.opacity, value, 0.0, 0.0, scale, 0.0]);
             }
             for f in self.layers[li].mask.as_ref().map_or(&[][..], |m| &m.filters[..]).iter().filter(|f| f.enabled) {
