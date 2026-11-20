@@ -188,3 +188,7 @@ Repository branch inventory has accumulated historical agent/test branches; do n
 - At task start, inspect current branch, HEAD SHA, open PRs, changed files/diff, CI, and other agents' recent commits/comments.
 - Do not concurrently modify the same files/subsystem. State ownership in the active PR or a concise handoff comment.
 - Commit coherent units and leave a handoff with changes, invariants, tests, gaps and next steps.
+
+## Owner-local data boundary
+
+LOCAL_CONTEXT.md is intentionally ignored by Git. It is the only place for personal project details, exact computer specifications, local paths, project files, and machine-specific performance baselines. Keep confirmed and unknown hardware fields distinct. Never invent CPU, RAM, GPU memory, storage, or driver details. Do not put personal project names, private workflow notes, local paths, or machine specifications in tracked documentation. The repository is public; all tracked content, commits, PRs, and CI logs must be treated as public.
