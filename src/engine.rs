@@ -2860,6 +2860,7 @@ impl Engine {
             || self.dirty
             || self.bake_cache_key.is_none()
             || !self.baked_map_groups_resident()
+            || self.maps_dirty
             || self.resolved[1].is_some()
             || self.resolved[2].is_some()
             || self.map_fix[4..=9].iter().any(Option::is_some)
