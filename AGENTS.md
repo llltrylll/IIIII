@@ -1,6 +1,6 @@
 # Guide for AI coding agents
 
-Read [PROJECT_SCOPE.md](PROJECT_SCOPE.md) first. It is the source of truth for the production objective, defined production workload ceiling, mandatory phase order, engineering latitude, shared GPT/Claude coordination, and repository boundaries. All instructions here are subordinate to that scope. Humans: see [CONTRIBUTING.md](CONTRIBUTING.md) too.
+Read LOCAL_CONTEXT.md if it exists in the working copy. It is machine-local, ignored by Git, and contains the owner's private project scope and hardware details. Never create, commit, upload, or quote its contents into tracked files, PRs, issues, logs, or external services. If absent, ask the owner for missing private context rather than guessing. This file is the shared operating guide for GPT, Claude, Kimi, and any other coding agent. Humans: see CONTRIBUTING.md too.
 
 ## Current priority — establish the production foundation
 
@@ -24,9 +24,9 @@ Projects around 100 items are a very distant possibility, not a current target. 
 
 The owner explicitly permits major, risky, or breaking internal refactors when they materially improve production reliability and performance. Do not avoid a needed rewrite just to keep a diff small. Protect user data, add tests, preserve project compatibility deliberately, inspect rendered results, and be explicit about unvalidated runtime behavior.
 
-## Shared work with GPT and Claude
+## Shared work across GPT, Claude, and Kimi
 
-Both agents work in the same repository and must read [PROJECT_SCOPE.md](PROJECT_SCOPE.md) and this file. Claude must also read [CLAUDE.md](CLAUDE.md).
+GPT, Claude, Kimi, and any other coding agent share this repository and must read this file. Claude must also read CLAUDE.md. Read the ignored LOCAL_CONTEXT.md only from the owner's local working copy; never push it.
 
 At the start of each task, inspect current branch, HEAD SHA, open PRs, changed files/diff, CI, and the other agent's recent commits/comments. Re-fetch files and current SHAs before writing. Never assume previous chat context equals current repository state.
 
@@ -100,3 +100,18 @@ offscreen with egui_kittest into `target/bake_test/ui/`.
 4. Run the app when possible; state clearly when owner-machine testing is still required.
 5. Report measurements, test status, and unresolved risk. Never claim unperformed tests.
 6. Ensure the diff contains only task-related changes.
+
+
+## Four-branch policy
+
+The repository must have exactly four long-lived branches, with these roles:
+1. Active work branch: the only branch receiving ongoing implementation.
+2. Backup: the last known-good state before the active branch.
+3. Backup-2: the previous stable generation, one generation behind Backup.
+4. Original: the untouched fork baseline used only for comparison/recovery.
+
+Do not create additional long-lived branches for experiments, agents, builds, or tests. Kimi must work on the active branch only when explicitly assigned; otherwise it must return a patch/commit proposal without creating a fifth persistent branch. Never delete or rewrite a branch until its unique commits have been checked and preserved in one of the four canonical branches or explicitly discarded by the owner. Verify the remote branch count after cleanup.
+
+## Owner-local data boundary
+
+LOCAL_CONTEXT.md is intentionally ignored by Git. It is the only place for personal project details, exact computer specifications, local paths, project files, and machine-specific performance baselines. Keep confirmed and unknown hardware fields distinct. Never invent CPU, RAM, GPU memory, storage, or driver details. Do not put personal project names, private workflow notes, local paths, or machine specifications in tracked documentation. The repository is public; all tracked content, commits, PRs, and CI logs must be treated as public.
