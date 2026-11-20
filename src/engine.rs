@@ -5084,7 +5084,7 @@ impl Engine {
             next_slot += n;
         }
         // Each single-channel FBM prepass gets its own dynamic uniform slot.
-        let variation_noise_slots: Vec<(usize, u64, bool)> = variation_noise_misses
+        let variation_noise_slots: Vec<(usize, usize, u64, bool)> = variation_noise_misses
             .iter()
             .map(|&(_layer_slot, layer_index, layer_id, roughness)| {
                 let prepass_slot = next_slot;
