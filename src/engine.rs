@@ -5339,7 +5339,11 @@ impl Engine {
                 &mut encoder,
                 profile_query.as_deref(),
                 profile_slot,
-                format!("Fill {} FBM cache · {}", if roughness { "roughness" } else { "color" }, layer.name),
+                if profile_query.is_some() {
+                    format!("Fill {} FBM cache · {}", if roughness { "roughness" } else { "color" }, layer.name)
+                } else {
+                    String::new()
+                },
                 &mut profile_labels,
             );
         }
