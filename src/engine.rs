@@ -5034,8 +5034,8 @@ impl Engine {
         // Cache color and roughness FBM together. Both depend only on the
         // position map, variation scale and seed; channel amounts and per-part
         // variation remain cheap controls in the main layer pass.
-        let mut variation_noise_needed = HashSet::new();
-        let mut variation_noise_misses: Vec<(usize, usize, u64, bool)> = Vec::new();
+        let mut variation_noise_needed = HashSet::with_capacity(passes.len());
+        let mut variation_noise_misses: Vec<(usize, usize, u64, bool)> = Vec::with_capacity(passes.len().saturating_mul(2));
         let mut variation_noise_hits = 0u32;
         for (slot, pass) in passes.iter().enumerate() {
             let Pass::Layer(li) = *pass else { continue };
@@ -5091,7 +5091,7 @@ impl Engine {
         // Cached mask sources get an extra uniform slot after the layer passes.
         // Filtered masks run their filter stack after the source; generator-only
         // masks go directly into the persistent result texture.
-        let mut source_slot: HashMap<usize, usize> = HashMap::new();
+        let mut source_slot: HashMap<usize, usize> = HashMap::with_capacity(passes.len());
         for pass in &passes {
             if let Pass::Layer(li) | Pass::End(li) = *pass
                 && self.needs_mask_cache(li) {
@@ -5100,7 +5100,7 @@ impl Engine {
         }
         // Each enabled mask layer renders through its own uniform slot too: the
         // layer's uniform with that mask layer's generator (or none, for a fill).
-        let mut item_slots: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut item_slots: HashMap<usize, Vec<usize>> = HashMap::with_capacity(source_slot.len());
         let mut next_slot = passes.len() + source_slot.len();
         for &li in source_slot.keys() {
             let n = self.layers[li].mask.as_ref().map_or(0, |m| m.layers.iter().filter(|ml| ml.enabled).count());
@@ -5202,8 +5202,8 @@ impl Engine {
         // Filter steps' uniforms, written up front: (kind, a, b, c), (dir x, dir y, scale).
         let mut steps = std::mem::take(&mut self.mask_filter_steps_scratch);
         steps.clear();
-        let mut layer_ops: HashMap<usize, Vec<MaskOp>> = HashMap::new();
-        let mut layer_op_labels: HashMap<usize, Vec<String>> = HashMap::new();
+        let mut layer_ops: HashMap<usize, Vec<MaskOp>> = HashMap::with_capacity(source_slot.len());
+        let mut layer_op_labels: HashMap<usize, Vec<String>> = HashMap::with_capacity(source_slot.len());
         for &li in source_slot.keys() {
             if !self.has_mask_filters(li) {
                 continue;
