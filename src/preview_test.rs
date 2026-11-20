@@ -5546,6 +5546,34 @@ fn parked_baked_map_groups_release_and_restore_from_cache() {
     assert_eq!(engine.map_tex(2).width, 256);
     assert_eq!(engine.read_tex(engine.map_tex(2)), map_c_before);
 
+    // Individual eviction sizes match B=RGBA16F (8 bytes/texel) and
+    // C=RGBA8 (4 bytes/texel), including their 1x1 neutral placeholders.
+    let full_group_bytes = engine.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
+    assert!(engine.release_baked_map_mask(crate::engine::BAKED_MAP_GROUP_B));
+    let after_b_bytes = engine.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
+    assert_eq!(full_group_bytes - after_b_bytes, (256 * 256 - 1) * 8);
+    assert!(engine.release_baked_map_mask(crate::engine::BAKED_MAP_GROUP_C));
+    let after_c_bytes = engine.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
+    assert_eq!(after_b_bytes - after_c_bytes, (256 * 256 - 1) * 4);
+
+    assert!(!engine.ensure_baked_map_mask(crate::engine::BAKED_MAP_GROUP_C));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut restored_c_only = false;
+    while Instant::now() < deadline {
+        if engine.poll_baked_map_restore() {
+            restored_c_only = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(restored_c_only, "the C-only cache request should complete");
+    assert_eq!(engine.map_tex(1).width, 1, "C-only restoration must leave B evicted");
+    assert_eq!(engine.map_tex(2).width, 256);
+    assert_eq!(engine.read_tex(engine.map_tex(2)), map_c_before);
+
     // A paint-only stack has no B/C dependency, so its next composite must
     // leave the groups evicted instead of restoring 48 MiB needlessly.
     assert!(engine.release_baked_map_groups(), "the second residency cycle should evict B/C");

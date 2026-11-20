@@ -96,7 +96,11 @@ fn retained_folder_depth(current: usize, required: usize) -> usize {
 
 #[cfg(test)]
 mod working_buffer_capacity_tests {
-    use super::{layer_uniform_buffer_capacity, mask_filter_buffer_capacity, retained_folder_depth, Engine, GenKind};
+    use super::{
+        layer_uniform_buffer_capacity, mask_filter_buffer_capacity, retained_folder_depth,
+        Engine, GenKind, Mask, MaskBlend, MaskLayer, MaskSource,
+        BAKED_MAP_GROUP_B, BAKED_MAP_GROUP_C,
+    };
 
     #[test]
     fn filter_uniform_capacity_grows_without_clamping_steps() {
@@ -132,7 +136,6 @@ mod working_buffer_capacity_tests {
 
     #[test]
     fn baked_map_residency_tracks_exact_generator_group() {
-        use super::{BAKED_MAP_GROUP_B, BAKED_MAP_GROUP_C};
         for kind in [GenKind::EdgeWear, GenKind::Dust, GenKind::CreaseGrime, GenKind::PartRandom] {
             assert_eq!(
                 Engine::generator_baked_map_group_mask(&kind.default_generator()),
@@ -152,6 +155,37 @@ mod working_buffer_capacity_tests {
                 "{kind:?} does not require packed map groups B/C"
             );
         }
+    }
+
+    #[test]
+    fn mask_baked_map_dependencies_follow_enabled_generator_layers() {
+        let mut mask = Mask {
+            black_base: false,
+            paint: None,
+            generator: Some(GenKind::PartGradient.default_generator()),
+            filters: Vec::new(),
+            layers: Vec::new(),
+            graph: None,
+        };
+        assert_eq!(Engine::mask_baked_map_group_mask(&mask), BAKED_MAP_GROUP_C);
+
+        mask.generator = Some(GenKind::EdgeWear.default_generator());
+        assert_eq!(Engine::mask_baked_map_group_mask(&mask), BAKED_MAP_GROUP_B);
+
+        mask.generator = None;
+        mask.layers.push(MaskLayer {
+            source: MaskSource::Generator(GenKind::PartGradient.default_generator()),
+            blend: MaskBlend::Normal,
+            opacity: 1.0,
+            enabled: true,
+        });
+        assert_eq!(Engine::mask_baked_map_group_mask(&mask), BAKED_MAP_GROUP_C);
+
+        mask.layers[0].enabled = false;
+        assert_eq!(Engine::mask_baked_map_group_mask(&mask), 0);
+
+        mask.graph = Some(1);
+        assert_eq!(Engine::mask_baked_map_group_mask(&mask), super::BAKED_MAP_GROUP_ALL);
     }
 }
 const STROKE_FORMAT: F = F::R16Float;
