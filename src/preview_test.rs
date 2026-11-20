@@ -1206,6 +1206,72 @@ fn smart_mask_generator_cache_matches_uncached_result_and_invalidates_on_change(
     rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 }
 
+/// Stable roughness FBM is evaluated once, reused on a later composite,
+/// and invalidated when the fill seed changes. The final roughness bytes must
+/// match a fresh engine that evaluates the original inline shader path.
+#[test]
+#[ignore]
+fn fill_roughness_noise_cache_matches_inline_and_invalidates_on_change() {
+    use crate::engine::{Content, FillParams, MatValues};
+    use crate::undo::UndoStack;
+
+    let mesh = crate::mesh::Primitive::RoundedCube.build();
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let res = 128;
+    let fill = FillParams {
+        mat: MatValues {
+            enabled: [false, true, false, false, false, false, false, false],
+            rough: 0.42,
+            ..Default::default()
+        },
+        rough_var: 0.78,
+        var_scale: 2.35,
+        seed: 17.0,
+        part_var: 0.24,
+        ..Default::default()
+    };
+
+    let mut cached = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+    let mut undo = UndoStack::default();
+    let layer = cached.add_fill_layer(0, None, "Micro Roughness".into(), fill, &mut undo);
+
+    cached.composite();
+    assert_eq!(cached.last_fill_roughness_cache_misses, 1, "the first composite must generate the roughness field");
+    assert_eq!(cached.last_fill_roughness_cache_gpu_passes, 1);
+    assert_eq!(cached.last_fill_roughness_cache_hits, 0);
+    let first = read_texture(&rs.device, &rs.queue, cached.final_tex(1));
+
+    cached.mark_dirty();
+    cached.composite();
+    assert_eq!(cached.last_fill_roughness_cache_hits, 1, "the unchanged layer should reuse its FBM field");
+    assert_eq!(cached.last_fill_roughness_cache_misses, 0);
+    assert_eq!(cached.last_fill_roughness_cache_gpu_passes, 0, "a cache hit must not submit another FBM pass");
+    assert_eq!(first, read_texture(&rs.device, &rs.queue, cached.final_tex(1)));
+
+    let changed = match &mut cached.layers[layer].content {
+        Content::Fill(params) => {
+            params.seed += 9.0;
+            *params
+        }
+        _ => unreachable!(),
+    };
+    cached.mark_dirty();
+    cached.composite();
+    assert_eq!(cached.last_fill_roughness_cache_misses, 1, "changing the seed must invalidate the cached field");
+    assert_eq!(cached.last_fill_roughness_cache_gpu_passes, 1);
+
+    let mut reference = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+    let mut reference_undo = UndoStack::default();
+    reference.add_fill_layer(0, None, "Micro Roughness".into(), changed, &mut reference_undo);
+    reference.composite();
+    let actual = read_texture(&rs.device, &rs.queue, cached.final_tex(1));
+    let expected = read_texture(&rs.device, &rs.queue, reference.final_tex(1));
+    assert_eq!(actual, expected, "cached roughness FBM must match the inline evaluation exactly");
+
+    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+}
+
 /// Mask filters change what a layer covers: a white mask shows the layer
 /// everywhere, Invert hides it, noise breakup eats into it, blur on a flat
 /// mask changes nothing.
