@@ -4671,6 +4671,7 @@ impl Engine {
             }
         };
         let source_out = if steps == 0 { result } else { &scratch[0] };
+        let source_label = if profile_query.is_some() { format!("Mask source · {layer_name}") } else { String::new() };
         {
             let profile_slot = begin_composite_profile_stage(encoder, profile_query, profile_stage_count);
             let mut pass = gpu::pass(encoder, "mask source", &[gpu::color_attachment(&source_out.view, load)]);
@@ -4678,7 +4679,7 @@ impl Engine {
             pass.set_bind_group(0, source_bg, &[source_offset]);
             draw(&mut pass, regions.as_ref().map(|r| &r[0][..]));
             drop(pass);
-            end_composite_profile_stage(encoder, profile_query, profile_slot, format!("Mask source · {}", layer_name), profile_labels);
+            end_composite_profile_stage(encoder, profile_query, profile_slot, source_label, profile_labels);
         }
         let filter = |encoder: &mut wgpu::CommandEncoder, step: usize, input: &Tex, other: &Tex, out: &Tex, rects: Option<&[[u32; 4]]>, label: String, profile_stage_count: &mut usize, profile_labels: &mut Vec<String>| {
             let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -4712,7 +4713,11 @@ impl Engine {
             let last = k + 1 == steps;
             let out = if last { result } else { &scratch[1 - cur] };
             let rects = regions.as_ref().map(|r| &r[k + 1][..]);
-            let op_label = op_labels.get(k).cloned().unwrap_or_else(|| format!("Mask op {}", k + 1));
+            let op_label = if profile_query.is_some() {
+                op_labels.get(k).cloned().unwrap_or_else(|| format!("Mask op {}", k + 1))
+            } else {
+                String::new()
+            };
             match *op {
                 MaskOp::Filter { step, .. } => filter(encoder, step, &scratch[cur], &scratch[2], out, rects, op_label, profile_stage_count, profile_labels),
                 MaskOp::Layer { uniform, combine } => {
@@ -4724,9 +4729,11 @@ impl Engine {
                         pass.set_bind_group(0, source_bg, &[uniform]);
                         draw(&mut pass, rects);
                         drop(pass);
-                        end_composite_profile_stage(encoder, profile_query, profile_slot, format!("Mask layer source · {}", op_label), profile_labels);
+                        let label = if profile_query.is_some() { format!("Mask layer source · {op_label}") } else { String::new() };
+                        end_composite_profile_stage(encoder, profile_query, profile_slot, label, profile_labels);
                     }
-                    filter(encoder, combine, &scratch[cur], &scratch[2], out, rects, format!("Mask layer combine · {}", op_label), profile_stage_count, profile_labels);
+                    let label = if profile_query.is_some() { format!("Mask layer combine · {op_label}") } else { String::new() };
+                    filter(encoder, combine, &scratch[cur], &scratch[2], out, rects, label, profile_stage_count, profile_labels);
                 }
             }
             if !last { cur = 1 - cur; }
@@ -5190,7 +5197,10 @@ impl Engine {
                     MaskSource::Generator(_) => 1.0,
                 };
                 ops.push(MaskOp::Layer { uniform: (slot as u64 * UNIFORM_STRIDE) as u32, combine: steps.len() });
-                op_labels.push(format!("mask layer {}", op_labels.iter().filter(|s| s.starts_with("mask layer")).count() + 1));
+                if profile_query.is_some() {
+                let number = op_labels.len() + 1;
+                op_labels.push(format!("mask layer {number}"));
+            }
                 steps.push([COMBINE_STEP, ml.blend as u32 as f32, ml.opacity, value, 0.0, 0.0, scale, 0.0]);
             }
             for f in self.layers[li].mask.as_ref().map_or(&[][..], |m| &m.filters[..]).iter().filter(|f| f.enabled) {
@@ -5200,14 +5210,14 @@ impl Engine {
                 if f.kind == FilterKind::Blur {
                     steps.push([kind, f.a, f.b, f.c, 1.0, 0.0, scale, 0.0]);
                     ops.push(MaskOp::Filter { step: steps.len() - 1, reach, wrap });
-                    op_labels.push("Blur horizontal".to_string());
+                    if profile_query.is_some() { op_labels.push("Blur horizontal".to_string()); }
                     steps.push([kind, f.a, f.b, f.c, 0.0, 1.0, scale, 0.0]);
                     ops.push(MaskOp::Filter { step: steps.len() - 1, reach, wrap });
-                    op_labels.push("Blur vertical".to_string());
+                    if profile_query.is_some() { op_labels.push("Blur vertical".to_string()); }
                 } else {
                     steps.push([kind, f.a, f.b, f.c, 0.0, 0.0, scale, 0.0]);
                     ops.push(MaskOp::Filter { step: steps.len() - 1, reach, wrap });
-                    op_labels.push(format!("{:?}", f.kind));
+                    if profile_query.is_some() { op_labels.push(format!("{:?}", f.kind)); }
                 }
             }
             layer_op_labels.insert(li, op_labels);
