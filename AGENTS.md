@@ -102,40 +102,53 @@ offscreen with egui_kittest into `target/bake_test/ui/`.
 6. Ensure the diff contains only task-related changes.
 
 
-## Seven-branch policy — hard limit
+## Ten-branch policy — hard limit
 
-The remote repository must contain **exactly seven long-lived branches**. All agents (GPT, Claude, Kimi, Copilot or others) must respect this fixed layout. Never create an eighth branch, personal agent branch, ad-hoc feature branch, build branch or temporary test branch.
+The remote repository must contain **exactly ten long-lived branches**. All agents (GPT, Claude, Kimi, Copilot or others) must respect this fixed layout. Never create an eleventh branch, personal agent branch, ad-hoc feature branch, build branch or temporary test branch.
 
 ### Four code/recovery branches
 
-1. Active development: `perf/vulkan-fill-color-fbm-cache-20261120`. This is the only branch where production source code is changed.
+1. Active development: `perf/vulkan-fill-color-fbm-cache-20261120`. Main integration branch. The only branch for production-ready source changes.
 2. Backup: `perf/vulkan-cache-claude-ui-20261119`. Last-known recovery point immediately before the active line.
 3. Backup-2: `feat/composite-uv-diagnostics-20261118`. Older stable recovery point, one generation behind Backup.
 4. Original/fork baseline: `master`. Preserve as the reference baseline; do not use it for feature development.
 
-### Three evidence/report branches
+### Three diagnostics/report branches
 
-5. Owner's real-machine tests: `diagnostics/user-benchmarks`. Store sanitized snapshots and reports from the owner's actual tests: F5/F6 readings, FPS/frame time, layer and texture-set counts, texture resolutions, undo/readback observations, bake results, workload description, test version, GPU/backend/driver and before/after comparisons. Keep raw local paths and project files out of this public repository.
-6. Application diagnostics: `diagnostics/app-runtime`. Store application-generated diagnostics and reproducible technical evidence: profiler stage timings, GPU pass counts, cache hits/misses, resource-allocation estimates, crash/trace excerpts, regression reproductions and diagnostic-system findings. Clearly distinguish application estimates from physical GPU/VRAM telemetry.
-7. Engineering reports: `reports/engineering`. Store consolidated audits, analysis, conclusions, validation matrices, regression summaries, agent handoffs and decisions. Reports should link to commits/PRs and test snapshots where possible.
+5. Owner's real-machine tests: `diagnostics/user-benchmarks`. Store sanitized snapshots and reports from the owner's actual tests: F5/F6 readings, FPS/frame time, layer and texture-set counts, texture resolutions, undo/readback observations, bake results, workload description, app version, GPU/backend/driver and comparable before/after runs.
+6. Application diagnostics: `diagnostics/app-runtime`. Store application-generated diagnostics and reproducible technical evidence: profiler stage timings, GPU pass counts, cache hits/misses, resource-allocation estimates, crash/trace excerpts, regression reproductions and diagnostic-system findings. Clearly distinguish app estimates from physical GPU/VRAM telemetry.
+7. Engineering reports: `reports/engineering`. Store consolidated audits, analysis, conclusions, validation matrices, regression summaries, agent handoffs and decisions. Link reports to commits/PRs and diagnostic snapshots.
 
-### Rules for branches 5–7
+### Three test/recovery branches
 
-- They are evidence/report-only. Do not implement production source-code changes there.
-- Sanitize every report before pushing. The fork is public: exclude local file paths, personal identifiers, credentials, project file contents, private assets and other machine-local information.
-- Keep the full unredacted local history in the owner's ignored `LOCAL_CONTEXT.md` or local files only.
-- Use consistent dated filenames and identify app version, test scenario, workload, capture mode and measurement units.
-- Never present CI compile success as real-GPU or owner-machine validation. Mark each result as CI, software Vulkan, other hardware, or owner's Vega 8 runtime.
+8. Test lane A: `test/agent-lab-a`. Isolated experiments and regression validation by one assigned agent.
+9. Test lane B: `test/agent-lab-b`. A second independent test lane for another agent or a separate experiment. Assign one owner per lane; do not have two agents edit the same lane simultaneously.
+10. Test backup: `backup/test-lab`. Preserve the last known-good test-lane state before a risky experiment, reset or replacement. It is a recovery snapshot, not a second active implementation lane.
+
+### Diagnostics and test branch rules
+
+- Branches 5–7 are evidence/report-only. No production source-code implementation there.
+- Branches 8–9 may contain experimental code, prototypes and regression tests. They are not automatically production-approved. A successful result must be reviewed and ported/integrated into branch 1 with relevant tests.
+- Branch 10 stores a recovery snapshot of useful test work. Update it only before replacing/resetting a test lane or when the owner explicitly requests a checkpoint.
+- Test lanes must not become permanent agent-owned feature branches. Use them for bounded experiments and then port, discard, or archive the result within the ten-branch limit.
+- No new branches for individual agents, PRs, temporary builds or diagnostics.
+
+### Privacy and evidence quality
+
+- Sanitize every diagnostic report before pushing. The fork is public: exclude local file paths, personal identifiers, credentials, project file contents, private assets and other machine-local information.
+- Keep full unredacted history, local paths and personal project details only in the owner's ignored `LOCAL_CONTEXT.md` or local files.
+- Use dated filenames and identify app version, test scenario, workload, capture mode and units.
+- Mark evidence as CI, software Vulkan, other hardware, or owner's Vega 8 runtime. CI compilation is not real-GPU validation.
 - Comparisons must disclose differences in layer count, resolution, texture sets, viewport mode, F6 state and other workload factors. Do not claim causation from non-equivalent runs.
+- Treat application allocation estimates separately from measured physical VRAM.
 
 ### Branch maintenance and agent workflow
 
-- GPT, Claude and Kimi work on the active development branch, but only one agent owns a given subsystem at a time. A delegated agent may prepare a patch or review without creating a new branch.
-- Backups and `master` are read-only unless the owner explicitly authorizes recovery.
-- Diagnostic evidence goes to the appropriate one of branches 5–7, never to a new branch.
-- Do not delete, reset, force-push or rewrite any branch. Only the owner performs branch deletion/cleanup.
-- Before cleanup, the owner must ensure unique useful commits from surplus branches are merged, cherry-picked, or explicitly declared disposable.
-- After the owner's cleanup, verify that exactly these seven branch names remain.
+- All production-ready implementation goes to branch 1. Test-only implementation goes to branch 8 or 9, according to explicit task ownership.
+- GPT, Claude and Kimi may use the two test lanes, but only one agent owns each lane/subsystem at a time.
+- Backups, diagnostics/report branches and `master` are read-only except for their defined checkpoint/report purpose.
+- Never delete, reset, force-push or rewrite any branch. Only the owner performs branch cleanup.
+- Before deleting surplus branches, preserve useful unique commits or explicitly classify them as disposable. After owner cleanup, verify exactly the ten canonical branch names remain.
 
 ## Owner-local data boundary
 
