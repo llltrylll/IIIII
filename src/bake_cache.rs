@@ -13,7 +13,7 @@ use crate::mesh::Mesh;
 use eframe::wgpu;
 use std::fs;
 use std::io::Write;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -26,11 +26,11 @@ const MAX_BYTES: u64 = 2 << 30;
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Key(String);
 
-static PINNED_KEYS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static PINNED_KEYS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
 
 /// Keeps a cache entry on disk while any Engine can still use it for restoration.
 #[derive(Clone)]
-pub struct CachePin(Arc<CachePinInner>);
+pub struct CachePin { _inner: Arc<CachePinInner> }
 
 struct CachePinInner {
     key: String,
@@ -41,17 +41,22 @@ impl Drop for CachePinInner {
         if let Some(pinned) = PINNED_KEYS.get()
             && let Ok(mut pinned) = pinned.lock()
         {
-            pinned.remove(&self.key);
+            if let Some(count) = pinned.get_mut(&self.key) {
+                *count -= 1;
+                if *count == 0 {
+                    pinned.remove(&self.key);
+                }
+            }
         }
     }
 }
 
 pub fn pin(key: &Key) -> CachePin {
-    let pinned = PINNED_KEYS.get_or_init(|| Mutex::new(HashSet::new()));
+    let pinned = PINNED_KEYS.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(mut pinned) = pinned.lock() {
-        pinned.insert(key.0.clone());
+        *pinned.entry(key.0.clone()).or_insert(0) += 1;
     }
-    CachePin(Arc::new(CachePinInner { key: key.0.clone() }))
+    CachePin { _inner: Arc::new(CachePinInner { key: key.0.clone() }) }
 }
 
 /// A cached bake: its report, the packed maps and the custom map textures,
