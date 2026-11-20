@@ -1507,8 +1507,6 @@ pub struct Engine {
     sampler: wgpu::Sampler,
     layer_ubuf: wgpu::Buffer,
     layer_ubuf_slots: u64,
-    /// Shared by all Fill-variation prepasses; dynamic offsets select each layer's uniform.
-    fill_variation_noise_bg: Option<wgpu::BindGroup>,
     stamp_ubuf: wgpu::Buffer,
     stamp_sbuf: wgpu::Buffer,
     apply_ubuf: wgpu::Buffer,
@@ -1848,7 +1846,6 @@ impl Engine {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            self.fill_variation_noise_bg = None;
         }
         let mask_slots = mask_filter_buffer_capacity(self.mask_filter_ubuf_slots, 0);
         if mask_slots != self.mask_filter_ubuf_slots {
@@ -2001,7 +1998,6 @@ impl Engine {
             sampler,
             layer_ubuf,
             layer_ubuf_slots,
-            fill_variation_noise_bg: None,
             stamp_ubuf,
             stamp_sbuf,
             apply_ubuf,
@@ -5285,8 +5281,15 @@ impl Engine {
         };
         // The cached variation field is independent of the accumulation below.
         // Generate one FBM channel per pass on a key miss; later composites reuse it.
-        if !variation_noise_slots.is_empty() && self.fill_variation_noise_bg.is_none() {
-            self.fill_variation_noise_bg = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        for &(slot, layer_index, layer_id, roughness) in &variation_noise_slots {
+            let layer = &self.layers[layer_index];
+            let cache = &self.fill_variation_noise[&layer_id];
+            let target = if roughness {
+                cache.roughness.as_ref().expect("roughness cache texture")
+            } else {
+                cache.color.as_ref().expect("color cache texture")
+            };
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("fill variation noise"),
                 layout: &self.p.fill_variation_noise_bgl,
                 entries: &[
@@ -5303,17 +5306,7 @@ impl Engine {
                         resource: wgpu::BindingResource::TextureView(&self.pos.view),
                     },
                 ],
-            }));
-        }
-        for &(slot, layer_index, layer_id, roughness) in &variation_noise_slots {
-            let layer = &self.layers[layer_index];
-            let cache = &self.fill_variation_noise[&layer_id];
-            let target = if roughness {
-                cache.roughness.as_ref().expect("roughness cache texture")
-            } else {
-                cache.color.as_ref().expect("color cache texture")
-            };
-            let bg = self.fill_variation_noise_bg.as_ref().expect("variation bind group created for cache misses");
+            });
             let profile_slot = begin_composite_profile_stage(
                 &mut encoder, profile_query.as_deref(), &mut profile_stage_count,
             );
@@ -5323,7 +5316,7 @@ impl Engine {
                 &[gpu::color_attachment(&target.view, wgpu::LoadOp::Clear(wgpu::Color::BLACK))],
             );
             pass.set_pipeline(variation_pipeline.expect("variation pipeline created for cache misses"));
-            pass.set_bind_group(0, bg, &[(slot as u64 * UNIFORM_STRIDE) as u32]);
+            pass.set_bind_group(0, &bg, &[(slot as u64 * UNIFORM_STRIDE) as u32]);
             pass.draw(0..3, 0..1);
             drop(pass);
             end_composite_profile_stage(
