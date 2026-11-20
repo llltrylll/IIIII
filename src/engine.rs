@@ -1806,15 +1806,16 @@ impl Engine {
     /// mesh maps, not these position/normal/tangent targets. Keep 1x1
     /// placeholders bound for dormant view modes, then regenerate the maps
     /// from the mesh when a mode or operation actually needs them.
-    pub(crate) fn release_surface_maps(&mut self) {
+    pub(crate) fn release_surface_maps(&mut self) -> bool {
         if self.pos.width == 1 && self.nrm.width == 1 && self.tan.width == 1 {
-            return;
+            return false;
         }
         self.pos = Tex::new(&self.device, "parked position map", 1, 1, POS_FORMAT, LAYER_USAGE);
         self.nrm = Tex::new(&self.device, "parked normal map", 1, 1, NRM_FORMAT, LAYER_USAGE);
         self.tan = Tex::new(&self.device, "parked tangent map", 1, 1, TAN_FORMAT, LAYER_USAGE);
         self.uv_baked = None;
         self.uv_version = self.uv_version.wrapping_add(1);
+        true
     }
 
     /// Ensures the world-space UV maps exist for this mesh/range.

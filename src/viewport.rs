@@ -1172,6 +1172,16 @@ impl ViewRenderer {
         self.custom_mesh.is_some()
     }
 
+    /// Releases stale bind groups immediately when a parked Engine drops its
+    /// surface maps. Hidden sets are skipped by the render loop, so they cannot
+    /// rely on the next bind-group refresh to release the old texture views.
+    pub(crate) fn invalidate_texture_set_binding(&mut self, set: usize) {
+        if let Some(binding) = self.view_bind_groups.get_mut(set) {
+            *binding = None;
+        }
+        self.view3d_cache_key = None;
+    }
+
     fn globals_buffer(device: &wgpu::Device) -> wgpu::Buffer {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("view globals"),

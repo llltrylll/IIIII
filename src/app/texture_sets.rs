@@ -78,10 +78,13 @@ impl PainterApp {
         // A bake preview shows on the set being edited; the full bake comes back first.
         self.end_preview(true);
         self.engine.commit_props(&mut self.undo);
+        let previous_active = self.sets.active;
         std::mem::swap(&mut self.engine, &mut p.engine);
         self.engine.restore_active_working_set(&self.gpu_mesh);
         p.engine.release_inactive_working_set();
-        p.engine.release_surface_maps();
+        if p.engine.release_surface_maps() {
+            self.views.invalidate_texture_set_binding(previous_active);
+        }
         self.engine_epoch = self.engine_epoch.wrapping_add(1);
         std::mem::swap(&mut self.selected, &mut p.selected);
         std::mem::swap(&mut self.target, &mut p.target);
@@ -113,11 +116,15 @@ impl PainterApp {
     /// World Normal and custom preview shaders need the per-set surface maps.
     pub(super) fn set_parked_surface_maps_resident(&mut self, resident: bool) {
         let mesh = &self.gpu_mesh;
-        for parked in self.sets.parked.iter_mut().flatten() {
+        let views = &mut self.views;
+        for (index, parked) in self.sets.parked.iter_mut().enumerate() {
+            let Some(parked) = parked else { continue };
             if resident {
                 parked.engine.ensure_surface_maps(mesh);
-            } else {
-                parked.engine.release_surface_maps();
+            } else if parked.engine.release_surface_maps() {
+                // In particular, invalidate bindings for hidden sets: the
+                // viewport skips refreshing their cached bind groups.
+                views.invalidate_texture_set_binding(index);
             }
         }
     }
