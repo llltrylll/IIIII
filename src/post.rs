@@ -95,6 +95,8 @@ struct BloomChain {
     /// These resources are stable until the chain is resized.
     down_groups: Vec<wgpu::BindGroup>,
     up_groups: Vec<Option<wgpu::BindGroup>>,
+    uniforms_initialized: bool,
+    threshold_bits: Option<u32>,
 }
 
 pub struct PostFx {
@@ -212,7 +214,11 @@ impl PostFx {
                 ],
             }));
         }
-        self.chain = Some(BloomChain { size, levels, uniforms, down_groups, up_groups });
+        self.chain = Some(BloomChain {
+            size, levels, uniforms, down_groups, up_groups,
+            uniforms_initialized: false,
+            threshold_bits: None,
+        });
         self.post_bind_group = None;
         self.post_bind_group_key = None;
     }
@@ -242,23 +248,48 @@ impl PostFx {
         if bloom_on {
             self.ensure_chain(device, size, &input.view);
         }
-        let bloom_view = match &self.chain {
+        let bloom_view = match self.chain.as_mut() {
             Some(chain) if bloom_on && !chain.levels.is_empty() => {
                 let n = chain.levels.len();
+                let threshold_bits = settings.bloom_threshold.to_bits();
+                if !chain.uniforms_initialized {
+                    // Texel sizes and first-pass flags are fixed for this chain.
+                    // Only the threshold can change while the chain remains valid.
+                    for i in 0..n {
+                        let src = if i == 0 { input } else { &chain.levels[i - 1] };
+                        let u = [
+                            1.0 / src.width as f32,
+                            1.0 / src.height as f32,
+                            if i == 0 { settings.bloom_threshold } else { 0.0 },
+                            if i == 0 { 1.0 } else { 0.0 },
+                        ];
+                        rs.queue.write_buffer(&chain.uniforms[i], 0, bytemuck::cast_slice(&u));
+                    }
+                    for i in 1..n {
+                        let src = &chain.levels[i];
+                        let u = [1.0 / src.width as f32, 1.0 / src.height as f32, 0.0, 0.0];
+                        rs.queue.write_buffer(&chain.uniforms[n + i], 0, bytemuck::cast_slice(&u));
+                    }
+                    chain.uniforms_initialized = true;
+                    chain.threshold_bits = Some(threshold_bits);
+                } else if chain.threshold_bits != Some(threshold_bits) {
+                    let u = [
+                        1.0 / input.width as f32,
+                        1.0 / input.height as f32,
+                        settings.bloom_threshold,
+                        1.0,
+                    ];
+                    rs.queue.write_buffer(&chain.uniforms[0], 0, bytemuck::cast_slice(&u));
+                    chain.threshold_bits = Some(threshold_bits);
+                }
+
                 for i in 0..n {
-                    let src = if i == 0 { input } else { &chain.levels[i - 1] };
-                    let first = if i == 0 { 1.0 } else { 0.0 };
-                    let u = [1.0 / src.width as f32, 1.0 / src.height as f32, settings.bloom_threshold, first];
-                    rs.queue.write_buffer(&chain.uniforms[i], 0, bytemuck::cast_slice(&u));
                     let mut pass = gpu::pass(encoder, "bloom down", &[gpu::color_attachment(&chain.levels[i].view, wgpu::LoadOp::Clear(wgpu::Color::BLACK))]);
                     pass.set_pipeline(&self.down);
                     pass.set_bind_group(0, &chain.down_groups[i], &[]);
                     pass.draw(0..3, 0..1);
                 }
                 for i in (1..n).rev() {
-                    let src = &chain.levels[i];
-                    let u = [1.0 / src.width as f32, 1.0 / src.height as f32, 0.0, 0.0];
-                    rs.queue.write_buffer(&chain.uniforms[n + i], 0, bytemuck::cast_slice(&u));
                     let bg = chain.up_groups[i].as_ref().expect("bloom up bind group");
                     let mut pass = gpu::pass(encoder, "bloom up", &[gpu::color_attachment(&chain.levels[i - 1].view, wgpu::LoadOp::Load)]);
                     pass.set_pipeline(&self.up);
