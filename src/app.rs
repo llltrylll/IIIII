@@ -547,6 +547,9 @@ impl StrokeMeter {
         mask_cache_hits: u32,
         mask_cache_misses: u32,
         mask_gpu_passes: u32,
+        roughness_cache_hits: u32,
+        roughness_cache_misses: u32,
+        roughness_cache_gpu_passes: u32,
     ) -> String {
         let (full, thumbs) = self.counters_base.map_or((0, 0), |b| (self.counters.0.saturating_sub(b.0), self.counters.1.saturating_sub(b.1)));
         let texture_pixels = u64::from(res) * u64::from(res);
@@ -554,7 +557,7 @@ impl StrokeMeter {
         let patch_percent = if texture_pixels == 0 { 0.0 } else { scissor_pixels as f64 * 100.0 / texture_pixels as f64 };
         let bbox_percent = if texture_pixels == 0 { 0.0 } else { bbox_pixels as f64 * 100.0 / texture_pixels as f64 };
         format!(
-            "F6 CPU avg/peak ms: steps/frame {}, brush stamps {}, spacing {:.1}/{:.1}px, spacing cap {}, resolve {}, region {}, stamp {}, begin {}, recomp {}, end {}, engine end {}, undo push {}, end cleanup {}, target {}, snapshot {}, submit {}, thumbs {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {}, clear {}, pass body {}, slowest pass {} {} | screen tris {}/{} | paint {:.1}%/{} scissors | composite {:.1}% (bbox {:.1}%, {} scissors) | stack {}L/{}F | masks {}h/{}m/{}p | since F6: full recomps {full}, thumbnails {thumbs}",
+            "F6 CPU avg/peak ms: steps/frame {}, brush stamps {}, spacing {:.1}/{:.1}px, spacing cap {}, resolve {}, region {}, stamp {}, begin {}, recomp {}, end {}, engine end {}, undo push {}, end cleanup {}, target {}, snapshot {}, submit {}, thumbs {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {}, clear {}, pass body {}, slowest pass {} {} | screen tris {}/{} | paint {:.1}%/{} scissors | composite {:.1}% (bbox {:.1}%, {} scissors) | stack {}L/{}F | masks {}h/{}m/{}p | rough FBM {}h/{}m/{}p | since F6: full recomps {full}, thumbnails {thumbs}",
             self.steps_per_frame.text(),
             self.brush_stamps_per_segment.text(),
             if self.brush_spacing_requested_px.n == 0 { 0.0 } else { self.brush_spacing_requested_px.sum / f64::from(self.brush_spacing_requested_px.n) },
@@ -593,7 +596,10 @@ impl StrokeMeter {
             folder_passes,
             mask_cache_hits,
             mask_cache_misses,
-            mask_gpu_passes
+            mask_gpu_passes,
+            roughness_cache_hits,
+            roughness_cache_misses,
+            roughness_cache_gpu_passes
         )
     }
 }
