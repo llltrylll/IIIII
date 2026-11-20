@@ -5511,6 +5511,41 @@ fn parked_baked_map_groups_release_and_restore_from_cache() {
     assert_eq!(engine.gpu_resource_breakdown().iter()
         .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap(), bytes_before);
 
+    // Restoring Edge/Part Random dependencies needs only B, not C.
+    assert!(engine.release_baked_map_groups());
+    assert!(!engine.ensure_baked_map_mask(crate::engine::BAKED_MAP_GROUP_B));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut restored_b = false;
+    while Instant::now() < deadline {
+        if engine.poll_baked_map_restore() {
+            restored_b = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(restored_b, "the B-only cache request should complete");
+    assert!(engine.baked_map_mask_resident(crate::engine::BAKED_MAP_GROUP_B));
+    assert_eq!(engine.map_tex(1).width, 256);
+    assert_eq!(engine.map_tex(2).width, 1, "B-only residency must leave C evicted");
+    assert_eq!(engine.read_tex(engine.map_tex(1)), map_b_before);
+
+    // Restoring Part Gradient/Bent Normal needs only C, not B.
+    assert!(!engine.ensure_baked_map_mask(crate::engine::BAKED_MAP_GROUP_C));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut restored_c = false;
+    while Instant::now() < deadline {
+        if engine.poll_baked_map_restore() {
+            restored_c = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(restored_c, "the C-only cache request should complete");
+    assert!(engine.baked_map_mask_resident(crate::engine::BAKED_MAP_GROUP_C));
+    assert_eq!(engine.map_tex(1).width, 256, "C-only restoration must retain B");
+    assert_eq!(engine.map_tex(2).width, 256);
+    assert_eq!(engine.read_tex(engine.map_tex(2)), map_c_before);
+
     // A paint-only stack has no B/C dependency, so its next composite must
     // leave the groups evicted instead of restoring 48 MiB needlessly.
     assert!(engine.release_baked_map_groups(), "the second residency cycle should evict B/C");
