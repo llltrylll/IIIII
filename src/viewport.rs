@@ -1406,22 +1406,35 @@ impl ViewRenderer {
         if self.view3d.ensure_size(rs, size) {
             self.post.invalidate_targets();
         }
-        self.ensure_object_draw_buffers(&rs.device, mesh, source_mesh, hidden_objects);
+        {
+            let _s = crate::startup_trace::span("viewport 3D: object visibility cache");
+            self.ensure_object_draw_buffers(&rs.device, mesh, source_mesh, hidden_objects);
+        }
         let size = self.view3d.size;
         let overlay_generation = overlays.map_or(0, Overlays::generation);
         let cacheable = self.custom_mesh.is_none();
-        if !cacheable {
-            self.view3d_cache_key = None;
-        } else if self.view3d_cache_key.as_ref().is_some_and(|key| {
-            key.matches(
-                size, engines, env, mesh, cam, settings, &self.set_looks, hidden_objects,
-                overlay_generation, update_screen_paint_depth, source_mesh.is_some(),
-            )
-        }) {
+        let cache_hit = {
+            let _s = crate::startup_trace::span("viewport 3D: frame cache comparison");
+            if cacheable {
+                self.view3d_cache_key.as_ref().is_some_and(|key| {
+                    key.matches(
+                        size, engines, env, mesh, cam, settings, &self.set_looks, hidden_objects,
+                        overlay_generation, update_screen_paint_depth, source_mesh.is_some(),
+                    )
+                })
+            } else {
+                self.view3d_cache_key = None;
+                false
+            }
+        };
+        if cache_hit {
+            crate::startup_trace::count("viewport 3D cache hits", 1);
             #[cfg(test)]
             { self.view3d_cache_hits = self.view3d_cache_hits.saturating_add(1); }
             return;
         }
+        crate::startup_trace::count("viewport 3D cache misses", 1);
+        let _render = crate::startup_trace::span("viewport 3D: encode and submit");
         let vp = cam.view_proj(size[0] as f32 / size[1] as f32);
         while self.globals.len() < engines.len() + 1 {
             self.globals.push(Self::globals_buffer(&rs.device));
@@ -1725,10 +1738,13 @@ impl ViewRenderer {
             settings: *settings,
         };
         if self.view2d_cache_key == Some(cache_key) {
+            crate::startup_trace::count("viewport 2D cache hits", 1);
             #[cfg(test)]
             { self.view2d_cache_hits = self.view2d_cache_hits.saturating_add(1); }
             return;
         }
+        crate::startup_trace::count("viewport 2D cache misses", 1);
+        let _render = crate::startup_trace::span("viewport 2D: encode and submit");
         let mut g = Self::base_globals(engine, settings, size, settings.uv_mode);
         g.view2d = [cam.zoom, cam.pan.x, cam.pan.y, 0.0];
         g.extra[3] = settings.uv_wire_opacity;
