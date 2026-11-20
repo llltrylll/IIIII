@@ -1830,6 +1830,14 @@ impl Engine {
         self.snap = Default::default();
         self.snap_mask = None;
         self.folder_below.clear();
+        self.folder_below.shrink_to_fit();
+        self.composite_scratch = CompositeScratch::default();
+        self.stroke_regions.clear();
+        self.stroke_regions.shrink_to_fit();
+        self.last_profiled_pass_labels.clear();
+        self.last_profiled_pass_labels.shrink_to_fit();
+        self.fill_image_ids_scratch.get_mut().clear();
+        self.fill_image_ids_scratch.get_mut().shrink_to_fit();
         self.prefix_cache = None;
         self.mask_scratch = None;
         self.mask_out.clear();
