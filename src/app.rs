@@ -620,7 +620,7 @@ mod stroke_meter_tests {
         assert_eq!(meter.counters_base, Some((10, 10)));
         meter.composited(false, 0.0, (12, 11), 1, 0);
 
-        let text = meter.text(2048, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        let text = meter.text(2048, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
         assert!(text.contains("since F6: full recomps 2, thumbnails 1"), "{text}");
     }
 
@@ -633,7 +633,7 @@ mod stroke_meter_tests {
         assert_eq!(meter.counters_base, Some((17, 11)));
         meter.composited(false, 0.0, (19, 12), 1, 1);
 
-        let text = meter.text(2048, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        let text = meter.text(2048, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
         assert!(text.contains("since F6: full recomps 2, thumbnails 1"), "{text}");
     }
 }
