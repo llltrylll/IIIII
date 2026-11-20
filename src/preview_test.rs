@@ -5403,9 +5403,12 @@ fn parked_surface_maps_release_and_restore_without_visual_changes() {
     views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
     let position_before = read_texture(&rs.device, &rs.queue, views.view3d.display_texture());
 
+    // Match the real set-switch path: discard edit-only scratch first, then
+    // evict the world-space maps while leaving final material outputs resident.
+    engine_b.release_inactive_working_set();
     let bytes_before = engine_b.gpu_resource_breakdown().iter()
         .find(|(name, _)| *name == "surface maps").map(|(_, bytes)| *bytes).unwrap();
-    engine_b.release_surface_maps();
+    assert!(engine_b.release_surface_maps());
     let bytes_after = engine_b.gpu_resource_breakdown().iter()
         .find(|(name, _)| *name == "surface maps").map(|(_, bytes)| *bytes).unwrap();
     assert!(bytes_after < bytes_before, "parked surface maps must release GPU memory");
@@ -5418,8 +5421,9 @@ fn parked_surface_maps_release_and_restore_without_visual_changes() {
     let material_after = read_texture(&rs.device, &rs.queue, views.view3d.display_texture());
     assert_eq!(material_after, material_before);
 
-    // The Position mode's residency request rebuilds the parked surface maps.
-    engine_b.ensure_surface_maps(&gpu_mesh);
+    // Reactivating the set restores both edit workspace and surface maps.
+    // The UV data is unchanged, so its rebuild must not dirty the material composite.
+    engine_b.restore_active_working_set(&gpu_mesh);
     assert!(!engine_b.dirty, "rebuilding unchanged UV targets must not invalidate the material composite");
     assert_eq!(engine_b.surface_maps().0.width, 128);
     assert_eq!(engine_b.surface_maps().1.width, 128);
