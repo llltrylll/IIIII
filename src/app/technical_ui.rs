@@ -339,6 +339,8 @@ impl PainterApp {
                     ui.label("Run three separate captures using the same project, viewport size and display settings. Each capture ends automatically after 1,200 frames (about 20–60 seconds at 20–60 FPS). Use the Release build for meaningful FPS results.");
                     ui.label(RichText::new("Idle: do not touch the mouse or keyboard. Camera: orbit continuously at a steady pace. Painting: make continuous strokes with the same brush and texture set.")
                         .small().color(theme::TEXT_DIM));
+                    ui.label(RichText::new("Before the painting capture, press F6 to enable the detailed paint profiler. Frame spans report CPU-side work/submission; F6 adds GPU timings for the paint pipeline, not a full-viewport GPU timestamp.")
+                        .small().color(theme::TEXT_DIM));
                     let scenarios = ["Idle — no interaction", "Camera — continuous orbit", "Painting — continuous strokes"];
                     if crate::startup_trace::capture_active() {
                         ui.horizontal(|ui| {
