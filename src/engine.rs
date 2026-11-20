@@ -5151,11 +5151,8 @@ impl Engine {
         self.queue.write_buffer(&self.layer_ubuf, 0, &data);
         // One persistent result per cached mask. Only masks with actual filter
         // operations need the three full-resolution ping-pong scratch targets.
-        let cached_ids: Vec<u64> = source_slot.keys().map(|&li| self.layers[li].id).collect();
-        let filter_ids: Vec<u64> = source_slot.keys()
-            .filter(|&&li| self.has_mask_filters(li))
-            .map(|&li| self.layers[li].id)
-            .collect();
+        let cached_ids: HashSet<u64> = source_slot.keys().map(|&li| self.layers[li].id).collect();
+        let has_filtered_masks = source_slot.keys().any(|&li| self.has_mask_filters(li));
         let res = self.res;
         let mask_final = &mut self.mask_final;
         self.mask_out.retain(|id, t| {
@@ -5169,7 +5166,7 @@ impl Engine {
                 self.mask_out.insert(*id, t);
             }
         }
-        if filter_ids.is_empty() {
+        if !has_filtered_masks {
             self.mask_scratch = None;
         } else if self.mask_scratch.as_ref().is_none_or(|set| set[0].width != res) {
             let t = || Tex::new(&self.device, "filtered mask scratch", res, res, MASK_FILTER_FORMAT, LAYER_USAGE);
