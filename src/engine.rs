@@ -5811,7 +5811,7 @@ impl Engine {
                         None
                     } else {
                         let dst = 1 - src_indices[channel];
-                        Some(gpu::color_attachment(&self.accum[dst][channel].view, load))
+                        gpu::color_attachment(&self.accum[dst][channel].view, load)
                     }
                 });
             let profile = self.active_gpu_profile.as_ref().filter(|_| profile_layer == Some(layer.id));

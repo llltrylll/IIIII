@@ -644,7 +644,7 @@ impl ObjectDrawBuffers {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct ViewBindGroupKey {
-    engine: (u64, u32, usize, u64, u64),
+    engine: (u64, u32, [usize; crate::engine::ACCUM], u64, u64),
     environment: u64,
     slot: usize,
 }
