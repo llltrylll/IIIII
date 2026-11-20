@@ -5511,13 +5511,18 @@ fn parked_baked_map_groups_release_and_restore_from_cache() {
     assert_eq!(engine.gpu_resource_breakdown().iter()
         .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap(), bytes_before);
 
-    // Synchronous export must wait for the same cache restore rather than
-    // snapshotting an old final composite while the maps are placeholders.
+    // A paint-only stack has no B/C dependency, so its next composite must
+    // leave the groups evicted instead of restoring 48 MiB needlessly.
     assert!(engine.release_baked_map_groups(), "the second residency cycle should evict B/C");
     engine.mark_dirty();
-    assert!(engine.ensure_baked_map_groups_blocking(), "synchronous operations must wait for cache restoration");
+    assert!(!engine.composite_needs_baked_map_groups());
     engine.composite();
-    assert!(!engine.dirty, "the composite must finish after the blocking restore");
+    assert!(!engine.dirty, "a map-independent composite should finish with B/C evicted");
+    assert!(!engine.baked_map_groups_resident(), "map-independent work must not restore B/C");
+
+    // Synchronous export still explicitly blocks for the maps it snapshots.
+    assert!(engine.ensure_baked_map_groups_blocking(), "synchronous operations must wait for cache restoration");
+    assert!(engine.baked_map_groups_resident());
     assert_eq!(engine.read_tex(engine.map_tex(1)), map_b_before);
     assert_eq!(engine.read_tex(engine.map_tex(2)), map_c_before);
 }
