@@ -1490,10 +1490,13 @@ pub struct Engine {
     pub last_mask_cache_hits: u32,
     pub last_mask_cache_misses: u32,
     pub last_mask_gpu_passes: u32,
-    /// Procedural fill roughness FBM cache activity from the most recent composite.
+    /// Procedural fill color/roughness FBM cache activity from the most recent composite.
     pub last_fill_roughness_cache_hits: u32,
     pub last_fill_roughness_cache_misses: u32,
     pub last_fill_roughness_cache_gpu_passes: u32,
+    /// Test-only switch to compare the cache against the original inline shader path.
+    #[cfg(test)]
+    pub(crate) force_inline_fill_variation: bool,
     /// IDs whose final filtered mask texture currently holds valid contents.
     mask_final: HashSet<u64>,
     pub bake_report: Option<Arc<BakeReport>>,
@@ -1578,6 +1581,8 @@ struct FillRoughnessNoiseKey {
     uv_version: u64,
     scale_bits: u32,
     seed_bits: u32,
+    color_enabled: bool,
+    roughness_enabled: bool,
 }
 
 struct FillRoughnessNoiseCache {
@@ -1981,6 +1986,8 @@ impl Engine {
             last_fill_roughness_cache_hits: 0,
             last_fill_roughness_cache_misses: 0,
             last_fill_roughness_cache_gpu_passes: 0,
+            #[cfg(test)]
+            force_inline_fill_variation: false,
             mask_final: HashSet::new(),
             bake_report: None,
             edge_max: 0.2,
@@ -2301,18 +2308,18 @@ impl Engine {
             label: Some("composite"),
             entries: &entries,
         });
-        // The roughness prepass needs only the layer uniform and the position map.
+        // The color/roughness FBM prepass needs only the layer uniform and position map.
         let fill_roughness_noise_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("fill roughness noise"),
+            label: Some("fill variation noise"),
             entries: &[gpu::uniform_entry(0, true), gpu::tex_entry(10, false)],
         });
         let fill_roughness_noise = gpu::fullscreen_pipeline(
             device,
-            "fill roughness noise",
+            "fill variation noise",
             &composite_module,
-            "fs_fill_roughness_noise",
+            "fs_fill_variation_noise",
             &gpu::layout(device, &fill_roughness_noise_bgl),
-            &[gpu::target(MASK_FILTER_FORMAT)],
+            &[gpu::target(F::Rg16Float)],
         );
         let composite = gpu::fullscreen_pipeline(
             device,
@@ -4995,9 +5002,9 @@ impl Engine {
             self.folder_below.push(set);
         }
 
-        // Cache the expensive roughness FBM for stable fill layers. The FBM
-        // depends only on the position map, scale and seed; rough_var remains a
-        // cheap multiplier in the main layer pass and can change without a rebake.
+        // Cache color and roughness FBM together. Both depend only on the
+        // position map, variation scale and seed; channel amounts and per-part
+        // variation remain cheap controls in the main layer pass.
         let mut roughness_noise_needed = HashSet::new();
         let mut roughness_noise_misses: Vec<(usize, u64)> = Vec::new();
         let mut roughness_noise_hits = 0u32;
@@ -5005,7 +5012,13 @@ impl Engine {
             let Pass::Layer(li) = *pass else { continue };
             let layer = &self.layers[li];
             let Content::Fill(fill) = &layer.content else { continue };
-            if fill.rough_var == 0.0 || !fill.mat.enabled[1] || layer.disabled_channels[1] {
+            #[cfg(test)]
+            if self.force_inline_fill_variation {
+                continue;
+            }
+            let color_enabled = fill.color_var != 0.0 && fill.mat.enabled[0] && !layer.disabled_channels[0];
+            let roughness_enabled = fill.rough_var != 0.0 && fill.mat.enabled[1] && !layer.disabled_channels[1];
+            if !color_enabled && !roughness_enabled {
                 continue;
             }
             let key = FillRoughnessNoiseKey {
@@ -5013,6 +5026,8 @@ impl Engine {
                 uv_version: self.uv_version,
                 scale_bits: fill.var_scale.to_bits(),
                 seed_bits: fill.seed.to_bits(),
+                color_enabled,
+                roughness_enabled,
             };
             roughness_noise_needed.insert(layer.id);
             let current = self.fill_roughness_noise.get(&layer.id)
@@ -5023,7 +5038,7 @@ impl Engine {
             }
             self.fill_roughness_noise.insert(layer.id, FillRoughnessNoiseCache {
                 key,
-                texture: Tex::new(&self.device, "fill roughness FBM cache", self.res, self.res, MASK_FILTER_FORMAT, LAYER_USAGE),
+                texture: Tex::new(&self.device, "fill color and roughness FBM cache", self.res, self.res, F::Rg16Float, LAYER_USAGE),
             });
             roughness_noise_misses.push((slot, layer.id));
         }
@@ -5068,8 +5083,9 @@ impl Engine {
         for (k, pass) in passes.iter().enumerate() {
             let (Pass::Layer(li) | Pass::End(li)) = *pass else { continue };
             let mut u = self.layer_uniform(&self.layers[li]);
-            if self.fill_roughness_noise.contains_key(&self.layers[li].id) {
-                u.varc[0] = 1.0;
+            if let Some(cache) = self.fill_roughness_noise.get(&self.layers[li].id) {
+                u.varc[0] = if cache.key.roughness_enabled { 1.0 } else { 0.0 };
+                u.varc[1] = if cache.key.color_enabled { 1.0 } else { 0.0 };
             }
             if let Some(&slot) = source_slot.get(&li) {
                 let off = slot * UNIFORM_STRIDE as usize;
@@ -5207,8 +5223,8 @@ impl Engine {
             && let Some(p) = &self.active_gpu_profile {
                 encoder.write_timestamp(&p.query_set, 6);
             }
-        // The cached noise field is independent of the accumulation below.
-        // Generate only on a key miss; future composites reuse the same texture.
+        // The cached variation field is independent of the accumulation below.
+        // Generate both enabled FBM channels on a key miss; later composites reuse it.
         for &(slot, layer_id) in &roughness_noise_misses {
             let layer = &self.layers[*self.layers.iter().position(|layer| layer.id == layer_id)
                 .as_ref().expect("cached roughness layer remains in stack")];
@@ -5236,7 +5252,7 @@ impl Engine {
             );
             let mut pass = gpu::pass(
                 &mut encoder,
-                "fill roughness noise cache",
+                "fill variation noise cache",
                 &[gpu::color_attachment(&cache.texture.view, wgpu::LoadOp::Clear(wgpu::Color::BLACK))],
             );
             pass.set_pipeline(&self.p.fill_roughness_noise);
@@ -5247,7 +5263,7 @@ impl Engine {
                 &mut encoder,
                 profile_query.as_deref(),
                 profile_slot,
-                format!("Roughness FBM cache · {}", layer.name),
+                format!("Fill FBM cache · {}", layer.name),
                 &mut profile_labels,
             );
         }
@@ -5408,7 +5424,7 @@ impl Engine {
             };
             let mask = layer.mask.as_ref().and_then(|m| m.paint.as_ref());
             let prev = if from_cache { self.prefix_cache.as_ref().expect("prefix cache") } else { &self.accum[src] };
-            let roughness_noise = self.fill_roughness_noise.get(&layer.id).map(|cache| &cache.texture);
+            let variation_noise = self.fill_roughness_noise.get(&layer.id).map(|cache| &cache.texture);
             let make_bg = |mask: Option<&Tex>| self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("composite"),
                 layout: &self.p.composite_bgl,
@@ -5448,7 +5464,7 @@ impl Engine {
                     wgpu::BindGroupEntry { binding: 24, resource: view(Some(&prev[FINAL_SPECULAR])) },
                     wgpu::BindGroupEntry { binding: 25, resource: view(chans[SPECULAR]) },
                     wgpu::BindGroupEntry { binding: 26, resource: view(Some(&self.tan)) },
-                    wgpu::BindGroupEntry { binding: 27, resource: view(roughness_noise) },
+                    wgpu::BindGroupEntry { binding: 27, resource: view(variation_noise) },
                 ],
             });
             // A filtered mask depends on its own paint/generator/filter data,
