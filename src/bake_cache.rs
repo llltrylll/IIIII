@@ -33,6 +33,13 @@ pub struct Entry {
     custom: Vec<(u32, Vec<u8>)>,
 }
 
+/// One selected packed baked-map texture decoded from the on-disk cache.
+pub struct CachedMapTexture {
+    pub index: usize,
+    pub resolution: u32,
+    pub bytes: Vec<u8>,
+}
+
 /// 64-bit FNV-1a over 8-byte words: stable across runs and builds (unlike
 /// `DefaultHasher`), and fast enough to hash a multi-million-vertex mesh.
 struct Hasher(u64);
@@ -166,6 +173,116 @@ pub fn load(key: &Key) -> Option<Entry> {
             None
         }
     }
+}
+
+
+/// Loads only the requested packed maps. Unselected LZ4 payloads are validated
+/// by their size prefix but are not decompressed, keeping restore-time RAM bounded.
+pub fn load_selected(key: &Key, requested: &[usize]) -> Option<Vec<CachedMapTexture>> {
+    if requested.is_empty() || requested.iter().any(|&i| i >= MAP_TEXTURES) {
+        return None;
+    }
+    let path = path(key)?;
+    let metadata = fs::metadata(&path).ok()?;
+    if metadata.len() > MAX_BYTES {
+        let _ = fs::remove_file(&path);
+        return None;
+    }
+    let bytes = fs::read(&path).ok()?;
+    if bytes.len() as u64 > MAX_BYTES {
+        let _ = fs::remove_file(&path);
+        return None;
+    }
+    match decode_selected(&bytes, requested) {
+        Some(maps) => {
+            if let Ok(f) = fs::File::options().write(true).open(&path) {
+                let _ = f.set_modified(std::time::SystemTime::now());
+            }
+            Some(maps)
+        }
+        None => {
+            let _ = fs::remove_file(&path);
+            None
+        }
+    }
+}
+
+fn decode_selected(mut b: &[u8], requested: &[usize]) -> Option<Vec<CachedMapTexture>> {
+    fn take<'a>(b: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
+        if b.len() < n {
+            return None;
+        }
+        let (head, rest) = b.split_at(n);
+        *b = rest;
+        Some(head)
+    }
+    fn u32_(b: &mut &[u8]) -> Option<u32> {
+        Some(u32::from_le_bytes(take(b, 4)?.try_into().ok()?))
+    }
+    fn packed_texture<'a>(
+        b: &mut &'a [u8],
+        format: wgpu::TextureFormat,
+    ) -> Option<(u32, &'a [u8], usize)> {
+        let res = u32_(b)?;
+        if res == 0 || res > MAX_BAKE_RES {
+            return None;
+        }
+        let packed_len = usize::try_from(u32_(b)?).ok()?;
+        let packed = take(b, packed_len)?;
+        let expected = (res as usize)
+            .checked_mul(res as usize)?
+            .checked_mul(gpu::bytes_per_texel(format) as usize)?;
+        if packed.len() < 4 {
+            return None;
+        }
+        let declared = u32::from_le_bytes(packed[..4].try_into().ok()?) as usize;
+        (declared == expected).then_some((res, packed, expected))
+    }
+
+    if take(&mut b, 4)? != MAGIC || u32_(&mut b)? != FORMAT_VERSION {
+        return None;
+    }
+    let json_len = usize::try_from(u32_(&mut b)?).ok()?;
+    let report_json: serde_json::Value = serde_json::from_slice(take(&mut b, json_len)?).ok()?;
+    let report = BakeReport::from_cache_json(&report_json)?;
+    if report.resolution == 0 || report.resolution > MAX_BAKE_RES {
+        return None;
+    }
+
+    let mut selected = Vec::with_capacity(requested.len());
+    let mut resolution = 0;
+    for i in 0..MAP_TEXTURES {
+        let (res, packed, expected) = packed_texture(&mut b, MAP_FORMATS[i])?;
+        if resolution == 0 {
+            resolution = res;
+        } else if res != resolution {
+            return None;
+        }
+        if requested.contains(&i) {
+            let data = lz4_flex::decompress_size_prepended(packed).ok()?;
+            if data.len() != expected {
+                return None;
+            }
+            selected.push(CachedMapTexture { index: i, resolution: res, bytes: data });
+        }
+    }
+
+    let count = usize::try_from(u32_(&mut b)?).ok()?;
+    let max_custom_textures = MAX_CUSTOM_MAPS.div_ceil(CUSTOM_PER_TEXTURE);
+    let expected_custom_textures = report.custom.len().div_ceil(CUSTOM_PER_TEXTURE);
+    if count > max_custom_textures || count != expected_custom_textures {
+        return None;
+    }
+    for _ in 0..count {
+        let (res, _, _) = packed_texture(&mut b, CUSTOM_FORMAT)?;
+        if res != resolution {
+            return None;
+        }
+    }
+    if report.resolution != resolution || !b.is_empty() || selected.len() != requested.len() {
+        return None;
+    }
+    Some(selected)
 }
 
 fn decode(mut b: &[u8]) -> Option<Entry> {
@@ -365,6 +482,24 @@ mod tests {
         let mut s2 = s.clone();
         s2.ao_distance += 0.01;
         assert_ne!(k, key(&ball, &s2, 2048, 0));
+    }
+
+    #[test]
+    fn selected_map_decode_only_returns_requested_groups() {
+        let mut bytes = test_cache_header();
+        for format in MAP_FORMATS {
+            append_test_texture(&mut bytes, 1, format);
+        }
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        let selected = decode_selected(&bytes, &[1, 3]).expect("selected maps decode");
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].index, 1);
+        assert_eq!(selected[1].index, 3);
+        assert_eq!(selected[0].resolution, 1);
+        assert_eq!(selected[1].resolution, 1);
+        assert_eq!(selected[0].bytes.len(), gpu::bytes_per_texel(MAP_FORMATS[1]) as usize);
+        assert_eq!(selected[1].bytes.len(), gpu::bytes_per_texel(MAP_FORMATS[3]) as usize);
+        assert!(decode_selected(&bytes, &[MAP_TEXTURES]).is_none());
     }
 
     #[test]
