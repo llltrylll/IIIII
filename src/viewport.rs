@@ -499,10 +499,10 @@ impl ViewTarget {
         ViewTarget { color: t.color, resolve: t.resolve, depth: t.depth, paint_depth: t.paint_depth, display: t.display, egui_id, size }
     }
 
-    fn ensure_size(&mut self, rs: &egui_wgpu::RenderState, size: [u32; 2]) {
+    fn ensure_size(&mut self, rs: &egui_wgpu::RenderState, size: [u32; 2]) -> bool {
         let size = [size[0].clamp(16, 8192), size[1].clamp(16, 8192)];
         if size == self.size {
-            return;
+            return false;
         }
         let t = Self::create(&rs.device, size, self.display.is_some());
         rs.renderer.write().update_egui_texture_from_wgpu_texture(
@@ -517,6 +517,7 @@ impl ViewTarget {
         self.paint_depth = t.paint_depth;
         self.display = t.display;
         self.size = size;
+        true
     }
 
     /// The displayed image.
@@ -1402,7 +1403,9 @@ impl ViewRenderer {
         hidden_objects: &[bool],
         update_screen_paint_depth: bool,
     ) {
-        self.view3d.ensure_size(rs, size);
+        if self.view3d.ensure_size(rs, size) {
+            self.post.invalidate_targets();
+        }
         self.ensure_object_draw_buffers(&rs.device, mesh, source_mesh, hidden_objects);
         let size = self.view3d.size;
         let overlay_generation = overlays.map_or(0, Overlays::generation);
