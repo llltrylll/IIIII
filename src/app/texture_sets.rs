@@ -130,6 +130,41 @@ impl PainterApp {
         }
     }
 
+    /// Keeps packed mesh-map groups resident only when the current view needs them.
+    /// The built-in Material view uses A/D, so parked B/C maps can be restored lazily.
+    pub(super) fn set_parked_baked_map_groups_resident(&mut self, resident: bool) {
+        if resident {
+            let _ = self.engine.ensure_baked_map_groups();
+            for parked in self.sets.parked.iter_mut().flatten() {
+                let _ = parked.engine.ensure_baked_map_groups();
+            }
+        } else {
+            for (index, parked) in self.sets.parked.iter_mut().enumerate() {
+                if let Some(parked) = parked
+                    && parked.engine.release_baked_map_groups()
+                {
+                    self.views.invalidate_texture_set_binding(index);
+                }
+            }
+        }
+    }
+
+    /// Completes asynchronous cache-backed restorations and invalidates view bindings.
+    pub(super) fn poll_baked_map_restores(&mut self, ctx: &egui::Context) {
+        if self.engine.poll_baked_map_restore() {
+            self.views.invalidate_texture_set_binding(self.sets.active);
+            ctx.request_repaint();
+        }
+        for (index, parked) in self.sets.parked.iter_mut().enumerate() {
+            if let Some(parked) = parked
+                && parked.engine.poll_baked_map_restore()
+            {
+                self.views.invalidate_texture_set_binding(index);
+                ctx.request_repaint();
+            }
+        }
+    }
+
     /// Composites every parked set when a synchronous operation needs final maps (export).
     pub(super) fn composite_parked(&mut self) {
         let mesh = &self.gpu_mesh;
@@ -148,6 +183,10 @@ impl PainterApp {
     pub(super) fn composite_parked_one(&mut self, ctx: &egui::Context) {
         let mesh = &self.gpu_mesh;
         if let Some(p) = self.sets.parked.iter_mut().flatten().find(|p| p.engine.dirty) {
+            if !p.engine.ensure_baked_map_groups() {
+                ctx.request_repaint();
+                return;
+            }
             p.engine.ensure_surface_maps(mesh);
             p.engine.composite();
             p.engine.release_inactive_working_set();
