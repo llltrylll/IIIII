@@ -135,16 +135,16 @@ impl PainterApp {
     pub(super) fn set_parked_baked_map_groups_resident(&mut self, resident: bool) {
         if resident {
             let _ = self.engine.ensure_baked_map_groups();
-            for parked in self.sets.parked.iter_mut().flatten() {
+        }
+        let views = &mut self.views;
+        for (index, parked) in self.sets.parked.iter_mut().enumerate() {
+            let Some(parked) = parked else { continue };
+            let visible = !views.set_looks.get(index).is_some_and(|look| look.hidden);
+            if resident && visible {
                 let _ = parked.engine.ensure_baked_map_groups();
-            }
-        } else {
-            for (index, parked) in self.sets.parked.iter_mut().enumerate() {
-                if let Some(parked) = parked
-                    && parked.engine.release_baked_map_groups()
-                {
-                    self.views.invalidate_texture_set_binding(index);
-                }
+            } else if parked.engine.release_baked_map_groups() {
+                // Hidden sets cannot use these maps in the current viewport.
+                views.invalidate_texture_set_binding(index);
             }
         }
     }
