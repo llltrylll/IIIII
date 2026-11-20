@@ -118,6 +118,12 @@ impl PainterApp {
                         let width = ui.max_rect().width();
                         let h = if last.is_some() { 30.0 } else { 20.0 };
                         let (r, _) = ui.allocate_exact_size(vec2(width, h), Sense::hover());
+                        *last = Some(k);
+                        // Off-screen group headings still take part in layout, but do not
+                        // need text shaping or paint commands until they enter the clip rect.
+                        if !ui.is_rect_visible(r) {
+                            return;
+                        }
                         let base = r.left_bottom() + vec2(2.0, -5.0);
                         let g = ui.painter().layout_no_wrap(k.name().to_uppercase(), egui::FontId::new(11.0, theme::heading_family()), theme::TEXT_DIM);
                         let line_y = base.y - g.size().y * 0.5;
@@ -127,7 +133,6 @@ impl PainterApp {
                             [pos2(base.x + text_w + 8.0, line_y), pos2(r.right() - 4.0, line_y)],
                             Stroke::new(1.0, theme::OUTLINE),
                         );
-                        *last = Some(k);
                     }
                 };
                 let mut share = None;
@@ -200,11 +205,13 @@ impl PainterApp {
                                     }
                                     let Some(tex) = s.thumb.as_ref().map(|t| t.id()).or(fallback) else { continue };
                                     let resp = Self::swatch(ui, tex, &s.name.clone(), icon);
-                                    let at = resp.rect.left_top() + vec2(8.0, 6.0);
-                                    let g = ui.painter().layout_no_wrap("MINE".into(), egui::FontId::proportional(8.5), Color32::WHITE);
-                                    let r = Rect::from_min_size(at, g.size() + vec2(6.0, 2.0));
-                                    ui.painter().rect_filled(r, 0.0, theme::DONATE.gamma_multiply(0.9));
-                                    ui.painter().galley(r.min + vec2(3.0, 1.0), g, Color32::WHITE);
+                                    if ui.is_rect_visible(resp.rect) {
+                                        let at = resp.rect.left_top() + vec2(8.0, 6.0);
+                                        let g = ui.painter().layout_no_wrap("MINE".into(), egui::FontId::proportional(8.5), Color32::WHITE);
+                                        let r = Rect::from_min_size(at, g.size() + vec2(6.0, 2.0));
+                                        ui.painter().rect_filled(r, 0.0, theme::DONATE.gamma_multiply(0.9));
+                                        ui.painter().galley(r.min + vec2(3.0, 1.0), g, Color32::WHITE);
+                                    }
                                     resp.dnd_set_drag_payload(ShelfItem::UserSmart(i));
                                     if resp.double_clicked() {
                                         self.pending.push(Action::AddOnTop(ShelfItem::UserSmart(i)));
@@ -221,7 +228,7 @@ impl PainterApp {
                                     group(ui, &mut last, s.kind());
                                     let tex = self.shelf.smart[i].id();
                                     let resp = Self::swatch(ui, tex, s.name, icon);
-                                    if s.is_scanned() {
+                                    if s.is_scanned() && ui.is_rect_visible(resp.rect) {
                                         // Badge: built on a photo-scanned texture set.
                                         let at = resp.rect.left_top() + vec2(8.0, 6.0);
                                         let font = egui::FontId::proportional(8.5);
@@ -230,7 +237,9 @@ impl PainterApp {
                                         ui.painter().rect_filled(r, 0.0, theme::ACCENT.gamma_multiply(0.85));
                                         ui.painter().galley(r.min + vec2(3.0, 1.0), g, Color32::WHITE);
                                     }
-                                    Self::missing_badge(ui, &resp, s.needs_maps() & self.engine.missing_maps());
+                                    if ui.is_rect_visible(resp.rect) {
+                                        Self::missing_badge(ui, &resp, s.needs_maps() & self.engine.missing_maps());
+                                    }
                                     resp.dnd_set_drag_payload(ShelfItem::Smart(i));
                                     if resp.double_clicked() {
                                         self.pending.push(Action::AddOnTop(ShelfItem::Smart(i)));
@@ -329,7 +338,9 @@ impl PainterApp {
                                     }
                                     let tex = self.shelf.generators[i].id();
                                     let resp = Self::swatch(ui, tex, g.name(), icon);
-                                    Self::missing_badge(ui, &resp, g.default_generator().needs_maps() & self.engine.missing_maps());
+                                    if ui.is_rect_visible(resp.rect) {
+                                        Self::missing_badge(ui, &resp, g.default_generator().needs_maps() & self.engine.missing_maps());
+                                    }
                                     resp.dnd_set_drag_payload(ShelfItem::Generator(*g));
                                     if resp.double_clicked() {
                                         self.pending.push(Action::AddGenerator(*g));
@@ -353,6 +364,12 @@ impl PainterApp {
     pub(super) fn swatch(ui: &mut egui::Ui, tex: egui::TextureId, name: &str, size: f32) -> egui::Response {
         let named = size >= NAMED_MIN;
         let (rect, resp) = ui.allocate_exact_size(vec2(size + 12.0, size + if named { 22.0 } else { 8.0 }), Sense::click_and_drag());
+        // ScrollArea lays out every item in a wrapped shelf. Items outside its
+        // clip rect cannot be hovered, clicked or dragged, so avoid shaping text,
+        // registering hover UI, and emitting thumbnail paint commands for them.
+        if !ui.is_rect_visible(rect) {
+            return resp;
+        }
         let p = ui.painter();
         if resp.hovered() {
             p.rect_filled(rect, 0.0, theme::WIDGET_HOVER);
