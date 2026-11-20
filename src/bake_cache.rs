@@ -41,11 +41,14 @@ impl Drop for CachePinInner {
         if let Some(pinned) = PINNED_KEYS.get()
             && let Ok(mut pinned) = pinned.lock()
         {
-            if let Some(count) = pinned.get_mut(&self.key) {
+            let remove = if let Some(count) = pinned.get_mut(&self.key) {
                 *count -= 1;
-                if *count == 0 {
-                    pinned.remove(&self.key);
-                }
+                *count == 0
+            } else {
+                false
+            };
+            if remove {
+                pinned.remove(&self.key);
             }
         }
     }
