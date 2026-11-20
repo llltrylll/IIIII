@@ -12,8 +12,8 @@ The owner authorizes large, risky, or breaking internal refactors when these are
 
 ## Shared repository protocol
 
-GPT, Claude and Kimi share this repository. Follow the exact seven-branch policy in AGENTS.md. Before every task, inspect current branch, HEAD, open PRs, changed files/diff, CI, and the other agents' latest commits/comments. Re-fetch files and latest SHAs before writing. Never assume earlier conversation context is current.
+GPT, Claude and Kimi share this repository. Follow the exact ten-branch policy in AGENTS.md. Use only the two designated test lanes for experiments; do not create another branch. Before every task, inspect current branch, HEAD, open PRs, changed files/diff, CI, and the other agents' latest commits/comments. Re-fetch files and latest SHAs before writing. Never assume earlier conversation context is current.
 
-Do not edit the same files/subsystem concurrently. Establish task ownership in the active PR or a handoff comment. Do not create a new branch. Production changes stay on the designated active branch; diagnostic evidence and reports go only to their three designated branches. Do not overwrite another agent's work. Commit coherent changes and leave a handoff with changed behavior, tests, unresolved risks, and next task.
+Do not edit the same files/subsystem concurrently. Establish task ownership in the active PR or a handoff comment. Do not create a new branch. Production-ready changes stay on the designated active branch; bounded experiments go only to test/agent-lab-a or test/agent-lab-b; preserve important experimental checkpoints in backup/test-lab; diagnostic evidence and reports go only to their three designated branches. Do not overwrite another agent's work. Commit coherent changes and leave a handoff with changed behavior, tests, unresolved risks, and next task.
 
 All changes belong only in `llltrylll/IIIII`. Never edit or push to `alla2001/material-painter`; do not push tags, merge PRs, or publish releases without the owner's explicit instruction.
