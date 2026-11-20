@@ -786,7 +786,7 @@ mod tests {
             }),
         );
 
-        assert_eq!(history.ram_bytes(), 134);
+        assert_eq!(history.ram_bytes(), 128);
         assert!(history.undo[0].pending_snapshots);
         history.update();
         assert_eq!(history.ram_bytes(), 6);
