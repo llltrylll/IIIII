@@ -5011,7 +5011,7 @@ impl Engine {
         // position map, variation scale and seed; channel amounts and per-part
         // variation remain cheap controls in the main layer pass.
         let mut variation_noise_needed = HashSet::new();
-        let mut variation_noise_misses: Vec<(usize, u64, bool)> = Vec::new();
+        let mut variation_noise_misses: Vec<(usize, usize, u64, bool)> = Vec::new();
         let mut variation_noise_hits = 0u32;
         for (slot, pass) in passes.iter().enumerate() {
             let Pass::Layer(li) = *pass else { continue };
@@ -5049,10 +5049,10 @@ impl Engine {
             let roughness = roughness_enabled.then(|| Tex::new(&self.device, "fill roughness FBM cache", self.res, self.res, F::R16Float, LAYER_USAGE));
             self.fill_variation_noise.insert(layer.id, FillVariationNoiseCache { key, color, roughness });
             if color_enabled {
-                variation_noise_misses.push((slot, layer.id, false));
+                variation_noise_misses.push((slot, li, layer.id, false));
             }
             if roughness_enabled {
-                variation_noise_misses.push((slot, layer.id, true));
+                variation_noise_misses.push((slot, li, layer.id, true));
             }
         }
         self.fill_variation_noise.retain(|id, cache| {
@@ -5086,10 +5086,10 @@ impl Engine {
         // Each single-channel FBM prepass gets its own dynamic uniform slot.
         let variation_noise_slots: Vec<(usize, u64, bool)> = variation_noise_misses
             .iter()
-            .map(|&(_layer_slot, layer_id, roughness)| {
+            .map(|&(_layer_slot, layer_index, layer_id, roughness)| {
                 let prepass_slot = next_slot;
                 next_slot += 1;
-                (prepass_slot, layer_id, roughness)
+                (prepass_slot, layer_index, layer_id, roughness)
             })
             .collect();
         let slots = next_slot;
@@ -5142,9 +5142,8 @@ impl Engine {
                 }
             }
         }
-        for &(slot, layer_id, roughness) in &variation_noise_slots {
-            let mut u = self.layer_uniform(&self.layers[*self.layers.iter().position(|layer| layer.id == layer_id)
-                .as_ref().expect("cached fill variation layer remains in stack")]);
+        for &(slot, layer_index, _layer_id, roughness) in &variation_noise_slots {
+            let mut u = self.layer_uniform(&self.layers[layer_index]);
             u.varc[2] = if roughness { 1.0 } else { 0.0 };
             let offset = slot * UNIFORM_STRIDE as usize;
             data[offset..offset + size_of::<LayerUniform>()].copy_from_slice(bytemuck::bytes_of(&u));
@@ -5292,9 +5291,8 @@ impl Engine {
                 ],
             }));
         }
-        for &(slot, layer_id, roughness) in &variation_noise_slots {
-            let layer = &self.layers[*self.layers.iter().position(|layer| layer.id == layer_id)
-                .as_ref().expect("cached fill variation layer remains in stack")];
+        for &(slot, layer_index, layer_id, roughness) in &variation_noise_slots {
+            let layer = &self.layers[layer_index];
             let cache = &self.fill_variation_noise[&layer_id];
             let target = if roughness {
                 cache.roughness.as_ref().expect("roughness cache texture")
