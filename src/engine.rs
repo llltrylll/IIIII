@@ -5191,15 +5191,16 @@ impl Engine {
             let mut op_labels: Vec<String> = Vec::new();
             let scale = self.res as f32 / FILTER_REF_RES;
             let mask = self.layers[li].mask.as_ref().expect("filtered layers have masks");
+            let mut mask_layer_number = 0usize;
             for (ml, &slot) in mask.layers.iter().filter(|ml| ml.enabled).zip(&item_slots[&li]) {
+                mask_layer_number += 1;
                 let value = match ml.source {
                     MaskSource::Fill(v) => v,
                     MaskSource::Generator(_) => 1.0,
                 };
                 ops.push(MaskOp::Layer { uniform: (slot as u64 * UNIFORM_STRIDE) as u32, combine: steps.len() });
                 if profile_query.is_some() {
-                let number = op_labels.len() + 1;
-                op_labels.push(format!("mask layer {number}"));
+                op_labels.push(format!("mask layer {mask_layer_number}"));
             }
                 steps.push([COMBINE_STEP, ml.blend as u32 as f32, ml.opacity, value, 0.0, 0.0, scale, 0.0]);
             }
