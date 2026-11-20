@@ -61,7 +61,7 @@ jobs:
         run: "cargo test --locked --bin material_painter preview_test::screen_projection_skips_inward_front_surface_and_paints_background_chart -- --ignored --exact --nocapture --test-threads 1"
 
       - name: GPU parity - thin foreground occluder
-        run: "cargo test --locked --bin material_painter preview_test::screen_projection_rejects_back_surface_behind_thin_occluder -- --ignored --exact --nocapture --test-threads 1"
+        run: "cargo test --locked --bin material_painter preview_test::screen_projection_weights_partial_msaa_occlusion -- --ignored --exact --nocapture --test-threads 1"
 
       - name: GPU parity - close stacked UV occlusion
         run: "cargo test --locked --bin material_painter preview_test::screen_projection_rejects_close_occluded_uv_surface -- --ignored --exact --nocapture --test-threads 1"
@@ -85,6 +85,15 @@ jobs:
 
       - name: GPU viewport - built-in material and map views
         run: "cargo test --locked --bin material_painter preview_test::preview_mesh -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU composite - smart mask generator cache
+        run: "cargo test --locked --bin material_painter preview_test::smart_mask_generator_cache_matches_uncached_result_and_invalidates_on_change -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU composite - roughness FBM cache fidelity
+        run: "cargo test --locked --bin material_painter preview_test::fill_roughness_noise_cache_matches_inline_and_invalidates_on_change -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU viewport - cached image invalidation
+        run: "cargo test --locked --bin material_painter preview_test::viewport_cache_reuses_unchanged_images_and_invalidates_changes -- --ignored --exact --nocapture --test-threads 1"
 
       - name: GPU viewport - custom shading graph previews
         run: "cargo test --locked --bin material_painter preview_test::preview_shaders_compile_and_render -- --ignored --exact --nocapture --test-threads 1"

@@ -435,6 +435,9 @@ impl PainterApp {
                             self.engine.last_mask_cache_hits,
                             self.engine.last_mask_cache_misses,
                             self.engine.last_mask_gpu_passes,
+                            self.engine.last_fill_roughness_cache_hits,
+                            self.engine.last_fill_roughness_cache_misses,
+                            self.engine.last_fill_roughness_cache_gpu_passes,
                         );
                         ui.add(egui::Label::new(RichText::new(details).small()).wrap());
                     }
@@ -576,6 +579,9 @@ impl PainterApp {
                 self.engine.last_mask_cache_hits,
                 self.engine.last_mask_cache_misses,
                 self.engine.last_mask_gpu_passes,
+                self.engine.last_fill_roughness_cache_hits,
+                self.engine.last_fill_roughness_cache_misses,
+                self.engine.last_fill_roughness_cache_gpu_passes,
             )
         } else {
             "disabled".to_string()

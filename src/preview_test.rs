@@ -38,6 +38,64 @@ fn map_mode(name: &str) -> ViewMode {
 
 #[test]
 #[ignore]
+fn viewport_cache_reuses_unchanged_images_and_invalidates_changes() {
+    use crate::mesh::Primitive;
+    use crate::viewport::Cam2d;
+    use glam::Vec2;
+
+    let mesh = Primitive::RoundedCube.build();
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 64);
+    engine.composite();
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+    let mut views = ViewRenderer::new(&rs);
+    let size = [320, 240];
+    let settings = ViewSettings::default();
+    let cam_a = OrbitCam::default();
+
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam_a, &settings, None);
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam_a, &settings, None);
+    assert_eq!(views.view3d_cache_hits, 1, "unchanged 3D view should reuse its raster image");
+
+    let cam_b = OrbitCam { yaw: cam_a.yaw + 0.2, ..cam_a };
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam_b, &settings, None);
+    assert_eq!(views.view3d_cache_hits, 1, "camera movement must invalidate the 3D cache");
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam_b, &settings, None);
+    assert_eq!(views.view3d_cache_hits, 2, "the new camera should then become cacheable");
+
+    let mut undo = crate::undo::UndoStack::default();
+    engine.add_paint_layer(0, None, None, &mut undo);
+    engine.composite();
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam_b, &settings, None);
+    assert_eq!(views.view3d_cache_hits, 2, "a material composite must invalidate the 3D cache");
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam_b, &settings, None);
+    assert_eq!(views.view3d_cache_hits, 3, "the updated material should become cacheable");
+
+    let uv_a = Cam2d { zoom: 120.0, pan: Vec2::ZERO };
+    views.render_2d(&rs, size, &engine, &env, &gpu_mesh, 0, &uv_a, &settings);
+    views.render_2d(&rs, size, &engine, &env, &gpu_mesh, 0, &uv_a, &settings);
+    assert_eq!(views.view2d_cache_hits, 1, "unchanged UV view should reuse its raster image");
+
+    let uv_b = Cam2d { zoom: 150.0, ..uv_a };
+    views.render_2d(&rs, size, &engine, &env, &gpu_mesh, 0, &uv_b, &settings);
+    assert_eq!(views.view2d_cache_hits, 1, "UV camera movement must invalidate the 2D cache");
+    views.render_2d(&rs, size, &engine, &env, &gpu_mesh, 0, &uv_b, &settings);
+    assert_eq!(views.view2d_cache_hits, 2, "the new UV camera should then become cacheable");
+
+    engine.add_paint_layer(0, None, None, &mut undo);
+    engine.composite();
+    views.render_2d(&rs, size, &engine, &env, &gpu_mesh, 0, &uv_b, &settings);
+    assert_eq!(views.view2d_cache_hits, 2, "a material composite must invalidate the UV cache");
+    views.render_2d(&rs, size, &engine, &env, &gpu_mesh, 0, &uv_b, &settings);
+    assert_eq!(views.view2d_cache_hits, 3, "the updated UV material should become cacheable");
+
+    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+}
+
+#[test]
+#[ignore]
 fn preview_mesh() {
     let mesh = match std::env::var("MP_PREVIEW_MESH").as_deref() {
         Ok("ball") => crate::mesh::Primitive::MaterialBall.build(),
@@ -1082,6 +1140,136 @@ fn ui_screenshots() {
     harness.state_mut().test_custom_mask();
     harness.run_steps(8);
     harness.render().expect("renders").save(dir.join("mask_custom.png")).unwrap();
+}
+
+/// Smart-mask generators are cached separately from material compositing.
+/// Repeated composites reuse the exact mask; editing the generator invalidates it.
+#[test]
+#[ignore]
+fn smart_mask_generator_cache_matches_uncached_result_and_invalidates_on_change() {
+    use crate::engine::{FillParams, GenKind, GEN_INPUT_COUNT, MatValues};
+    use crate::undo::UndoStack;
+
+    let mesh = crate::mesh::Primitive::RoundedCube.build();
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let res = 128;
+    let fill = FillParams {
+        mat: MatValues {
+            enabled: [true, false, false, false, false, false, false, false],
+            color: [0.9, 0.08, 0.04],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut generator = GenKind::EdgeWear.default_generator();
+    generator.weights = [0.0; GEN_INPUT_COUNT];
+    // Exercise the expensive projected-scratches procedural input.
+    generator.weights[18] = 1.0;
+    generator.noise = 0.0;
+    generator.level = 0.45;
+    generator.contrast = 0.3;
+
+    let mut cached = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+    let mut undo = UndoStack::default();
+    let layer = cached.add_fill_layer(0, None, "Scratches".into(), fill, &mut undo);
+    cached.add_mask(layer, true, Some(generator), &mut undo);
+
+    cached.composite();
+    assert_eq!(cached.last_mask_cache_misses, 1, "the first composite must render the generator mask");
+    assert_eq!(cached.last_mask_gpu_passes, 1, "a generator-only mask needs one source pass");
+    let first = read_texture(&rs.device, &rs.queue, cached.final_tex(0));
+
+    cached.mark_dirty();
+    cached.composite();
+    assert_eq!(cached.last_mask_cache_hits, 1, "an unchanged smart mask should be reused");
+    assert_eq!(cached.last_mask_cache_misses, 0);
+    assert_eq!(cached.last_mask_gpu_passes, 0, "a cache hit must not rerun the generator");
+    assert_eq!(first, read_texture(&rs.device, &rs.queue, cached.final_tex(0)));
+
+    let mut changed = generator;
+    changed.seed += 3.0;
+    cached.set_mask_source(layer, Some(changed), None, &mut undo);
+    cached.composite();
+    assert_eq!(cached.last_mask_cache_misses, 1, "editing a generator must invalidate its result");
+    assert_eq!(cached.last_mask_gpu_passes, 1, "the edited generator must be evaluated again");
+    let actual = read_texture(&rs.device, &rs.queue, cached.final_tex(0));
+
+    let mut reference = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+    let mut reference_undo = UndoStack::default();
+    let reference_layer = reference.add_fill_layer(0, None, "Scratches".into(), fill, &mut reference_undo);
+    reference.add_mask(reference_layer, true, Some(changed), &mut reference_undo);
+    reference.composite();
+    let expected = read_texture(&rs.device, &rs.queue, reference.final_tex(0));
+    assert_eq!(actual, expected, "cached generator output must match a fresh uncached evaluation");
+
+    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+}
+
+/// Stable roughness FBM is evaluated once, reused on a later composite,
+/// and invalidated when the fill seed changes. The final roughness bytes must
+/// match a fresh engine that evaluates the original inline shader path.
+#[test]
+#[ignore]
+fn fill_roughness_noise_cache_matches_inline_and_invalidates_on_change() {
+    use crate::engine::{Content, FillParams, MatValues};
+    use crate::undo::UndoStack;
+
+    let mesh = crate::mesh::Primitive::RoundedCube.build();
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let res = 128;
+    let fill = FillParams {
+        mat: MatValues {
+            enabled: [false, true, false, false, false, false, false, false],
+            rough: 0.42,
+            ..Default::default()
+        },
+        rough_var: 0.78,
+        var_scale: 2.35,
+        seed: 17.0,
+        part_var: 0.24,
+        ..Default::default()
+    };
+
+    let mut cached = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+    let mut undo = UndoStack::default();
+    let layer = cached.add_fill_layer(0, None, "Micro Roughness".into(), fill, &mut undo);
+
+    cached.composite();
+    assert_eq!(cached.last_fill_roughness_cache_misses, 1, "the first composite must generate the roughness field");
+    assert_eq!(cached.last_fill_roughness_cache_gpu_passes, 1);
+    assert_eq!(cached.last_fill_roughness_cache_hits, 0);
+    let first = read_texture(&rs.device, &rs.queue, cached.final_tex(1));
+
+    cached.mark_dirty();
+    cached.composite();
+    assert_eq!(cached.last_fill_roughness_cache_hits, 1, "the unchanged layer should reuse its FBM field");
+    assert_eq!(cached.last_fill_roughness_cache_misses, 0);
+    assert_eq!(cached.last_fill_roughness_cache_gpu_passes, 0, "a cache hit must not submit another FBM pass");
+    assert_eq!(first, read_texture(&rs.device, &rs.queue, cached.final_tex(1)));
+
+    let changed = match &mut cached.layers[layer].content {
+        Content::Fill(params) => {
+            params.seed += 9.0;
+            *params
+        }
+        _ => unreachable!(),
+    };
+    cached.mark_dirty();
+    cached.composite();
+    assert_eq!(cached.last_fill_roughness_cache_misses, 1, "changing the seed must invalidate the cached field");
+    assert_eq!(cached.last_fill_roughness_cache_gpu_passes, 1);
+
+    let mut reference = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+    let mut reference_undo = UndoStack::default();
+    reference.add_fill_layer(0, None, "Micro Roughness".into(), changed, &mut reference_undo);
+    reference.composite();
+    let actual = read_texture(&rs.device, &rs.queue, cached.final_tex(1));
+    let expected = read_texture(&rs.device, &rs.queue, reference.final_tex(1));
+    assert_eq!(actual, expected, "cached roughness FBM must match the inline evaluation exactly");
+
+    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 }
 
 /// Mask filters change what a layer covers: a white mask shows the layer
@@ -2948,12 +3136,12 @@ fn screen_projection_rejects_close_occluded_uv_surface() {
     assert_eq!(hidden_chart, 0, "the nearby hidden chart must remain untouched, got {hidden_chart}");
 }
 
-/// A sub-pixel foreground bar must still occlude the back surface.
-/// This catches choosing any matching MSAA sample: a pixel partially covered
-/// by the bar may also contain samples from the background plane.
+/// A sub-pixel foreground bar must occlude the hidden fraction without
+/// erasing the background's still-visible MSAA samples. Partially covered
+/// background texels receive proportionally reduced paint.
 #[test]
 #[ignore]
-fn screen_projection_rejects_back_surface_behind_thin_occluder() {
+fn screen_projection_weights_partial_msaa_occlusion() {
     use crate::app::{BrushProjection, resolve_stamps, screen_stroke_plan};
     use crate::engine::{BrushPaint, Content, Engine, MatValues, StampUniform};
     use crate::mesh::{Mesh, Vertex};
@@ -3071,25 +3259,27 @@ fn screen_projection_rejects_back_surface_behind_thin_occluder() {
     let Content::Paint(channels) = &engine.layers[0].content else { panic!("expected paint layer") };
     let color = channels[0].as_ref().expect("base color channel was allocated");
     let rgba = read_texture(&rs.device, &rs.queue, color);
-    let painted = |x: usize, y: usize| {
-        let i = (y * res as usize + x) * 4;
-        rgba[i + 3] > 0
-    };
+    let alpha_at = |x: usize, y: usize| rgba[(y * res as usize + x) * 4 + 3];
     let back_chart_count = rgba.chunks_exact(4).enumerate()
         .filter(|(index, pixel)| *index % (res as usize) < (res as usize / 2) && pixel[3] > 0)
         .count();
     let bar_chart_count = rgba.chunks_exact(4).enumerate()
         .filter(|(index, pixel)| *index % (res as usize) >= (res as usize / 2) && pixel[3] > 0)
         .count();
-    let hidden_column = (0..res as usize).filter(|&y| (96..=160).contains(&y))
-        .filter(|&y| painted(70, y))
-        .count();
+    let partial_column: Vec<u8> = (96..=160).map(|y| alpha_at(70, y)).filter(|&alpha| alpha > 0 && alpha < 255).collect();
+    let back_edge_alpha = alpha_at(70, 128);
+    let bar_alpha = alpha_at(185, 128);
 
-    println!("  thin occluder: back chart {back_chart_count}, bar chart {bar_chart_count}, painted texels under bar {hidden_column}");
+    println!(
+        "  thin occluder: back chart {back_chart_count}, bar chart {bar_chart_count}, partial back-edge texels {}, sample alpha back/bar {back_edge_alpha}/{bar_alpha}",
+        partial_column.len()
+    );
     assert!(back_chart_count > 500, "the visible back plane must still paint around the bar");
     assert!(bar_chart_count > 10, "the thin visible bar should paint its own UV chart");
-    assert_eq!(hidden_column, 0,
-        "the back UV chart must not paint through the partially covered screen pixels");
+    assert!(!partial_column.is_empty(),
+        "partially visible back-face texels should keep a reduced MSAA coverage instead of becoming holes");
+    assert!(back_edge_alpha < bar_alpha,
+        "the partly occluded back surface must receive less paint than the fully visible foreground bar");
 }
 
 /// A visible sloped face must remain paintable when MSAA samples do not

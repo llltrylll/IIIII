@@ -403,6 +403,9 @@ impl Engine {
                 // Full size, unlike the thumbnail's position and normal: it
                 // only turns normal images, which thumbnails don't show.
                 wgpu::BindGroupEntry { binding: 26, resource: view(Some(&self.tan)) },
+                // Thumbnails do not need the full-resolution procedural roughness cache.
+                // A neutral fallback keeps the shared compositor layout complete.
+                wgpu::BindGroupEntry { binding: 27, resource: view(None) },
             ],
         });
 

@@ -119,7 +119,7 @@ fn look_at_rh(eye: Vec3, center: Vec3, up: Vec3) -> Mat4 {
     )
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct OrbitCam {
     pub yaw: f32,
     pub pitch: f32,
@@ -228,7 +228,7 @@ impl OrbitCam {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Cam2d {
     /// Pixels per UV unit.
     pub zoom: f32,
@@ -386,9 +386,14 @@ struct OverlayBuffers {
 #[derive(Default)]
 pub struct Overlays {
     slots: [OverlayBuffers; 3],
+    /// Changes only when overlay geometry is replaced or removed.
+    generation: u64,
 }
 
 impl Overlays {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
     /// Replaces a slot's geometry: triangle-list and line-list vertices.
     pub fn set(&mut self, device: &wgpu::Device, slot: OverlaySlot, tris: &[OverlayVertex], lines: &[OverlayVertex]) {
         use wgpu::util::DeviceExt;
@@ -403,10 +408,14 @@ impl Overlays {
             })
         };
         self.slots[slot as usize] = OverlayBuffers { tris: upload("overlay tris", tris), lines: upload("overlay lines", lines) };
+        self.generation = self.generation.wrapping_add(1);
     }
 
     pub fn clear(&mut self, slot: OverlaySlot) {
-        self.slots[slot as usize] = OverlayBuffers::default();
+        if self.is_set(slot) {
+            self.slots[slot as usize] = OverlayBuffers::default();
+            self.generation = self.generation.wrapping_add(1);
+        }
     }
 
     pub fn is_set(&self, slot: OverlaySlot) -> bool {
@@ -639,6 +648,140 @@ struct CachedViewBindGroup {
     bind_group: wgpu::BindGroup,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ViewEngineStamp {
+    binding: (u64, u32, usize, u64, u64),
+    generation: u64,
+}
+
+impl ViewEngineStamp {
+    fn new(engine: &Engine) -> Self {
+        Self { binding: engine.viewport_binding_identity(), generation: engine.generation }
+    }
+}
+
+/// Complete visual inputs for the built-in 3D raster viewport.
+/// Reusing the image is safe only while every input that affects its pixels
+/// remains unchanged. Dynamic custom shaders bypass this cache.
+#[derive(Clone, PartialEq)]
+struct View3dCacheKey {
+    size: [u32; 2],
+    mesh_id: u64,
+    environment: u64,
+    camera: OrbitCam,
+    settings: ViewSettings,
+    engines: Vec<ViewEngineStamp>,
+    looks: Vec<SetLook>,
+    hidden_objects: Vec<bool>,
+    overlay_generation: u64,
+    update_screen_paint_depth: bool,
+    has_source_mesh: bool,
+}
+
+impl View3dCacheKey {
+    fn matches(
+        &self,
+        size: [u32; 2],
+        engines: &[&Engine],
+        env: &Environment,
+        mesh: &GpuMesh,
+        cam: &OrbitCam,
+        settings: &ViewSettings,
+        looks: &[SetLook],
+        hidden_objects: &[bool],
+        overlay_generation: u64,
+        update_screen_paint_depth: bool,
+        has_source_mesh: bool,
+    ) -> bool {
+        self.size == size
+            && self.mesh_id == mesh.mesh_id
+            && self.environment == env.id
+            && self.camera == *cam
+            && self.settings == *settings
+            && self.engines.len() == engines.len()
+            && self.engines.iter().zip(engines).all(|(old, current)| *old == ViewEngineStamp::new(current))
+            && self.looks.as_slice() == looks
+            && self.hidden_objects.as_slice() == hidden_objects
+            && self.overlay_generation == overlay_generation
+            && self.update_screen_paint_depth == update_screen_paint_depth
+            && self.has_source_mesh == has_source_mesh
+    }
+
+    fn update(
+        &mut self,
+        size: [u32; 2],
+        engines: &[&Engine],
+        env: &Environment,
+        mesh: &GpuMesh,
+        cam: &OrbitCam,
+        settings: &ViewSettings,
+        looks: &[SetLook],
+        hidden_objects: &[bool],
+        overlay_generation: u64,
+        update_screen_paint_depth: bool,
+        has_source_mesh: bool,
+    ) {
+        self.size = size;
+        self.mesh_id = mesh.mesh_id;
+        self.environment = env.id;
+        self.camera = *cam;
+        self.settings = *settings;
+        self.engines.clear();
+        self.engines.extend(engines.iter().map(|engine| ViewEngineStamp::new(engine)));
+        self.looks.clear();
+        self.looks.extend_from_slice(looks);
+        self.hidden_objects.clear();
+        self.hidden_objects.extend_from_slice(hidden_objects);
+        self.overlay_generation = overlay_generation;
+        self.update_screen_paint_depth = update_screen_paint_depth;
+        self.has_source_mesh = has_source_mesh;
+    }
+
+    fn new(
+        size: [u32; 2],
+        engines: &[&Engine],
+        env: &Environment,
+        mesh: &GpuMesh,
+        cam: &OrbitCam,
+        settings: &ViewSettings,
+        looks: &[SetLook],
+        hidden_objects: &[bool],
+        overlay_generation: u64,
+        update_screen_paint_depth: bool,
+        has_source_mesh: bool,
+    ) -> Self {
+        let mut key = Self {
+            size,
+            mesh_id: mesh.mesh_id,
+            environment: env.id,
+            camera: *cam,
+            settings: *settings,
+            engines: Vec::with_capacity(engines.len()),
+            looks: Vec::with_capacity(looks.len()),
+            hidden_objects: Vec::with_capacity(hidden_objects.len()),
+            overlay_generation,
+            update_screen_paint_depth,
+            has_source_mesh,
+        };
+        key.update(
+            size, engines, env, mesh, cam, settings, looks, hidden_objects,
+            overlay_generation, update_screen_paint_depth, has_source_mesh,
+        );
+        key
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct View2dCacheKey {
+    size: [u32; 2],
+    mesh_id: u64,
+    set: usize,
+    engine: ViewEngineStamp,
+    environment: u64,
+    camera: Cam2d,
+    settings: ViewSettings,
+}
+
 pub struct ViewRenderer {
     /// Per texture set (missing entries: shown, no highlight).
     pub set_looks: Vec<SetLook>,
@@ -683,6 +826,16 @@ pub struct ViewRenderer {
     /// View bind groups reference texture views and are rebuilt only when an
     /// Engine replaces a bound resource, the environment changes, or its slot changes.
     view_bind_groups: Vec<Option<CachedViewBindGroup>>,
+    /// The UV view has a separate uniform buffer and one persistent bind group.
+    view2d_bind_group: Option<CachedViewBindGroup>,
+    /// Skip raster work when the complete set of visible inputs is unchanged.
+    view3d_cache_key: Option<View3dCacheKey>,
+    view2d_cache_key: Option<View2dCacheKey>,
+    /// Test-only counters prove the cache hits unchanged frames and misses changed ones.
+    #[cfg(test)]
+    pub(crate) view3d_cache_hits: u64,
+    #[cfg(test)]
+    pub(crate) view2d_cache_hits: u64,
     /// Reused visibility scratch storage; avoids a fresh Vec on every viewport frame.
     shown_sets: Vec<usize>,
     sampler: wgpu::Sampler,
@@ -937,6 +1090,13 @@ impl ViewRenderer {
             bgl,
             globals,
             view_bind_groups: Vec::new(),
+            view2d_bind_group: None,
+            view3d_cache_key: None,
+            view2d_cache_key: None,
+            #[cfg(test)]
+            view3d_cache_hits: 0,
+            #[cfg(test)]
+            view2d_cache_hits: 0,
             shown_sets: Vec::new(),
             sampler: gpu::linear_sampler(device, wgpu::AddressMode::ClampToEdge),
             view3d: ViewTarget::new(rs, true),
@@ -950,6 +1110,7 @@ impl ViewRenderer {
     pub fn set_custom_shader(&mut self, device: &wgpu::Device, code: Option<&str>) -> Result<(), String> {
         let Some(code) = code else {
             self.custom_mesh = None;
+            self.view3d_cache_key = None;
             return Ok(());
         };
         let src = format!(
@@ -990,6 +1151,7 @@ impl ViewRenderer {
             return Err(e);
         }
         self.custom_mesh = Some(pipeline);
+        self.view3d_cache_key = None;
         Ok(())
     }
 
@@ -1104,6 +1266,7 @@ impl ViewRenderer {
     pub fn invalidate_shadow(&mut self) {
         self.shadow_key = None;
         self.paint_depth_key = None;
+        self.view3d_cache_key = None;
     }
 
     fn screen_paint_depth_key(vp: Mat4, size: [u32; 2], mesh: &GpuMesh, shown: &[usize], key: &mut Vec<u32>) {
@@ -1152,6 +1315,7 @@ impl ViewRenderer {
                 self.object_draw = None;
                 self.paint_depth_key = None;
                 self.shadow_key = None;
+                self.view3d_cache_key = None;
             }
             self.object_draw_key.get_or_insert_with(Vec::new).clone_from(&self.object_draw_key_scratch);
             return;
@@ -1163,6 +1327,7 @@ impl ViewRenderer {
         self.object_draw_key.get_or_insert_with(Vec::new).clone_from(&self.object_draw_key_scratch);
         self.paint_depth_key = None;
         self.shadow_key = None;
+        self.view3d_cache_key = None;
     }
 
     /// Draws the mesh using the current texture-set visibility.
@@ -1240,6 +1405,20 @@ impl ViewRenderer {
         self.view3d.ensure_size(rs, size);
         self.ensure_object_draw_buffers(&rs.device, mesh, source_mesh, hidden_objects);
         let size = self.view3d.size;
+        let overlay_generation = overlays.map_or(0, Overlays::generation);
+        let cacheable = self.custom_mesh.is_none();
+        if !cacheable {
+            self.view3d_cache_key = None;
+        } else if self.view3d_cache_key.as_ref().is_some_and(|key| {
+            key.matches(
+                size, engines, env, mesh, cam, settings, &self.set_looks, hidden_objects,
+                overlay_generation, update_screen_paint_depth, source_mesh.is_some(),
+            )
+        }) {
+            #[cfg(test)]
+            { self.view3d_cache_hits = self.view3d_cache_hits.saturating_add(1); }
+            return;
+        }
         let vp = cam.view_proj(size[0] as f32 / size[1] as f32);
         while self.globals.len() < engines.len() + 1 {
             self.globals.push(Self::globals_buffer(&rs.device));
@@ -1503,6 +1682,20 @@ impl ViewRenderer {
         let raw = settings.mode != ViewMode::Material;
         self.post.record(rs, &mut encoder, hdr, &display.view, &settings.post, settings.exposure, raw);
         rs.queue.submit([encoder.finish()]);
+        if cacheable {
+            match self.view3d_cache_key.as_mut() {
+                Some(key) => key.update(
+                    size, engines, env, mesh, cam, settings, &self.set_looks, hidden_objects,
+                    overlay_generation, update_screen_paint_depth, source_mesh.is_some(),
+                ),
+                None => {
+                    self.view3d_cache_key = Some(View3dCacheKey::new(
+                        size, engines, env, mesh, cam, settings, &self.set_looks, hidden_objects,
+                        overlay_generation, update_screen_paint_depth, source_mesh.is_some(),
+                    ));
+                }
+            }
+        }
     }
 
     /// Draws texture set `set` of the mesh, painted by `engine`, flat.
@@ -1519,11 +1712,35 @@ impl ViewRenderer {
     ) {
         self.view2d.ensure_size(rs, size);
         let size = self.view2d.size;
+        let cache_key = View2dCacheKey {
+            size,
+            mesh_id: mesh.mesh_id,
+            set,
+            engine: ViewEngineStamp::new(engine),
+            environment: env.id,
+            camera: *cam,
+            settings: *settings,
+        };
+        if self.view2d_cache_key == Some(cache_key) {
+            #[cfg(test)]
+            { self.view2d_cache_hits = self.view2d_cache_hits.saturating_add(1); }
+            return;
+        }
         let mut g = Self::base_globals(engine, settings, size, settings.uv_mode);
         g.view2d = [cam.zoom, cam.pan.x, cam.pan.y, 0.0];
         g.extra[3] = settings.uv_wire_opacity;
         rs.queue.write_buffer(&self.globals[0], 0, bytemuck::bytes_of(&g));
-        let bg = self.bind_group(&rs.device, engine, env, &self.globals[0]);
+        let bind_key = ViewBindGroupKey {
+            engine: engine.viewport_binding_identity(),
+            environment: env.id,
+            slot: usize::MAX,
+        };
+        let stale = self.view2d_bind_group.as_ref().is_none_or(|cached| cached.key != bind_key);
+        if stale {
+            let bind_group = self.bind_group(&rs.device, engine, env, &self.globals[0]);
+            self.view2d_bind_group = Some(CachedViewBindGroup { key: bind_key, bind_group });
+        }
+        let bg = &self.view2d_bind_group.as_ref().expect("the UV view needs a bind group").bind_group;
         let (edges, seams) = mesh.sets.get(set).map_or((0..mesh.edge_count, 0..mesh.seam_count), |s| (s.edges.clone(), s.seams.clone()));
 
         let mut encoder = rs.device.create_command_encoder(&Default::default());
@@ -1534,7 +1751,7 @@ impl ViewRenderer {
                 "2d view",
                 &[gpu::color_attachment(&self.view2d.color.view, wgpu::LoadOp::Clear(bg_color))],
             );
-            pass.set_bind_group(0, &bg, &[]);
+            pass.set_bind_group(0, bg, &[]);
             pass.set_pipeline(&self.quad);
             pass.draw(0..6, 0..1);
             pass.set_vertex_buffer(0, mesh.vertices.slice(..));
@@ -1550,6 +1767,7 @@ impl ViewRenderer {
             }
         }
         rs.queue.submit([encoder.finish()]);
+        self.view2d_cache_key = Some(cache_key);
     }
 }
 

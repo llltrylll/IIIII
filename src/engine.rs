@@ -1160,6 +1160,8 @@ struct LayerUniform {
     ns: [f32; 4],
     /// The ID mask's further colors (rgb) with a 1 in w when in use.
     gids: [[f32; 4]; MAX_ID_COLORS - 1],
+    /// Cached procedural roughness FBM is bound at composite texture slot 27.
+    varc: [f32; 4],
 }
 
 #[repr(C)]
@@ -1238,6 +1240,8 @@ struct Pipelines {
     composite: wgpu::RenderPipeline,
     folder_merge: wgpu::RenderPipeline,
     composite_bgl: wgpu::BindGroupLayout,
+    fill_roughness_noise: wgpu::RenderPipeline,
+    fill_roughness_noise_bgl: wgpu::BindGroupLayout,
     mask_source: wgpu::RenderPipeline,
     mask_filter: wgpu::RenderPipeline,
     mask_filter_bgl: wgpu::BindGroupLayout,
@@ -1486,6 +1490,10 @@ pub struct Engine {
     pub last_mask_cache_hits: u32,
     pub last_mask_cache_misses: u32,
     pub last_mask_gpu_passes: u32,
+    /// Procedural fill roughness FBM cache activity from the most recent composite.
+    pub last_fill_roughness_cache_hits: u32,
+    pub last_fill_roughness_cache_misses: u32,
+    pub last_fill_roughness_cache_gpu_passes: u32,
     /// IDs whose final filtered mask texture currently holds valid contents.
     mask_final: HashSet<u64>,
     pub bake_report: Option<Arc<BakeReport>>,
@@ -1531,6 +1539,8 @@ pub struct Engine {
     prefix_cache: Option<[Tex; ACCUM]>,
     /// One persistent result texture per filtered mask.
     mask_out: HashMap<u64, Tex>,
+    /// Full-resolution, one-channel FBM fields for stable fill roughness variations.
+    fill_roughness_noise: HashMap<u64, FillRoughnessNoiseCache>,
     /// Three scratch textures shared by every filtered mask in this engine:
     /// two ping-pong buffers and one temporary mask-layer source.
     mask_scratch: Option<[Tex; 3]>,
@@ -1558,6 +1568,21 @@ impl UvBakeKey {
     fn is_current(baked: Option<&UvBakeKey>, mesh_id: u64, tris: &std::ops::Range<u32>, res: u32) -> bool {
         baked.is_some_and(|k| k.mesh_id == mesh_id && k.tris == *tris && k.res == res)
     }
+}
+
+/// Inputs that actually change the roughness FBM field. The variation amount
+/// is intentionally excluded: it scales the cached noise cheaply in fs_layer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FillRoughnessNoiseKey {
+    res: u32,
+    uv_version: u64,
+    scale_bits: u32,
+    seed_bits: u32,
+}
+
+struct FillRoughnessNoiseCache {
+    key: FillRoughnessNoiseKey,
+    texture: Tex,
 }
 
 fn accum_set(device: &wgpu::Device, res: u32, label: &str) -> [Tex; ACCUM] {
@@ -1794,6 +1819,7 @@ impl Engine {
         self.prefix_cache = None;
         self.mask_scratch = None;
         self.mask_out.clear();
+        self.fill_roughness_noise.clear();
         self.mask_final.clear();
         self.apply_bg = None;
         // Cached stamp bind groups retain views such as the last viewport depth target.
@@ -1952,6 +1978,9 @@ impl Engine {
             last_mask_cache_hits: 0,
             last_mask_cache_misses: 0,
             last_mask_gpu_passes: 0,
+            last_fill_roughness_cache_hits: 0,
+            last_fill_roughness_cache_misses: 0,
+            last_fill_roughness_cache_gpu_passes: 0,
             mask_final: HashSet::new(),
             bake_report: None,
             edge_max: 0.2,
@@ -1990,6 +2019,7 @@ impl Engine {
             prefix: None,
             prefix_cache: None,
             mask_out: HashMap::new(),
+            fill_roughness_noise: HashMap::new(),
             mask_scratch: None,
             mask_filter_ubuf: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("mask filter uniforms"),
@@ -2265,10 +2295,25 @@ impl Engine {
         entries.push(gpu::tex_entry(25, true));
         // The tangent frame, for normal images projected in world space.
         entries.push(gpu::tex_entry(26, false));
+        // Cached roughness variation is read with textureLoad, not a sampler.
+        entries.push(gpu::tex_entry(27, false));
         let composite_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("composite"),
             entries: &entries,
         });
+        // The roughness prepass needs only the layer uniform and the position map.
+        let fill_roughness_noise_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("fill roughness noise"),
+            entries: &[gpu::uniform_entry(0, true), gpu::tex_entry(10, false)],
+        });
+        let fill_roughness_noise = gpu::fullscreen_pipeline(
+            device,
+            "fill roughness noise",
+            &composite_module,
+            "fs_fill_roughness_noise",
+            &gpu::layout(device, &fill_roughness_noise_bgl),
+            &[gpu::target(MASK_FILTER_FORMAT)],
+        );
         let composite = gpu::fullscreen_pipeline(
             device,
             "composite",
@@ -2378,6 +2423,8 @@ impl Engine {
             composite,
             folder_merge,
             composite_bgl,
+            fill_roughness_noise,
+            fill_roughness_noise_bgl,
             mask_source,
             mask_filter,
             mask_filter_bgl,
@@ -4501,10 +4548,62 @@ impl Engine {
         compact_scissors(&mut self.stroke_regions);
     }
 
-    /// The layer's mask has filters that are on.
+    /// The layer's mask has filters or extra mask layers that need a cached result.
     fn has_mask_filters(&self, li: usize) -> bool {
         let l = &self.layers[li];
         l.mask.as_ref().is_some_and(|m| m.filters.iter().any(|f| f.enabled) || m.layers.iter().any(|ml| ml.enabled))
+    }
+
+    /// A smart generator is expensive per texel and independent of the material
+    /// channels below it, so cache its full mask result between composites.
+    fn needs_mask_cache(&self, li: usize) -> bool {
+        self.has_mask_filters(li)
+            || self.layers[li].mask.as_ref().is_some_and(|mask| mask.generator.is_some())
+    }
+
+    /// Renders a cached mask source with no post-source filters.
+    fn encode_mask_source<'a>(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        layer_name: &str,
+        source_bg: &wgpu::BindGroup,
+        source_offset: u32,
+        result: &'a Tex,
+        scissors: Option<&[[u32; 4]]>,
+        profile_query: Option<&wgpu::QuerySet>,
+        profile_stage_count: &mut usize,
+        profile_labels: &mut Vec<String>,
+    ) -> &'a Tex {
+        let load = if scissors.is_some() {
+            wgpu::LoadOp::Load
+        } else {
+            wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+        };
+        let profile_slot = begin_composite_profile_stage(encoder, profile_query, profile_stage_count);
+        let mut pass = gpu::pass(
+            encoder,
+            "cached smart mask",
+            &[gpu::color_attachment(&result.view, load)],
+        );
+        pass.set_pipeline(&self.p.mask_source);
+        pass.set_bind_group(0, source_bg, &[source_offset]);
+        if let Some(rects) = scissors {
+            for &[x0, y0, x1, y1] in rects {
+                pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                pass.draw(0..3, 0..1);
+            }
+        } else {
+            pass.draw(0..3, 0..1);
+        }
+        drop(pass);
+        end_composite_profile_stage(
+            encoder,
+            profile_query,
+            profile_slot,
+            format!("Mask generator · {layer_name}"),
+            profile_labels,
+        );
+        result
     }
 
     /// Renders a layer's mask (painting times smart mask) and runs its
@@ -4896,13 +4995,52 @@ impl Engine {
             self.folder_below.push(set);
         }
 
-        // Layers with mask filters: their source pass reads the mask as usual
-        // (an extra uniform slot after the passes'), their layer pass reads
-        // the filtered texture instead (no smart mask on top).
+        // Cache the expensive roughness FBM for stable fill layers. The FBM
+        // depends only on the position map, scale and seed; rough_var remains a
+        // cheap multiplier in the main layer pass and can change without a rebake.
+        let mut roughness_noise_needed = HashSet::new();
+        let mut roughness_noise_misses: Vec<(usize, u64)> = Vec::new();
+        let mut roughness_noise_hits = 0u32;
+        for (slot, pass) in passes.iter().enumerate() {
+            let Pass::Layer(li) = *pass else { continue };
+            let layer = &self.layers[li];
+            let Content::Fill(fill) = &layer.content else { continue };
+            if fill.rough_var == 0.0 || !fill.mat.enabled[1] || layer.disabled_channels[1] {
+                continue;
+            }
+            let key = FillRoughnessNoiseKey {
+                res: self.res,
+                uv_version: self.uv_version,
+                scale_bits: fill.var_scale.to_bits(),
+                seed_bits: fill.seed.to_bits(),
+            };
+            roughness_noise_needed.insert(layer.id);
+            let current = self.fill_roughness_noise.get(&layer.id)
+                .is_some_and(|cache| cache.key == key && cache.texture.width == self.res);
+            if current {
+                roughness_noise_hits += 1;
+                continue;
+            }
+            self.fill_roughness_noise.insert(layer.id, FillRoughnessNoiseCache {
+                key,
+                texture: Tex::new(&self.device, "fill roughness FBM cache", self.res, self.res, MASK_FILTER_FORMAT, LAYER_USAGE),
+            });
+            roughness_noise_misses.push((slot, layer.id));
+        }
+        self.fill_roughness_noise.retain(|id, cache| {
+            roughness_noise_needed.contains(id) && cache.texture.width == self.res
+        });
+        self.last_fill_roughness_cache_hits = roughness_noise_hits;
+        self.last_fill_roughness_cache_misses = roughness_noise_misses.len() as u32;
+        self.last_fill_roughness_cache_gpu_passes = roughness_noise_misses.len() as u32;
+
+        // Cached mask sources get an extra uniform slot after the layer passes.
+        // Filtered masks run their filter stack after the source; generator-only
+        // masks go directly into the persistent result texture.
         let mut source_slot: HashMap<usize, usize> = HashMap::new();
         for pass in &passes {
             if let Pass::Layer(li) | Pass::End(li) = *pass
-                && self.has_mask_filters(li) {
+                && self.needs_mask_cache(li) {
                     source_slot.insert(li, passes.len() + source_slot.len());
                 }
         }
@@ -4930,6 +5068,9 @@ impl Engine {
         for (k, pass) in passes.iter().enumerate() {
             let (Pass::Layer(li) | Pass::End(li)) = *pass else { continue };
             let mut u = self.layer_uniform(&self.layers[li]);
+            if self.fill_roughness_noise.contains_key(&self.layers[li].id) {
+                u.varc[0] = 1.0;
+            }
             if let Some(&slot) = source_slot.get(&li) {
                 let off = slot * UNIFORM_STRIDE as usize;
                 data[off..off + size_of::<LayerUniform>()].copy_from_slice(bytemuck::bytes_of(&u));
@@ -4961,25 +5102,27 @@ impl Engine {
             }
         }
         self.queue.write_buffer(&self.layer_ubuf, 0, &data);
-        // One persistent result per filtered mask; intermediate ping-pong
-        // textures are shared by this engine and reused sequentially in the encoder.
-        let filtered_ids: Vec<u64> = source_slot.keys().map(|&li| self.layers[li].id).collect();
+        // One persistent result per cached mask. Only masks with actual filter
+        // operations need the three full-resolution ping-pong scratch targets.
+        let cached_ids: Vec<u64> = source_slot.keys().map(|&li| self.layers[li].id).collect();
+        let filter_ids: Vec<u64> = source_slot.keys()
+            .filter(|&&li| self.has_mask_filters(li))
+            .map(|&li| self.layers[li].id)
+            .collect();
         let res = self.res;
         let mask_final = &mut self.mask_final;
         self.mask_out.retain(|id, t| {
-            let keep = filtered_ids.contains(id) && t.width == res;
+            let keep = cached_ids.contains(id) && t.width == res;
             if !keep { mask_final.remove(id); }
             keep
         });
-        for id in &filtered_ids {
+        for id in &cached_ids {
             if !self.mask_out.contains_key(id) {
-                let t = Tex::new(&self.device, "filtered mask result", res, res, MASK_FILTER_FORMAT, LAYER_USAGE);
+                let t = Tex::new(&self.device, "cached mask result", res, res, MASK_FILTER_FORMAT, LAYER_USAGE);
                 self.mask_out.insert(*id, t);
             }
         }
-        if filtered_ids.is_empty() {
-            // These full-resolution ping-pong targets are only useful while at
-            // least one enabled mask layer/filter needs the filter pipeline.
+        if filter_ids.is_empty() {
             self.mask_scratch = None;
         } else if self.mask_scratch.as_ref().is_none_or(|set| set[0].width != res) {
             let t = || Tex::new(&self.device, "filtered mask scratch", res, res, MASK_FILTER_FORMAT, LAYER_USAGE);
@@ -4990,6 +5133,9 @@ impl Engine {
         let mut layer_ops: HashMap<usize, Vec<MaskOp>> = HashMap::new();
         let mut layer_op_labels: HashMap<usize, Vec<String>> = HashMap::new();
         for &li in source_slot.keys() {
+            if !self.has_mask_filters(li) {
+                continue;
+            }
             let mut ops = Vec::new();
             let mut op_labels: Vec<String> = Vec::new();
             let scale = self.res as f32 / FILTER_REF_RES;
@@ -5061,6 +5207,50 @@ impl Engine {
             && let Some(p) = &self.active_gpu_profile {
                 encoder.write_timestamp(&p.query_set, 6);
             }
+        // The cached noise field is independent of the accumulation below.
+        // Generate only on a key miss; future composites reuse the same texture.
+        for &(slot, layer_id) in &roughness_noise_misses {
+            let layer = &self.layers[*self.layers.iter().position(|layer| layer.id == layer_id)
+                .as_ref().expect("cached roughness layer remains in stack")];
+            let cache = &self.fill_roughness_noise[&layer_id];
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("fill roughness noise"),
+                layout: &self.p.fill_roughness_noise_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &self.layer_ubuf,
+                            offset: 0,
+                            size: NonZeroU64::new(size_of::<LayerUniform>() as u64),
+                        }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: wgpu::BindingResource::TextureView(&self.pos.view),
+                    },
+                ],
+            });
+            let profile_slot = begin_composite_profile_stage(
+                &mut encoder, profile_query.as_deref(), &mut profile_stage_count,
+            );
+            let mut pass = gpu::pass(
+                &mut encoder,
+                "fill roughness noise cache",
+                &[gpu::color_attachment(&cache.texture.view, wgpu::LoadOp::Clear(wgpu::Color::BLACK))],
+            );
+            pass.set_pipeline(&self.p.fill_roughness_noise);
+            pass.set_bind_group(0, &bg, &[(slot as u64 * UNIFORM_STRIDE) as u32]);
+            pass.draw(0..3, 0..1);
+            drop(pass);
+            end_composite_profile_stage(
+                &mut encoder,
+                profile_query.as_deref(),
+                profile_slot,
+                format!("Roughness FBM cache · {}", layer.name),
+                &mut profile_labels,
+            );
+        }
         if resume.is_none() {
             let c = |v: f64| wgpu::LoadOp::Clear(wgpu::Color { r: v, g: v, b: v, a: 1.0 });
             let a = &self.accum[0];
@@ -5218,6 +5408,7 @@ impl Engine {
             };
             let mask = layer.mask.as_ref().and_then(|m| m.paint.as_ref());
             let prev = if from_cache { self.prefix_cache.as_ref().expect("prefix cache") } else { &self.accum[src] };
+            let roughness_noise = self.fill_roughness_noise.get(&layer.id).map(|cache| &cache.texture);
             let make_bg = |mask: Option<&Tex>| self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("composite"),
                 layout: &self.p.composite_bgl,
@@ -5257,6 +5448,7 @@ impl Engine {
                     wgpu::BindGroupEntry { binding: 24, resource: view(Some(&prev[FINAL_SPECULAR])) },
                     wgpu::BindGroupEntry { binding: 25, resource: view(chans[SPECULAR]) },
                     wgpu::BindGroupEntry { binding: 26, resource: view(Some(&self.tan)) },
+                    wgpu::BindGroupEntry { binding: 27, resource: view(roughness_noise) },
                 ],
             });
             // A filtered mask depends on its own paint/generator/filter data,
@@ -5270,24 +5462,40 @@ impl Engine {
                         Some(&self.mask_out[&layer.id])
                     } else {
                         mask_cache_misses += 1;
-                        let ops = layer_ops.get(&li).map_or(&[][..], |o| &o[..]);
-                        mask_gpu_passes += 1 + ops.iter().map(|op| match op {
-                            MaskOp::Layer { .. } => 2,
-                            MaskOp::Filter { .. } => 1,
-                        }).sum::<u32>();
-                        Some(self.encode_mask_filters(
-                            &mut encoder,
-                            layer.id,
-                            &layer.name,
-                            &make_bg(mask),
-                            (slot as u64 * UNIFORM_STRIDE) as u32,
-                            ops,
-                            layer_op_labels.get(&li).map_or(&[][..], |labels| labels.as_slice()),
-                            scissors.as_deref(),
-                            profile_query.as_deref(),
-                            &mut profile_stage_count,
-                            &mut profile_labels,
-                        ))
+                        let source_bg = make_bg(mask);
+                        if self.has_mask_filters(li) {
+                            let ops = layer_ops.get(&li).map_or(&[][..], |o| &o[..]);
+                            mask_gpu_passes += 1 + ops.iter().map(|op| match op {
+                                MaskOp::Layer { .. } => 2,
+                                MaskOp::Filter { .. } => 1,
+                            }).sum::<u32>();
+                            Some(self.encode_mask_filters(
+                                &mut encoder,
+                                layer.id,
+                                &layer.name,
+                                &source_bg,
+                                (slot as u64 * UNIFORM_STRIDE) as u32,
+                                ops,
+                                layer_op_labels.get(&li).map_or(&[][..], |labels| labels.as_slice()),
+                                scissors.as_deref(),
+                                profile_query.as_deref(),
+                                &mut profile_stage_count,
+                                &mut profile_labels,
+                            ))
+                        } else {
+                            mask_gpu_passes += 1;
+                            Some(self.encode_mask_source(
+                                &mut encoder,
+                                &layer.name,
+                                &source_bg,
+                                (slot as u64 * UNIFORM_STRIDE) as u32,
+                                &self.mask_out[&layer.id],
+                                scissors.as_deref(),
+                                profile_query.as_deref(),
+                                &mut profile_stage_count,
+                                &mut profile_labels,
+                            ))
+                        }
                     }
                 }
                 _ => None,
@@ -5603,7 +5811,7 @@ impl Engine {
 
     /// Application-side estimate of known GPU allocations by owned resource category.
     /// Driver padding, shared renderer resources and the viewport mesh are excluded.
-    pub fn gpu_resource_breakdown(&self) -> [(&'static str, u64); 13] {
+    pub fn gpu_resource_breakdown(&self) -> [(&'static str, u64); 14] {
         [
             ("surface maps", self.pos.bytes() + self.nrm.bytes() + self.tan.bytes() + self.stroke.bytes()),
             ("mesh maps and fixes", self.maps.iter().map(|t| t.bytes()).sum::<u64>()
@@ -5615,6 +5823,7 @@ impl Engine {
             ("prefix cache", self.prefix_cache.as_ref().map_or(0, |set| set.iter().map(|t| t.bytes()).sum())),
             ("filtered masks", self.mask_out.values().map(|t| t.bytes()).sum::<u64>()
                 + self.mask_scratch.as_ref().map_or(0, |set| set.iter().map(|t| t.bytes()).sum::<u64>())),
+            ("procedural variation caches", self.fill_roughness_noise.values().map(|cache| cache.texture.bytes()).sum()),
             ("paint layers and masks", self.layers.iter().map(|l| l.vram_bytes()).sum::<u64>()),
             ("fill images", self.fill_image_bytes()),
             ("thumbnails", self.thumbs.vram_bytes()),
