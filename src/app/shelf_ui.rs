@@ -363,11 +363,13 @@ impl PainterApp {
     /// shows it at twice the size.
     pub(super) fn swatch(ui: &mut egui::Ui, tex: egui::TextureId, name: &str, size: f32) -> egui::Response {
         let named = size >= NAMED_MIN;
-        let (rect, resp) = ui.allocate_exact_size(vec2(size + 12.0, size + if named { 22.0 } else { 8.0 }), Sense::click_and_drag());
-        // ScrollArea lays out every item in a wrapped shelf. Items outside its
-        // clip rect cannot be hovered, clicked or dragged, so avoid shaping text,
-        // registering hover UI, and emitting thumbnail paint commands for them.
-        if !ui.is_rect_visible(rect) {
+        let (id, rect) = ui.allocate_space(vec2(size + 12.0, size + if named { 22.0 } else { 8.0 }));
+        // ScrollArea lays out every item in a wrapped shelf. Off-screen items
+        // still reserve their exact layout space, but do not need interactive
+        // hit testing, text shaping, hover UI, or thumbnail paint commands.
+        let visible = ui.is_rect_visible(rect);
+        let resp = ui.interact(rect, id, if visible { Sense::click_and_drag() } else { Sense::hover() });
+        if !visible {
             return resp;
         }
         let p = ui.painter();
