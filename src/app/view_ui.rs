@@ -457,6 +457,9 @@ impl PainterApp {
                 );
             }
         }
+        if kind == ViewKind::V3d {
+            self.views.set_looks = self.set_looks(ui.ctx());
+        }
         // The built-in Material shader does not sample the world-space UV maps.
         // Restore them for the diagnostic modes that display them, or for a
         // custom material graph that consumes the complete Surface input.
@@ -469,7 +472,6 @@ impl PainterApp {
         let mut rt_view = None;
         match kind {
             ViewKind::V3d => {
-                self.views.set_looks = self.set_looks(ui.ctx());
                 let engines = texture_sets::engines(&self.engine, &self.sets, self.mesh.sets.len());
                 self.views.render_3d_with_object_visibility_and_paint_depth(
                     &self.rs, size, &engines, &self.env, &self.gpu_mesh, self.mesh.as_ref(),

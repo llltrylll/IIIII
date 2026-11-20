@@ -119,7 +119,8 @@ impl PainterApp {
         let views = &mut self.views;
         for (index, parked) in self.sets.parked.iter_mut().enumerate() {
             let Some(parked) = parked else { continue };
-            if resident {
+            let visible = !views.set_looks.get(index).is_some_and(|look| look.hidden);
+            if resident && visible {
                 parked.engine.ensure_surface_maps(mesh);
             } else if parked.engine.release_surface_maps() {
                 // In particular, invalidate bindings for hidden sets: the
