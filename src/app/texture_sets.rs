@@ -5,7 +5,7 @@
 
 use super::{PainterApp, icons, theme};
 use crate::bvh::Bvh;
-use crate::engine::Engine;
+use crate::engine::{Engine, BAKED_MAP_GROUP_ALL};
 use crate::undo::{StrokeTarget, UndoStack};
 use crate::viewport::{OverlaySlot, SetLook};
 use eframe::egui;
@@ -130,20 +130,23 @@ impl PainterApp {
         }
     }
 
-    /// Keeps packed mesh-map groups resident only when the current view needs them.
-    /// The built-in Material view uses A/D, so parked B/C maps can be restored lazily.
-    pub(super) fn set_parked_baked_map_groups_resident(&mut self, resident: bool) {
-        if resident {
-            let _ = self.engine.ensure_baked_map_groups();
+    /// Keeps only the requested packed baked-map group resident across visible sets.
+    /// For example, an Edge Distance view needs B but not C; a Part Gradient view needs C.
+    pub(super) fn set_parked_baked_map_groups_resident(&mut self, requested_mask: u8) {
+        if requested_mask != 0 {
+            let _ = self.engine.ensure_baked_map_mask(requested_mask);
         }
         let views = &mut self.views;
         for (index, parked) in self.sets.parked.iter_mut().enumerate() {
             let Some(parked) = parked else { continue };
             let visible = !views.set_looks.get(index).is_some_and(|look| look.hidden);
-            if resident && visible {
-                let _ = parked.engine.ensure_baked_map_groups();
-            } else if parked.engine.release_baked_map_groups() {
-                // Hidden sets cannot use these maps in the current viewport.
+            let required = if visible { requested_mask } else { 0 };
+            let release = BAKED_MAP_GROUP_ALL & !required;
+            if required != 0 {
+                let _ = parked.engine.ensure_baked_map_mask(required);
+            }
+            if release != 0 && parked.engine.release_baked_map_mask(release) {
+                // In particular, hidden sets must not retain cached map views.
                 views.invalidate_texture_set_binding(index);
             }
         }
