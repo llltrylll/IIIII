@@ -3759,7 +3759,7 @@ fn texture_sets_paint_apart() {
         views.render_3d(&rs, size, &[&left, &right], &env, &gpu_mesh, &cam, &settings, None);
         read_texture(&rs.device, &rs.queue, views.view3d.image())
     };
-    use crate::viewport::{SetLook, ViewMode};
+    use crate::viewport::SetLook;
     let hidden = looks(&mut views, [SetLook::default(), SetLook { hidden: true, highlight: 0.0 }]);
     let bluish_hidden = hidden.chunks(4).filter(|p| p[2] as i32 > p[0] as i32 + 40 && p[2] as i32 > p[1] as i32 + 40).count();
     println!("  right set hidden: {bluish_hidden} blue pixels");
@@ -5464,7 +5464,7 @@ fn parked_baked_map_groups_release_and_restore_from_cache() {
     let key = crate::bake_cache::key(&mesh, &settings, 256, 0);
 
     // Wait for the existing asynchronous cache writer before testing eviction.
-    crate::bake_cache::store(key.clone(), &baked, Arc::new(report.clone()), &rs.device, &rs.queue);
+    crate::bake_cache::store(key.clone(), &baked, report.clone(), &rs.device, &rs.queue);
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut cached = false;
     while Instant::now() < deadline {
@@ -5477,7 +5477,7 @@ fn parked_baked_map_groups_release_and_restore_from_cache() {
     assert!(cached, "the completed bake must be present in the disk cache before eviction");
 
     let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 256);
-    engine.set_maps_cached(baked, Arc::new(report), key);
+    engine.set_maps_cached(baked, report, key);
     engine.composite();
     assert!(!engine.dirty, "the baseline composite must be clean");
 
