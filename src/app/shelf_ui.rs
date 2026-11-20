@@ -155,16 +155,18 @@ impl PainterApp {
                                     }
                                     let Some(tex) = g.thumb.as_ref().map(|t| t.id()).or(fallback) else { continue };
                                     let resp = Self::swatch(ui, tex, &g.name, icon);
-                                    resp.dnd_set_drag_payload(ShelfItem::Graph(i));
-                                    if resp.double_clicked() {
-                                        self.pending.push(Action::AddOnTop(ShelfItem::Graph(i)));
-                                    }
-                                    resp.context_menu(|ui| {
-                                        if ui.button(theme::with_icon(icons::SHARE_NETWORK, "Share to community…")).clicked() {
-                                            share = Some(i);
-                                            ui.close();
+                                    if ui.clip_rect().intersects(resp.rect) {
+                                        resp.dnd_set_drag_payload(ShelfItem::Graph(i));
+                                        if resp.double_clicked() {
+                                            self.pending.push(Action::AddOnTop(ShelfItem::Graph(i)));
                                         }
-                                    });
+                                        resp.context_menu(|ui| {
+                                            if ui.button(theme::with_icon(icons::SHARE_NETWORK, "Share to community…")).clicked() {
+                                                share = Some(i);
+                                                ui.close();
+                                            }
+                                        });
+                                    }
                                 }
                             }
                             ShelfCat::Downloaded => {
@@ -187,12 +189,15 @@ impl PainterApp {
                                     let m = &self.library.local[i];
                                     let thumb = self.library.local_thumbs.get(i).and_then(|t| t.as_ref()).map(|t| t.id());
                                     let Some(tex) = thumb.or(fallback) else { continue };
-                                    let resp = Self::swatch(ui, tex, &m.name.clone(), icon).on_hover_text(format!("{}, from {}", m.name, m.source));
-                                    resp.dnd_set_drag_payload(ShelfItem::Library(i));
-                                    if resp.double_clicked() {
-                                        self.pending.push(Action::AddOnTop(ShelfItem::Library(i)));
+                                    let resp = Self::swatch(ui, tex, &m.name, icon);
+                                    if ui.clip_rect().intersects(resp.rect) {
+                                        let resp = resp.on_hover_text(format!("{}, from {}", m.name, m.source));
+                                        resp.dnd_set_drag_payload(ShelfItem::Library(i));
+                                        if resp.double_clicked() {
+                                            self.pending.push(Action::AddOnTop(ShelfItem::Library(i)));
+                                        }
+                                        resp.context_menu(|ui| self.library_material_menu(ui, i));
                                     }
-                                    resp.context_menu(|ui| self.library_material_menu(ui, i));
                                 }
                             }
                             ShelfCat::SmartMaterials => {
@@ -212,11 +217,13 @@ impl PainterApp {
                                         ui.painter().rect_filled(r, 0.0, theme::DONATE.gamma_multiply(0.9));
                                         ui.painter().galley(r.min + vec2(3.0, 1.0), g, Color32::WHITE);
                                     }
-                                    resp.dnd_set_drag_payload(ShelfItem::UserSmart(i));
-                                    if resp.double_clicked() {
-                                        self.pending.push(Action::AddOnTop(ShelfItem::UserSmart(i)));
+                                    if ui.clip_rect().intersects(resp.rect) {
+                                        resp.dnd_set_drag_payload(ShelfItem::UserSmart(i));
+                                        if resp.double_clicked() {
+                                            self.pending.push(Action::AddOnTop(ShelfItem::UserSmart(i)));
+                                        }
+                                        resp.context_menu(|ui| self.user_smart_menu(ui, i, &mut share_smart));
                                     }
-                                    resp.context_menu(|ui| self.user_smart_menu(ui, i, &mut share_smart));
                                 }
                                 let mut order: Vec<usize> = (0..presets::SMART_MATERIALS.len())
                                     .filter(|&i| presets::SMART_MATERIALS[i].name.to_lowercase().contains(&search) && wanted(presets::SMART_MATERIALS[i].kind()))
@@ -240,11 +247,12 @@ impl PainterApp {
                                     if ui.is_rect_visible(resp.rect) {
                                         Self::missing_badge(ui, &resp, s.needs_maps() & self.engine.missing_maps());
                                     }
-                                    resp.dnd_set_drag_payload(ShelfItem::Smart(i));
-                                    if resp.double_clicked() {
-                                        self.pending.push(Action::AddOnTop(ShelfItem::Smart(i)));
-                                    }
-                                    resp.context_menu(|ui| {
+                                    if ui.clip_rect().intersects(resp.rect) {
+                                        resp.dnd_set_drag_payload(ShelfItem::Smart(i));
+                                        if resp.double_clicked() {
+                                            self.pending.push(Action::AddOnTop(ShelfItem::Smart(i)));
+                                        }
+                                        resp.context_menu(|ui| {
                                         if ui.button("Add as layer folder").on_hover_text("A folder of fill layers with smart masks; Ctrl+G shows them as a graph you can edit too").clicked() {
                                             self.pending.push(Action::AddOnTop(ShelfItem::Smart(i)));
                                             ui.close();
@@ -253,7 +261,8 @@ impl PainterApp {
                                             self.pending.push(Action::AddOnTop(ShelfItem::SmartGraph(i)));
                                             ui.close();
                                         }
-                                    });
+                                        });
+                                    }
                                 }
                             }
                             ShelfCat::Materials => {
@@ -265,11 +274,12 @@ impl PainterApp {
                                     group(ui, &mut last, m.kind());
                                     let tex = self.shelf.materials[i].id();
                                     let resp = Self::swatch(ui, tex, m.name, icon);
-                                    resp.dnd_set_drag_payload(ShelfItem::Material(i));
-                                    if resp.double_clicked() {
-                                        self.pending.push(Action::AddOnTop(ShelfItem::Material(i)));
-                                    }
-                                    resp.context_menu(|ui| {
+                                    if ui.clip_rect().intersects(resp.rect) {
+                                        resp.dnd_set_drag_payload(ShelfItem::Material(i));
+                                        if resp.double_clicked() {
+                                            self.pending.push(Action::AddOnTop(ShelfItem::Material(i)));
+                                        }
+                                        resp.context_menu(|ui| {
                                         if ui.button("Add as fill layer").clicked() {
                                             self.pending.push(Action::AddOnTop(ShelfItem::Material(i)));
                                             ui.close();
@@ -288,7 +298,8 @@ impl PainterApp {
                                             self.set_tool(Tool::Paint);
                                             ui.close();
                                         }
-                                    });
+                                        });
+                                    }
                                 }
                             }
                             ShelfCat::Brushes => {
@@ -300,9 +311,11 @@ impl PainterApp {
                                     if self.brush.tip == Some(i) {
                                         ui.painter().rect_stroke(resp.rect.shrink(2.0), theme::RADIUS, Stroke::new(1.5, theme::ACCENT), egui::StrokeKind::Inside);
                                     }
-                                    resp.dnd_set_drag_payload(ShelfItem::Brush(i));
-                                    if resp.double_clicked() {
-                                        self.pending.push(Action::SetBrushTip(Some(i)));
+                                    if ui.clip_rect().intersects(resp.rect) {
+                                        resp.dnd_set_drag_payload(ShelfItem::Brush(i));
+                                        if resp.double_clicked() {
+                                            self.pending.push(Action::SetBrushTip(Some(i)));
+                                        }
                                     }
                                 }
                             }
@@ -312,11 +325,12 @@ impl PainterApp {
                                         continue;
                                     }
                                     let resp = Self::swatch(ui, self.shelf.textures[i].id(), t.name, icon);
-                                    resp.dnd_set_drag_payload(ShelfItem::Texture(i));
-                                    if resp.double_clicked() {
-                                        self.pending.push(Action::AddOnTop(ShelfItem::Texture(i)));
-                                    }
-                                    resp.context_menu(|ui| {
+                                    if ui.clip_rect().intersects(resp.rect) {
+                                        resp.dnd_set_drag_payload(ShelfItem::Texture(i));
+                                        if resp.double_clicked() {
+                                            self.pending.push(Action::AddOnTop(ShelfItem::Texture(i)));
+                                        }
+                                        resp.context_menu(|ui| {
                                         if ui.button("Add as height fill layer").clicked() {
                                             self.pending.push(Action::AddOnTop(ShelfItem::Texture(i)));
                                             ui.close();
@@ -328,7 +342,8 @@ impl PainterApp {
                                                 ui.close();
                                             }
                                         }
-                                    });
+                                        });
+                                    }
                                 }
                             }
                             ShelfCat::Generators => {
@@ -341,9 +356,11 @@ impl PainterApp {
                                     if ui.is_rect_visible(resp.rect) {
                                         Self::missing_badge(ui, &resp, g.default_generator().needs_maps() & self.engine.missing_maps());
                                     }
-                                    resp.dnd_set_drag_payload(ShelfItem::Generator(*g));
-                                    if resp.double_clicked() {
-                                        self.pending.push(Action::AddGenerator(*g));
+                                    if ui.clip_rect().intersects(resp.rect) {
+                                        resp.dnd_set_drag_payload(ShelfItem::Generator(*g));
+                                        if resp.double_clicked() {
+                                            self.pending.push(Action::AddGenerator(*g));
+                                        }
                                     }
                                 }
                             }
