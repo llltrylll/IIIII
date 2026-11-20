@@ -49,6 +49,13 @@ impl SnapshotBufferPool {
             && size <= Self::MAX_CACHED_BYTES.saturating_sub(cached_bytes)
     }
 
+    /// Chooses the smallest cached allocation that can hold the requested copy.
+    /// Reusing a larger buffer avoids driver allocations when channel combinations
+    /// produce slightly different snapshot sizes.
+    fn best_fit_cached_size(required: u64, sizes: impl Iterator<Item = u64>) -> Option<u64> {
+        sizes.filter(|&size| size >= required).min()
+    }
+
     /// Cached GPU readback bytes retained across all Texture Sets in this document.
     pub fn cached_bytes(&self) -> u64 {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).cached_bytes
@@ -57,12 +64,22 @@ impl SnapshotBufferPool {
     fn take(&self, device: &wgpu::Device, size: u64) -> wgpu::Buffer {
         let cached = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let buffer = state.buffers.get_mut(&size).and_then(Vec::pop);
-            if buffer.is_some() {
-                state.cached_bytes = state.cached_bytes.saturating_sub(size);
-                if state.buffers.get(&size).is_some_and(Vec::is_empty) {
-                    state.buffers.remove(&size);
-                }
+            let cached_size = Self::best_fit_cached_size(
+                size,
+                state.buffers.iter()
+                    .filter(|(_, buffers)| !buffers.is_empty())
+                    .map(|(&capacity, _)| capacity),
+            );
+            let buffer = cached_size.and_then(|capacity| {
+                state.buffers.get_mut(&capacity).and_then(Vec::pop)
+            });
+            if let Some(buffer) = buffer.as_ref() {
+                state.cached_bytes = state.cached_bytes.saturating_sub(buffer.size());
+            }
+            if let Some(capacity) = cached_size
+                && state.buffers.get(&capacity).is_some_and(Vec::is_empty)
+            {
+                state.buffers.remove(&capacity);
             }
             buffer
         };
@@ -86,6 +103,15 @@ impl SnapshotBufferPool {
             state.cached_bytes += size;
         }
     }
+}
+
+/// Returns staging-buffer request indices from largest to smallest.
+/// Matching the largest requests first preserves larger cached allocations
+/// for the snapshots that cannot fit in smaller buffers.
+fn snapshot_buffer_allocation_order(sizes: &[u64]) -> Vec<usize> {
+    let mut order = (0..sizes.len()).collect::<Vec<_>>();
+    order.sort_unstable_by_key(|&index| std::cmp::Reverse(sizes[index]));
+    order
 }
 
 enum SnapState {
@@ -141,7 +167,17 @@ impl Snapshot {
             return Snapshot { infos, state: SnapState::Ready(Vec::new()), pool, accounted_bytes };
         }
 
-        let buffers = buffer_sizes.iter().map(|&size| pool.take(device, size)).collect::<Vec<_>>();
+        // Allocate the largest chunks first so a larger cached buffer is not
+        // consumed by a small request while a later large request needs it.
+        let mut buffers = std::iter::repeat_with(|| None)
+            .take(buffer_sizes.len())
+            .collect::<Vec<Option<wgpu::Buffer>>>();
+        for index in snapshot_buffer_allocation_order(&buffer_sizes) {
+            buffers[index] = Some(pool.take(device, buffer_sizes[index]));
+        }
+        let buffers = buffers.into_iter()
+            .map(|buffer| buffer.expect("snapshot staging buffer was allocated"))
+            .collect::<Vec<_>>();
         for (tex, info) in textures.iter().zip(&infos) {
             let row = tex.width * info.bpp;
             encoder.copy_texture_to_buffer(
@@ -618,6 +654,38 @@ mod tests {
         assert!(!SnapshotBufferPool::can_recycle(8 * MIB, SnapshotBufferPool::MAX_PER_SIZE, 0));
         assert!(!SnapshotBufferPool::can_recycle(1, 0, SnapshotBufferPool::MAX_CACHED_BYTES));
         assert!(!SnapshotBufferPool::can_recycle(SnapshotBufferPool::MAX_CACHED_BYTES + 1, 0, 0));
+    }
+
+    #[test]
+    fn staging_buffer_pool_prefers_the_smallest_cached_buffer_that_fits() {
+        assert_eq!(
+            SnapshotBufferPool::best_fit_cached_size(16, [64, 32, 8].into_iter()),
+            Some(32),
+        );
+        assert_eq!(
+            SnapshotBufferPool::best_fit_cached_size(32, [64, 16].into_iter()),
+            Some(64),
+        );
+        assert_eq!(
+            SnapshotBufferPool::best_fit_cached_size(65, [64, 128, 256].into_iter()),
+            Some(128),
+        );
+        assert_eq!(
+            SnapshotBufferPool::best_fit_cached_size(129, [64, 128].into_iter()),
+            None,
+        );
+    }
+
+    #[test]
+    fn snapshot_allocates_the_largest_readback_chunks_first() {
+        assert_eq!(
+            super::snapshot_buffer_allocation_order(&[16, 64, 32]),
+            vec![1, 2, 0],
+        );
+        assert_eq!(
+            super::snapshot_buffer_allocation_order(&[8, 8, 8]),
+            vec![0, 1, 2],
+        );
     }
 
     #[test]
