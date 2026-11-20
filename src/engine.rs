@@ -5215,7 +5215,9 @@ impl Engine {
         let mut layer_ops: HashMap<usize, Vec<MaskOp>> = HashMap::with_capacity(source_slot.len());
         let mut layer_op_labels: HashMap<usize, Vec<String>> = HashMap::with_capacity(source_slot.len());
         for &li in source_slot.keys() {
-            if !self.has_mask_filters(li) {
+            // A valid filtered-mask result bypasses its source and filter passes.
+            // Avoid rebuilding its CPU operation plan and uniforms on cache hits.
+            if self.mask_final.contains(&self.layers[li].id) || !self.has_mask_filters(li) {
                 continue;
             }
             let scale = self.res as f32 / FILTER_REF_RES;
