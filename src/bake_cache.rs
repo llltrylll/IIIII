@@ -12,18 +12,56 @@ use crate::gpu::{self, LAYER_USAGE, Tex};
 use crate::mesh::Mesh;
 use eframe::wgpu;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 const MAGIC: &[u8; 4] = b"MPBC";
 const FORMAT_VERSION: u32 = 3;
 /// Total size the cache may grow to before old entries are evicted.
 const MAX_BYTES: u64 = 2 << 30;
+const MAX_REPORT_BYTES: usize = 16 * 1024 * 1024;
 
 /// Identifies one bake (see the module docs).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Key(String);
+
+static PINNED_KEYS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+
+/// Keeps a cache entry on disk while any Engine can still use it for restoration.
+#[derive(Clone)]
+pub struct CachePin { _inner: Arc<CachePinInner> }
+
+struct CachePinInner {
+    key: String,
+}
+
+impl Drop for CachePinInner {
+    fn drop(&mut self) {
+        if let Some(pinned) = PINNED_KEYS.get()
+            && let Ok(mut pinned) = pinned.lock()
+        {
+            let remove = if let Some(count) = pinned.get_mut(&self.key) {
+                *count -= 1;
+                *count == 0
+            } else {
+                false
+            };
+            if remove {
+                pinned.remove(&self.key);
+            }
+        }
+    }
+}
+
+pub fn pin(key: &Key) -> CachePin {
+    let pinned = PINNED_KEYS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut pinned) = pinned.lock() {
+        *pinned.entry(key.0.clone()).or_insert(0) += 1;
+    }
+    CachePin { _inner: Arc::new(CachePinInner { key: key.0.clone() }) }
+}
 
 /// A cached bake: its report, the packed maps and the custom map textures,
 /// as uploaded bytes.
@@ -31,6 +69,13 @@ pub struct Entry {
     pub report: BakeReport,
     maps: [(u32, Vec<u8>); MAP_TEXTURES],
     custom: Vec<(u32, Vec<u8>)>,
+}
+
+/// One selected packed baked-map texture decoded from the on-disk cache.
+pub struct CachedMapTexture {
+    pub index: usize,
+    pub resolution: u32,
+    pub bytes: Vec<u8>,
 }
 
 /// 64-bit FNV-1a over 8-byte words: stable across runs and builds (unlike
@@ -166,6 +211,237 @@ pub fn load(key: &Key) -> Option<Entry> {
             None
         }
     }
+}
+
+
+/// Loads only the requested packed maps. Unselected LZ4 payloads are validated
+/// by their size prefix but are not decompressed, keeping restore-time RAM bounded.
+pub fn load_selected(key: &Key, requested: &[usize]) -> Option<Vec<CachedMapTexture>> {
+    if requested.is_empty()
+        || requested.iter().any(|&i| i >= MAP_TEXTURES)
+        || requested.iter().copied().collect::<std::collections::HashSet<_>>().len() != requested.len()
+    {
+        return None;
+    }
+    let path = path(key)?;
+    let mut file = fs::File::open(&path).ok()?;
+    let file_len = file.metadata().ok()?.len();
+    if file_len > MAX_BYTES {
+        drop(file);
+        let _ = fs::remove_file(&path);
+        return None;
+    }
+    let decoded = decode_selected_reader(&mut file, file_len, requested);
+    drop(file);
+    match decoded {
+        Some(maps) => {
+            if let Ok(f) = fs::File::options().write(true).open(&path) {
+                let _ = f.set_modified(std::time::SystemTime::now());
+            }
+            Some(maps)
+        }
+        None => {
+            let _ = fs::remove_file(&path);
+            None
+        }
+    }
+}
+
+/// Streams the cache container and decompresses only the requested textures.
+/// Unselected compressed payloads are validated by their dimensions and LZ4
+/// size prefix, then skipped with Seek; a large custom-map payload never has
+/// to be copied into system RAM just to restore packed groups B, C or D.
+fn decode_selected_reader<R: Read + Seek>(
+    reader: &mut R,
+    file_len: u64,
+    requested: &[usize],
+) -> Option<Vec<CachedMapTexture>> {
+    fn read_u32<R: Read>(reader: &mut R) -> Option<u32> {
+        let mut bytes = [0u8; 4];
+        reader.read_exact(&mut bytes).ok()?;
+        Some(u32::from_le_bytes(bytes))
+    }
+
+    fn remaining<R: Seek>(reader: &mut R, file_len: u64, bytes: u64) -> Option<()> {
+        let position = reader.stream_position().ok()?;
+        (position.checked_add(bytes)? <= file_len).then_some(())
+    }
+
+    fn packed_header<R: Read + Seek>(
+        reader: &mut R,
+        file_len: u64,
+        format: wgpu::TextureFormat,
+    ) -> Option<(u32, usize, usize, [u8; 4])> {
+        let resolution = read_u32(reader)?;
+        if resolution == 0 || resolution > MAX_BAKE_RES {
+            return None;
+        }
+        let packed_len = usize::try_from(read_u32(reader)?).ok()?;
+        if packed_len < 4 {
+            return None;
+        }
+        remaining(reader, file_len, packed_len as u64)?;
+        let expected = (resolution as usize)
+            .checked_mul(resolution as usize)?
+            .checked_mul(gpu::bytes_per_texel(format) as usize)?;
+        // LZ4's worst-case block bound is only slightly larger than the raw
+        // texture. Reject forged oversized payload lengths before allocating.
+        let maximum_packed = expected.checked_add(expected / 255)?.checked_add(64)?;
+        let mut prefix = [0u8; 4];
+        reader.read_exact(&mut prefix).ok()?;
+        (u32::from_le_bytes(prefix) as usize == expected && packed_len <= maximum_packed)
+            .then_some((resolution, packed_len - 4, expected, prefix))
+    }
+
+    fn skip_rest<R: Seek>(reader: &mut R, bytes_after_prefix: usize) -> Option<()> {
+        reader.seek(SeekFrom::Current(i64::try_from(bytes_after_prefix).ok()?)).ok()?;
+        Some(())
+    }
+
+    let mut magic = [0u8; 4];
+    reader.read_exact(&mut magic).ok()?;
+    if &magic != MAGIC || read_u32(reader)? != FORMAT_VERSION {
+        return None;
+    }
+    let json_len = usize::try_from(read_u32(reader)?).ok()?;
+    if json_len > MAX_REPORT_BYTES {
+        return None;
+    }
+    remaining(reader, file_len, json_len as u64)?;
+    let mut report_bytes = vec![0u8; json_len];
+    reader.read_exact(&mut report_bytes).ok()?;
+    let report_json: serde_json::Value = serde_json::from_slice(&report_bytes).ok()?;
+    let report = BakeReport::from_cache_json(&report_json)?;
+    if report.resolution == 0 || report.resolution > MAX_BAKE_RES {
+        return None;
+    }
+
+    let mut selected = Vec::with_capacity(requested.len());
+    let mut resolution = 0;
+    for index in 0..MAP_TEXTURES {
+        let (res, rest_len, expected, prefix) = packed_header(reader, file_len, MAP_FORMATS[index])?;
+        if resolution == 0 {
+            resolution = res;
+        } else if res != resolution {
+            return None;
+        }
+        if requested.contains(&index) {
+            let packed_len = rest_len.checked_add(4)?;
+            let mut packed = Vec::with_capacity(packed_len);
+            packed.extend_from_slice(&prefix);
+            let start = packed.len();
+            packed.resize(packed_len, 0);
+            reader.read_exact(&mut packed[start..]).ok()?;
+            let data = lz4_flex::decompress_size_prepended(&packed).ok()?;
+            if data.len() != expected {
+                return None;
+            }
+            selected.push(CachedMapTexture { index, resolution: res, bytes: data });
+        } else {
+            skip_rest(reader, rest_len)?;
+        }
+    }
+
+    let count = usize::try_from(read_u32(reader)?).ok()?;
+    let max_custom_textures = MAX_CUSTOM_MAPS.div_ceil(CUSTOM_PER_TEXTURE);
+    let expected_custom_textures = report.custom.len().div_ceil(CUSTOM_PER_TEXTURE);
+    if count > max_custom_textures || count != expected_custom_textures {
+        return None;
+    }
+    for _ in 0..count {
+        let (res, rest_len, _expected, _prefix) = packed_header(reader, file_len, CUSTOM_FORMAT)?;
+        if res != resolution {
+            return None;
+        }
+        skip_rest(reader, rest_len)?;
+    }
+
+    if report.resolution != resolution
+        || reader.stream_position().ok()? != file_len
+        || selected.len() != requested.len()
+    {
+        return None;
+    }
+    Some(selected)
+}
+
+#[cfg(test)]
+fn decode_selected(mut b: &[u8], requested: &[usize]) -> Option<Vec<CachedMapTexture>> {
+    fn take<'a>(b: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
+        if b.len() < n {
+            return None;
+        }
+        let (head, rest) = b.split_at(n);
+        *b = rest;
+        Some(head)
+    }
+    fn u32_(b: &mut &[u8]) -> Option<u32> {
+        Some(u32::from_le_bytes(take(b, 4)?.try_into().ok()?))
+    }
+    fn packed_texture<'a>(
+        b: &mut &'a [u8],
+        format: wgpu::TextureFormat,
+    ) -> Option<(u32, &'a [u8], usize)> {
+        let res = u32_(b)?;
+        if res == 0 || res > MAX_BAKE_RES {
+            return None;
+        }
+        let packed_len = usize::try_from(u32_(b)?).ok()?;
+        let packed = take(b, packed_len)?;
+        let expected = (res as usize)
+            .checked_mul(res as usize)?
+            .checked_mul(gpu::bytes_per_texel(format) as usize)?;
+        if packed.len() < 4 {
+            return None;
+        }
+        let declared = u32::from_le_bytes(packed[..4].try_into().ok()?) as usize;
+        (declared == expected).then_some((res, packed, expected))
+    }
+
+    if take(&mut b, 4)? != MAGIC || u32_(&mut b)? != FORMAT_VERSION {
+        return None;
+    }
+    let json_len = usize::try_from(u32_(&mut b)?).ok()?;
+    let report_json: serde_json::Value = serde_json::from_slice(take(&mut b, json_len)?).ok()?;
+    let report = BakeReport::from_cache_json(&report_json)?;
+    if report.resolution == 0 || report.resolution > MAX_BAKE_RES {
+        return None;
+    }
+
+    let mut selected = Vec::with_capacity(requested.len());
+    let mut resolution = 0;
+    for i in 0..MAP_TEXTURES {
+        let (res, packed, expected) = packed_texture(&mut b, MAP_FORMATS[i])?;
+        if resolution == 0 {
+            resolution = res;
+        } else if res != resolution {
+            return None;
+        }
+        if requested.contains(&i) {
+            let data = lz4_flex::decompress_size_prepended(packed).ok()?;
+            if data.len() != expected {
+                return None;
+            }
+            selected.push(CachedMapTexture { index: i, resolution: res, bytes: data });
+        }
+    }
+
+    let count = usize::try_from(u32_(&mut b)?).ok()?;
+    let max_custom_textures = MAX_CUSTOM_MAPS.div_ceil(CUSTOM_PER_TEXTURE);
+    let expected_custom_textures = report.custom.len().div_ceil(CUSTOM_PER_TEXTURE);
+    if count > max_custom_textures || count != expected_custom_textures {
+        return None;
+    }
+    for _ in 0..count {
+        let (res, _, _) = packed_texture(&mut b, CUSTOM_FORMAT)?;
+        if res != resolution {
+            return None;
+        }
+    }
+    if report.resolution != resolution || !b.is_empty() || selected.len() != requested.len() {
+        return None;
+    }
+    Some(selected)
 }
 
 fn decode(mut b: &[u8]) -> Option<Entry> {
@@ -329,23 +605,37 @@ fn entries() -> Vec<(PathBuf, u64, std::time::SystemTime)> {
         .collect()
 }
 
-/// Drops the least recently used entries until the cache fits in `max` bytes.
+/// Drops the least recently used unpinned entries until the cache fits in `max` bytes.
+/// Pinned entries may keep the cache above the soft limit while an Engine needs them.
 fn evict(max: u64) {
     let mut all = entries();
     all.sort_by_key(|e| std::cmp::Reverse(e.2));
+    let pinned = PINNED_KEYS.get()
+        .and_then(|keys| keys.lock().ok().map(|keys| keys.clone()))
+        .unwrap_or_default();
     let mut total = 0;
     for (path, len, _) in all {
         total += len;
         if total > max {
-            let _ = fs::remove_file(path);
+            let key = path.file_stem().and_then(|stem| stem.to_str());
+            if !key.is_some_and(|key| pinned.contains_key(key)) && fs::remove_file(&path).is_ok() {
+                total = total.saturating_sub(len);
+            }
         }
     }
 }
 
-/// Removes every cached bake.
+/// Removes every unpinned cached bake. Engines with an evicted map group
+/// keep their source entry until they release the cache pin.
 pub fn clear() {
+    let pinned = PINNED_KEYS.get()
+        .and_then(|keys| keys.lock().ok().map(|keys| keys.clone()))
+        .unwrap_or_default();
     for (path, ..) in entries() {
-        let _ = fs::remove_file(path);
+        let key = path.file_stem().and_then(|stem| stem.to_str());
+        if !key.is_some_and(|key| pinned.contains_key(key)) {
+            let _ = fs::remove_file(path);
+        }
     }
 }
 
@@ -365,6 +655,35 @@ mod tests {
         let mut s2 = s.clone();
         s2.ao_distance += 0.01;
         assert_ne!(k, key(&ball, &s2, 2048, 0));
+    }
+
+    #[test]
+    fn selected_map_decode_only_returns_requested_groups() {
+        let mut bytes = test_cache_header();
+        for format in MAP_FORMATS {
+            append_test_texture(&mut bytes, 1, format);
+        }
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        let selected = decode_selected(&bytes, &[1, 3]).expect("selected maps decode");
+        let mut stream = std::io::Cursor::new(bytes.clone());
+        let streamed = decode_selected_reader(&mut stream, bytes.len() as u64, &[1, 3])
+            .expect("streamed selected maps decode");
+        assert_eq!(streamed.len(), 2);
+        assert_eq!(streamed[0].bytes, selected[0].bytes);
+        assert_eq!(streamed[1].bytes, selected[1].bytes);
+        let mut truncated = std::io::Cursor::new(bytes.clone());
+        assert!(
+            decode_selected_reader(&mut truncated, bytes.len() as u64 - 1, &[1]).is_none(),
+            "a truncated stream must be rejected"
+        );
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].index, 1);
+        assert_eq!(selected[1].index, 3);
+        assert_eq!(selected[0].resolution, 1);
+        assert_eq!(selected[1].resolution, 1);
+        assert_eq!(selected[0].bytes.len(), gpu::bytes_per_texel(MAP_FORMATS[1]) as usize);
+        assert_eq!(selected[1].bytes.len(), gpu::bytes_per_texel(MAP_FORMATS[3]) as usize);
+        assert!(decode_selected(&bytes, &[MAP_TEXTURES]).is_none());
     }
 
     #[test]

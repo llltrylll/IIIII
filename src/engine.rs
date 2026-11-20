@@ -52,6 +52,11 @@ pub const FINAL_NORMAL: usize = 5;
 /// The final specular level's index (0.5 where no layer sets it).
 pub const FINAL_SPECULAR: usize = 6;
 const ACCUM_FORMATS: [F; ACCUM] = [F::Rgba8Unorm, F::R8Unorm, F::R8Unorm, F::R16Float, F::Rgba8Unorm, F::Rgba8Unorm, F::R8Unorm];
+pub(crate) const BAKED_MAP_GROUP_B: u8 = 1 << 0;
+pub(crate) const BAKED_MAP_GROUP_C: u8 = 1 << 1;
+pub(crate) const BAKED_MAP_GROUP_D: u8 = 1 << 2;
+pub(crate) const BAKED_MAP_GROUP_ALL: u8 = BAKED_MAP_GROUP_B | BAKED_MAP_GROUP_C | BAKED_MAP_GROUP_D;
+
 const POS_FORMAT: F = F::Rgba16Float;
 const NRM_FORMAT: F = F::Rgba8Unorm;
 /// Tangent and bitangent sign per texel (see `uvbake.wgsl`).
@@ -92,7 +97,11 @@ fn retained_folder_depth(current: usize, required: usize) -> usize {
 
 #[cfg(test)]
 mod working_buffer_capacity_tests {
-    use super::{layer_uniform_buffer_capacity, mask_filter_buffer_capacity, retained_folder_depth};
+    use super::{
+        layer_uniform_buffer_capacity, mask_filter_buffer_capacity, retained_folder_depth,
+        Engine, GenKind, Mask, MaskBlend, MaskLayer, MaskSource,
+        BAKED_MAP_GROUP_B, BAKED_MAP_GROUP_C,
+    };
 
     #[test]
     fn filter_uniform_capacity_grows_without_clamping_steps() {
@@ -124,6 +133,60 @@ mod working_buffer_capacity_tests {
         assert_eq!(retained_folder_depth(8, 3), 8);
         assert_eq!(retained_folder_depth(12, 3), 3);
         assert_eq!(retained_folder_depth(4, 0), 0);
+    }
+
+    #[test]
+    fn baked_map_residency_tracks_exact_generator_group() {
+        for kind in [GenKind::EdgeWear, GenKind::Dust, GenKind::CreaseGrime, GenKind::PartRandom] {
+            assert_eq!(
+                Engine::generator_baked_map_group_mask(&kind.default_generator()),
+                BAKED_MAP_GROUP_B,
+                "{kind:?} uses packed map group B"
+            );
+        }
+        assert_eq!(
+            Engine::generator_baked_map_group_mask(&GenKind::PartGradient.default_generator()),
+            BAKED_MAP_GROUP_C,
+            "Part Gradient uses packed map group C"
+        );
+        for kind in [GenKind::Dirt, GenKind::ThinAreas, GenKind::PositionGradient, GenKind::IdMask, GenKind::CustomMap] {
+            assert_eq!(
+                Engine::generator_baked_map_group_mask(&kind.default_generator()),
+                0,
+                "{kind:?} does not require packed map groups B/C"
+            );
+        }
+    }
+
+    #[test]
+    fn mask_baked_map_dependencies_follow_enabled_generator_layers() {
+        let mut mask = Mask {
+            black_base: false,
+            paint: None,
+            generator: Some(GenKind::PartGradient.default_generator()),
+            filters: Vec::new(),
+            layers: Vec::new(),
+            graph: None,
+        };
+        assert_eq!(Engine::mask_baked_map_group_mask(&mask), BAKED_MAP_GROUP_C);
+
+        mask.generator = Some(GenKind::EdgeWear.default_generator());
+        assert_eq!(Engine::mask_baked_map_group_mask(&mask), BAKED_MAP_GROUP_B);
+
+        mask.generator = None;
+        mask.layers.push(MaskLayer {
+            source: MaskSource::Generator(GenKind::PartGradient.default_generator()),
+            blend: MaskBlend::Normal,
+            opacity: 1.0,
+            enabled: true,
+        });
+        assert_eq!(Engine::mask_baked_map_group_mask(&mask), BAKED_MAP_GROUP_C);
+
+        mask.layers[0].enabled = false;
+        assert_eq!(Engine::mask_baked_map_group_mask(&mask), 0);
+
+        mask.graph = Some(1);
+        assert_eq!(Engine::mask_baked_map_group_mask(&mask), super::BAKED_MAP_GROUP_ALL);
     }
 }
 const STROKE_FORMAT: F = F::R16Float;
@@ -1465,6 +1528,12 @@ pub struct Engine {
     pub map_levels: [Levels; MAP_COUNT],
     maps_dirty: bool,
     pub has_bake: bool,
+    /// Disk-cache identity for the baked maps; only cache-loaded bakes are evictable.
+    bake_cache_key: Option<crate::bake_cache::Key>,
+    /// Keeps the cache file alive while this Engine may need to restore B/C.
+    _bake_cache_pin: Option<crate::bake_cache::CachePin>,
+    /// Pending background read of evicted packed map groups B and C.
+    baked_map_restore_rx: Option<mpsc::Receiver<Option<Vec<crate::bake_cache::CachedMapTexture>>>>,
     /// Bumped whenever the mesh maps (or their levels and fixes) change.
     pub maps_version: u64,
     /// Bumped whenever the position and normal maps are made again.
@@ -1800,6 +1869,42 @@ impl Engine {
         }
     }
 
+    /// Releases world-space UV maps while this Texture Set is parked.
+    ///
+    /// The ordinary raster Material view reads the final material and baked
+    /// mesh maps, not these position/normal/tangent targets. Keep 1x1
+    /// placeholders bound for dormant view modes, then regenerate the maps
+    /// from the mesh when a mode or operation actually needs them.
+    pub(crate) fn release_surface_maps(&mut self) -> bool {
+        if self.pos.width == 1 && self.nrm.width == 1 && self.tan.width == 1 {
+            return false;
+        }
+        self.pos = Tex::new(&self.device, "parked position map", 1, 1, POS_FORMAT, LAYER_USAGE);
+        self.nrm = Tex::new(&self.device, "parked normal map", 1, 1, NRM_FORMAT, LAYER_USAGE);
+        self.tan = Tex::new(&self.device, "parked tangent map", 1, 1, TAN_FORMAT, LAYER_USAGE);
+        // Keep the bake key: it tells restoration that this is the same mesh,
+        // range and resolution, so rebuilding the discarded targets does not
+        // invalidate otherwise valid material composites.
+        self.uv_version = self.uv_version.wrapping_add(1);
+        true
+    }
+
+    /// Ensures the world-space UV maps exist for this mesh/range.
+    /// Re-baking is deterministic and does not touch the painted layer data.
+    pub(crate) fn ensure_surface_maps(&mut self, mesh: &GpuMesh) {
+        let resident = self.pos.width == self.res
+            && self.nrm.width == self.res
+            && self.tan.width == self.res;
+        let same_bake = UvBakeKey::is_current(self.uv_baked.as_ref(), mesh.mesh_id, &self.tris, self.res);
+        if !resident {
+            // The maps are being reconstructed from an unchanged mesh/range.
+            // This changes binding identity, not the already-correct composite.
+            self.bake_uv_internal(mesh, !same_bake);
+        } else if !same_bake {
+            self.bake_uv(mesh);
+        }
+    }
+
     /// Drops GPU resources used only while this Texture Set is being edited.
     /// The final composited result stays resident for the viewport. The next
     /// composite/paint recreates the released workspace lazily.
@@ -1881,9 +1986,10 @@ impl Engine {
         }
     }
 
-    pub(crate) fn restore_active_working_set(&mut self) {
+    pub(crate) fn restore_active_working_set(&mut self, mesh: &GpuMesh) {
         self.ensure_composite_working_set();
         self.ensure_stroke_target();
+        self.ensure_surface_maps(mesh);
     }
 
     /// Creates an engine for another mesh while reusing immutable GPU pipelines.
@@ -1971,6 +2077,9 @@ impl Engine {
             map_levels: [Levels::default(); MAP_COUNT],
             maps_dirty: true,
             has_bake: false,
+            bake_cache_key: None,
+            _bake_cache_pin: None,
+            baked_map_restore_rx: None,
             maps_version: 0,
             uv_version: 0,
             uv_baked: None,
@@ -2448,7 +2557,18 @@ impl Engine {
     /// Rasterizes position and normal maps for the current mesh at the
     /// current resolution, with dilation past UV island borders.
     pub fn bake_uv(&mut self, mesh: &GpuMesh) {
+        self.bake_uv_internal(mesh, true);
+    }
+
+    fn bake_uv_internal(&mut self, mesh: &GpuMesh, invalidate_composite: bool) {
         self.apply_bg = None;
+        // Parked Texture Sets keep 1x1 placeholders. Recreate their full-size
+        // targets only when editing, compositing or a world-space view needs them.
+        if self.pos.width != self.res || self.nrm.width != self.res || self.tan.width != self.res {
+            self.pos = Tex::new(&self.device, "position map", self.res, self.res, POS_FORMAT, LAYER_USAGE);
+            self.nrm = Tex::new(&self.device, "normal map", self.res, self.res, NRM_FORMAT, LAYER_USAGE);
+            self.tan = Tex::new(&self.device, "tangent map", self.res, self.res, TAN_FORMAT, LAYER_USAGE);
+        }
         // A mesh change can leave the range past the end; the app sets the
         // new range right after, and this draws nothing meanwhile.
         let tris = self.tris.start.min(mesh.index_count)..self.tris.end.min(mesh.index_count);
@@ -2507,8 +2627,10 @@ impl Engine {
         self.queue.submit([encoder.finish()]);
         self.uv_version += 1;
         self.uv_baked = Some(UvBakeKey { mesh_id: mesh.mesh_id, tris: self.tris.clone(), res: self.res });
-        self.mask_final.clear();
-        self.mark_dirty();
+        if invalidate_composite {
+            self.mask_final.clear();
+            self.mark_dirty();
+        }
     }
 
     pub fn bounds(&self) -> (Vec3, Vec3) {
@@ -2538,6 +2660,8 @@ impl Engine {
         self.tris = tris;
         if !repeat {
             self.bake_uv(mesh);
+        } else if self.pos.width != self.res || self.nrm.width != self.res || self.tan.width != self.res {
+            self.ensure_surface_maps(mesh);
         }
     }
 
@@ -2663,6 +2787,9 @@ impl Engine {
 
     /// Back to the neutral maps of a document that was never baked.
     pub fn clear_maps(&mut self) {
+        self.bake_cache_key = None;
+        self._bake_cache_pin = None;
+        self.baked_map_restore_rx = None;
         self.custom.clear();
         self.custom_ids.clear();
         self.custom_array = Self::custom_array_texture(&self.device, 1, 1);
@@ -2694,7 +2821,22 @@ impl Engine {
         self.mark_dirty();
     }
 
+    /// Adopts maps loaded from the bake cache and retains the key needed for lazy restoration.
+    pub(crate) fn set_maps_cached(
+        &mut self,
+        baked: BakedMaps,
+        report: Arc<BakeReport>,
+        key: crate::bake_cache::Key,
+    ) {
+        self.set_maps(baked, report);
+        self._bake_cache_pin = Some(crate::bake_cache::pin(&key));
+        self.bake_cache_key = Some(key);
+    }
+
     pub fn set_maps(&mut self, baked: BakedMaps, report: Arc<BakeReport>) {
+        self.bake_cache_key = None;
+        self._bake_cache_pin = None;
+        self.baked_map_restore_rx = None;
         // Bakes stop at `bake::MAX_BAKE_RES`; bigger texture sets get them upscaled.
         let mut encoder = self.device.create_command_encoder(&Default::default());
         let BakedMaps { maps, custom } = baked;
@@ -2772,6 +2914,207 @@ impl Engine {
         self.record(undo, format!("Clear fix: {}", MAPS[map].name), Edit::Fix { map, tex: Some(tex) });
         self.maps_dirty = true;
         self.mark_dirty();
+    }
+
+    /// Whether the requested subset of packed baked-map groups B/C/D is fully resident.
+    pub(crate) fn baked_map_mask_resident(&self, mask: u8) -> bool {
+        (mask & BAKED_MAP_GROUP_B == 0 || self.maps[1].width == self.res)
+            && (mask & BAKED_MAP_GROUP_C == 0 || self.maps[2].width == self.res)
+            && (mask & BAKED_MAP_GROUP_D == 0 || self.maps[3].width == self.res)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn baked_map_groups_resident(&self) -> bool {
+        self.baked_map_mask_resident(BAKED_MAP_GROUP_ALL)
+    }
+
+    /// Drops only the requested packed map groups when each is recoverable from
+    /// the cache and has no edited levels/fixes or resolved texture to preserve.
+    pub(crate) fn release_baked_map_mask(&mut self, mask: u8) -> bool {
+        let mask = mask & BAKED_MAP_GROUP_ALL;
+        if mask == 0 || !self.has_bake || self.dirty || self.bake_cache_key.is_none() || self.maps_dirty {
+            return false;
+        }
+
+        let groups = [
+            (BAKED_MAP_GROUP_B, 1usize, 4usize, 7usize),
+            (BAKED_MAP_GROUP_C, 2usize, 8usize, 9usize),
+            (BAKED_MAP_GROUP_D, 3usize, 10usize, 11usize),
+        ];
+        let mut released = false;
+        for (bit, texture, first_map, last_map) in groups {
+            if mask & bit == 0
+                || self.maps[texture].width != self.res
+                || self.resolved[texture].is_some()
+                || self.map_fix[first_map..=last_map].iter().any(Option::is_some)
+                || self.map_levels[first_map..=last_map].iter().any(|levels| *levels != Levels::default())
+            {
+                continue;
+            }
+            self.maps[texture] = Self::neutral_map(&self.device, &self.queue, texture);
+            released = true;
+        }
+        if released {
+            self.maps_version = self.maps_version.wrapping_add(1);
+        }
+        released
+    }
+
+    #[cfg(test)]
+    pub(crate) fn release_baked_map_groups(&mut self) -> bool {
+        self.release_baked_map_mask(BAKED_MAP_GROUP_ALL)
+    }
+
+    /// Starts a background cache read for only the requested missing baked-map groups.
+    /// The worker decompresses precisely the packed groups the current view needs.
+    pub(crate) fn ensure_baked_map_mask(&mut self, mask: u8) -> bool {
+        let mask = mask & BAKED_MAP_GROUP_ALL;
+        if !self.has_bake || mask == 0 || self.baked_map_mask_resident(mask) {
+            return true;
+        }
+        if self.baked_map_restore_rx.is_none() {
+            let Some(key) = self.bake_cache_key.clone() else { return false };
+            let mut requested = Vec::with_capacity(2);
+            if mask & BAKED_MAP_GROUP_B != 0 && self.maps[1].width != self.res {
+                requested.push(1usize);
+            }
+            if mask & BAKED_MAP_GROUP_C != 0 && self.maps[2].width != self.res {
+                requested.push(2usize);
+            }
+            if mask & BAKED_MAP_GROUP_D != 0 && self.maps[3].width != self.res {
+                requested.push(3usize);
+            }
+            if requested.is_empty() {
+                return true;
+            }
+            let (tx, rx) = mpsc::channel();
+            self.baked_map_restore_rx = Some(rx);
+            let spawned = std::thread::Builder::new()
+                .name("restore baked maps".into())
+                .spawn(move || {
+                    let _ = tx.send(crate::bake_cache::load_selected(&key, &requested));
+                });
+            if spawned.is_err() {
+                self.baked_map_restore_rx = None;
+            }
+        }
+        false
+    }
+
+    /// Ensures every evictable packed map group is resident (used by export and full snapshots).
+    #[cfg(test)]
+    pub(crate) fn ensure_baked_map_groups(&mut self) -> bool {
+        self.ensure_baked_map_mask(BAKED_MAP_GROUP_ALL)
+    }
+
+    /// Restores the requested maps before a synchronous operation such as export.
+    pub(crate) fn ensure_baked_map_mask_blocking(&mut self, mask: u8) -> bool {
+        if self.ensure_baked_map_mask(mask) {
+            return true;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if self.poll_baked_map_restore() && self.baked_map_mask_resident(mask) {
+                return true;
+            }
+            if self.baked_map_restore_rx.is_none() {
+                // The first read may have restored only a subset. Start a second
+                // read for any remaining requested group before failing.
+                if self.ensure_baked_map_mask(mask) {
+                    return true;
+                }
+                if self.baked_map_restore_rx.is_none() {
+                    return false;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    pub(crate) fn ensure_baked_map_groups_blocking(&mut self) -> bool {
+        self.ensure_baked_map_mask_blocking(BAKED_MAP_GROUP_ALL)
+    }
+
+    /// Polls a selective cache read and uploads only the returned baked-map groups.
+    /// Lower-resolution cached bakes are resampled to this Texture Set's resolution.
+    pub(crate) fn poll_baked_map_restore(&mut self) -> bool {
+        let result = match self.baked_map_restore_rx.as_ref() {
+            Some(rx) => match rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Empty) => return false,
+                Err(mpsc::TryRecvError::Disconnected) => Some(None),
+            },
+            None => return false,
+        };
+        self.baked_map_restore_rx = None;
+        let Some(mut maps) = result.flatten() else {
+            // The cache entry may have been removed by LRU cleanup or become unreadable.
+            self.bake_cache_key = None;
+            self._bake_cache_pin = None;
+            return false;
+        };
+        maps.sort_by_key(|map| map.index);
+        if maps.is_empty()
+            || maps.iter().any(|map| !matches!(map.index, 1 | 2 | 3))
+            || maps.windows(2).any(|pair| pair[0].index == pair[1].index)
+        {
+            self.bake_cache_key = None;
+            self._bake_cache_pin = None;
+            return false;
+        }
+
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        for map in maps {
+            let format = MAP_FORMATS[map.index];
+            let source = Tex::new(
+                &self.device,
+                "restored baked map",
+                map.resolution,
+                map.resolution,
+                format,
+                LAYER_USAGE | wgpu::TextureUsages::STORAGE_BINDING,
+            );
+            self.queue.write_texture(
+                source.copy_info(),
+                &map.bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(map.resolution * gpu::bytes_per_texel(format)),
+                    rows_per_image: Some(map.resolution),
+                },
+                source.extent(),
+            );
+            self.maps[map.index] = if map.resolution == self.res {
+                source
+            } else {
+                self.resample(&mut encoder, &source, self.res)
+            };
+        }
+        self.queue.submit([encoder.finish()]);
+        self.maps_version = self.maps_version.wrapping_add(1);
+        true
+    }
+
+    fn neutral_map(device: &wgpu::Device, queue: &wgpu::Queue, index: usize) -> Tex {
+        let tex = Tex::new(device, "evicted baked map placeholder", 1, 1, MAP_FORMATS[index], LAYER_USAGE);
+        match index {
+            1 => {
+                let values: [u16; 4] = [0x3C00, 0x3C00, 0x3C00, 0x3800];
+                queue.write_texture(tex.copy_info(), bytemuck::cast_slice(&values), Default::default(), tex.extent());
+            }
+            2 => {
+                queue.write_texture(tex.copy_info(), &[128, 255, 128, 128], Default::default(), tex.extent());
+            }
+            3 => {
+                let half: [u16; 4] = [0, 0, 0x3800, 0];
+                queue.write_texture(tex.copy_info(), bytemuck::cast_slice(&half), Default::default(), tex.extent());
+            }
+            _ => unreachable!("only packed maps B, C and D are evictable"),
+        }
+        tex
     }
 
     /// Packed map texture `t` with levels and fixes applied.
@@ -4962,7 +5305,84 @@ impl Engine {
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
     }
 
+    fn generator_baked_map_group_mask(generator: &Generator) -> u8 {
+        let maps = generator.needs_maps();
+        let mut mask = 0;
+        // Group B stores Sky Exposure, Edge/Crease Distance and Part Random.
+        if maps & ((1 << 4) | (1 << 5) | (1 << 6) | (1 << 7)) != 0 {
+            mask |= BAKED_MAP_GROUP_B;
+        }
+        // Group C stores Part Gradient and Bent Normal.
+        if maps & ((1 << 8) | (1 << 9)) != 0 {
+            mask |= BAKED_MAP_GROUP_C;
+        }
+        mask
+    }
+
+    fn mask_baked_map_group_mask(mask: &Mask) -> u8 {
+        if mask.graph.is_some() {
+            return BAKED_MAP_GROUP_ALL;
+        }
+        let mut required = mask.generator.as_ref()
+            .map_or(0, Self::generator_baked_map_group_mask);
+        for layer in &mask.layers {
+            if layer.enabled && layer.opacity > 1e-4 {
+                if let MaskSource::Generator(generator) = &layer.source {
+                    required |= Self::generator_baked_map_group_mask(generator);
+                }
+            }
+        }
+        required
+    }
+
+    /// Exact packed B/C dependencies of the current layer stack.
+    /// Paint-only composites can run while both groups stay evicted.
+    pub(crate) fn composite_baked_map_group_mask(&self) -> u8 {
+        let mut required = 0;
+        // Adjusted levels/fixes need their original packed map for resolve.
+        if (4..=7).any(|index| self.map_fix[index].is_some() || self.map_levels[index] != Levels::default()) {
+            required |= BAKED_MAP_GROUP_B;
+        }
+        if (8..=9).any(|index| self.map_fix[index].is_some() || self.map_levels[index] != Levels::default()) {
+            required |= BAKED_MAP_GROUP_C;
+        }
+        if (10..=11).any(|index| self.map_fix[index].is_some() || self.map_levels[index] != Levels::default()) {
+            required |= BAKED_MAP_GROUP_D;
+        }
+        for layer in &self.layers {
+            if let Content::Fill(fill) = &layer.content {
+                if fill.part_var.abs() > 1e-4 {
+                    required |= BAKED_MAP_GROUP_B;
+                }
+                if fill.graph.is_some() {
+                    required |= BAKED_MAP_GROUP_ALL;
+                }
+            }
+            if let Some(mask) = &layer.mask {
+                required |= Self::mask_baked_map_group_mask(mask);
+            }
+            if required == BAKED_MAP_GROUP_ALL {
+                break;
+            }
+        }
+        required
+    }
+
+    #[cfg(test)]
+    pub(crate) fn composite_needs_baked_map_groups(&self) -> bool {
+        self.composite_baked_map_group_mask() != 0
+    }
+
+    pub(crate) fn ensure_composite_baked_map_groups(&mut self) -> bool {
+        let mask = self.composite_baked_map_group_mask();
+        mask == 0 || self.ensure_baked_map_mask(mask)
+    }
+
     pub fn composite(&mut self) {
+        // Only restore packed maps when this layer stack can actually sample B/C.
+        if !self.ensure_composite_baked_map_groups() {
+            return;
+        }
         if self.composite_profile_requested {
             self.composite_profile_requested = false;
             if self.active_gpu_profile.is_none() {

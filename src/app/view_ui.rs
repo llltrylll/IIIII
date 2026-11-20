@@ -457,11 +457,60 @@ impl PainterApp {
                 );
             }
         }
+        if kind == ViewKind::V3d {
+            self.views.set_looks = self.set_looks(ui.ctx());
+        }
+        // The built-in Material shader does not sample the world-space UV maps.
+        // Restore them for the diagnostic modes that display them, or for a
+        // custom material graph that consumes the complete Surface input.
+        let needs_parked_surface_maps = kind == ViewKind::V3d
+            && (matches!(self.view.mode, ViewMode::WorldNormal | ViewMode::Position)
+                || (self.view.mode == ViewMode::Material && self.views.has_custom_shader()));
+        if kind == ViewKind::V3d {
+            self.set_parked_surface_maps_resident(needs_parked_surface_maps);
+            // Restore only the packed group sampled by the selected map view.
+            // Custom material graphs conservatively retain all evictable groups.
+            let needs_parked_baked_map_groups = if self.view.mode == ViewMode::Material && self.views.has_custom_shader() {
+                crate::engine::BAKED_MAP_GROUP_ALL
+            } else {
+                let mut required = match self.view.mode {
+                    ViewMode::Map(4..=7) => crate::engine::BAKED_MAP_GROUP_B,
+                    ViewMode::Map(8..=9) => crate::engine::BAKED_MAP_GROUP_C,
+                    ViewMode::Map(10..=11) | ViewMode::MissedRays => crate::engine::BAKED_MAP_GROUP_D,
+                    _ => 0,
+                };
+                if self.view.use_baked_normal
+                    && matches!(self.view.mode, ViewMode::Material | ViewMode::Normal)
+                {
+                    required |= crate::engine::BAKED_MAP_GROUP_D;
+                }
+                required
+            };
+            self.set_parked_baked_map_groups_resident(needs_parked_baked_map_groups);
+        }
+        // The UV panel shows only the active Texture Set; restore only the
+        // packed group represented by the selected map preview.
+        if kind == ViewKind::V2d {
+            let mut uv_map_mask = match self.view.uv_mode {
+                ViewMode::Map(4..=7) => crate::engine::BAKED_MAP_GROUP_B,
+                ViewMode::Map(8..=9) => crate::engine::BAKED_MAP_GROUP_C,
+                ViewMode::Map(10..=11) | ViewMode::MissedRays => crate::engine::BAKED_MAP_GROUP_D,
+                _ => 0,
+            };
+            if self.view.use_baked_normal
+                && matches!(self.view.uv_mode, ViewMode::Material | ViewMode::Normal)
+            {
+                uv_map_mask |= crate::engine::BAKED_MAP_GROUP_D;
+            }
+            if uv_map_mask != 0 {
+                let _ = self.engine.ensure_baked_map_mask(uv_map_mask);
+            }
+        }
+
         let size = [(rect.width() * self.ppp).round() as u32, (rect.height() * self.ppp).round() as u32];
         let mut rt_view = None;
         match kind {
             ViewKind::V3d => {
-                self.views.set_looks = self.set_looks(ui.ctx());
                 let engines = texture_sets::engines(&self.engine, &self.sets, self.mesh.sets.len());
                 self.views.render_3d_with_object_visibility_and_paint_depth(
                     &self.rs, size, &engines, &self.env, &self.gpu_mesh, self.mesh.as_ref(),
@@ -635,6 +684,7 @@ impl PainterApp {
     /// After every view drew: strokes end when the button is released, and
     /// the 3D depth the brush reads stays valid when no 3D view is showing.
     pub(super) fn views_end_frame(&mut self, ctx: &egui::Context) {
+        self.poll_baked_map_restores(ctx);
         if let Some((forced_composite, stamp_ms, apply_ms, composite_ms, composite_total_ms, composite_clear_ms, composite_body_ms, pass_times)) =
             self.engine.poll_gpu_stroke_times()
         {

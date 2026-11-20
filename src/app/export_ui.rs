@@ -280,27 +280,60 @@ impl PainterApp {
         &mut self,
         settings: &export::Settings,
         selected_sets: &HashSet<String>,
-    ) -> Vec<(export::Snapshot, export::Settings)> {
+    ) -> Result<Vec<(export::Snapshot, export::Settings)>, String> {
         let selected_indices: Vec<usize> = self.mesh.sets.iter().enumerate()
             .filter_map(|(i, set)| selected_sets.contains(&set.name).then_some(i))
             .collect();
+        let gpu_mesh = &self.gpu_mesh;
 
         for &index in &selected_indices {
+            let set_name = self.mesh.sets.get(index)
+                .map(|set| set.name.clone())
+                .unwrap_or_else(|| format!("set {index}"));
             if index == self.sets.active {
+                // Export snapshots read all baked maps and the surface maps even
+                // when the final material composite is already clean.
+                if !self.engine.ensure_baked_map_groups_blocking() {
+                    return Err(format!(
+                        "Texture Set {set_name}: baked mesh maps could not be restored; export was cancelled."
+                    ));
+                }
+                self.engine.ensure_surface_maps(gpu_mesh);
                 if self.engine.dirty {
                     self.engine.composite();
+                    if self.engine.dirty {
+                        return Err(format!(
+                            "Texture Set {set_name}: recomposition did not complete; export was cancelled."
+                        ));
+                    }
                 }
-            } else if let Some(parked) = self.sets.parked.get_mut(index).and_then(Option::as_mut)
-                && parked.engine.dirty
-            {
-                parked.engine.composite();
-                parked.engine.release_inactive_working_set();
+            } else {
+                let Some(parked) = self.sets.parked.get_mut(index).and_then(Option::as_mut) else {
+                    return Err(format!(
+                        "Texture Set {set_name}: Engine is not resident; export was cancelled."
+                    ));
+                };
+                if !parked.engine.ensure_baked_map_groups_blocking() {
+                    return Err(format!(
+                        "Texture Set {set_name}: baked mesh maps could not be restored; export was cancelled."
+                    ));
+                }
+                parked.engine.ensure_surface_maps(gpu_mesh);
+                if parked.engine.dirty {
+                    parked.engine.composite();
+                    if parked.engine.dirty {
+                        return Err(format!(
+                            "Texture Set {set_name}: recomposition did not complete; export was cancelled."
+                        ));
+                    }
+                    parked.engine.release_inactive_working_set();
+                }
             }
         }
 
         let mesh = self.mesh.clone();
         let engines = self.set_engines();
-        selected_indices.into_iter().filter_map(|index| {
+        let snapshots = selected_indices.into_iter().filter_map(|index| {
             let set = mesh.sets.get(index)?;
             let engine = engines.get(index)?;
             let snapshot = export::snapshot(engine, &self.rs.device, &self.rs.queue, mesh.clone());
@@ -308,13 +341,21 @@ impl PainterApp {
                 set_name: set.name.replace(' ', ""),
                 ..settings.clone()
             }))
-        }).collect()
+        }).collect();
+        Ok(snapshots)
     }
 
     /// Read the chosen maps and write their files on a worker thread.
     fn start_export(&mut self, template: Template, selected_sets: HashSet<String>, ctx: &egui::Context) {
         let settings = self.export_settings();
-        let jobs = self.export_snapshots(&settings, &selected_sets);
+        let jobs = match self.export_snapshots(&settings, &selected_sets) {
+            Ok(jobs) => jobs,
+            Err(error) => {
+                self.export.job = None;
+                self.export.result = Some(Err(error));
+                return;
+            }
+        };
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
@@ -335,9 +376,9 @@ impl PainterApp {
         let selected_sets: HashSet<String> = self.mesh.sets.iter().map(|set| set.name.clone()).collect();
         // The agent-facing export intentionally includes every set, so keep the
         // previous all-parked composite behavior on this full-export path.
-        self.composite_parked();
+        self.composite_parked()?;
         let mut files = Vec::new();
-        for (snapshot, settings) in self.export_snapshots(settings, &selected_sets) {
+        for (snapshot, settings) in self.export_snapshots(settings, &selected_sets)? {
             files.extend(export::export(&snapshot, &self.export.templates[template], &settings)?);
         }
         Ok(files)

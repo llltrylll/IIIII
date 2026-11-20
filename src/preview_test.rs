@@ -1274,8 +1274,23 @@ fn fill_variation_noise_cache_matches_inline_and_invalidates_on_change() {
     let expected_color = read_texture(&rs.device, &rs.queue, reference.final_tex(0));
     let actual_roughness = read_texture(&rs.device, &rs.queue, cached.final_tex(1));
     let expected_roughness = read_texture(&rs.device, &rs.queue, reference.final_tex(1));
-    assert_eq!(actual_color, expected_color, "cached color FBM must match the inline evaluation exactly");
-    assert_eq!(actual_roughness, expected_roughness, "cached roughness FBM must match the inline evaluation exactly");
+    // The cached FBM fields are stored in R16Float while the inline path
+    // keeps the procedural value in f32. After the final 8-bit readback this
+    // can move an individual color/roughness byte by one LSB; larger changes
+    // indicate a real mismatch. Cache hits above must still remain identical.
+    let assert_within_one_lsb = |actual: &[u8], expected: &[u8], label: &str| {
+        assert_eq!(actual.len(), expected.len(), "{label}: output sizes differ");
+        let max_delta = actual.iter().zip(expected)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_delta <= 1,
+            "{label}: cached FBM differs from inline evaluation by up to {max_delta} 8-bit levels"
+        );
+    };
+    assert_within_one_lsb(&actual_color, &expected_color, "cached color FBM");
+    assert_within_one_lsb(&actual_roughness, &expected_roughness, "cached roughness FBM");
 
     rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 }
@@ -3759,7 +3774,7 @@ fn texture_sets_paint_apart() {
         views.render_3d(&rs, size, &[&left, &right], &env, &gpu_mesh, &cam, &settings, None);
         read_texture(&rs.device, &rs.queue, views.view3d.image())
     };
-    use crate::viewport::{SetLook, ViewMode};
+    use crate::viewport::SetLook;
     let hidden = looks(&mut views, [SetLook::default(), SetLook { hidden: true, highlight: 0.0 }]);
     let bluish_hidden = hidden.chunks(4).filter(|p| p[2] as i32 > p[0] as i32 + 40 && p[2] as i32 > p[1] as i32 + 40).count();
     println!("  right set hidden: {bluish_hidden} blue pixels");
@@ -5365,3 +5380,293 @@ fn first_paint_pass_lazily_captures_undo_before_snapshot() {
     let redone = read_texture(&rs.device, &rs.queue, engine.final_tex(0));
     assert_eq!(redone, painted, "Redo must restore the exact painted texture");
 }
+
+/// Parked world-space UV targets can be evicted without changing the multi-set
+/// Material viewport, then regenerated exactly for Position/World Normal views.
+#[test]
+#[ignore]
+fn parked_surface_maps_release_and_restore_without_visual_changes() {
+    use crate::mesh::set_tests::split_plane;
+
+    let mesh = split_plane();
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let bounds = (mesh.bounds_min, mesh.bounds_max);
+    let first = mesh.sets[0].index_range();
+    let second = mesh.sets[1].index_range();
+
+    let mut engine_a = Engine::new(&rs, &gpu_mesh, bounds, 128);
+    engine_a.set_triangles(first, &gpu_mesh);
+    engine_a.composite();
+    let mut engine_b = engine_a.sibling(&gpu_mesh, second, 128);
+    engine_b.composite();
+
+    let pos_before = engine_b.read_tex(&engine_b.surface_maps().0);
+    let nrm_before = engine_b.read_tex(&engine_b.surface_maps().1);
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+    let mut views = ViewRenderer::new(&rs);
+    let size = [320, 240];
+    let cam = OrbitCam::default();
+    let mut settings = ViewSettings::default();
+
+    // Capture both visible sets with the complete surface-map working set.
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    let material_before = read_texture(&rs.device, &rs.queue, views.view3d.display_texture());
+
+    settings.mode = ViewMode::Position;
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    let position_before = read_texture(&rs.device, &rs.queue, views.view3d.display_texture());
+
+    // Match the real set-switch path: discard edit-only scratch first, then
+    // evict the world-space maps while leaving final material outputs resident.
+    engine_b.release_inactive_working_set();
+    let bytes_before = engine_b.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "surface maps").map(|(_, bytes)| *bytes).unwrap();
+    assert!(engine_b.release_surface_maps());
+    let bytes_after = engine_b.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "surface maps").map(|(_, bytes)| *bytes).unwrap();
+    assert!(bytes_after < bytes_before, "parked surface maps must release GPU memory");
+    assert_eq!(engine_b.surface_maps().0.width, 1);
+    assert_eq!(engine_b.surface_maps().1.width, 1);
+
+    // A parked set remains in the viewport, and its Material output is byte-identical.
+    settings.mode = ViewMode::Material;
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    let material_after = read_texture(&rs.device, &rs.queue, views.view3d.display_texture());
+    assert_eq!(material_after, material_before);
+
+    // Reactivating the set restores both edit workspace and surface maps.
+    // The UV data is unchanged, so its rebuild must not dirty the material composite.
+    engine_b.restore_active_working_set(&gpu_mesh);
+    assert!(!engine_b.dirty, "rebuilding unchanged UV targets must not invalidate the material composite");
+    assert_eq!(engine_b.surface_maps().0.width, 128);
+    assert_eq!(engine_b.surface_maps().1.width, 128);
+    assert_eq!(engine_b.read_tex(&engine_b.surface_maps().0), pos_before);
+    assert_eq!(engine_b.read_tex(&engine_b.surface_maps().1), nrm_before);
+
+    settings.mode = ViewMode::Position;
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    let position_after = read_texture(&rs.device, &rs.queue, views.view3d.display_texture());
+    assert_eq!(position_after, position_before);
+
+    // A hidden set is skipped by the render loop, so its old bind group would
+    // otherwise keep the evicted texture views alive indefinitely.
+    views.set_looks = vec![crate::viewport::SetLook::default(); 2];
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    assert!(views.has_texture_set_binding(1));
+    views.set_looks[1].hidden = true;
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    assert!(views.has_texture_set_binding(1), "the hidden path deliberately skips binding refresh");
+    assert!(engine_b.release_surface_maps());
+    views.invalidate_texture_set_binding(1);
+    assert!(!views.has_texture_set_binding(1), "eviction must release hidden cached texture views");
+}
+/// Packed baked map groups B/C can be evicted from a parked Engine and restored
+/// from the selective disk-cache path without changing their texel contents.
+#[test]
+#[ignore = "needs a GPU and a writable bake cache"]
+fn parked_baked_map_groups_release_and_restore_from_cache() {
+    use crate::mesh::Primitive;
+    use std::time::{Duration, Instant};
+
+    let mesh = Primitive::MaterialBall.build();
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let mut settings = BakeSettings::default();
+    settings.apply_quality(crate::bake::Quality::Draft);
+    let (baked, report, _) = run_bake(&rs.device, &rs.queue, &mesh, &gpu_mesh, &settings, 256);
+    let key = crate::bake_cache::key(&mesh, &settings, 256, 0);
+
+    // Wait for the existing asynchronous cache writer before testing eviction.
+    crate::bake_cache::store(key.clone(), &baked, report.clone(), &rs.device, &rs.queue);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut cached = false;
+    while Instant::now() < deadline {
+        if crate::bake_cache::load_selected(&key, &[1, 2]).is_some() {
+            cached = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(cached, "the completed bake must be present in the disk cache before eviction");
+
+    let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 256);
+    engine.set_maps_cached(baked, report, key);
+    engine.composite();
+    assert!(!engine.dirty, "the baseline composite must be clean");
+
+    let map_b_before = engine.read_tex(engine.map_tex(1));
+    let map_c_before = engine.read_tex(engine.map_tex(2));
+    let map_d_before = engine.read_tex(engine.map_tex(3));
+    let bytes_before = engine.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
+
+    assert!(engine.release_baked_map_groups(), "cached B/C groups should be evictable");
+    assert_eq!(engine.map_tex(1).width, 1);
+    assert_eq!(engine.map_tex(2).width, 1);
+    let bytes_after = engine.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
+    assert_eq!(bytes_before - bytes_after, (256 * 256 - 1) * 20, "B/C/D should retain only their 1x1 placeholders");
+
+    assert!(!engine.ensure_baked_map_groups(), "first request starts the background cache restore");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut restored = false;
+    while Instant::now() < deadline {
+        if engine.poll_baked_map_restore() {
+            restored = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(restored, "the cache worker should restore both groups");
+    assert!(engine.baked_map_groups_resident());
+    assert_eq!(engine.read_tex(engine.map_tex(1)), map_b_before);
+    assert_eq!(engine.read_tex(engine.map_tex(2)), map_c_before);
+    assert!(!engine.dirty, "restoring unchanged baked maps must not invalidate the material composite");
+    assert_eq!(engine.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap(), bytes_before);
+
+    // Restoring Edge/Part Random dependencies needs only B, not C.
+    assert!(engine.release_baked_map_groups());
+    assert!(!engine.ensure_baked_map_mask(crate::engine::BAKED_MAP_GROUP_B));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut restored_b = false;
+    while Instant::now() < deadline {
+        if engine.poll_baked_map_restore() {
+            restored_b = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(restored_b, "the B-only cache request should complete");
+    assert!(engine.baked_map_mask_resident(crate::engine::BAKED_MAP_GROUP_B));
+    assert_eq!(engine.map_tex(1).width, 256);
+    assert_eq!(engine.map_tex(2).width, 1, "B-only residency must leave C evicted");
+    assert_eq!(engine.map_tex(3).width, 1, "B-only residency must leave D evicted");
+    assert_eq!(engine.read_tex(engine.map_tex(1)), map_b_before);
+
+    // Restoring Part Gradient/Bent Normal needs only C, not B.
+    assert!(!engine.ensure_baked_map_mask(crate::engine::BAKED_MAP_GROUP_C));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut restored_c = false;
+    while Instant::now() < deadline {
+        if engine.poll_baked_map_restore() {
+            restored_c = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(restored_c, "the C-only cache request should complete");
+    assert!(engine.baked_map_mask_resident(crate::engine::BAKED_MAP_GROUP_C));
+    assert_eq!(engine.map_tex(1).width, 256, "C-only restoration must retain B");
+    assert_eq!(engine.map_tex(2).width, 256);
+    assert_eq!(engine.read_tex(engine.map_tex(2)), map_c_before);
+
+    // Individual eviction sizes match B=RGBA16F (8 bytes/texel) and
+    // C=RGBA8 (4 bytes/texel), including their 1x1 neutral placeholders.
+    let full_group_bytes = engine.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
+    assert!(engine.release_baked_map_mask(crate::engine::BAKED_MAP_GROUP_B));
+    let after_b_bytes = engine.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
+    assert_eq!(full_group_bytes - after_b_bytes, (256 * 256 - 1) * 8);
+    assert!(engine.release_baked_map_mask(crate::engine::BAKED_MAP_GROUP_C));
+    let after_c_bytes = engine.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
+    assert_eq!(after_b_bytes - after_c_bytes, (256 * 256 - 1) * 4);
+
+    assert!(!engine.ensure_baked_map_mask(crate::engine::BAKED_MAP_GROUP_C));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut restored_c_only = false;
+    while Instant::now() < deadline {
+        if engine.poll_baked_map_restore() {
+            restored_c_only = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(restored_c_only, "the C-only cache request should complete");
+    assert_eq!(engine.map_tex(1).width, 1, "C-only restoration must leave B evicted");
+    assert_eq!(engine.map_tex(2).width, 256);
+    assert_eq!(engine.read_tex(engine.map_tex(2)), map_c_before);
+
+    // Baked Normal/Height is group D. It can be restored without bringing B
+    // back, and its neutral placeholder must preserve the default no-normal state.
+    assert!(!engine.ensure_baked_map_mask(crate::engine::BAKED_MAP_GROUP_D));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut restored_d_only = false;
+    while Instant::now() < deadline {
+        if engine.poll_baked_map_restore() {
+            restored_d_only = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(restored_d_only, "the D-only cache request should complete");
+    assert_eq!(engine.map_tex(1).width, 1, "D-only restoration must leave B evicted");
+    assert_eq!(engine.map_tex(2).width, 256);
+    assert_eq!(engine.map_tex(3).width, 256);
+    assert_eq!(engine.read_tex(engine.map_tex(3)), map_d_before);
+
+    let before_remaining_releases = engine.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
+    assert_eq!(engine.map_tex(1).width, 1, "B was already evicted before the C/D-only restoration cycle");
+    assert!(!engine.release_baked_map_mask(crate::engine::BAKED_MAP_GROUP_B),
+        "releasing an already-evicted B group must not report a second release");
+    let after_repeated_b_release = engine.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
+    assert_eq!(before_remaining_releases, after_repeated_b_release,
+        "an already-evicted B group must not change the resource allocation");
+    let without_b_bytes = after_repeated_b_release;
+    assert!(engine.release_baked_map_mask(crate::engine::BAKED_MAP_GROUP_C));
+    let without_c_bytes = engine.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
+    assert_eq!(without_b_bytes - without_c_bytes, (256 * 256 - 1) * 4);
+    assert!(engine.release_baked_map_mask(crate::engine::BAKED_MAP_GROUP_D));
+    let without_d_bytes = engine.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
+    assert_eq!(without_c_bytes - without_d_bytes, (256 * 256 - 1) * 8);
+
+    assert!(!engine.ensure_baked_map_mask(crate::engine::BAKED_MAP_GROUP_C));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut restored_c_only_after_all_evicted = false;
+    while Instant::now() < deadline {
+        if engine.poll_baked_map_restore() {
+            restored_c_only_after_all_evicted = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(restored_c_only_after_all_evicted, "C should restore independently after all groups are evicted");
+    assert_eq!(engine.map_tex(1).width, 1);
+    assert_eq!(engine.map_tex(2).width, 256);
+    assert_eq!(engine.map_tex(3).width, 1);
+
+    // A paint-only stack has no B/C dependency, so its next composite must
+    // leave the groups evicted instead of restoring 48 MiB needlessly.
+    assert!(engine.release_baked_map_groups(), "the second residency cycle should evict B/C");
+    engine.mark_dirty();
+    assert!(!engine.composite_needs_baked_map_groups());
+    engine.composite();
+    assert!(!engine.dirty, "a map-independent composite should finish with B/C evicted");
+    assert!(!engine.baked_map_groups_resident(), "map-independent work must not restore B/C");
+
+    // A later level adjustment must also force source-map residency before resolve.
+    engine.map_levels[4] = crate::engine::Levels { black: 0.1, ..Default::default() };
+    assert!(engine.composite_needs_baked_map_groups(), "B/C levels require their original packed maps");
+    engine.map_levels[11] = crate::engine::Levels { black: 0.1, ..Default::default() };
+    assert_eq!(
+        engine.composite_baked_map_group_mask() & crate::engine::BAKED_MAP_GROUP_D,
+        crate::engine::BAKED_MAP_GROUP_D,
+        "Height levels require the original D map before resolve"
+    );
+
+    // Synchronous export still explicitly blocks for the maps it snapshots.
+    assert!(engine.ensure_baked_map_groups_blocking(), "synchronous operations must wait for cache restoration");
+    assert!(engine.baked_map_groups_resident());
+    assert_eq!(engine.read_tex(engine.map_tex(1)), map_b_before);
+    assert_eq!(engine.read_tex(engine.map_tex(2)), map_c_before);
+    assert_eq!(engine.read_tex(engine.map_tex(3)), map_d_before);
+}
+

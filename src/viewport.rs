@@ -468,6 +468,11 @@ pub struct ViewTarget {
 }
 
 impl ViewTarget {
+    #[cfg(test)]
+    pub(crate) fn display_texture(&self) -> &Tex {
+        self.display.as_ref().expect("the 3D viewport has a display texture")
+    }
+
     fn create(device: &wgpu::Device, size: [u32; 2], hdr: bool) -> Targets {
         let [w, h] = size;
         // COPY_SRC lets tests and MCP read rendered images back.
@@ -1165,6 +1170,21 @@ impl ViewRenderer {
 
     pub fn has_custom_shader(&self) -> bool {
         self.custom_mesh.is_some()
+    }
+
+    /// Releases stale bind groups immediately when a parked Engine drops its
+    /// surface maps. Hidden sets are skipped by the render loop, so they cannot
+    /// rely on the next bind-group refresh to release the old texture views.
+    pub(crate) fn invalidate_texture_set_binding(&mut self, set: usize) {
+        if let Some(binding) = self.view_bind_groups.get_mut(set) {
+            *binding = None;
+        }
+        self.view3d_cache_key = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_texture_set_binding(&self, set: usize) -> bool {
+        self.view_bind_groups.get(set).is_some_and(Option::is_some)
     }
 
     fn globals_buffer(device: &wgpu::Device) -> wgpu::Buffer {

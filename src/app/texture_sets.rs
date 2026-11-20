@@ -5,7 +5,7 @@
 
 use super::{PainterApp, icons, theme};
 use crate::bvh::Bvh;
-use crate::engine::Engine;
+use crate::engine::{Engine, BAKED_MAP_GROUP_ALL};
 use crate::undo::{StrokeTarget, UndoStack};
 use crate::viewport::{OverlaySlot, SetLook};
 use eframe::egui;
@@ -78,9 +78,13 @@ impl PainterApp {
         // A bake preview shows on the set being edited; the full bake comes back first.
         self.end_preview(true);
         self.engine.commit_props(&mut self.undo);
+        let previous_active = self.sets.active;
         std::mem::swap(&mut self.engine, &mut p.engine);
-        self.engine.restore_active_working_set();
+        self.engine.restore_active_working_set(&self.gpu_mesh);
         p.engine.release_inactive_working_set();
+        if p.engine.release_surface_maps() {
+            self.views.invalidate_texture_set_binding(previous_active);
+        }
         self.engine_epoch = self.engine_epoch.wrapping_add(1);
         std::mem::swap(&mut self.selected, &mut p.selected);
         std::mem::swap(&mut self.target, &mut p.target);
@@ -107,19 +111,110 @@ impl PainterApp {
         }
     }
 
-    /// Composites every parked set when a synchronous operation needs final maps (export).
-    pub(super) fn composite_parked(&mut self) {
-        for p in self.sets.parked.iter_mut().flatten() {
-            if p.engine.dirty {
-                p.engine.composite();
-                p.engine.release_inactive_working_set();
+    /// Applies the per-view residency policy to parked world-space UV maps.
+    /// Material and baked mesh-map modes use the final maps directly; Position,
+    /// World Normal and custom preview shaders need the per-set surface maps.
+    pub(super) fn set_parked_surface_maps_resident(&mut self, resident: bool) {
+        let mesh = &self.gpu_mesh;
+        let views = &mut self.views;
+        for (index, parked) in self.sets.parked.iter_mut().enumerate() {
+            let Some(parked) = parked else { continue };
+            let visible = !views.set_looks.get(index).is_some_and(|look| look.hidden);
+            if resident && visible {
+                parked.engine.ensure_surface_maps(mesh);
+            } else if parked.engine.release_surface_maps() {
+                // In particular, invalidate bindings for hidden sets: the
+                // viewport skips refreshing their cached bind groups.
+                views.invalidate_texture_set_binding(index);
             }
         }
     }
 
+    /// Keeps only the requested packed baked-map groups resident across visible sets.
+    /// Hidden sets retain D only when the path tracer still samples their baked normals.
+    pub(super) fn set_parked_baked_map_groups_resident(&mut self, requested_mask: u8) {
+        if requested_mask != 0 {
+            let _ = self.engine.ensure_baked_map_mask(requested_mask);
+        }
+        // RayTracer builds one texture array for every set, including sets hidden
+        // in the raster viewport. Keep D resident for those sets while the
+        // path tracer is sampling baked normals.
+        let raytracer_needs_hidden_baked_maps = self.rt.enabled
+            && self.view.mode == crate::viewport::ViewMode::Material
+            && self.view.use_baked_normal
+            && requested_mask & crate::engine::BAKED_MAP_GROUP_D != 0;
+        let views = &mut self.views;
+        for (index, parked) in self.sets.parked.iter_mut().enumerate() {
+            let Some(parked) = parked else { continue };
+            let visible = !views.set_looks.get(index).is_some_and(|look| look.hidden);
+            let required = if visible {
+                requested_mask
+            } else if raytracer_needs_hidden_baked_maps {
+                requested_mask & crate::engine::BAKED_MAP_GROUP_D
+            } else {
+                0
+            };
+            let release = BAKED_MAP_GROUP_ALL & !required;
+            if required != 0 {
+                let _ = parked.engine.ensure_baked_map_mask(required);
+            }
+            if release != 0 && parked.engine.release_baked_map_mask(release) {
+                // In particular, hidden sets must not retain cached map views.
+                views.invalidate_texture_set_binding(index);
+            }
+        }
+    }
+
+    /// Completes asynchronous cache-backed restorations and invalidates view bindings.
+    pub(super) fn poll_baked_map_restores(&mut self, ctx: &egui::Context) {
+        if self.engine.poll_baked_map_restore() {
+            self.views.invalidate_texture_set_binding(self.sets.active);
+            ctx.request_repaint();
+        }
+        for (index, parked) in self.sets.parked.iter_mut().enumerate() {
+            if let Some(parked) = parked
+                && parked.engine.poll_baked_map_restore()
+            {
+                self.views.invalidate_texture_set_binding(index);
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    /// Ensures every parked set has exportable mesh maps and a current final composite.
+    /// This is blocking by design: an export must never snapshot eviction placeholders.
+    pub(super) fn composite_parked(&mut self) -> Result<(), String> {
+        let mesh = &self.gpu_mesh;
+        for (index, parked) in self.sets.parked.iter_mut().enumerate() {
+            let Some(parked) = parked else { continue };
+            if !parked.engine.ensure_baked_map_groups_blocking() {
+                return Err(format!(
+                    "Texture Set {index}: baked mesh maps could not be restored from the bake cache; export was cancelled."
+                ));
+            }
+            parked.engine.ensure_surface_maps(mesh);
+            if parked.engine.dirty {
+                parked.engine.composite();
+                if parked.engine.dirty {
+                    return Err(format!(
+                        "Texture Set {index}: recomposition did not complete; export was cancelled."
+                    ));
+                }
+                parked.engine.release_inactive_working_set();
+            }
+        }
+        Ok(())
+    }
+
     /// Spreads parked-set recomposition across frames during interactive use.
     pub(super) fn composite_parked_one(&mut self, ctx: &egui::Context) {
+        let mesh = &self.gpu_mesh;
         if let Some(p) = self.sets.parked.iter_mut().flatten().find(|p| p.engine.dirty) {
+            if !p.engine.ensure_composite_baked_map_groups() {
+                ctx.request_repaint();
+                return;
+            }
+            p.engine.ensure_surface_maps(mesh);
             p.engine.composite();
             p.engine.release_inactive_working_set();
             ctx.request_repaint();

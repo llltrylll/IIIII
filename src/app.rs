@@ -346,7 +346,7 @@ enum BakeJob {
 
 enum Prepared {
     Scene(PreparedScene, bake_cache::Key),
-    Cached(bake_cache::Entry),
+    Cached(bake_cache::Entry, bake_cache::Key),
 }
 
 struct Shelf {

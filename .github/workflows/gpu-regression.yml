@@ -104,6 +104,9 @@ jobs:
       - name: GPU parity - grazing-angle normal map facing
         run: "cargo test --locked --bin material_painter preview_test::raster_normal_map_is_clamped_to_view_hemisphere_at_grazing_angle -- --ignored --exact --nocapture --test-threads 1"
 
+      - name: GPU composite - fill normal-map projection parity
+        run: "cargo test --locked --bin material_painter preview_test::normal_and_specular_channels -- --ignored --exact --nocapture --test-threads 1"
+
       - name: GPU parity - path tracer shader compiles
         run: "cargo test --locked --bin material_painter preview_test::path_trace_pipeline_compiles_with_grazing_normal_correction -- --ignored --exact --nocapture --test-threads 1"
 
@@ -147,6 +150,12 @@ jobs:
 
       - name: GPU regression - mask strokes refresh only their own thumbnail
         run: "cargo test --locked --bin material_painter preview_test::mask_stroke_redoes_only_the_mask_thumbnail -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU viewport - parked surface map residency
+        run: "cargo test --locked --bin material_painter preview_test::parked_surface_maps_release_and_restore_without_visual_changes -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU viewport - parked baked map groups restore from cache
+        run: "cargo test --locked --bin material_painter preview_test::parked_baked_map_groups_release_and_restore_from_cache -- --ignored --exact --nocapture --test-threads 1"
 
       - name: Upload GPU regression images
         if: always()

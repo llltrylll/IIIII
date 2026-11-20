@@ -4,7 +4,7 @@
 //! saved graphs.
 
 use super::{Action, PainterApp, labeled, section, theme};
-use crate::engine::{Content, FillParams, MAPS};
+use crate::engine::{Content, Engine, FillParams, MAPS, BAKED_MAP_GROUP_B, BAKED_MAP_GROUP_C, BAKED_MAP_GROUP_D};
 use crate::gpu::Tex;
 use crate::graph::{self, Graph, Library, ParamKind, Runtime, Value};
 use crate::undo::StrokeTarget;
@@ -13,6 +13,82 @@ use egui::{Color32, Pos2, Rect, Sense, Stroke, pos2, vec2};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
+
+/// The graph evaluator can sample mesh-map parameters directly or request the
+/// complete Surface input. Restore those resources before evaluating any node.
+fn graph_input_requirements(graph: &Graph, lib: &Library) -> (u8, bool) {
+    let mut required = 0;
+    let mut needs_surface = false;
+    for node in &graph.nodes {
+        let Some(def) = lib.find(&node.def) else { continue };
+        if def.surface {
+            needs_surface = true;
+            // Surface supplies AO/curvature/cavity/thickness, B, C and ID,
+            // plus the world-space position and normal inputs.
+            required |= BAKED_MAP_GROUP_B | BAKED_MAP_GROUP_C;
+        }
+        for param in &def.params {
+            if param.kind != ParamKind::MeshMap {
+                continue;
+            }
+            let Some(Value::MeshMap(index)) = lib.value_ref(node, &param.name) else { continue };
+            required |= match *index {
+                4..=7 => BAKED_MAP_GROUP_B,
+                8..=9 => BAKED_MAP_GROUP_C,
+                10..=11 => BAKED_MAP_GROUP_D,
+                _ => 0, // A and ID remain resident; custom maps have their own resident array.
+            };
+        }
+    }
+    (required, needs_surface)
+}
+
+/// Runtime graph outputs are shared across Texture Sets, so its map cache key
+/// must include the Engine identity as well as map and surface-map revisions.
+fn graph_maps_key(engine: &Engine, set_index: usize) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let (engine_id, resolution, _final_index, uv_version, maps_version) = engine.viewport_binding_identity();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    engine_id.hash(&mut hasher);
+    resolution.hash(&mut hasher);
+    uv_version.hash(&mut hasher);
+    maps_version.hash(&mut hasher);
+    set_index.hash(&mut hasher);
+    hasher.finish()
+}
+
+#[cfg(test)]
+mod graph_residency_tests {
+    use super::*;
+
+    #[test]
+    fn mesh_map_nodes_request_only_their_packed_group() {
+        let lib = Library::load(None);
+        for (index, expected) in [
+            (5, BAKED_MAP_GROUP_B),
+            (8, BAKED_MAP_GROUP_C),
+            (10, BAKED_MAP_GROUP_D),
+            (0, 0),
+            (12, 0),
+        ] {
+            let mut graph = Graph::new("map residency");
+            let node = graph.add("mesh_map", [0.0, 0.0]);
+            graph.node_mut(node).unwrap().params.insert("map".into(), Value::MeshMap(index));
+            assert_eq!(graph_input_requirements(&graph, &lib), (expected, false));
+        }
+    }
+
+    #[test]
+    fn surface_nodes_require_world_maps_and_packed_groups_b_and_c() {
+        let lib = Library::load(None);
+        let mut graph = Graph::new("surface residency");
+        graph.add("smart_mask", [0.0, 0.0]);
+        assert_eq!(
+            graph_input_requirements(&graph, &lib),
+            (BAKED_MAP_GROUP_B | BAKED_MAP_GROUP_C, true)
+        );
+    }
+}
 
 pub(super) struct GraphDoc {
     pub id: u64,
@@ -450,20 +526,30 @@ impl PainterApp {
                 self.shader_files_changed();
             }
         self.fill_parked_graphs();
-        let maps_version = self.engine.maps_version;
         for i in 0..self.graphs.docs.len() {
             let id = self.graphs.docs[i].id;
             let in_use = self.engine.layers.iter().any(|l| {
                 matches!(&l.content, Content::Fill(f) if f.graph == Some(id)) || l.mask.as_ref().is_some_and(|m| m.graph == Some(id))
             });
             let shown = self.workspace == super::Workspace::Designer && self.graphs.editor.doc == Some(id);
-            if !in_use && !shown {
+            if !in_use && !shown || self.graphs.docs[i].shading {
                 continue;
             }
+
+            let (required_maps, needs_surface) = graph_input_requirements(
+                &self.graphs.docs[i].graph,
+                &self.graphs.lib,
+            );
+            if needs_surface {
+                self.engine.ensure_surface_maps(&self.gpu_mesh);
+            }
+            if required_maps != 0 && !self.engine.ensure_baked_map_mask(required_maps) {
+                // The graph is not evaluated against eviction placeholders.
+                // The restore poll requests another frame when the maps arrive.
+                continue;
+            }
+            let maps_version = graph_maps_key(&self.engine, self.sets.active);
             let d = &mut self.graphs.docs[i];
-            if d.shading {
-                continue;
-            }
             // Images decoded since: the nodes waiting for them render now.
             if d.rt.take_images(&self.rs.device, &self.rs.queue) {
                 d.dirty = true;
@@ -475,9 +561,9 @@ impl PainterApp {
             if d.dirty || d.maps_seen != maps_version || (d.lean && shown) {
                 let engine = &self.engine;
                 let maps = |m: usize| engine.mesh_map(m);
-                let surface = engine.graph_surface();
+                let surface = needs_surface.then(|| engine.graph_surface());
                 let lean = !shown;
-                if d.rt.evaluate(&self.rs.device, &self.rs.queue, &d.graph, &self.graphs.lib, &maps, Some(&surface), maps_version, lean) {
+                if d.rt.evaluate(&self.rs.device, &self.rs.queue, &d.graph, &self.graphs.lib, &maps, surface.as_ref(), maps_version, lean) {
                     d.push = true;
                 }
                 d.dirty = false;
@@ -498,22 +584,31 @@ impl PainterApp {
     /// mesh maps.
     fn fill_parked_graphs(&mut self) {
         let active_channels = self.active_channels;
+        let mesh = &self.gpu_mesh;
         let (lib, docs) = (&self.graphs.lib, &mut self.graphs.docs);
-        for p in self.sets.parked.iter_mut().flatten() {
-            let engine = &mut p.engine;
+        for (set_index, parked) in self.sets.parked.iter_mut().enumerate() {
+            let Some(parked) = parked else { continue };
+            let engine = &mut parked.engine;
             for li in 0..engine.layers.len() {
                 let l = &engine.layers[li];
                 let Content::Fill(f) = &l.content else { continue };
                 let Some(id) = f.graph.filter(|_| l.images.iter().all(Option::is_none)) else { continue };
                 let Some(d) = docs.iter_mut().find(|d| d.id == id && !d.shading) else { continue };
-                let version = engine.maps_version;
+                let (required_maps, needs_surface) = graph_input_requirements(&d.graph, lib);
+                if needs_surface {
+                    engine.ensure_surface_maps(mesh);
+                }
+                if required_maps != 0 && !engine.ensure_baked_map_mask(required_maps) {
+                    continue;
+                }
+                let version = graph_maps_key(engine, set_index);
                 if d.graph.match_set {
                     d.graph.res = engine.res;
                 }
                 {
                     let maps = |m: usize| engine.mesh_map(m);
-                    let surface = engine.graph_surface();
-                    d.rt.evaluate(&self.rs.device, &self.rs.queue, &d.graph, lib, &maps, Some(&surface), version, true);
+                    let surface = needs_surface.then(|| engine.graph_surface());
+                    d.rt.evaluate(&self.rs.device, &self.rs.queue, &d.graph, lib, &maps, surface.as_ref(), version, true);
                 }
                 // The edited set's outputs are made again on its own maps.
                 d.maps_seen = u64::MAX;
