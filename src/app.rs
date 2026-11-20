@@ -5925,7 +5925,10 @@ impl eframe::App for PainterApp {
         let ctx = ui.ctx().clone();
         self.frame_interval_ms = ctx.input(|i| i.stable_dt.max(0.0) * 1000.0);
         self.ppp = ctx.pixels_per_point();
-        let _ = self.rs.device.poll(wgpu::PollType::Poll);
+        {
+            let _s = crate::startup_trace::span("frame: device.poll");
+            let _ = self.rs.device.poll(wgpu::PollType::Poll);
+        }
         {
             let _s = crate::startup_trace::span("frame: async job polling");
             self.undo.update();
@@ -6062,6 +6065,7 @@ impl eframe::App for PainterApp {
         // button held (slider drags) and no text field focused (typing).
         let idle = !ctx.input(|i| i.pointer.any_down()) && ctx.memory(|m| m.focused().is_none());
         if idle && self.stroke.is_none() {
+            let _s = crate::startup_trace::span("frame: commit idle properties");
             self.engine.commit_props(&mut self.undo);
         }
         let ms = start.elapsed().as_secs_f32() * 1000.0;
