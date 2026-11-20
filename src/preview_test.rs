@@ -3768,7 +3768,7 @@ fn texture_sets_paint_apart() {
         views.render_3d(&rs, size, &[&left, &right], &env, &gpu_mesh, &cam, &settings, None);
         read_texture(&rs.device, &rs.queue, views.view3d.image())
     };
-    use crate::viewport::{SetLook, ViewMode};
+    use crate::viewport::SetLook;
     let hidden = looks(&mut views, [SetLook::default(), SetLook { hidden: true, highlight: 0.0 }]);
     let bluish_hidden = hidden.chunks(4).filter(|p| p[2] as i32 > p[0] as i32 + 40 && p[2] as i32 > p[1] as i32 + 40).count();
     println!("  right set hidden: {bluish_hidden} blue pixels");
