@@ -754,6 +754,7 @@ mod memory_breakdown_tests {
                 TechnicalMetric::F6Meter,
                 TechnicalMetric::Bake,
             ],
+            ..TechnicalUi::default()
         };
         assert_eq!(
             ui.sanitized().bottom,
