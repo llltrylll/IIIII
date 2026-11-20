@@ -2923,6 +2923,7 @@ impl Engine {
             && (mask & BAKED_MAP_GROUP_D == 0 || self.maps[3].width == self.res)
     }
 
+    #[cfg(test)]
     pub(crate) fn baked_map_groups_resident(&self) -> bool {
         self.baked_map_mask_resident(BAKED_MAP_GROUP_ALL)
     }
@@ -2959,6 +2960,7 @@ impl Engine {
         released
     }
 
+    #[cfg(test)]
     pub(crate) fn release_baked_map_groups(&mut self) -> bool {
         self.release_baked_map_mask(BAKED_MAP_GROUP_ALL)
     }
@@ -3000,6 +3002,7 @@ impl Engine {
     }
 
     /// Ensures every evictable packed map group is resident (used by export and full snapshots).
+    #[cfg(test)]
     pub(crate) fn ensure_baked_map_groups(&mut self) -> bool {
         self.ensure_baked_map_mask(BAKED_MAP_GROUP_ALL)
     }
@@ -5365,6 +5368,7 @@ impl Engine {
         required
     }
 
+    #[cfg(test)]
     pub(crate) fn composite_needs_baked_map_groups(&self) -> bool {
         self.composite_baked_map_group_mask() != 0
     }

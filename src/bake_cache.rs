@@ -365,6 +365,7 @@ fn decode_selected_reader<R: Read + Seek>(
     Some(selected)
 }
 
+#[cfg(test)]
 fn decode_selected(mut b: &[u8], requested: &[usize]) -> Option<Vec<CachedMapTexture>> {
     fn take<'a>(b: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
         if b.len() < n {
