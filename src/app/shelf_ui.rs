@@ -311,7 +311,7 @@ impl PainterApp {
                                         continue;
                                     }
                                     let resp = Self::swatch(ui, self.shelf.brushes[i].id(), b.name, icon);
-                                    if self.brush.tip == Some(i) {
+                                    if self.brush.tip == Some(i) && ui.is_rect_visible(resp.rect) {
                                         ui.painter().rect_stroke(resp.rect.shrink(2.0), theme::RADIUS, Stroke::new(1.5, theme::ACCENT), egui::StrokeKind::Inside);
                                     }
                                     if ui.clip_rect().intersects(resp.rect) {
