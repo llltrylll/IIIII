@@ -5430,4 +5430,16 @@ fn parked_surface_maps_release_and_restore_without_visual_changes() {
     views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
     let position_after = read_texture(&rs.device, &rs.queue, views.view3d.display_texture());
     assert_eq!(position_after, position_before);
+
+    // A hidden set is skipped by the render loop, so its old bind group would
+    // otherwise keep the evicted texture views alive indefinitely.
+    views.set_looks = vec![crate::viewport::SetLook::default(); 2];
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    assert!(views.has_texture_set_binding(1));
+    views.set_looks[1].hidden = true;
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    assert!(views.has_texture_set_binding(1), "the hidden path deliberately skips binding refresh");
+    assert!(engine_b.release_surface_maps());
+    views.invalidate_texture_set_binding(1);
+    assert!(!views.has_texture_set_binding(1), "eviction must release hidden cached texture views");
 }
