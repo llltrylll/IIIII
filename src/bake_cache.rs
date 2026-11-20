@@ -250,7 +250,7 @@ pub fn load_selected(key: &Key, requested: &[usize]) -> Option<Vec<CachedMapText
 /// Streams the cache container and decompresses only the requested textures.
 /// Unselected compressed payloads are validated by their dimensions and LZ4
 /// size prefix, then skipped with Seek; a large custom-map payload never has
-/// to be copied into system RAM just to restore packed group B or C.
+/// to be copied into system RAM just to restore packed groups B, C or D.
 fn decode_selected_reader<R: Read + Seek>(
     reader: &mut R,
     file_len: u64,
@@ -284,9 +284,12 @@ fn decode_selected_reader<R: Read + Seek>(
         let expected = (resolution as usize)
             .checked_mul(resolution as usize)?
             .checked_mul(gpu::bytes_per_texel(format) as usize)?;
+        // LZ4's worst-case block bound is only slightly larger than the raw
+        // texture. Reject forged oversized payload lengths before allocating.
+        let maximum_packed = expected.checked_add(expected / 255)?.checked_add(64)?;
         let mut prefix = [0u8; 4];
         reader.read_exact(&mut prefix).ok()?;
-        (u32::from_le_bytes(prefix) as usize == expected)
+        (u32::from_le_bytes(prefix) as usize == expected && packed_len <= maximum_packed)
             .then_some((resolution, packed_len - 4, expected, prefix))
     }
 
