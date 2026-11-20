@@ -1465,6 +1465,10 @@ pub struct Engine {
     pub map_levels: [Levels; MAP_COUNT],
     maps_dirty: bool,
     pub has_bake: bool,
+    /// Disk-cache identity for the baked maps; only cache-loaded bakes are evictable.
+    bake_cache_key: Option<crate::bake_cache::Key>,
+    /// Pending background read of evicted packed map groups B and C.
+    baked_map_restore_rx: Option<mpsc::Receiver<Option<Vec<crate::bake_cache::CachedMapTexture>>>>,
     /// Bumped whenever the mesh maps (or their levels and fixes) change.
     pub maps_version: u64,
     /// Bumped whenever the position and normal maps are made again.
@@ -2008,6 +2012,8 @@ impl Engine {
             map_levels: [Levels::default(); MAP_COUNT],
             maps_dirty: true,
             has_bake: false,
+            bake_cache_key: None,
+            baked_map_restore_rx: None,
             maps_version: 0,
             uv_version: 0,
             uv_baked: None,
@@ -2715,6 +2721,8 @@ impl Engine {
 
     /// Back to the neutral maps of a document that was never baked.
     pub fn clear_maps(&mut self) {
+        self.bake_cache_key = None;
+        self.baked_map_restore_rx = None;
         self.custom.clear();
         self.custom_ids.clear();
         self.custom_array = Self::custom_array_texture(&self.device, 1, 1);
@@ -2746,7 +2754,20 @@ impl Engine {
         self.mark_dirty();
     }
 
+    /// Adopts maps loaded from the bake cache and retains the key needed for lazy restoration.
+    pub(crate) fn set_maps_cached(
+        &mut self,
+        baked: BakedMaps,
+        report: Arc<BakeReport>,
+        key: crate::bake_cache::Key,
+    ) {
+        self.set_maps(baked, report);
+        self.bake_cache_key = Some(key);
+    }
+
     pub fn set_maps(&mut self, baked: BakedMaps, report: Arc<BakeReport>) {
+        self.bake_cache_key = None;
+        self.baked_map_restore_rx = None;
         // Bakes stop at `bake::MAX_BAKE_RES`; bigger texture sets get them upscaled.
         let mut encoder = self.device.create_command_encoder(&Default::default());
         let BakedMaps { maps, custom } = baked;
@@ -2824,6 +2845,126 @@ impl Engine {
         self.record(undo, format!("Clear fix: {}", MAPS[map].name), Edit::Fix { map, tex: Some(tex) });
         self.maps_dirty = true;
         self.mark_dirty();
+    }
+
+    /// Whether the full-resolution packed B/C maps are available.
+    pub(crate) fn baked_map_groups_resident(&self) -> bool {
+        self.maps[1].width == self.res && self.maps[2].width == self.res
+    }
+
+    /// Drops packed map B (sky/edge/crease/part-random) and C (bent-normal/part-gradient)
+    /// only when their data is safely recoverable from the bake cache and no
+    /// painted fixes or non-default levels need their current resolved outputs.
+    pub(crate) fn release_baked_map_groups(&mut self) -> bool {
+        if !self.has_bake
+            || self.dirty
+            || self.bake_cache_key.is_none()
+            || !self.baked_map_groups_resident()
+            || self.resolved[1].is_some()
+            || self.resolved[2].is_some()
+            || self.map_fix[4..=9].iter().any(Option::is_some)
+            || self.map_levels[4..=9].iter().any(|levels| *levels != Levels::default())
+        {
+            return false;
+        }
+
+        self.maps[1] = Self::neutral_map(&self.device, &self.queue, 1);
+        self.maps[2] = Self::neutral_map(&self.device, &self.queue, 2);
+        self.maps_version = self.maps_version.wrapping_add(1);
+        true
+    }
+
+    /// Starts a background cache read when a parked Engine's B/C map groups are absent.
+    /// Returns true only when both groups are already resident.
+    pub(crate) fn ensure_baked_map_groups(&mut self) -> bool {
+        if self.baked_map_groups_resident() {
+            return true;
+        }
+        if self.baked_map_restore_rx.is_none() {
+            let Some(key) = self.bake_cache_key.clone() else { return false };
+            let (tx, rx) = mpsc::channel();
+            self.baked_map_restore_rx = Some(rx);
+            let spawned = std::thread::Builder::new()
+                .name("restore baked maps".into())
+                .spawn(move || {
+                    let _ = tx.send(crate::bake_cache::load_selected(&key, &[1, 2]));
+                });
+            if spawned.is_err() {
+                self.baked_map_restore_rx = None;
+            }
+        }
+        false
+    }
+
+    /// Polls the cache worker and uploads only groups B/C, resampling to this
+    /// Texture Set's current resolution when the cached bake was lower resolution.
+    pub(crate) fn poll_baked_map_restore(&mut self) -> bool {
+        let result = match self.baked_map_restore_rx.as_ref() {
+            Some(rx) => match rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Empty) => return false,
+                Err(mpsc::TryRecvError::Disconnected) => Some(None),
+            },
+            None => return false,
+        };
+        self.baked_map_restore_rx = None;
+        let Some(mut maps) = result.flatten() else {
+            // The cache entry may have been removed by LRU cleanup or become unreadable.
+            // Keep the neutral placeholders and stop retrying every frame.
+            self.bake_cache_key = None;
+            return false;
+        };
+        maps.sort_by_key(|map| map.index);
+        if maps.len() != 2 || maps[0].index != 1 || maps[1].index != 2 {
+            self.bake_cache_key = None;
+            return false;
+        }
+
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        for map in maps {
+            let format = MAP_FORMATS[map.index];
+            let source = Tex::new(
+                &self.device,
+                "restored baked map",
+                map.resolution,
+                map.resolution,
+                format,
+                LAYER_USAGE | wgpu::TextureUsages::STORAGE_BINDING,
+            );
+            self.queue.write_texture(
+                source.copy_info(),
+                &map.bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(map.resolution * gpu::bytes_per_texel(format)),
+                    rows_per_image: Some(map.resolution),
+                },
+                source.extent(),
+            );
+            self.maps[map.index] = if map.resolution == self.res {
+                source
+            } else {
+                self.resample(&mut encoder, &source, self.res)
+            };
+        }
+        self.queue.submit([encoder.finish()]);
+        self.maps_version = self.maps_version.wrapping_add(1);
+        true
+    }
+
+    fn neutral_map(device: &wgpu::Device, queue: &wgpu::Queue, index: usize) -> Tex {
+        let tex = Tex::new(device, "evicted baked map placeholder", 1, 1, MAP_FORMATS[index], LAYER_USAGE);
+        match index {
+            1 => {
+                let values: [u16; 4] = [0x3C00, 0x3C00, 0x3C00, 0x3800];
+                queue.write_texture(tex.copy_info(), bytemuck::cast_slice(&values), Default::default(), tex.extent());
+            }
+            2 => {
+                queue.write_texture(tex.copy_info(), &[128, 255, 128, 128], Default::default(), tex.extent());
+            }
+            _ => unreachable!("only packed maps B and C are evictable"),
+        }
+        tex
     }
 
     /// Packed map texture `t` with levels and fixes applied.
@@ -5015,6 +5156,11 @@ impl Engine {
     }
 
     pub fn composite(&mut self) {
+        // Smart masks and procedural fill variations may sample packed baked
+        // maps B/C. Never composite against eviction placeholders.
+        if !self.ensure_baked_map_groups() {
+            return;
+        }
         if self.composite_profile_requested {
             self.composite_profile_requested = false;
             if self.active_gpu_profile.is_none() {
