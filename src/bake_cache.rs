@@ -496,7 +496,7 @@ fn evict(max: u64) {
         total += len;
         if total > max {
             let key = path.file_stem().and_then(|stem| stem.to_str());
-            if !key.is_some_and(|key| pinned.contains(key)) && fs::remove_file(&path).is_ok() {
+            if !key.is_some_and(|key| pinned.contains_key(key)) && fs::remove_file(&path).is_ok() {
                 total = total.saturating_sub(len);
             }
         }
@@ -507,7 +507,7 @@ fn evict(max: u64) {
 /// keep their source entry until they release the cache pin.
 pub fn clear() {
     let pinned = PINNED_KEYS.get()
-        .and_then(|keys| keys.lock().ok().map(|keys| keys.keys().cloned().collect::<HashSet<_>>()))
+        .and_then(|keys| keys.lock().ok().map(|keys| keys.clone()))
         .unwrap_or_default();
     for (path, ..) in entries() {
         let key = path.file_stem().and_then(|stem| stem.to_str());
