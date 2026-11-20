@@ -96,8 +96,11 @@ impl PainterApp {
         }
         let Some(mut p) = self.sets.parked.get_mut(k).and_then(Option::take) else { return };
         let previous_active = self.sets.active;
-        let keep_surface_maps = super::graph_ui::engine_uses_surface_graph(
+        let keep_new_active_surface_maps = super::graph_ui::engine_uses_surface_graph(
             &p.engine, &self.graphs.docs, &self.graphs.lib,
+        );
+        let keep_previous_active_surface_maps = super::graph_ui::engine_uses_surface_graph(
+            &self.engine, &self.graphs.docs, &self.graphs.lib,
         );
         // A bake preview shows on the set being edited; the full bake comes back first.
         self.end_preview(true);
@@ -105,7 +108,7 @@ impl PainterApp {
         std::mem::swap(&mut self.engine, &mut p.engine);
         self.engine.restore_active_working_set(&self.gpu_mesh);
         p.engine.release_inactive_working_set();
-        if !keep_surface_maps && p.engine.release_surface_maps() {
+        if !keep_previous_active_surface_maps && p.engine.release_surface_maps() {
             self.views.invalidate_texture_set_binding(previous_active);
         }
         self.engine_epoch = self.engine_epoch.wrapping_add(1);
