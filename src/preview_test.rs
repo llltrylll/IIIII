@@ -5420,6 +5420,7 @@ fn parked_surface_maps_release_and_restore_without_visual_changes() {
 
     // The Position mode's residency request rebuilds the parked surface maps.
     engine_b.ensure_surface_maps(&gpu_mesh);
+    assert!(!engine_b.dirty, "rebuilding unchanged UV targets must not invalidate the material composite");
     assert_eq!(engine_b.surface_maps().0.width, 128);
     assert_eq!(engine_b.surface_maps().1.width, 128);
     assert_eq!(engine_b.read_tex(&engine_b.surface_maps().0), pos_before);

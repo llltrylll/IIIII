@@ -1813,7 +1813,9 @@ impl Engine {
         self.pos = Tex::new(&self.device, "parked position map", 1, 1, POS_FORMAT, LAYER_USAGE);
         self.nrm = Tex::new(&self.device, "parked normal map", 1, 1, NRM_FORMAT, LAYER_USAGE);
         self.tan = Tex::new(&self.device, "parked tangent map", 1, 1, TAN_FORMAT, LAYER_USAGE);
-        self.uv_baked = None;
+        // Keep the bake key: it tells restoration that this is the same mesh,
+        // range and resolution, so rebuilding the discarded targets does not
+        // invalidate otherwise valid material composites.
         self.uv_version = self.uv_version.wrapping_add(1);
         true
     }
@@ -1824,7 +1826,12 @@ impl Engine {
         let resident = self.pos.width == self.res
             && self.nrm.width == self.res
             && self.tan.width == self.res;
-        if !resident || !UvBakeKey::is_current(self.uv_baked.as_ref(), mesh.mesh_id, &self.tris, self.res) {
+        let same_bake = UvBakeKey::is_current(self.uv_baked.as_ref(), mesh.mesh_id, &self.tris, self.res);
+        if !resident {
+            // The maps are being reconstructed from an unchanged mesh/range.
+            // This changes binding identity, not the already-correct composite.
+            self.bake_uv_internal(mesh, !same_bake);
+        } else if !same_bake {
             self.bake_uv(mesh);
         }
     }
@@ -2478,6 +2485,10 @@ impl Engine {
     /// Rasterizes position and normal maps for the current mesh at the
     /// current resolution, with dilation past UV island borders.
     pub fn bake_uv(&mut self, mesh: &GpuMesh) {
+        self.bake_uv_internal(mesh, true);
+    }
+
+    fn bake_uv_internal(&mut self, mesh: &GpuMesh, invalidate_composite: bool) {
         self.apply_bg = None;
         // Parked Texture Sets keep 1x1 placeholders. Recreate their full-size
         // targets only when editing, compositing or a world-space view needs them.
@@ -2544,8 +2555,10 @@ impl Engine {
         self.queue.submit([encoder.finish()]);
         self.uv_version += 1;
         self.uv_baked = Some(UvBakeKey { mesh_id: mesh.mesh_id, tris: self.tris.clone(), res: self.res });
-        self.mask_final.clear();
-        self.mark_dirty();
+        if invalidate_composite {
+            self.mask_final.clear();
+            self.mark_dirty();
+        }
     }
 
     pub fn bounds(&self) -> (Vec3, Vec3) {
@@ -2575,6 +2588,8 @@ impl Engine {
         self.tris = tris;
         if !repeat {
             self.bake_uv(mesh);
+        } else if self.pos.width != self.res || self.nrm.width != self.res || self.tan.width != self.res {
+            self.ensure_surface_maps(mesh);
         }
     }
 
