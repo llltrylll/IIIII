@@ -5134,7 +5134,7 @@ impl Engine {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            self.fill_variation_noise_bg = None;
+
         }
         let mut data = std::mem::take(&mut self.layer_uniform_scratch);
         data.resize((UNIFORM_STRIDE as usize) * slots.max(1), 0);
@@ -5883,7 +5883,7 @@ impl Engine {
         self.res = res;
         self.uv_version += 1;
         self.pos = Tex::new(&self.device, "position map", res, res, POS_FORMAT, LAYER_USAGE);
-        self.fill_variation_noise_bg = None;
+
         self.nrm = Tex::new(&self.device, "normal map", res, res, NRM_FORMAT, LAYER_USAGE);
         self.tan = Tex::new(&self.device, "tangent map", res, res, TAN_FORMAT, LAYER_USAGE);
         self.accum = [accum_set(&self.device, res, "accum A"), accum_set(&self.device, res, "accum B")];
