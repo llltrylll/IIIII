@@ -66,7 +66,7 @@ impl PainterApp {
                 Err("Bake preparation cancelled".into())
             } else {
                 match bake_cache::load(&key) {
-                    Some(entry) if !worker_cancel.load(std::sync::atomic::Ordering::Relaxed) => Ok(Prepared::Cached(entry)),
+                    Some(entry) if !worker_cancel.load(std::sync::atomic::Ordering::Relaxed) => Ok(Prepared::Cached(entry, key.clone())),
                     Some(_) => Err("Bake preparation cancelled".into()),
                     None => bake::prepare_cancellable(&mesh, &settings, set, &worker_cancel)
                         .map(|scene| Prepared::Scene(scene, key)),
@@ -96,14 +96,18 @@ impl PainterApp {
         match &mut self.bake_job {
             None => {}
             Some(BakeJob::Preparing { rx, .. }) => match rx.try_recv() {
-                Ok(Ok(Prepared::Cached(entry))) => {
+                Ok(Ok(Prepared::Cached(entry, key))) => {
                     let rs = &self.rs;
                     match out_of_memory_guard(&rs.device, || entry.upload(&rs.device, &rs.queue)) {
                         Ok((maps, report)) => {
                             self.status = format!("Loaded {} cached mesh maps ({}², from {}).", report.baked.count_ones(), report.resolution, report.source);
                             let id_only = self.bake_id_only;
                             if let Some(e) = self.set_engine_mut(self.sets.baking) {
-                                if id_only { e.replace_id_map(maps, Arc::new(report)) } else { e.set_maps(maps, Arc::new(report)) }
+                                if id_only {
+                                    e.replace_id_map(maps, Arc::new(report));
+                                } else {
+                                    e.set_maps_cached(maps, Arc::new(report), key);
+                                }
                             }
                         }
                         Err(e) => {
