@@ -468,6 +468,11 @@ pub struct ViewTarget {
 }
 
 impl ViewTarget {
+    #[cfg(test)]
+    pub(crate) fn display_texture(&self) -> &Tex {
+        self.display.as_ref().expect("the 3D viewport has a display texture")
+    }
+
     fn create(device: &wgpu::Device, size: [u32; 2], hdr: bool) -> Targets {
         let [w, h] = size;
         // COPY_SRC lets tests and MCP read rendered images back.
@@ -499,10 +504,10 @@ impl ViewTarget {
         ViewTarget { color: t.color, resolve: t.resolve, depth: t.depth, paint_depth: t.paint_depth, display: t.display, egui_id, size }
     }
 
-    fn ensure_size(&mut self, rs: &egui_wgpu::RenderState, size: [u32; 2]) {
+    fn ensure_size(&mut self, rs: &egui_wgpu::RenderState, size: [u32; 2]) -> bool {
         let size = [size[0].clamp(16, 8192), size[1].clamp(16, 8192)];
         if size == self.size {
-            return;
+            return false;
         }
         let t = Self::create(&rs.device, size, self.display.is_some());
         rs.renderer.write().update_egui_texture_from_wgpu_texture(
@@ -517,6 +522,7 @@ impl ViewTarget {
         self.paint_depth = t.paint_depth;
         self.display = t.display;
         self.size = size;
+        true
     }
 
     /// The displayed image.
@@ -638,7 +644,7 @@ impl ObjectDrawBuffers {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct ViewBindGroupKey {
-    engine: (u64, u32, usize, u64, u64),
+    engine: (u64, u32, [usize; crate::engine::ACCUM], u64, u64),
     environment: u64,
     slot: usize,
 }
@@ -650,7 +656,7 @@ struct CachedViewBindGroup {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct ViewEngineStamp {
-    binding: (u64, u32, usize, u64, u64),
+    binding: (u64, u32, [usize; crate::engine::ACCUM], u64, u64),
     generation: u64,
 }
 
@@ -1167,6 +1173,20 @@ impl ViewRenderer {
         self.custom_mesh.is_some()
     }
 
+    /// Releases stale bind groups immediately when a parked Engine drops its
+    /// surface maps. Hidden sets skip bind-group refresh in the render loop.
+    pub(crate) fn invalidate_texture_set_binding(&mut self, set: usize) {
+        if let Some(binding) = self.view_bind_groups.get_mut(set) {
+            *binding = None;
+        }
+        self.view3d_cache_key = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_texture_set_binding(&self, set: usize) -> bool {
+        self.view_bind_groups.get(set).is_some_and(Option::is_some)
+    }
+
     fn globals_buffer(device: &wgpu::Device) -> wgpu::Buffer {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("view globals"),
@@ -1402,23 +1422,38 @@ impl ViewRenderer {
         hidden_objects: &[bool],
         update_screen_paint_depth: bool,
     ) {
-        self.view3d.ensure_size(rs, size);
-        self.ensure_object_draw_buffers(&rs.device, mesh, source_mesh, hidden_objects);
+        if self.view3d.ensure_size(rs, size) {
+            self.post.invalidate_targets();
+        }
+        {
+            let _s = crate::startup_trace::span("viewport 3D: object visibility cache");
+            self.ensure_object_draw_buffers(&rs.device, mesh, source_mesh, hidden_objects);
+        }
         let size = self.view3d.size;
         let overlay_generation = overlays.map_or(0, Overlays::generation);
         let cacheable = self.custom_mesh.is_none();
-        if !cacheable {
-            self.view3d_cache_key = None;
-        } else if self.view3d_cache_key.as_ref().is_some_and(|key| {
-            key.matches(
-                size, engines, env, mesh, cam, settings, &self.set_looks, hidden_objects,
-                overlay_generation, update_screen_paint_depth, source_mesh.is_some(),
-            )
-        }) {
+        let cache_hit = {
+            let _s = crate::startup_trace::span("viewport 3D: frame cache comparison");
+            if cacheable {
+                self.view3d_cache_key.as_ref().is_some_and(|key| {
+                    key.matches(
+                        size, engines, env, mesh, cam, settings, &self.set_looks, hidden_objects,
+                        overlay_generation, update_screen_paint_depth, source_mesh.is_some(),
+                    )
+                })
+            } else {
+                self.view3d_cache_key = None;
+                false
+            }
+        };
+        if cache_hit {
+            crate::startup_trace::count("viewport 3D cache hits", 1);
             #[cfg(test)]
             { self.view3d_cache_hits = self.view3d_cache_hits.saturating_add(1); }
             return;
         }
+        crate::startup_trace::count("viewport 3D cache misses", 1);
+        let _render = crate::startup_trace::span("viewport 3D: encode and submit");
         let vp = cam.view_proj(size[0] as f32 / size[1] as f32);
         while self.globals.len() < engines.len() + 1 {
             self.globals.push(Self::globals_buffer(&rs.device));
@@ -1722,10 +1757,13 @@ impl ViewRenderer {
             settings: *settings,
         };
         if self.view2d_cache_key == Some(cache_key) {
+            crate::startup_trace::count("viewport 2D cache hits", 1);
             #[cfg(test)]
             { self.view2d_cache_hits = self.view2d_cache_hits.saturating_add(1); }
             return;
         }
+        crate::startup_trace::count("viewport 2D cache misses", 1);
+        let _render = crate::startup_trace::span("viewport 2D: encode and submit");
         let mut g = Self::base_globals(engine, settings, size, settings.uv_mode);
         g.view2d = [cam.zoom, cam.pan.x, cam.pan.y, 0.0];
         g.extra[3] = settings.uv_wire_opacity;

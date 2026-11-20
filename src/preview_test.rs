@@ -1310,6 +1310,15 @@ fn mask_filters_apply() {
     set(&mut engine, vec![MaskFilter::new(FilterKind::Blur)]);
     let blurred = red(&mut engine);
     assert!(blurred > 0.95, "blurred white mask: {blurred}");
+    // Four filter steps alternate scratch inputs twice. This exercises reuse
+    // of both cached filter bind groups within one mask evaluation.
+    set(&mut engine, vec![
+        MaskFilter::new(FilterKind::Invert),
+        MaskFilter::new(FilterKind::Blur),
+        MaskFilter::new(FilterKind::Invert),
+    ]);
+    let stacked = red(&mut engine);
+    assert!(stacked > 0.95, "invert + blur + invert filter stack: {stacked}");
     set(&mut engine, vec![MaskFilter::new(FilterKind::Invert)]);
     let inverted = red(&mut engine);
     assert!(inverted < 0.01, "inverted: {inverted}");
@@ -3759,7 +3768,7 @@ fn texture_sets_paint_apart() {
         views.render_3d(&rs, size, &[&left, &right], &env, &gpu_mesh, &cam, &settings, None);
         read_texture(&rs.device, &rs.queue, views.view3d.image())
     };
-    use crate::viewport::{SetLook, ViewMode};
+    use crate::viewport::SetLook;
     let hidden = looks(&mut views, [SetLook::default(), SetLook { hidden: true, highlight: 0.0 }]);
     let bluish_hidden = hidden.chunks(4).filter(|p| p[2] as i32 > p[0] as i32 + 40 && p[2] as i32 > p[1] as i32 + 40).count();
     println!("  right set hidden: {bluish_hidden} blue pixels");
@@ -4821,6 +4830,24 @@ fn bloom_glows_around_red_emission() {
     let n = halo(&glow);
     println!("  default strength {strength}: {n} background pixels glow red");
     assert!(n > 3000, "red emission blooms onto the background at the default settings ({n})");
+
+    // Exercise target replacement while the cached post/Bloom bind groups exist,
+    // then return to the original dimensions and require identical pixels.
+    drop(frame);
+    let mut threshold_settings = ViewSettings::default();
+    threshold_settings.post.bloom = 1.0;
+    threshold_settings.post.bloom_threshold = 0.2;
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &threshold_settings, None);
+    let low_threshold = read_texture(&rs.device, &rs.queue, views.view3d.image());
+    assert_ne!(low_threshold, glow, "changing the Bloom threshold must update its cached uniform");
+
+    let mut resize_settings = ViewSettings::default();
+    resize_settings.post.bloom = 1.0;
+    views.render_3d(&rs, [384, 384], &[&engine], &env, &gpu_mesh, &cam, &resize_settings, None);
+    let _resized = read_texture(&rs.device, &rs.queue, views.view3d.image());
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &resize_settings, None);
+    let restored = read_texture(&rs.device, &rs.queue, views.view3d.image());
+    assert_eq!(restored, glow, "post-processing output changed after viewport target resize");
 }
 
 /// Emission: a fill that emits fills the final emission texture, a stroke
@@ -5008,6 +5035,77 @@ fn diff_report(a: &[u8], b: &[u8], bpp: usize, res: u32) -> String {
     match first {
         None => "identical".to_string(),
         Some((fx, fy)) => format!("{n} bytes differ, first at ({fx}, {fy}), box x {x0}..={x1} y {y0}..={y1}"),
+    }
+}
+
+/// Every optimized per-layer output mask must produce the same material
+/// textures as the reference path that writes all accumulation channels.
+#[test]
+#[ignore]
+fn selective_composite_matches_full_output_reference() {
+    use crate::engine::{ACCUM, FillParams};
+    use crate::undo::UndoStack;
+
+    let rs = render_state();
+    let mesh = crate::mesh::Primitive::Plane.build();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+
+    let render = |force_full: bool| -> Vec<Vec<u8>> {
+        let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 256);
+        engine.force_full_composite_channel_outputs = force_full;
+        let mut undo = UndoStack::default();
+
+        let mut color = FillParams::default();
+        color.mat.enabled = [true, false, false, false, false, false, false, false];
+        color.mat.color = [0.82, 0.12, 0.04];
+        color.mat.opacity = 0.82;
+        let color = engine.add_fill_layer(0, None, "Color only".into(), color, &mut undo);
+        engine.layers[color].opacity = 0.83;
+
+        let mut rough_metal = FillParams::default();
+        rough_metal.mat.enabled = [false, true, true, false, false, false, false, false];
+        rough_metal.mat.rough = 0.23;
+        rough_metal.mat.metal = 0.71;
+        let rm = engine.add_fill_layer(1, None, "Rough and metal".into(), rough_metal, &mut undo);
+        engine.layers[rm].opacity = 0.76;
+
+        let mut height = FillParams::default();
+        height.mat.enabled = [false, false, false, true, false, false, false, false];
+        height.mat.height = 0.31;
+        engine.add_fill_layer(2, None, "Height only".into(), height, &mut undo);
+
+        let mut emission = FillParams::default();
+        emission.mat.enabled = [false, false, false, false, false, true, false, false];
+        emission.mat.emission = [0.63, 0.08, 0.21];
+        engine.add_fill_layer(3, None, "Emission only".into(), emission, &mut undo);
+
+        let mut specular = FillParams::default();
+        specular.mat.enabled = [false, false, false, false, false, false, false, true];
+        specular.mat.specular = 0.91;
+        engine.add_fill_layer(4, None, "Specular only".into(), specular, &mut undo);
+
+        let mut opacity = FillParams::default();
+        opacity.mat.enabled = [false, false, false, false, true, false, false, false];
+        opacity.mat.opacity = 0.42;
+        engine.add_fill_layer(5, None, "Opacity only".into(), opacity, &mut undo);
+
+        // A painted mask exercises the independent coverage path too.
+        engine.add_mask(color, true, None, &mut undo);
+        engine.composite();
+
+        (0..ACCUM)
+            .map(|channel| read_texture(&rs.device, &rs.queue, engine.final_tex(channel)))
+            .collect()
+    };
+
+    let selective = render(false);
+    let reference = render(true);
+    for channel in 0..ACCUM {
+        assert_eq!(
+            selective[channel],
+            reference[channel],
+            "selective composite differs from the all-channel reference on accumulation channel {channel}",
+        );
     }
 }
 
@@ -5364,4 +5462,83 @@ fn first_paint_pass_lazily_captures_undo_before_snapshot() {
     engine.composite();
     let redone = read_texture(&rs.device, &rs.queue, engine.final_tex(0));
     assert_eq!(redone, painted, "Redo must restore the exact painted texture");
+}
+
+/// Parked world-space UV maps can be evicted without changing the Material
+/// viewport, then reconstructed exactly when a view or operation needs them.
+#[test]
+#[ignore]
+fn parked_surface_maps_release_and_restore_without_visual_changes() {
+    use crate::mesh::set_tests::split_plane;
+    use crate::viewport::SetLook;
+
+    let mesh = split_plane();
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let bounds = (mesh.bounds_min, mesh.bounds_max);
+    let first = mesh.sets[0].index_range();
+    let second = mesh.sets[1].index_range();
+
+    let mut engine_a = Engine::new(&rs, &gpu_mesh, bounds, 128);
+    engine_a.set_triangles(first, &gpu_mesh);
+    engine_a.composite();
+    let mut engine_b = engine_a.sibling(&gpu_mesh, second, 128);
+    engine_b.composite();
+
+    let pos_before = engine_b.read_tex(&engine_b.surface_maps().0);
+    let nrm_before = engine_b.read_tex(&engine_b.surface_maps().1);
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+    let mut views = ViewRenderer::new(&rs);
+    let size = [320, 240];
+    let cam = OrbitCam::default();
+    let mut settings = ViewSettings::default();
+
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    let material_before = read_texture(&rs.device, &rs.queue, views.view3d.display_texture());
+
+    settings.mode = ViewMode::Position;
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    let position_before = read_texture(&rs.device, &rs.queue, views.view3d.display_texture());
+
+    engine_b.release_inactive_working_set();
+    let bytes_before = engine_b.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "surface maps").map(|(_, bytes)| *bytes).unwrap();
+    assert!(engine_b.release_surface_maps());
+    let bytes_after = engine_b.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "surface maps").map(|(_, bytes)| *bytes).unwrap();
+    assert!(bytes_after < bytes_before, "parked surface maps must release GPU memory");
+    assert_eq!(engine_b.surface_maps().0.width, 1);
+    assert_eq!(engine_b.surface_maps().1.width, 1);
+    views.invalidate_texture_set_binding(1);
+
+    settings.mode = ViewMode::Material;
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    let material_after = read_texture(&rs.device, &rs.queue, views.view3d.display_texture());
+    assert_eq!(material_after, material_before);
+
+    if engine_b.restore_active_working_set(&gpu_mesh) {
+        views.invalidate_texture_set_binding(1);
+    }
+    assert!(!engine_b.dirty, "restoring unchanged surface maps must not dirty the composite");
+    assert_eq!(engine_b.surface_maps().0.width, 128);
+    assert_eq!(engine_b.surface_maps().1.width, 128);
+    assert_eq!(engine_b.read_tex(&engine_b.surface_maps().0), pos_before);
+    assert_eq!(engine_b.read_tex(&engine_b.surface_maps().1), nrm_before);
+
+    settings.mode = ViewMode::Position;
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    let position_after = read_texture(&rs.device, &rs.queue, views.view3d.display_texture());
+    assert_eq!(position_after, position_before);
+
+    views.set_looks = vec![SetLook::default(); 2];
+    settings.mode = ViewMode::Material;
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    assert!(views.has_texture_set_binding(1));
+    views.set_looks[1].hidden = true;
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    assert!(views.has_texture_set_binding(1));
+    assert!(engine_b.release_surface_maps());
+    views.invalidate_texture_set_binding(1);
+    assert!(!views.has_texture_set_binding(1));
 }

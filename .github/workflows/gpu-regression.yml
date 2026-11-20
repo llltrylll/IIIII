@@ -92,8 +92,14 @@ jobs:
       - name: GPU composite - color + roughness FBM cache fidelity
         run: "cargo test --locked --bin material_painter preview_test::fill_variation_noise_cache_matches_inline_and_invalidates_on_change -- --ignored --exact --nocapture --test-threads 1"
 
+      - name: GPU composite - selective accumulation outputs match full reference
+        run: "cargo test --locked --bin material_painter preview_test::selective_composite_matches_full_output_reference -- --ignored --exact --nocapture --test-threads 1"
+
       - name: GPU viewport - cached image invalidation
         run: "cargo test --locked --bin material_painter preview_test::viewport_cache_reuses_unchanged_images_and_invalidates_changes -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU viewport - post-processing cache survives Bloom toggle and resize
+        run: "cargo test --locked --bin material_painter preview_test::bloom_glows_around_red_emission -- --ignored --exact --nocapture --test-threads 1"
 
       - name: GPU viewport - custom shading graph previews
         run: "cargo test --locked --bin material_painter preview_test::preview_shaders_compile_and_render -- --ignored --exact --nocapture --test-threads 1"
@@ -147,6 +153,9 @@ jobs:
 
       - name: GPU regression - mask strokes refresh only their own thumbnail
         run: "cargo test --locked --bin material_painter preview_test::mask_stroke_redoes_only_the_mask_thumbnail -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU viewport - parked surface map residency
+        run: "cargo test --locked --bin material_painter preview_test::parked_surface_maps_release_and_restore_without_visual_changes -- --ignored --exact --nocapture --test-threads 1"
 
       - name: Upload GPU regression images
         if: always()

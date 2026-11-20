@@ -315,16 +315,27 @@ fn fs_layer(in: FsOut) -> AccumOut {
     let dims = vec2<f32>(textureDimensions(prev_color));
     let uv = in.pos.xy / dims;
 
-    let pc4 = textureLoad(prev_color, c, 0);
+    // The render pipeline omits attachments for channels this layer leaves
+    // unchanged. Keep their previous textures unread as well: on integrated
+    // GPUs the accumulation traffic is a major part of full-stack cost.
+    let outputs = u32(u.varc.w + 0.5);
+    var pc4 = vec4<f32>(0.0);
+    var pr = 0.0;
+    var pm = 0.0;
+    var ph = 0.0;
+    var pe = vec3<f32>(0.0);
+    var pn = vec3<f32>(0.0, 0.0, 1.0);
+    var ps = 0.0;
+    if ((outputs & 1u) != 0u) { pc4 = textureLoad(prev_color, c, 0); }
+    if ((outputs & 2u) != 0u) { pr = textureLoad(prev_rough, c, 0).r; }
+    if ((outputs & 4u) != 0u) { pm = textureLoad(prev_metal, c, 0).r; }
+    if ((outputs & 8u) != 0u) { ph = textureLoad(prev_height, c, 0).r; }
+    if ((outputs & 16u) != 0u) { pe = textureLoad(prev_emission, c, 0).rgb; }
+    if ((outputs & 32u) != 0u) { pn = textureLoad(prev_normal, c, 0).xyz * 2.0 - 1.0; }
+    if ((outputs & 64u) != 0u) { ps = textureLoad(prev_spec, c, 0).r; }
     let pc = pc4.rgb;
     // Opacity accumulates in the color's alpha.
     let po = pc4.a;
-    let pr = textureLoad(prev_rough, c, 0).r;
-    let pm = textureLoad(prev_metal, c, 0).r;
-    let ph = textureLoad(prev_height, c, 0).r;
-    let pe = textureLoad(prev_emission, c, 0).rgb;
-    let pn = textureLoad(prev_normal, c, 0).xyz * 2.0 - 1.0;
-    let ps = textureLoad(prev_spec, c, 0).r;
 
     let bits = u32(u.var1.w);
     var p = vec3<f32>(0.0);
@@ -469,16 +480,44 @@ fn fs_layer(in: FsOut) -> AccumOut {
 
     let mode = i32(u.p0.y);
     var out: AccumOut;
-    let opacity = clamp(mix(po, blend1(mode, po, so), ao * mask), 0.0, 1.0);
-    out.color = vec4<f32>(clamp(mix(pc, blend3(mode, pc, sc), ac * mask), vec3<f32>(0.0), vec3<f32>(1.0)), opacity);
-    out.rough = vec4<f32>(clamp(mix(pr, blend1(mode, pr, sr), ar * mask), 0.0, 1.0));
-    out.metal = vec4<f32>(clamp(mix(pm, blend1(mode, pm, sm), am * mask), 0.0, 1.0));
-    out.height = vec4<f32>(mix(ph, blend1(mode, ph, sh), ah * mask));
-    out.emission = vec4<f32>(clamp(mix(pe, blend3(mode, pe, se), ae * mask), vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    if ((outputs & 1u) != 0u) {
+        let opacity = clamp(mix(po, blend1(mode, po, so), ao * mask), 0.0, 1.0);
+        out.color = vec4<f32>(clamp(mix(pc, blend3(mode, pc, sc), ac * mask), vec3<f32>(0.0), vec3<f32>(1.0)), opacity);
+    } else {
+        out.color = vec4<f32>(0.0);
+    }
+    if ((outputs & 2u) != 0u) {
+        out.rough = vec4<f32>(clamp(mix(pr, blend1(mode, pr, sr), ar * mask), 0.0, 1.0));
+    } else {
+        out.rough = vec4<f32>(0.0);
+    }
+    if ((outputs & 4u) != 0u) {
+        out.metal = vec4<f32>(clamp(mix(pm, blend1(mode, pm, sm), am * mask), 0.0, 1.0));
+    } else {
+        out.metal = vec4<f32>(0.0);
+    }
+    if ((outputs & 8u) != 0u) {
+        out.height = vec4<f32>(mix(ph, blend1(mode, ph, sh), ah * mask));
+    } else {
+        out.height = vec4<f32>(0.0);
+    }
+    if ((outputs & 16u) != 0u) {
+        out.emission = vec4<f32>(clamp(mix(pe, blend3(mode, pe, se), ae * mask), vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    } else {
+        out.emission = vec4<f32>(0.0);
+    }
     // Normals add the layer's detail to what's below, by its coverage.
-    let nb = normalize(pn);
-    out.normal = vec4<f32>(normalize(mix(nb, combine_normals(nb, sn), an * mask)) * 0.5 + 0.5, 1.0);
-    out.spec = vec4<f32>(clamp(mix(ps, blend1(mode, ps, ss), as_ * mask), 0.0, 1.0));
+    if ((outputs & 32u) != 0u) {
+        let nb = normalize(pn);
+        out.normal = vec4<f32>(normalize(mix(nb, combine_normals(nb, sn), an * mask)) * 0.5 + 0.5, 1.0);
+    } else {
+        out.normal = vec4<f32>(0.5, 0.5, 1.0, 1.0);
+    }
+    if ((outputs & 64u) != 0u) {
+        out.spec = vec4<f32>(clamp(mix(ps, blend1(mode, ps, ss), as_ * mask), 0.0, 1.0));
+    } else {
+        out.spec = vec4<f32>(0.5);
+    }
     return out;
 }
 

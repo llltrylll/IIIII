@@ -4,7 +4,7 @@
 //! saved graphs.
 
 use super::{Action, PainterApp, labeled, section, theme};
-use crate::engine::{Content, FillParams, MAPS};
+use crate::engine::{Content, Engine, FillParams, MAPS};
 use crate::gpu::Tex;
 use crate::graph::{self, Graph, Library, ParamKind, Runtime, Value};
 use crate::undo::StrokeTarget;
@@ -31,6 +31,33 @@ pub(super) struct GraphDoc {
     /// A folder's live graph as last brought in line with its layers: what
     /// differs since are the artist's edits.
     pub(super) seen: Option<Graph>,
+}
+
+/// Whether an Engine has a live graph-backed layer or mask that reads the
+/// world-space Surface input. Such maps must stay resident because parked
+/// graph evaluation happens before the viewport renders.
+pub(super) fn engine_uses_surface_graph(engine: &Engine, docs: &[GraphDoc], lib: &Library) -> bool {
+    let graph_uses_surface = |id: u64| {
+        docs.iter()
+            .find(|doc| doc.id == id && !doc.shading)
+            .is_some_and(|doc| {
+                doc.graph.nodes.iter().any(|node| {
+                    lib.find(&node.def).is_some_and(|definition| definition.surface)
+                })
+            })
+    };
+    engine.layers.iter().any(|layer| {
+        let fill_uses_surface = if let Content::Fill(fill) = &layer.content {
+            layer.images.iter().all(Option::is_none)
+                && fill.graph.is_some_and(|id| graph_uses_surface(id))
+        } else {
+            false
+        };
+        let mask_uses_surface = layer.mask.as_ref()
+            .and_then(|mask| mask.graph)
+            .is_some_and(|id| graph_uses_surface(id));
+        fill_uses_surface || mask_uses_surface
+    })
 }
 
 /// The floating add-node menu: where it opened (canvas units and screen)
@@ -498,22 +525,31 @@ impl PainterApp {
     /// mesh maps.
     fn fill_parked_graphs(&mut self) {
         let active_channels = self.active_channels;
+        let mesh = &self.gpu_mesh;
+        let views = &mut self.views;
         let (lib, docs) = (&self.graphs.lib, &mut self.graphs.docs);
-        for p in self.sets.parked.iter_mut().flatten() {
+        for (index, parked) in self.sets.parked.iter_mut().enumerate() {
+            let Some(p) = parked.as_mut() else { continue };
             let engine = &mut p.engine;
             for li in 0..engine.layers.len() {
                 let l = &engine.layers[li];
                 let Content::Fill(f) = &l.content else { continue };
                 let Some(id) = f.graph.filter(|_| l.images.iter().all(Option::is_none)) else { continue };
                 let Some(d) = docs.iter_mut().find(|d| d.id == id && !d.shading) else { continue };
+                let needs_surface = d.graph.nodes.iter().any(|node| {
+                    lib.find(&node.def).is_some_and(|definition| definition.surface)
+                });
+                if needs_surface && engine.ensure_surface_maps(mesh) {
+                    views.invalidate_texture_set_binding(index);
+                }
                 let version = engine.maps_version;
                 if d.graph.match_set {
                     d.graph.res = engine.res;
                 }
                 {
                     let maps = |m: usize| engine.mesh_map(m);
-                    let surface = engine.graph_surface();
-                    d.rt.evaluate(&self.rs.device, &self.rs.queue, &d.graph, lib, &maps, Some(&surface), version, true);
+                    let surface = needs_surface.then(|| engine.graph_surface());
+                    d.rt.evaluate(&self.rs.device, &self.rs.queue, &d.graph, lib, &maps, surface.as_ref(), version, true);
                 }
                 // The edited set's outputs are made again on its own maps.
                 d.maps_seen = u64::MAX;

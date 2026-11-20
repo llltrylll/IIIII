@@ -108,6 +108,9 @@ impl PainterApp {
                 }
                 let icon = self.shelf.icon_size;
                 let search = self.shelf.search.to_lowercase();
+                // The common unfiltered shelf view should not allocate a lowercase
+                // copy for every asset on every frame.
+                let matches_search = |name: &str| search.is_empty() || name.to_lowercase().contains(&search);
                 let kind = self.shelf.kind;
                 let wanted = |k: presets::MaterialType| kind.is_none_or(|f| f == k);
                 // The type's name as a heading of its own when the type changes
@@ -118,6 +121,12 @@ impl PainterApp {
                         let width = ui.max_rect().width();
                         let h = if last.is_some() { 30.0 } else { 20.0 };
                         let (r, _) = ui.allocate_exact_size(vec2(width, h), Sense::hover());
+                        *last = Some(k);
+                        // Off-screen group headings still take part in layout, but do not
+                        // need text shaping or paint commands until they enter the clip rect.
+                        if !ui.is_rect_visible(r) {
+                            return;
+                        }
                         let base = r.left_bottom() + vec2(2.0, -5.0);
                         let g = ui.painter().layout_no_wrap(k.name().to_uppercase(), egui::FontId::new(11.0, theme::heading_family()), theme::TEXT_DIM);
                         let line_y = base.y - g.size().y * 0.5;
@@ -127,7 +136,6 @@ impl PainterApp {
                             [pos2(base.x + text_w + 8.0, line_y), pos2(r.right() - 4.0, line_y)],
                             Stroke::new(1.0, theme::OUTLINE),
                         );
-                        *last = Some(k);
                     }
                 };
                 let mut share = None;
@@ -145,21 +153,23 @@ impl PainterApp {
                                 }
                                 let fallback = self.shelf.materials.first().map(|t| t.id());
                                 for (i, g) in self.graphs.shelf.iter().enumerate() {
-                                    if !g.name.to_lowercase().contains(&search) {
+                                    if !matches_search(&g.name) {
                                         continue;
                                     }
                                     let Some(tex) = g.thumb.as_ref().map(|t| t.id()).or(fallback) else { continue };
                                     let resp = Self::swatch(ui, tex, &g.name, icon);
-                                    resp.dnd_set_drag_payload(ShelfItem::Graph(i));
-                                    if resp.double_clicked() {
-                                        self.pending.push(Action::AddOnTop(ShelfItem::Graph(i)));
-                                    }
-                                    resp.context_menu(|ui| {
-                                        if ui.button(theme::with_icon(icons::SHARE_NETWORK, "Share to community…")).clicked() {
-                                            share = Some(i);
-                                            ui.close();
+                                    if ui.clip_rect().intersects(resp.rect) {
+                                        resp.dnd_set_drag_payload(ShelfItem::Graph(i));
+                                        if resp.double_clicked() {
+                                            self.pending.push(Action::AddOnTop(ShelfItem::Graph(i)));
                                         }
-                                    });
+                                        resp.context_menu(|ui| {
+                                            if ui.button(theme::with_icon(icons::SHARE_NETWORK, "Share to community…")).clicked() {
+                                                share = Some(i);
+                                                ui.close();
+                                            }
+                                        });
+                                    }
                                 }
                             }
                             ShelfCat::Downloaded => {
@@ -173,7 +183,7 @@ impl PainterApp {
                                 let fallback = self.shelf.materials.first().map(|t| t.id());
                                 let kinds: Vec<presets::MaterialType> = self.library.local.iter().map(|m| presets::MaterialType::of(&m.name, None)).collect();
                                 let mut order: Vec<usize> = (0..self.library.local.len())
-                                    .filter(|&i| self.library.local[i].name.to_lowercase().contains(&search) && wanted(kinds[i]))
+                                    .filter(|&i| matches_search(&self.library.local[i].name) && wanted(kinds[i]))
                                     .collect();
                                 order.sort_by_key(|&i| kinds[i]);
                                 let mut last = None;
@@ -182,12 +192,15 @@ impl PainterApp {
                                     let m = &self.library.local[i];
                                     let thumb = self.library.local_thumbs.get(i).and_then(|t| t.as_ref()).map(|t| t.id());
                                     let Some(tex) = thumb.or(fallback) else { continue };
-                                    let resp = Self::swatch(ui, tex, &m.name.clone(), icon).on_hover_text(format!("{}, from {}", m.name, m.source));
-                                    resp.dnd_set_drag_payload(ShelfItem::Library(i));
-                                    if resp.double_clicked() {
-                                        self.pending.push(Action::AddOnTop(ShelfItem::Library(i)));
+                                    let resp = Self::swatch(ui, tex, &m.name, icon);
+                                    if ui.clip_rect().intersects(resp.rect) {
+                                        let resp = resp.on_hover_text(format!("{}, from {}", m.name, m.source));
+                                        resp.dnd_set_drag_payload(ShelfItem::Library(i));
+                                        if resp.double_clicked() {
+                                            self.pending.push(Action::AddOnTop(ShelfItem::Library(i)));
+                                        }
+                                        resp.context_menu(|ui| self.library_material_menu(ui, i));
                                     }
-                                    resp.context_menu(|ui| self.library_material_menu(ui, i));
                                 }
                             }
                             ShelfCat::SmartMaterials => {
@@ -195,24 +208,28 @@ impl PainterApp {
                                 let fallback = self.shelf.smart.first().map(|t| t.id());
                                 for i in 0..self.user_smarts.len() {
                                     let s = &self.user_smarts[i];
-                                    if !s.name.to_lowercase().contains(&search) || !wanted(presets::MaterialType::of(&s.name, None)) {
+                                    if !matches_search(&s.name) || !wanted(presets::MaterialType::of(&s.name, None)) {
                                         continue;
                                     }
                                     let Some(tex) = s.thumb.as_ref().map(|t| t.id()).or(fallback) else { continue };
                                     let resp = Self::swatch(ui, tex, &s.name.clone(), icon);
-                                    let at = resp.rect.left_top() + vec2(8.0, 6.0);
-                                    let g = ui.painter().layout_no_wrap("MINE".into(), egui::FontId::proportional(8.5), Color32::WHITE);
-                                    let r = Rect::from_min_size(at, g.size() + vec2(6.0, 2.0));
-                                    ui.painter().rect_filled(r, 0.0, theme::DONATE.gamma_multiply(0.9));
-                                    ui.painter().galley(r.min + vec2(3.0, 1.0), g, Color32::WHITE);
-                                    resp.dnd_set_drag_payload(ShelfItem::UserSmart(i));
-                                    if resp.double_clicked() {
-                                        self.pending.push(Action::AddOnTop(ShelfItem::UserSmart(i)));
+                                    if ui.is_rect_visible(resp.rect) {
+                                        let at = resp.rect.left_top() + vec2(8.0, 6.0);
+                                        let g = ui.painter().layout_no_wrap("MINE".into(), egui::FontId::proportional(8.5), Color32::WHITE);
+                                        let r = Rect::from_min_size(at, g.size() + vec2(6.0, 2.0));
+                                        ui.painter().rect_filled(r, 0.0, theme::DONATE.gamma_multiply(0.9));
+                                        ui.painter().galley(r.min + vec2(3.0, 1.0), g, Color32::WHITE);
                                     }
-                                    resp.context_menu(|ui| self.user_smart_menu(ui, i, &mut share_smart));
+                                    if ui.clip_rect().intersects(resp.rect) {
+                                        resp.dnd_set_drag_payload(ShelfItem::UserSmart(i));
+                                        if resp.double_clicked() {
+                                            self.pending.push(Action::AddOnTop(ShelfItem::UserSmart(i)));
+                                        }
+                                        resp.context_menu(|ui| self.user_smart_menu(ui, i, &mut share_smart));
+                                    }
                                 }
                                 let mut order: Vec<usize> = (0..presets::SMART_MATERIALS.len())
-                                    .filter(|&i| presets::SMART_MATERIALS[i].name.to_lowercase().contains(&search) && wanted(presets::SMART_MATERIALS[i].kind()))
+                                    .filter(|&i| matches_search(presets::SMART_MATERIALS[i].name) && wanted(presets::SMART_MATERIALS[i].kind()))
                                     .collect();
                                 order.sort_by_key(|&i| presets::SMART_MATERIALS[i].kind());
                                 // Your own stay first, apart from the groups.
@@ -221,7 +238,7 @@ impl PainterApp {
                                     group(ui, &mut last, s.kind());
                                     let tex = self.shelf.smart[i].id();
                                     let resp = Self::swatch(ui, tex, s.name, icon);
-                                    if s.is_scanned() {
+                                    if s.is_scanned() && ui.is_rect_visible(resp.rect) {
                                         // Badge: built on a photo-scanned texture set.
                                         let at = resp.rect.left_top() + vec2(8.0, 6.0);
                                         let font = egui::FontId::proportional(8.5);
@@ -230,12 +247,15 @@ impl PainterApp {
                                         ui.painter().rect_filled(r, 0.0, theme::ACCENT.gamma_multiply(0.85));
                                         ui.painter().galley(r.min + vec2(3.0, 1.0), g, Color32::WHITE);
                                     }
-                                    Self::missing_badge(ui, &resp, s.needs_maps() & self.engine.missing_maps());
-                                    resp.dnd_set_drag_payload(ShelfItem::Smart(i));
-                                    if resp.double_clicked() {
-                                        self.pending.push(Action::AddOnTop(ShelfItem::Smart(i)));
+                                    if ui.is_rect_visible(resp.rect) {
+                                        Self::missing_badge(ui, &resp, s.needs_maps() & self.engine.missing_maps());
                                     }
-                                    resp.context_menu(|ui| {
+                                    if ui.clip_rect().intersects(resp.rect) {
+                                        resp.dnd_set_drag_payload(ShelfItem::Smart(i));
+                                        if resp.double_clicked() {
+                                            self.pending.push(Action::AddOnTop(ShelfItem::Smart(i)));
+                                        }
+                                        resp.context_menu(|ui| {
                                         if ui.button("Add as layer folder").on_hover_text("A folder of fill layers with smart masks; Ctrl+G shows them as a graph you can edit too").clicked() {
                                             self.pending.push(Action::AddOnTop(ShelfItem::Smart(i)));
                                             ui.close();
@@ -244,23 +264,25 @@ impl PainterApp {
                                             self.pending.push(Action::AddOnTop(ShelfItem::SmartGraph(i)));
                                             ui.close();
                                         }
-                                    });
+                                        });
+                                    }
                                 }
                             }
                             ShelfCat::Materials => {
                                 let mut order: Vec<usize> =
-                                    (0..presets::MATERIALS.len()).filter(|&i| presets::MATERIALS[i].name.to_lowercase().contains(&search) && wanted(presets::MATERIALS[i].kind())).collect();
+                                    (0..presets::MATERIALS.len()).filter(|&i| matches_search(presets::MATERIALS[i].name) && wanted(presets::MATERIALS[i].kind())).collect();
                                 order.sort_by_key(|&i| presets::MATERIALS[i].kind());
                                 let mut last = None;
                                 for (i, m) in order.into_iter().map(|i| (i, &presets::MATERIALS[i])) {
                                     group(ui, &mut last, m.kind());
                                     let tex = self.shelf.materials[i].id();
                                     let resp = Self::swatch(ui, tex, m.name, icon);
-                                    resp.dnd_set_drag_payload(ShelfItem::Material(i));
-                                    if resp.double_clicked() {
-                                        self.pending.push(Action::AddOnTop(ShelfItem::Material(i)));
-                                    }
-                                    resp.context_menu(|ui| {
+                                    if ui.clip_rect().intersects(resp.rect) {
+                                        resp.dnd_set_drag_payload(ShelfItem::Material(i));
+                                        if resp.double_clicked() {
+                                            self.pending.push(Action::AddOnTop(ShelfItem::Material(i)));
+                                        }
+                                        resp.context_menu(|ui| {
                                         if ui.button("Add as fill layer").clicked() {
                                             self.pending.push(Action::AddOnTop(ShelfItem::Material(i)));
                                             ui.close();
@@ -279,35 +301,39 @@ impl PainterApp {
                                             self.set_tool(Tool::Paint);
                                             ui.close();
                                         }
-                                    });
+                                        });
+                                    }
                                 }
                             }
                             ShelfCat::Brushes => {
                                 for (i, b) in crate::brushes::BRUSH_ALPHAS.iter().enumerate() {
-                                    if !b.name.to_lowercase().contains(&search) {
+                                    if !matches_search(b.name) {
                                         continue;
                                     }
                                     let resp = Self::swatch(ui, self.shelf.brushes[i].id(), b.name, icon);
-                                    if self.brush.tip == Some(i) {
+                                    if self.brush.tip == Some(i) && ui.is_rect_visible(resp.rect) {
                                         ui.painter().rect_stroke(resp.rect.shrink(2.0), theme::RADIUS, Stroke::new(1.5, theme::ACCENT), egui::StrokeKind::Inside);
                                     }
-                                    resp.dnd_set_drag_payload(ShelfItem::Brush(i));
-                                    if resp.double_clicked() {
-                                        self.pending.push(Action::SetBrushTip(Some(i)));
+                                    if ui.clip_rect().intersects(resp.rect) {
+                                        resp.dnd_set_drag_payload(ShelfItem::Brush(i));
+                                        if resp.double_clicked() {
+                                            self.pending.push(Action::SetBrushTip(Some(i)));
+                                        }
                                     }
                                 }
                             }
                             ShelfCat::Textures => {
                                 for (i, t) in crate::textures::TEXTURES.iter().enumerate() {
-                                    if !t.name.to_lowercase().contains(&search) && !t.category.to_lowercase().contains(&search) {
+                                    if !matches_search(t.name) && !matches_search(t.category) {
                                         continue;
                                     }
                                     let resp = Self::swatch(ui, self.shelf.textures[i].id(), t.name, icon);
-                                    resp.dnd_set_drag_payload(ShelfItem::Texture(i));
-                                    if resp.double_clicked() {
-                                        self.pending.push(Action::AddOnTop(ShelfItem::Texture(i)));
-                                    }
-                                    resp.context_menu(|ui| {
+                                    if ui.clip_rect().intersects(resp.rect) {
+                                        resp.dnd_set_drag_payload(ShelfItem::Texture(i));
+                                        if resp.double_clicked() {
+                                            self.pending.push(Action::AddOnTop(ShelfItem::Texture(i)));
+                                        }
+                                        resp.context_menu(|ui| {
                                         if ui.button("Add as height fill layer").clicked() {
                                             self.pending.push(Action::AddOnTop(ShelfItem::Texture(i)));
                                             ui.close();
@@ -319,20 +345,25 @@ impl PainterApp {
                                                 ui.close();
                                             }
                                         }
-                                    });
+                                        });
+                                    }
                                 }
                             }
                             ShelfCat::Generators => {
                                 for (i, g) in GenKind::ALL.iter().enumerate() {
-                                    if !g.name().to_lowercase().contains(&search) {
+                                    if !matches_search(g.name()) {
                                         continue;
                                     }
                                     let tex = self.shelf.generators[i].id();
                                     let resp = Self::swatch(ui, tex, g.name(), icon);
-                                    Self::missing_badge(ui, &resp, g.default_generator().needs_maps() & self.engine.missing_maps());
-                                    resp.dnd_set_drag_payload(ShelfItem::Generator(*g));
-                                    if resp.double_clicked() {
-                                        self.pending.push(Action::AddGenerator(*g));
+                                    if ui.is_rect_visible(resp.rect) {
+                                        Self::missing_badge(ui, &resp, g.default_generator().needs_maps() & self.engine.missing_maps());
+                                    }
+                                    if ui.clip_rect().intersects(resp.rect) {
+                                        resp.dnd_set_drag_payload(ShelfItem::Generator(*g));
+                                        if resp.double_clicked() {
+                                            self.pending.push(Action::AddGenerator(*g));
+                                        }
                                     }
                                 }
                             }
@@ -352,7 +383,15 @@ impl PainterApp {
     /// shows it at twice the size.
     pub(super) fn swatch(ui: &mut egui::Ui, tex: egui::TextureId, name: &str, size: f32) -> egui::Response {
         let named = size >= NAMED_MIN;
-        let (rect, resp) = ui.allocate_exact_size(vec2(size + 12.0, size + if named { 22.0 } else { 8.0 }), Sense::click_and_drag());
+        let (id, rect) = ui.allocate_space(vec2(size + 12.0, size + if named { 22.0 } else { 8.0 }));
+        // ScrollArea lays out every item in a wrapped shelf. Off-screen items
+        // still reserve their exact layout space, but do not need interactive
+        // hit testing, text shaping, hover UI, or thumbnail paint commands.
+        let visible = ui.is_rect_visible(rect);
+        let resp = ui.interact(rect, id, if visible { Sense::click_and_drag() } else { Sense::hover() });
+        if !visible {
+            return resp;
+        }
         let p = ui.painter();
         if resp.hovered() {
             p.rect_filled(rect, 0.0, theme::WIDGET_HOVER);

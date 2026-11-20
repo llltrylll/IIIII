@@ -18,3 +18,18 @@ jobs:
           RUSTFLAGS: -D warnings
       - name: Unit tests
         run: cargo test --locked
+
+      # The frame-time campaign must be tested in the optimized configuration,
+      # not only the development build used by the compiler/test gate.
+      - name: Build optimized release
+        run: cargo build --locked --release
+        env:
+          RUSTFLAGS: -D warnings
+
+      - name: Upload optimized frame-time test build
+        uses: actions/upload-artifact@v4
+        with:
+          name: material-painter-frame-time-test
+          path: target/release/material_painter.exe
+          if-no-files-found: error
+          retention-days: 14

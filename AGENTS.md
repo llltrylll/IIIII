@@ -2,15 +2,86 @@
 
 Read LOCAL_CONTEXT.md if it exists in the working copy. It is machine-local, ignored by Git, and contains the owner's private project scope and hardware details. Never create, commit, upload, or quote its contents into tracked files, PRs, issues, logs, or external services. If absent, ask the owner for missing private context rather than guessing. This file is the shared operating guide for GPT, Claude, Kimi, and any other coding agent. Humans: see CONTRIBUTING.md too.
 
-## Current priority — establish the production foundation
+## Current priority — 60 FPS frame-time campaign
 
-**Phase 1: finish and validate the core painting and mask systems.** Focus on 3D brush latency and spikes, UV/2D painting correctness, Vertex ID and painted masks, smart-mask generators, mask layers/folders/filters, cache invalidation, incremental recomposition, and the CPU/GPU work directly involved. Validate realistic layer/mask/filter stacks and the representative production workload, not empty or nearly unpainted models.
+**Owner's current top priority: make the editor sustain 60 FPS (16.67 ms/frame) on the owner's real machine, starting from the reported ~20 FPS while the program is open.** This priority supersedes the previous Phase 1 / Phase 2 ordering below. Do not postpone frame-time work behind broad painting-feature completion.
 
-Phase 1 requires relevant unit and GPU tests, correct rendered output, and runtime validation on the owner's actual machine. F6/performance measurements must be comparable. CI compilation alone is not proof. A GPU test marked ignored is not validated unless it was actually run on a GPU-capable setup; state any remaining gap.
+The goal is not a benchmark spike. Target a stable 60 FPS in representative normal editing conditions, including idle editor, loaded production project, camera interaction, brush interaction, and normal viewport effects. Record separate results for each scenario. Do not promise the target until measured on the owner's Vega 8 machine.
 
-**Phase 2: optimize the rest of the production foundation only after Phase 1 is validated.** Then audit memory, CPU allocations, GPU resource lifetime/reuse, viewport, baking, import, project I/O, export, background work, and architecture inside the defined production workload envelope.
+### Initial owner-reported interaction baseline (20 Nov 2026)
 
-Do not jump to broad cleanup while core painting/masking remains unresolved. Do not let hypothetical huge projects or cosmetic HUD work displace the foundation.
+The owner initially reported:
+- Cursor-triggered UI redraws (previously labelled "Idle"): approximately 30 FPS (33.3 ms/frame).
+- Moving camera: approximately 22–25 FPS (40.0–45.5 ms/frame).
+- Operating/painting: approximately 18–20 FPS (50.0–55.6 ms/frame).
+
+**Methodology correction:** the owner clarified that the application does not execute another UI frame while mouse/keyboard input is idle; frames are event/repaint-driven. The earlier "Idle" capture required moving the cursor to generate redraws, so it is not a static-idle FPS measurement. Treat it as cursor-triggered redraw cadence. Do not request another 1,200-frame idle capture: static idle should be evaluated by confirming that no unnecessary repaints or background UI/GPU work occur.
+
+The first three reports were collected in Release on the owner's AMD Vega 8 using Vulkan, with 1,200 recorded redraws. Their per-redraw CPU spans remain useful, but frame-to-frame intervals during cursor movement describe event/repaint cadence and must not be presented as true idle FPS. Continue to separate UI CPU work, repaint cadence, and GPU execution. Do not infer a fixed 30 FPS cap or a GPU bottleneck from these numbers alone.
+
+### Required first step: establish the bottleneck
+
+Before broad rewrites, build a reproducible frame-time baseline and identify the dominant costs. Separate:
+- UI/app CPU time per frame;
+- viewport CPU preparation and cache-key work;
+- GPU command submission and GPU execution;
+- driver/device polling and synchronization;
+- background jobs, async completion polling, and repaint scheduling;
+- memory allocation, uploads, readbacks, and resource churn.
+
+Use F6/F5 and existing startup tracing where appropriate, but do not mistake paint/composite timings for total frame time. Add low-overhead stage instrumentation where the current measurements cannot isolate a bottleneck. Instrumentation must be disabled or cheap in normal use.
+
+The first investigation must explicitly test idle behavior: whether the app continuously repaints, which subsystems request repaints, whether viewport cache hits are actually occurring, and whether the app does unnecessary CPU/GPU work while visually unchanged. The existing 3D/2D viewport caches are a starting point, not proof that the whole frame is cheap.
+
+### Implementation mandate
+
+The owner explicitly authorizes substantial architectural changes to the frame loop, repaint scheduling, viewport/render path, GPU submission, and background work when measurements justify them. Prefer changes capable of materially reducing frame time over cosmetic or sub-millisecond micro-optimizations. Do not preserve an inefficient architecture merely to keep diffs small.
+
+Potential avenues to investigate (not assumptions or permission to implement blindly):
+- demand-driven/dirty-driven rendering and repaint scheduling;
+- avoiding unconditional per-frame work and redundant GPU polling;
+- separating UI updates from expensive viewport refreshes;
+- eliminating repeated cache-key construction and per-frame allocations;
+- reducing GPU pass count, synchronization, unnecessary uploads/readbacks, and resource recreation;
+- moving expensive work off the UI thread or incrementally budgeting it;
+- adaptive quality only where it does not compromise texture correctness or the user's expected visual output.
+
+### Hard invariants
+
+- Preserve exact visual output and shading unless the owner explicitly approves a quality tradeoff. Existing pixel-regression failures are release blockers, not acceptable collateral.
+- Keep old projects loadable. Do not alter project schemas casually; any schema change requires migration and compatibility tests.
+- Protect user data. No destructive project operations, silent data loss, unbounded caches, uncontrolled GPU allocation, or unbounded background queues.
+- Keep painting responsive: brush strokes, UV painting, undo/redo, masks, generators, baking, and export must remain correct.
+- Never block the UI thread on disk, decoding, expensive CPU work, GPU readback, or a wait-for-idle operation in the normal frame loop.
+- Do not remove GPU polling, callbacks, cache invalidation, or repaint requests until their lifecycle requirements are understood and tests cover them.
+- No sleeps, frame-counting, or timeout-based timing hacks.
+- WGSL must compile on DX12, Vulkan, and Metal. Shader compilation under Naga alone is not visual validation.
+- Builds must remain warning-free under -D warnings; avoid unnecessary dependencies.
+
+### Measurement and acceptance
+
+For every optimization, record:
+1. baseline and post-change measurements from equivalent workloads;
+2. average, median, p95 and worst/recent-peak frame time where available;
+3. CPU frame time separately from GPU time;
+4. GPU/backend/driver and viewport resolution;
+5. workload state (project, triangle count, texture sets, UV maps, texture resolution, layers, masks, effects, workspace);
+6. correctness tests and any remaining owner-machine validation.
+
+A 60 FPS claim requires sustained frame intervals at or below 16.67 ms in the stated scenario, not a momentary FPS counter. Report idle and active-editing results separately. If CI hardware differs from the owner's Vega 8, label it clearly. CI passing is not proof of a real-machine FPS gain.
+
+### Execution order
+
+1. Capture current HEAD, open PRs, branch state, CI and diffs. Preserve the owner's master-nosso-reserva-2026-11-20 recovery anchor as read-only.
+2. Establish the idle and representative-workload frame-time baseline; inspect repaint sources, app-frame stages, viewport cache hit/miss behavior, and GPU submission/polling.
+3. Identify the top one or two measured bottlenecks. Write a short design note with expected gain, risks, invalidation rules and rollback strategy.
+4. Implement the highest-impact bounded change first; add regression tests and compare frame-time evidence.
+5. Continue through the next measured bottleneck. Do not accumulate unrelated micro-optimizations.
+6. Validate build, unit tests, relevant GPU tests, output images, project-open compatibility, and real-machine behavior. Clearly mark anything not tested.
+
+## Previous production-foundation requirements (remain mandatory)
+
+The former painting/masking foundation remains a correctness requirement even though it is no longer the gating priority for performance work. Continue to protect 3D brush latency and spikes, UV/2D painting correctness, Vertex ID and painted masks, smart-mask generators, mask layers/folders/filters, cache invalidation, incremental recomposition, and CPU/GPU work directly involved. Validate realistic layer/mask/filter stacks and the representative production workload, not empty or nearly unpainted models.
 
 ## Target workload
 
@@ -46,6 +117,8 @@ cargo test --bin material_painter <name> -- --ignored               # one GPU te
 ```
 
 GPU tests render without a window and write images to `target/bake_test/`.
+
+For frame-time diagnosis on the owner's machine, launch with `MP_STARTUP_TRACE=1` (or `MP_STARTUP_TRACE=<file>`) and optionally `MP_STARTUP_FRAMES=300`. The report includes per-frame UI work, frame-to-frame cadence, named spans and viewport cache hit/miss counters. Compare equivalent workloads and share the sanitized report through `diagnostics/user-benchmarks` or `reports/engineering`; never include local paths or private project data.
 Look at the images after changing rendering code; a passing test alone does
 not prove the picture is right. `ui_screenshots` renders the real UI
 offscreen with egui_kittest into `target/bake_test/ui/`.
@@ -102,53 +175,30 @@ offscreen with egui_kittest into `target/bake_test/ui/`.
 6. Ensure the diff contains only task-related changes.
 
 
-## Ten-branch policy — hard limit
+## Current branch and recovery policy
 
-The remote repository must contain **exactly ten long-lived branches**. All agents (GPT, Claude, Kimi, Copilot or others) must respect this fixed layout. Never create an eleventh branch, personal agent branch, ad-hoc feature branch, build branch or temporary test branch.
+Repository branch inventory has accumulated historical agent/test branches; do not assume the old ten-branch inventory is current, and do not delete or clean up branches.
 
-### Four code/recovery branches
+- Active frame-time/performance work: perf/postfx-bind-group-cache-20261120 (PR #26). Continue the current task here unless the owner explicitly changes the active branch.
+- PR #26 is stacked on perf/vulkan-fill-color-fbm-cache-20261120. Do not merge it independently of its base; preserve the stack relationship.
+- Immutable owner recovery anchor: master-nosso-reserva-2026-11-20. It was verified identical to the working tree when created. Never commit, force-push, reset, or otherwise modify it.
+- Existing diagnostic evidence branches remain report-only: diagnostics/user-benchmarks, diagnostics/app-runtime, reports/engineering.
+- Existing test lanes test/agent-lab-a and test/agent-lab-b are reserved for bounded experiments only. Do not create more branches for individual agents or experiments.
+- Never delete, reset, force-push, or rewrite any existing branch. Only the owner performs branch cleanup.
+- Before any write, re-fetch the target branch HEAD and file SHA. Do not overwrite another agent's newer work.
 
-1. Active development: `perf/vulkan-fill-color-fbm-cache-20261120`. Main integration branch. The only branch for production-ready source changes.
-2. Backup: `perf/vulkan-cache-claude-ui-20261119`. Last-known recovery point immediately before the active line.
-3. Backup-2: `feat/composite-uv-diagnostics-20261118`. Older stable recovery point, one generation behind Backup.
-4. Original/fork baseline: `master`. Preserve as the reference baseline; do not use it for feature development.
+### Evidence and privacy
 
-### Three diagnostics/report branches
+- Sanitize diagnostic reports before pushing. The repository is public: exclude local file paths, personal identifiers, credentials, project file contents, private assets and machine-local information.
+- Mark evidence as CI, software Vulkan/Lavapipe, other hardware, or owner's Vega 8 runtime. CI compilation is not real-GPU validation.
+- Keep app allocation estimates separate from physical GPU/VRAM telemetry.
 
-5. Owner's real-machine tests: `diagnostics/user-benchmarks`. Store sanitized snapshots and reports from the owner's actual tests: F5/F6 readings, FPS/frame time, layer and texture-set counts, texture resolutions, undo/readback observations, bake results, workload description, app version, GPU/backend/driver and comparable before/after runs.
-6. Application diagnostics: `diagnostics/app-runtime`. Store application-generated diagnostics and reproducible technical evidence: profiler stage timings, GPU pass counts, cache hits/misses, resource-allocation estimates, crash/trace excerpts, regression reproductions and diagnostic-system findings. Clearly distinguish app estimates from physical GPU/VRAM telemetry.
-7. Engineering reports: `reports/engineering`. Store consolidated audits, analysis, conclusions, validation matrices, regression summaries, agent handoffs and decisions. Link reports to commits/PRs and diagnostic snapshots.
+### Multi-agent coordination
 
-### Three test/recovery branches
-
-8. Test lane A: `test/agent-lab-a`. Isolated experiments and regression validation by one assigned agent.
-9. Test lane B: `test/agent-lab-b`. A second independent test lane for another agent or a separate experiment. Assign one owner per lane; do not have two agents edit the same lane simultaneously.
-10. Test backup: `backup/test-lab`. Preserve the last known-good test-lane state before a risky experiment, reset or replacement. It is a recovery snapshot, not a second active implementation lane.
-
-### Diagnostics and test branch rules
-
-- Branches 5–7 are evidence/report-only. No production source-code implementation there.
-- Branches 8–9 may contain experimental code, prototypes and regression tests. They are not automatically production-approved. A successful result must be reviewed and ported/integrated into branch 1 with relevant tests.
-- Branch 10 stores a recovery snapshot of useful test work. Update it only before replacing/resetting a test lane or when the owner explicitly requests a checkpoint.
-- Test lanes must not become permanent agent-owned feature branches. Use them for bounded experiments and then port, discard, or archive the result within the ten-branch limit.
-- No new branches for individual agents, PRs, temporary builds or diagnostics.
-
-### Privacy and evidence quality
-
-- Sanitize every diagnostic report before pushing. The fork is public: exclude local file paths, personal identifiers, credentials, project file contents, private assets and other machine-local information.
-- Keep full unredacted history, local paths and personal project details only in the owner's ignored `LOCAL_CONTEXT.md` or local files.
-- Use dated filenames and identify app version, test scenario, workload, capture mode and units.
-- Mark evidence as CI, software Vulkan, other hardware, or owner's Vega 8 runtime. CI compilation is not real-GPU validation.
-- Comparisons must disclose differences in layer count, resolution, texture sets, viewport mode, F6 state and other workload factors. Do not claim causation from non-equivalent runs.
-- Treat application allocation estimates separately from measured physical VRAM.
-
-### Branch maintenance and agent workflow
-
-- All production-ready implementation goes to branch 1. Test-only implementation goes to branch 8 or 9, according to explicit task ownership.
-- GPT, Claude and Kimi may use the two test lanes, but only one agent owns each lane/subsystem at a time.
-- Backups, diagnostics/report branches and `master` are read-only except for their defined checkpoint/report purpose.
-- Never delete, reset, force-push or rewrite any branch. Only the owner performs branch cleanup.
-- Before deleting surplus branches, preserve useful unique commits or explicitly classify them as disposable. After owner cleanup, verify exactly the ten canonical branch names remain.
+- GPT, Claude, Kimi and other agents must read this file. Claude must also read CLAUDE.md.
+- At task start, inspect current branch, HEAD SHA, open PRs, changed files/diff, CI, and other agents' recent commits/comments.
+- Do not concurrently modify the same files/subsystem. State ownership in the active PR or a concise handoff comment.
+- Commit coherent units and leave a handoff with changes, invariants, tests, gaps and next steps.
 
 ## Owner-local data boundary
 
