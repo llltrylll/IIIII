@@ -13,8 +13,9 @@ use crate::mesh::Mesh;
 use eframe::wgpu;
 use std::fs;
 use std::io::Write;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 const MAGIC: &[u8; 4] = b"MPBC";
 const FORMAT_VERSION: u32 = 3;
@@ -24,6 +25,34 @@ const MAX_BYTES: u64 = 2 << 30;
 /// Identifies one bake (see the module docs).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Key(String);
+
+static PINNED_KEYS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+/// Keeps a cache entry on disk while any Engine can still use it for restoration.
+#[derive(Clone)]
+pub struct CachePin(Arc<CachePinInner>);
+
+struct CachePinInner {
+    key: String,
+}
+
+impl Drop for CachePinInner {
+    fn drop(&mut self) {
+        if let Some(pinned) = PINNED_KEYS.get()
+            && let Ok(mut pinned) = pinned.lock()
+        {
+            pinned.remove(&self.key);
+        }
+    }
+}
+
+pub fn pin(key: &Key) -> CachePin {
+    let pinned = PINNED_KEYS.get_or_init(|| Mutex::new(HashSet::new()));
+    if let Ok(mut pinned) = pinned.lock() {
+        pinned.insert(key.0.clone());
+    }
+    CachePin(Arc::new(CachePinInner { key: key.0.clone() }))
+}
 
 /// A cached bake: its report, the packed maps and the custom map textures,
 /// as uploaded bytes.
@@ -446,15 +475,22 @@ fn entries() -> Vec<(PathBuf, u64, std::time::SystemTime)> {
         .collect()
 }
 
-/// Drops the least recently used entries until the cache fits in `max` bytes.
+/// Drops the least recently used unpinned entries until the cache fits in `max` bytes.
+/// Pinned entries may keep the cache above the soft limit while an Engine needs them.
 fn evict(max: u64) {
     let mut all = entries();
     all.sort_by_key(|e| std::cmp::Reverse(e.2));
+    let pinned = PINNED_KEYS.get()
+        .and_then(|keys| keys.lock().ok().map(|keys| keys.clone()))
+        .unwrap_or_default();
     let mut total = 0;
     for (path, len, _) in all {
         total += len;
         if total > max {
-            let _ = fs::remove_file(path);
+            let key = path.file_stem().and_then(|stem| stem.to_str());
+            if !key.is_some_and(|key| pinned.contains(key)) && fs::remove_file(&path).is_ok() {
+                total = total.saturating_sub(len);
+            }
         }
     }
 }
