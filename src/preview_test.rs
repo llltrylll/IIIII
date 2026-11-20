@@ -5636,6 +5636,12 @@ fn parked_baked_map_groups_release_and_restore_from_cache() {
     // A later level adjustment must also force source-map residency before resolve.
     engine.map_levels[4] = crate::engine::Levels { black: 0.1, ..Default::default() };
     assert!(engine.composite_needs_baked_map_groups(), "B/C levels require their original packed maps");
+    engine.map_levels[11] = crate::engine::Levels { black: 0.1, ..Default::default() };
+    assert_eq!(
+        engine.composite_baked_map_group_mask() & crate::engine::BAKED_MAP_GROUP_D,
+        crate::engine::BAKED_MAP_GROUP_D,
+        "Height levels require the original D map before resolve"
+    );
 
     // Synchronous export still explicitly blocks for the maps it snapshots.
     assert!(engine.ensure_baked_map_groups_blocking(), "synchronous operations must wait for cache restoration");

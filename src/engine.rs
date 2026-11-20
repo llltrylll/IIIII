@@ -5343,6 +5343,9 @@ impl Engine {
         if (8..=9).any(|index| self.map_fix[index].is_some() || self.map_levels[index] != Levels::default()) {
             required |= BAKED_MAP_GROUP_C;
         }
+        if (10..=11).any(|index| self.map_fix[index].is_some() || self.map_levels[index] != Levels::default()) {
+            required |= BAKED_MAP_GROUP_D;
+        }
         for layer in &self.layers {
             if let Content::Fill(fill) = &layer.content {
                 if fill.part_var.abs() > 1e-4 {
