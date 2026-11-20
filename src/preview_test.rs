@@ -5491,7 +5491,7 @@ fn parked_baked_map_groups_release_and_restore_from_cache() {
     assert_eq!(engine.map_tex(2).width, 1);
     let bytes_after = engine.gpu_resource_breakdown().iter()
         .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
-    assert_eq!(bytes_before - bytes_after, 256 * 256 * 12, "B/C should release exactly 12 bytes per texel");
+    assert_eq!(bytes_before - bytes_after, (256 * 256 - 1) * 12, "B/C should retain only their 1x1 placeholders");
 
     assert!(!engine.ensure_baked_map_groups(), "first request starts the background cache restore");
     let deadline = Instant::now() + Duration::from_secs(15);
