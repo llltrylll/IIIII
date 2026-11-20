@@ -52,6 +52,10 @@ pub const FINAL_NORMAL: usize = 5;
 /// The final specular level's index (0.5 where no layer sets it).
 pub const FINAL_SPECULAR: usize = 6;
 const ACCUM_FORMATS: [F; ACCUM] = [F::Rgba8Unorm, F::R8Unorm, F::R8Unorm, F::R16Float, F::Rgba8Unorm, F::Rgba8Unorm, F::R8Unorm];
+pub(crate) const BAKED_MAP_GROUP_B: u8 = 1 << 0;
+pub(crate) const BAKED_MAP_GROUP_C: u8 = 1 << 1;
+pub(crate) const BAKED_MAP_GROUP_ALL: u8 = BAKED_MAP_GROUP_B | BAKED_MAP_GROUP_C;
+
 const POS_FORMAT: F = F::Rgba16Float;
 const NRM_FORMAT: F = F::Rgba8Unorm;
 /// Tangent and bitangent sign per texel (see `uvbake.wgsl`).
@@ -127,16 +131,24 @@ mod working_buffer_capacity_tests {
     }
 
     #[test]
-    fn baked_map_residency_tracks_actual_generator_inputs() {
-        for kind in [GenKind::EdgeWear, GenKind::Dust, GenKind::CreaseGrime, GenKind::PartGradient, GenKind::PartRandom] {
-            assert!(
-                Engine::generator_needs_baked_map_groups(&kind.default_generator()),
-                "{kind:?} uses packed map group B or C"
+    fn baked_map_residency_tracks_exact_generator_group() {
+        use super::{BAKED_MAP_GROUP_B, BAKED_MAP_GROUP_C};
+        for kind in [GenKind::EdgeWear, GenKind::Dust, GenKind::CreaseGrime, GenKind::PartRandom] {
+            assert_eq!(
+                Engine::generator_baked_map_group_mask(&kind.default_generator()),
+                BAKED_MAP_GROUP_B,
+                "{kind:?} uses packed map group B"
             );
         }
+        assert_eq!(
+            Engine::generator_baked_map_group_mask(&GenKind::PartGradient.default_generator()),
+            BAKED_MAP_GROUP_C,
+            "Part Gradient uses packed map group C"
+        );
         for kind in [GenKind::Dirt, GenKind::ThinAreas, GenKind::PositionGradient, GenKind::IdMask, GenKind::CustomMap] {
-            assert!(
-                !Engine::generator_needs_baked_map_groups(&kind.default_generator()),
+            assert_eq!(
+                Engine::generator_baked_map_group_mask(&kind.default_generator()),
+                0,
                 "{kind:?} does not require packed map groups B/C"
             );
         }
@@ -2869,48 +2881,76 @@ impl Engine {
         self.mark_dirty();
     }
 
-    /// Whether the full-resolution packed B/C maps are available.
-    pub(crate) fn baked_map_groups_resident(&self) -> bool {
-        self.maps[1].width == self.res && self.maps[2].width == self.res
+    /// Whether the requested subset of packed B/C maps is fully resident.
+    pub(crate) fn baked_map_mask_resident(&self, mask: u8) -> bool {
+        (mask & BAKED_MAP_GROUP_B == 0 || self.maps[1].width == self.res)
+            && (mask & BAKED_MAP_GROUP_C == 0 || self.maps[2].width == self.res)
     }
 
-    /// Drops packed map B (sky/edge/crease/part-random) and C (bent-normal/part-gradient)
-    /// only when their data is safely recoverable from the bake cache and no
-    /// painted fixes or non-default levels need their current resolved outputs.
-    pub(crate) fn release_baked_map_groups(&mut self) -> bool {
-        if !self.has_bake
-            || self.dirty
-            || self.bake_cache_key.is_none()
-            || !self.baked_map_groups_resident()
-            || self.maps_dirty
-            || self.resolved[1].is_some()
-            || self.resolved[2].is_some()
-            || self.map_fix[4..=9].iter().any(Option::is_some)
-            || self.map_levels[4..=9].iter().any(|levels| *levels != Levels::default())
-        {
+    pub(crate) fn baked_map_groups_resident(&self) -> bool {
+        self.baked_map_mask_resident(BAKED_MAP_GROUP_ALL)
+    }
+
+    /// Drops only the requested packed map groups when each is recoverable from
+    /// the cache and has no edited levels/fixes or resolved texture to preserve.
+    pub(crate) fn release_baked_map_mask(&mut self, mask: u8) -> bool {
+        let mask = mask & BAKED_MAP_GROUP_ALL;
+        if mask == 0 || !self.has_bake || self.dirty || self.bake_cache_key.is_none() || self.maps_dirty {
             return false;
         }
 
-        self.maps[1] = Self::neutral_map(&self.device, &self.queue, 1);
-        self.maps[2] = Self::neutral_map(&self.device, &self.queue, 2);
-        self.maps_version = self.maps_version.wrapping_add(1);
-        true
+        let groups = [
+            (BAKED_MAP_GROUP_B, 1usize, 4usize, 7usize),
+            (BAKED_MAP_GROUP_C, 2usize, 8usize, 9usize),
+        ];
+        let mut released = false;
+        for (bit, texture, first_map, last_map) in groups {
+            if mask & bit == 0
+                || self.maps[texture].width != self.res
+                || self.resolved[texture].is_some()
+                || self.map_fix[first_map..=last_map].iter().any(Option::is_some)
+                || self.map_levels[first_map..=last_map].iter().any(|levels| *levels != Levels::default())
+            {
+                continue;
+            }
+            self.maps[texture] = Self::neutral_map(&self.device, &self.queue, texture);
+            released = true;
+        }
+        if released {
+            self.maps_version = self.maps_version.wrapping_add(1);
+        }
+        released
     }
 
-    /// Starts a background cache read when a parked Engine's B/C map groups are absent.
-    /// Returns true only when both groups are already resident.
-    pub(crate) fn ensure_baked_map_groups(&mut self) -> bool {
-        if !self.has_bake || self.baked_map_groups_resident() {
+    pub(crate) fn release_baked_map_groups(&mut self) -> bool {
+        self.release_baked_map_mask(BAKED_MAP_GROUP_ALL)
+    }
+
+    /// Starts a background cache read for only the requested missing B/C maps.
+    /// The worker decompresses precisely the packed groups the current view needs.
+    pub(crate) fn ensure_baked_map_mask(&mut self, mask: u8) -> bool {
+        let mask = mask & BAKED_MAP_GROUP_ALL;
+        if !self.has_bake || mask == 0 || self.baked_map_mask_resident(mask) {
             return true;
         }
         if self.baked_map_restore_rx.is_none() {
             let Some(key) = self.bake_cache_key.clone() else { return false };
+            let mut requested = Vec::with_capacity(2);
+            if mask & BAKED_MAP_GROUP_B != 0 && self.maps[1].width != self.res {
+                requested.push(1usize);
+            }
+            if mask & BAKED_MAP_GROUP_C != 0 && self.maps[2].width != self.res {
+                requested.push(2usize);
+            }
+            if requested.is_empty() {
+                return true;
+            }
             let (tx, rx) = mpsc::channel();
             self.baked_map_restore_rx = Some(rx);
             let spawned = std::thread::Builder::new()
                 .name("restore baked maps".into())
                 .spawn(move || {
-                    let _ = tx.send(crate::bake_cache::load_selected(&key, &[1, 2]));
+                    let _ = tx.send(crate::bake_cache::load_selected(&key, &requested));
                 });
             if spawned.is_err() {
                 self.baked_map_restore_rx = None;
@@ -2919,25 +2959,40 @@ impl Engine {
         false
     }
 
-    /// Restores evicted baked maps before an explicitly synchronous operation such as export.
-    /// Interactive rendering should continue to use the non-blocking ensure/poll path.
-    pub(crate) fn ensure_baked_map_groups_blocking(&mut self) -> bool {
-        if self.ensure_baked_map_groups() {
+    /// Ensures both packed groups B/C are resident (used by export and full snapshots).
+    pub(crate) fn ensure_baked_map_groups(&mut self) -> bool {
+        self.ensure_baked_map_mask(BAKED_MAP_GROUP_ALL)
+    }
+
+    /// Restores the requested maps before a synchronous operation such as export.
+    pub(crate) fn ensure_baked_map_mask_blocking(&mut self, mask: u8) -> bool {
+        if self.ensure_baked_map_mask(mask) {
             return true;
         }
         loop {
-            if self.poll_baked_map_restore() {
+            if self.poll_baked_map_restore() && self.baked_map_mask_resident(mask) {
                 return true;
             }
             if self.baked_map_restore_rx.is_none() {
-                return false;
+                // The first read may have restored only a subset. Start a second
+                // read for any remaining requested group before failing.
+                if self.ensure_baked_map_mask(mask) {
+                    return true;
+                }
+                if self.baked_map_restore_rx.is_none() {
+                    return false;
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
 
-    /// Polls the cache worker and uploads only groups B/C, resampling to this
-    /// Texture Set's current resolution when the cached bake was lower resolution.
+    pub(crate) fn ensure_baked_map_groups_blocking(&mut self) -> bool {
+        self.ensure_baked_map_mask_blocking(BAKED_MAP_GROUP_ALL)
+    }
+
+    /// Polls a selective cache read and uploads only the returned groups.
+    /// Lower-resolution cached bakes are resampled to this Texture Set's resolution.
     pub(crate) fn poll_baked_map_restore(&mut self) -> bool {
         let result = match self.baked_map_restore_rx.as_ref() {
             Some(rx) => match rx.try_recv() {
@@ -2950,13 +3005,17 @@ impl Engine {
         self.baked_map_restore_rx = None;
         let Some(mut maps) = result.flatten() else {
             // The cache entry may have been removed by LRU cleanup or become unreadable.
-            // Keep the neutral placeholders and stop retrying every frame.
             self.bake_cache_key = None;
+            self._bake_cache_pin = None;
             return false;
         };
         maps.sort_by_key(|map| map.index);
-        if maps.len() != 2 || maps[0].index != 1 || maps[1].index != 2 {
+        if maps.is_empty()
+            || maps.iter().any(|map| !matches!(map.index, 1 | 2))
+            || maps.windows(2).any(|pair| pair[0].index == pair[1].index)
+        {
             self.bake_cache_key = None;
+            self._bake_cache_pin = None;
             return false;
         }
 
@@ -5195,47 +5254,73 @@ impl Engine {
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
     }
 
-    fn generator_needs_baked_map_groups(generator: &Generator) -> bool {
-        // Packed groups B/C contain built-in maps 4 through 9:
-        // Sky Exposure, Edge/Crease Distance, Part Random/Gradient and Bent Normal.
-        const B_C_MAPS: u32 = (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8) | (1 << 9);
-        generator.needs_maps() & B_C_MAPS != 0
+    fn generator_baked_map_group_mask(generator: &Generator) -> u8 {
+        let maps = generator.needs_maps();
+        let mut mask = 0;
+        // Group B stores Sky Exposure, Edge/Crease Distance and Part Random.
+        if maps & ((1 << 4) | (1 << 5) | (1 << 6) | (1 << 7)) != 0 {
+            mask |= BAKED_MAP_GROUP_B;
+        }
+        // Group C stores Part Gradient and Bent Normal.
+        if maps & ((1 << 8) | (1 << 9)) != 0 {
+            mask |= BAKED_MAP_GROUP_C;
+        }
+        mask
     }
 
-    fn mask_needs_baked_map_groups(mask: &Mask) -> bool {
-        mask.graph.is_some()
-            || mask.generator.as_ref().is_some_and(Self::generator_needs_baked_map_groups)
-            || mask.layers.iter().any(|layer| {
-                layer.enabled
-                    && layer.opacity > 1e-4
-                    && matches!(
-                        &layer.source,
-                        MaskSource::Generator(generator)
-                            if Self::generator_needs_baked_map_groups(generator)
-                    )
-            })
+    fn mask_baked_map_group_mask(mask: &Mask) -> u8 {
+        if mask.graph.is_some() {
+            return BAKED_MAP_GROUP_ALL;
+        }
+        let mut required = mask.generator.as_ref()
+            .map_or(0, Self::generator_baked_map_group_mask);
+        for layer in &mask.layers {
+            if layer.enabled && layer.opacity > 1e-4 {
+                if let MaskSource::Generator(generator) = &layer.source {
+                    required |= Self::generator_baked_map_group_mask(generator);
+                }
+            }
+        }
+        required
     }
 
-    /// Whether the current layer stack can read packed baked-map groups B/C.
-    /// This lets ordinary paint-only composites run while those maps stay evicted.
+    /// Exact packed B/C dependencies of the current layer stack.
+    /// Paint-only composites can run while both groups stay evicted.
+    pub(crate) fn composite_baked_map_group_mask(&self) -> u8 {
+        let mut required = 0;
+        // Adjusted levels/fixes need their original packed map for resolve.
+        if (4..=7).any(|index| self.map_fix[index].is_some() || self.map_levels[index] != Levels::default()) {
+            required |= BAKED_MAP_GROUP_B;
+        }
+        if (8..=9).any(|index| self.map_fix[index].is_some() || self.map_levels[index] != Levels::default()) {
+            required |= BAKED_MAP_GROUP_C;
+        }
+        for layer in &self.layers {
+            if let Content::Fill(fill) = &layer.content {
+                if fill.part_var.abs() > 1e-4 {
+                    required |= BAKED_MAP_GROUP_B;
+                }
+                if fill.graph.is_some() {
+                    required |= BAKED_MAP_GROUP_ALL;
+                }
+            }
+            if let Some(mask) = &layer.mask {
+                required |= Self::mask_baked_map_group_mask(mask);
+            }
+            if required == BAKED_MAP_GROUP_ALL {
+                break;
+            }
+        }
+        required
+    }
+
     pub(crate) fn composite_needs_baked_map_groups(&self) -> bool {
-        // Levels and painted fixes can be changed after a group was evicted.
-        // Resolving those adjusted maps also requires the original B/C source.
-        let adjusted_baked_maps = (4..=9).any(|index| {
-            self.map_fix[index].is_some() || self.map_levels[index] != Levels::default()
-        });
-        adjusted_baked_maps || self.layers.iter().any(|layer| {
-            let fill_needs_maps = matches!(
-                &layer.content,
-                Content::Fill(fill) if fill.part_var.abs() > 1e-4 || fill.graph.is_some()
-            );
-            fill_needs_maps
-                || layer.mask.as_ref().is_some_and(Self::mask_needs_baked_map_groups)
-        })
+        self.composite_baked_map_group_mask() != 0
     }
 
     pub(crate) fn ensure_composite_baked_map_groups(&mut self) -> bool {
-        !self.composite_needs_baked_map_groups() || self.ensure_baked_map_groups()
+        let mask = self.composite_baked_map_group_mask();
+        mask == 0 || self.ensure_baked_map_mask(mask)
     }
 
     pub fn composite(&mut self) {
