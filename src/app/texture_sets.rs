@@ -82,7 +82,9 @@ impl PainterApp {
             let graph_needs_surface = super::graph_ui::engine_uses_surface_graph(&parked.engine, docs, lib);
             let visible = !views.set_looks.get(index).is_some_and(|look| look.hidden);
             if (resident && visible) || graph_needs_surface {
-                parked.engine.ensure_surface_maps(mesh);
+                if parked.engine.ensure_surface_maps(mesh) {
+                    views.invalidate_texture_set_binding(index);
+                }
             } else if parked.engine.release_surface_maps() {
                 views.invalidate_texture_set_binding(index);
             }
@@ -103,7 +105,9 @@ impl PainterApp {
         self.end_preview(true);
         self.engine.commit_props(&mut self.undo);
         std::mem::swap(&mut self.engine, &mut p.engine);
-        self.engine.restore_active_working_set(&self.gpu_mesh);
+        if self.engine.restore_active_working_set(&self.gpu_mesh) {
+            self.views.invalidate_texture_set_binding(k);
+        }
         p.engine.release_inactive_working_set();
         if !keep_previous_active_surface_maps && p.engine.release_surface_maps() {
             self.views.invalidate_texture_set_binding(previous_active);
@@ -137,9 +141,12 @@ impl PainterApp {
     /// Composites every parked set when a synchronous operation needs final maps (export).
     pub(super) fn composite_parked(&mut self) {
         let mesh = &self.gpu_mesh;
-        for p in self.sets.parked.iter_mut().flatten() {
+        for (index, parked) in self.sets.parked.iter_mut().enumerate() {
+            let Some(p) = parked else { continue };
             if p.engine.dirty {
-                p.engine.ensure_surface_maps(mesh);
+                if p.engine.ensure_surface_maps(mesh) {
+                    self.views.invalidate_texture_set_binding(index);
+                }
                 p.engine.composite();
                 p.engine.release_inactive_working_set();
             }
@@ -149,8 +156,12 @@ impl PainterApp {
     /// Spreads parked-set recomposition across frames during interactive use.
     pub(super) fn composite_parked_one(&mut self, ctx: &egui::Context) {
         let mesh = &self.gpu_mesh;
-        if let Some(p) = self.sets.parked.iter_mut().flatten().find(|p| p.engine.dirty) {
-            p.engine.ensure_surface_maps(mesh);
+        if let Some((index, p)) = self.sets.parked.iter_mut().enumerate()
+            .find_map(|(index, parked)| parked.as_mut().filter(|p| p.engine.dirty).map(|p| (index, p)))
+        {
+            if p.engine.ensure_surface_maps(mesh) {
+                self.views.invalidate_texture_set_binding(index);
+            }
             p.engine.composite();
             p.engine.release_inactive_working_set();
             ctx.request_repaint();

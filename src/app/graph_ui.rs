@@ -526,8 +526,10 @@ impl PainterApp {
     fn fill_parked_graphs(&mut self) {
         let active_channels = self.active_channels;
         let mesh = &self.gpu_mesh;
+        let views = &mut self.views;
         let (lib, docs) = (&self.graphs.lib, &mut self.graphs.docs);
-        for p in self.sets.parked.iter_mut().flatten() {
+        for (index, parked) in self.sets.parked.iter_mut().enumerate() {
+            let Some(p) = parked.as_mut() else { continue };
             let engine = &mut p.engine;
             for li in 0..engine.layers.len() {
                 let l = &engine.layers[li];
@@ -537,8 +539,8 @@ impl PainterApp {
                 let needs_surface = d.graph.nodes.iter().any(|node| {
                     lib.find(&node.def).is_some_and(|definition| definition.surface)
                 });
-                if needs_surface {
-                    engine.ensure_surface_maps(mesh);
+                if needs_surface && engine.ensure_surface_maps(mesh) {
+                    views.invalidate_texture_set_binding(index);
                 }
                 let version = engine.maps_version;
                 if d.graph.match_set {

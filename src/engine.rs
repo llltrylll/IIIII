@@ -1899,15 +1899,19 @@ impl Engine {
 
     /// Ensures world-space UV maps exist. An unchanged bake does not invalidate
     /// the already-correct material composite.
-    pub(crate) fn ensure_surface_maps(&mut self, mesh: &GpuMesh) {
+    pub(crate) fn ensure_surface_maps(&mut self, mesh: &GpuMesh) -> bool {
         let resident = self.pos.width == self.res
             && self.nrm.width == self.res
             && self.tan.width == self.res;
         let same_bake = UvBakeKey::is_current(self.uv_baked.as_ref(), mesh.mesh_id, &self.tris, self.res);
         if !resident {
             self.bake_uv_internal(mesh, !same_bake);
+            true
         } else if !same_bake {
             self.bake_uv(mesh);
+            true
+        } else {
+            false
         }
     }
 
@@ -1929,10 +1933,10 @@ impl Engine {
         }
     }
 
-    pub(crate) fn restore_active_working_set(&mut self, mesh: &GpuMesh) {
+    pub(crate) fn restore_active_working_set(&mut self, mesh: &GpuMesh) -> bool {
         self.ensure_composite_working_set();
         self.ensure_stroke_target();
-        self.ensure_surface_maps(mesh);
+        self.ensure_surface_maps(mesh)
     }
 
     /// Creates an engine for another mesh while reusing immutable GPU pipelines.

@@ -288,12 +288,16 @@ impl PainterApp {
         let gpu_mesh = &self.gpu_mesh;
         for &index in &selected_indices {
             if index == self.sets.active {
-                self.engine.ensure_surface_maps(gpu_mesh);
+                if self.engine.ensure_surface_maps(gpu_mesh) {
+                    self.views.invalidate_texture_set_binding(index);
+                }
                 if self.engine.dirty {
                     self.engine.composite();
                 }
             } else if let Some(parked) = self.sets.parked.get_mut(index).and_then(Option::as_mut) {
-                parked.engine.ensure_surface_maps(gpu_mesh);
+                if parked.engine.ensure_surface_maps(gpu_mesh) {
+                    self.views.invalidate_texture_set_binding(index);
+                }
                 if parked.engine.dirty {
                     parked.engine.composite();
                     parked.engine.release_inactive_working_set();
