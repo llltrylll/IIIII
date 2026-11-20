@@ -4681,29 +4681,35 @@ impl Engine {
             drop(pass);
             end_composite_profile_stage(encoder, profile_query, profile_slot, source_label, profile_labels);
         }
-        let filter = |encoder: &mut wgpu::CommandEncoder, step: usize, input: &Tex, other: &Tex, out: &Tex, rects: Option<&[[u32; 4]]>, label: String, profile_stage_count: &mut usize, profile_labels: &mut Vec<String>| {
-            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("mask filter"),
-                layout: &self.p.mask_filter_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &self.mask_filter_ubuf,
-                            offset: 0,
-                            size: NonZeroU64::new(32),
-                        }),
-                    },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&input.view) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.repeat_sampler) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&other.view) },
-                ],
-            });
+        // Filter inputs alternate between scratch 0 and 1. Reuse one bind group
+        // per input for the whole stack instead of rebuilding one for every step.
+        let mut filter_bgs: [Option<wgpu::BindGroup>; 2] = [None, None];
+        let mut filter = |encoder: &mut wgpu::CommandEncoder, step: usize, input_slot: usize, out: &Tex, rects: Option<&[[u32; 4]]>, label: String, profile_stage_count: &mut usize, profile_labels: &mut Vec<String>| {
+            if filter_bgs[input_slot].is_none() {
+                filter_bgs[input_slot] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("mask filter"),
+                    layout: &self.p.mask_filter_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: &self.mask_filter_ubuf,
+                                offset: 0,
+                                size: NonZeroU64::new(32),
+                            }),
+                        },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&scratch[input_slot].view) },
+                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.repeat_sampler) },
+                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&scratch[2].view) },
+                    ],
+                }));
+            }
+            let bg = filter_bgs[input_slot].as_ref().expect("mask filter bind group created");
             let profile_slot = begin_composite_profile_stage(encoder, profile_query, profile_stage_count);
             let mut pass = gpu::pass(encoder, "mask filter", &[gpu::color_attachment(&out.view, load)]);
             pass.set_pipeline(&self.p.mask_filter);
             let offset = u32::try_from(step as u64 * MASK_FILTER_STRIDE).expect("mask filter uniform offset fits in u32");
-            pass.set_bind_group(0, &bg, &[offset]);
+            pass.set_bind_group(0, bg, &[offset]);
             draw(&mut pass, rects);
             drop(pass);
             end_composite_profile_stage(encoder, profile_query, profile_slot, label, profile_labels);
@@ -4719,7 +4725,7 @@ impl Engine {
                 String::new()
             };
             match *op {
-                MaskOp::Filter { step, .. } => filter(encoder, step, &scratch[cur], &scratch[2], out, rects, op_label, profile_stage_count, profile_labels),
+                MaskOp::Filter { step, .. } => filter(encoder, step, cur, out, rects, op_label, profile_stage_count, profile_labels),
                 MaskOp::Layer { uniform, combine } => {
                     // The mask layer's own values, then combined over the mask so far.
                     {
@@ -4733,7 +4739,7 @@ impl Engine {
                         end_composite_profile_stage(encoder, profile_query, profile_slot, label, profile_labels);
                     }
                     let label = if profile_query.is_some() { format!("Mask layer combine · {op_label}") } else { String::new() };
-                    filter(encoder, combine, &scratch[cur], &scratch[2], out, rects, label, profile_stage_count, profile_labels);
+                    filter(encoder, combine, cur, out, rects, label, profile_stage_count, profile_labels);
                 }
             }
             if !last { cur = 1 - cur; }
