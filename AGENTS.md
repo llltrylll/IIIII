@@ -30,7 +30,7 @@ GPT, Claude, Kimi, and any other coding agent share this repository and must rea
 
 At the start of each task, inspect current branch, HEAD SHA, open PRs, changed files/diff, CI, and the other agent's recent commits/comments. Re-fetch files and current SHAs before writing. Never assume previous chat context equals current repository state.
 
-Do not concurrently modify the same files/subsystem. Establish task ownership in the active PR or a concise handoff comment. Never overwrite the other agent's work. Commit coherent units and leave a handoff stating changes, invariants, tests, gaps, and next steps. Keep code understandable for the other agent; no agent-specific abstractions.
+Do not concurrently modify the same files/subsystem. Establish task ownership in the active PR or a concise handoff comment. Never overwrite the other agent's work. Do not create agent-specific branches; all production code work stays on the active branch and all diagnostic evidence uses the three designated evidence branches. Commit coherent units and leave a handoff stating changes, invariants, tests, gaps, and next steps. Keep code understandable for the other agent; no agent-specific abstractions.
 
 ## What this is
 
@@ -102,15 +102,40 @@ offscreen with egui_kittest into `target/bake_test/ui/`.
 6. Ensure the diff contains only task-related changes.
 
 
-## Four-branch policy
+## Seven-branch policy — hard limit
 
-The repository must have exactly four long-lived branches, with these roles:
-1. Active work branch: the only branch receiving ongoing implementation.
-2. Backup: the last known-good state before the active branch.
-3. Backup-2: the previous stable generation, one generation behind Backup.
-4. Original: the untouched fork baseline used only for comparison/recovery.
+The remote repository must contain **exactly seven long-lived branches**. All agents (GPT, Claude, Kimi, Copilot or others) must respect this fixed layout. Never create an eighth branch, personal agent branch, ad-hoc feature branch, build branch or temporary test branch.
 
-Do not create additional long-lived branches for experiments, agents, builds, or tests. Kimi must work on the active branch only when explicitly assigned; otherwise it must return a patch/commit proposal without creating a fifth persistent branch. Never delete or rewrite a branch until its unique commits have been checked and preserved in one of the four canonical branches or explicitly discarded by the owner. Verify the remote branch count after cleanup.
+### Four code/recovery branches
+
+1. Active development: `perf/vulkan-fill-color-fbm-cache-20261120`. This is the only branch where production source code is changed.
+2. Backup: `perf/vulkan-cache-claude-ui-20261119`. Last-known recovery point immediately before the active line.
+3. Backup-2: `feat/composite-uv-diagnostics-20261118`. Older stable recovery point, one generation behind Backup.
+4. Original/fork baseline: `master`. Preserve as the reference baseline; do not use it for feature development.
+
+### Three evidence/report branches
+
+5. Owner's real-machine tests: `diagnostics/user-benchmarks`. Store sanitized snapshots and reports from the owner's actual tests: F5/F6 readings, FPS/frame time, layer and texture-set counts, texture resolutions, undo/readback observations, bake results, workload description, test version, GPU/backend/driver and before/after comparisons. Keep raw local paths and project files out of this public repository.
+6. Application diagnostics: `diagnostics/app-runtime`. Store application-generated diagnostics and reproducible technical evidence: profiler stage timings, GPU pass counts, cache hits/misses, resource-allocation estimates, crash/trace excerpts, regression reproductions and diagnostic-system findings. Clearly distinguish application estimates from physical GPU/VRAM telemetry.
+7. Engineering reports: `reports/engineering`. Store consolidated audits, analysis, conclusions, validation matrices, regression summaries, agent handoffs and decisions. Reports should link to commits/PRs and test snapshots where possible.
+
+### Rules for branches 5–7
+
+- They are evidence/report-only. Do not implement production source-code changes there.
+- Sanitize every report before pushing. The fork is public: exclude local file paths, personal identifiers, credentials, project file contents, private assets and other machine-local information.
+- Keep the full unredacted local history in the owner's ignored `LOCAL_CONTEXT.md` or local files only.
+- Use consistent dated filenames and identify app version, test scenario, workload, capture mode and measurement units.
+- Never present CI compile success as real-GPU or owner-machine validation. Mark each result as CI, software Vulkan, other hardware, or owner's Vega 8 runtime.
+- Comparisons must disclose differences in layer count, resolution, texture sets, viewport mode, F6 state and other workload factors. Do not claim causation from non-equivalent runs.
+
+### Branch maintenance and agent workflow
+
+- GPT, Claude and Kimi work on the active development branch, but only one agent owns a given subsystem at a time. A delegated agent may prepare a patch or review without creating a new branch.
+- Backups and `master` are read-only unless the owner explicitly authorizes recovery.
+- Diagnostic evidence goes to the appropriate one of branches 5–7, never to a new branch.
+- Do not delete, reset, force-push or rewrite any branch. Only the owner performs branch deletion/cleanup.
+- Before cleanup, the owner must ensure unique useful commits from surplus branches are merged, cherry-picked, or explicitly declared disposable.
+- After the owner's cleanup, verify that exactly these seven branch names remain.
 
 ## Owner-local data boundary
 
