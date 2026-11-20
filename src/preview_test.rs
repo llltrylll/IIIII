@@ -5393,24 +5393,28 @@ fn parked_surface_maps_release_and_restore_without_visual_changes() {
     let mut views = ViewRenderer::new(&rs);
     let size = [320, 240];
     let cam = OrbitCam::default();
-    let engines = [&engine_a, &engine_b];
     let mut settings = ViewSettings::default();
 
     // Capture both visible sets with the complete surface-map working set.
-    views.render_3d(&rs, size, &engines, &env, &gpu_mesh, &cam, &settings, None);
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
     let material_before = read_texture(&rs.device, &rs.queue, views.view3d.display_texture());
 
     settings.mode = ViewMode::Position;
-    views.render_3d(&rs, size, &engines, &env, &gpu_mesh, &cam, &settings, None);
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
     let position_before = read_texture(&rs.device, &rs.queue, views.view3d.display_texture());
 
+    let bytes_before = engine_b.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "surface maps").map(|(_, bytes)| *bytes).unwrap();
     engine_b.release_surface_maps();
+    let bytes_after = engine_b.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "surface maps").map(|(_, bytes)| *bytes).unwrap();
+    assert!(bytes_after < bytes_before, "parked surface maps must release GPU memory");
     assert_eq!(engine_b.surface_maps().0.width, 1);
     assert_eq!(engine_b.surface_maps().1.width, 1);
 
     // A parked set remains in the viewport, and its Material output is byte-identical.
     settings.mode = ViewMode::Material;
-    views.render_3d(&rs, size, &engines, &env, &gpu_mesh, &cam, &settings, None);
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
     let material_after = read_texture(&rs.device, &rs.queue, views.view3d.display_texture());
     assert_eq!(material_after, material_before);
 
@@ -5422,7 +5426,7 @@ fn parked_surface_maps_release_and_restore_without_visual_changes() {
     assert_eq!(engine_b.read_tex(&engine_b.surface_maps().1), nrm_before);
 
     settings.mode = ViewMode::Position;
-    views.render_3d(&rs, size, &engines, &env, &gpu_mesh, &cam, &settings, None);
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
     let position_after = read_texture(&rs.device, &rs.queue, views.view3d.display_texture());
     assert_eq!(position_after, position_before);
 }
