@@ -240,9 +240,7 @@ impl Snapshot {
     pub fn ram_bytes(&self) -> usize {
         match &self.state {
             SnapState::Mapping { .. } => self.uncompressed_bytes(),
-            SnapState::Compressing { packed, pending_raw_bytes, .. } => {
-                packed.iter().map(|v| v.len()).sum::<usize>().saturating_add(*pending_raw_bytes)
-            }
+            SnapState::Compressing { pending_raw_bytes, .. } => *pending_raw_bytes,
             SnapState::Ready(d) => d.iter().map(|v| v.len()).sum(),
         }
     }
@@ -680,15 +678,13 @@ mod tests {
     fn cached_ram_total_tracks_async_compression_without_recounting_history() {
         let snapshot = || {
             let (tx, receiver) = mpsc::sync_channel(1);
+            tx.send(vec![vec![1, 2, 3]]).unwrap();
             drop(tx);
             Snapshot {
                 infos: vec![TexInfo { width: 4, height: 4, bpp: 4, offset: 0 }],
-                state: SnapState::Compressing {
-                    receiver,
-                    pending_raw_bytes: 64,
-                },
+                state: SnapState::Compressing { receiver, pending_raw_bytes: 64 },
                 pool: Arc::new(SnapshotBufferPool::default()),
-                accounted_bytes: 67,
+                accounted_bytes: 64,
             }
         };
         let mut history = UndoStack::default();
@@ -732,15 +728,10 @@ mod tests {
         let (_tx, receiver) = mpsc::sync_channel(1);
         let snapshot = Snapshot {
             infos: vec![TexInfo { width: 4, height: 4, bpp: 4, offset: 0 }],
-            state: SnapState::Compressing {
-                receiver,
-                packed: vec![vec![1, 2, 3]],
-                pending_raw_bytes: 64,
-                total: 2,
-            },
+            state: SnapState::Compressing { receiver, pending_raw_bytes: 64 },
             pool: Arc::new(SnapshotBufferPool::default()),
             accounted_bytes: 67,
         };
-        assert_eq!(snapshot.ram_bytes(), 67);
+        assert_eq!(snapshot.ram_bytes(), 64);
     }
 }
