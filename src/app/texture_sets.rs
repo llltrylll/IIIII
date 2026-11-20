@@ -194,7 +194,7 @@ impl PainterApp {
     pub(super) fn composite_parked_one(&mut self, ctx: &egui::Context) {
         let mesh = &self.gpu_mesh;
         if let Some(p) = self.sets.parked.iter_mut().flatten().find(|p| p.engine.dirty) {
-            if !p.engine.ensure_baked_map_groups() {
+            if !p.engine.ensure_composite_baked_map_groups() {
                 ctx.request_repaint();
                 return;
             }
