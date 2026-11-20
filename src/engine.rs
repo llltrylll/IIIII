@@ -92,7 +92,7 @@ fn retained_folder_depth(current: usize, required: usize) -> usize {
 
 #[cfg(test)]
 mod working_buffer_capacity_tests {
-    use super::{layer_uniform_buffer_capacity, mask_filter_buffer_capacity, retained_folder_depth};
+    use super::{layer_uniform_buffer_capacity, mask_filter_buffer_capacity, retained_folder_depth, Engine, GenKind};
 
     #[test]
     fn filter_uniform_capacity_grows_without_clamping_steps() {
@@ -124,6 +124,22 @@ mod working_buffer_capacity_tests {
         assert_eq!(retained_folder_depth(8, 3), 8);
         assert_eq!(retained_folder_depth(12, 3), 3);
         assert_eq!(retained_folder_depth(4, 0), 0);
+    }
+
+    #[test]
+    fn baked_map_residency_tracks_actual_generator_inputs() {
+        for kind in [GenKind::EdgeWear, GenKind::Dust, GenKind::CreaseGrime, GenKind::PartGradient, GenKind::PartRandom] {
+            assert!(
+                Engine::generator_needs_baked_map_groups(&kind.default_generator()),
+                "{kind:?} uses packed map group B or C"
+            );
+        }
+        for kind in [GenKind::Dirt, GenKind::ThinAreas, GenKind::PositionGradient, GenKind::IdMask, GenKind::CustomMap] {
+            assert!(
+                !Engine::generator_needs_baked_map_groups(&kind.default_generator()),
+                "{kind:?} does not require packed map groups B/C"
+            );
+        }
     }
 }
 const STROKE_FORMAT: F = F::R16Float;
