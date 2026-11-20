@@ -1160,6 +1160,8 @@ struct LayerUniform {
     ns: [f32; 4],
     /// The ID mask's further colors (rgb) with a 1 in w when in use.
     gids: [[f32; 4]; MAX_ID_COLORS - 1],
+    /// Cached procedural roughness FBM is bound at composite texture slot 27.
+    varc: [f32; 4],
 }
 
 #[repr(C)]
@@ -1238,6 +1240,8 @@ struct Pipelines {
     composite: wgpu::RenderPipeline,
     folder_merge: wgpu::RenderPipeline,
     composite_bgl: wgpu::BindGroupLayout,
+    fill_roughness_noise: wgpu::RenderPipeline,
+    fill_roughness_noise_bgl: wgpu::BindGroupLayout,
     mask_source: wgpu::RenderPipeline,
     mask_filter: wgpu::RenderPipeline,
     mask_filter_bgl: wgpu::BindGroupLayout,
@@ -1531,6 +1535,8 @@ pub struct Engine {
     prefix_cache: Option<[Tex; ACCUM]>,
     /// One persistent result texture per filtered mask.
     mask_out: HashMap<u64, Tex>,
+    /// Full-resolution, one-channel FBM fields for stable fill roughness variations.
+    fill_roughness_noise: HashMap<u64, FillRoughnessNoiseCache>,
     /// Three scratch textures shared by every filtered mask in this engine:
     /// two ping-pong buffers and one temporary mask-layer source.
     mask_scratch: Option<[Tex; 3]>,
@@ -1558,6 +1564,21 @@ impl UvBakeKey {
     fn is_current(baked: Option<&UvBakeKey>, mesh_id: u64, tris: &std::ops::Range<u32>, res: u32) -> bool {
         baked.is_some_and(|k| k.mesh_id == mesh_id && k.tris == *tris && k.res == res)
     }
+}
+
+/// Inputs that actually change the roughness FBM field. The variation amount
+/// is intentionally excluded: it scales the cached noise cheaply in fs_layer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FillRoughnessNoiseKey {
+    res: u32,
+    uv_version: u64,
+    scale_bits: u32,
+    seed_bits: u32,
+}
+
+struct FillRoughnessNoiseCache {
+    key: FillRoughnessNoiseKey,
+    texture: Tex,
 }
 
 fn accum_set(device: &wgpu::Device, res: u32, label: &str) -> [Tex; ACCUM] {
@@ -1794,6 +1815,7 @@ impl Engine {
         self.prefix_cache = None;
         self.mask_scratch = None;
         self.mask_out.clear();
+        self.fill_roughness_noise.clear();
         self.mask_final.clear();
         self.apply_bg = None;
         // Cached stamp bind groups retain views such as the last viewport depth target.
@@ -1990,6 +2012,7 @@ impl Engine {
             prefix: None,
             prefix_cache: None,
             mask_out: HashMap::new(),
+            fill_roughness_noise: HashMap::new(),
             mask_scratch: None,
             mask_filter_ubuf: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("mask filter uniforms"),
@@ -2265,10 +2288,25 @@ impl Engine {
         entries.push(gpu::tex_entry(25, true));
         // The tangent frame, for normal images projected in world space.
         entries.push(gpu::tex_entry(26, false));
+        // Cached roughness variation is read with textureLoad, not a sampler.
+        entries.push(gpu::tex_entry(27, false));
         let composite_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("composite"),
             entries: &entries,
         });
+        // The roughness prepass needs only the layer uniform and the position map.
+        let fill_roughness_noise_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("fill roughness noise"),
+            entries: &[gpu::uniform_entry(0, true), gpu::tex_entry(10, false)],
+        });
+        let fill_roughness_noise = gpu::fullscreen_pipeline(
+            device,
+            "fill roughness noise",
+            &composite_module,
+            "fs_fill_roughness_noise",
+            &gpu::layout(device, &fill_roughness_noise_bgl),
+            &[gpu::target(MASK_FILTER_FORMAT)],
+        );
         let composite = gpu::fullscreen_pipeline(
             device,
             "composite",
@@ -2378,6 +2416,8 @@ impl Engine {
             composite,
             folder_merge,
             composite_bgl,
+            fill_roughness_noise,
+            fill_roughness_noise_bgl,
             mask_source,
             mask_filter,
             mask_filter_bgl,
@@ -5676,7 +5716,7 @@ impl Engine {
 
     /// Application-side estimate of known GPU allocations by owned resource category.
     /// Driver padding, shared renderer resources and the viewport mesh are excluded.
-    pub fn gpu_resource_breakdown(&self) -> [(&'static str, u64); 13] {
+    pub fn gpu_resource_breakdown(&self) -> [(&'static str, u64); 14] {
         [
             ("surface maps", self.pos.bytes() + self.nrm.bytes() + self.tan.bytes() + self.stroke.bytes()),
             ("mesh maps and fixes", self.maps.iter().map(|t| t.bytes()).sum::<u64>()
@@ -5688,6 +5728,7 @@ impl Engine {
             ("prefix cache", self.prefix_cache.as_ref().map_or(0, |set| set.iter().map(|t| t.bytes()).sum())),
             ("filtered masks", self.mask_out.values().map(|t| t.bytes()).sum::<u64>()
                 + self.mask_scratch.as_ref().map_or(0, |set| set.iter().map(|t| t.bytes()).sum::<u64>())),
+            ("procedural variation caches", self.fill_roughness_noise.values().map(|cache| cache.texture.bytes()).sum()),
             ("paint layers and masks", self.layers.iter().map(|l| l.vram_bytes()).sum::<u64>()),
             ("fill images", self.fill_image_bytes()),
             ("thumbnails", self.thumbs.vram_bytes()),
