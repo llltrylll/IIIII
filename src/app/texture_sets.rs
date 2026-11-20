@@ -96,9 +96,6 @@ impl PainterApp {
         }
         let Some(mut p) = self.sets.parked.get_mut(k).and_then(Option::take) else { return };
         let previous_active = self.sets.active;
-        let keep_new_active_surface_maps = super::graph_ui::engine_uses_surface_graph(
-            &p.engine, &self.graphs.docs, &self.graphs.lib,
-        );
         let keep_previous_active_surface_maps = super::graph_ui::engine_uses_surface_graph(
             &self.engine, &self.graphs.docs, &self.graphs.lib,
         );
