@@ -1507,6 +1507,8 @@ pub struct Engine {
     sampler: wgpu::Sampler,
     layer_ubuf: wgpu::Buffer,
     layer_ubuf_slots: u64,
+    /// Shared by all Fill-variation prepasses; dynamic offsets select each layer's uniform.
+    fill_variation_noise_bg: Option<wgpu::BindGroup>,
     stamp_ubuf: wgpu::Buffer,
     stamp_sbuf: wgpu::Buffer,
     apply_ubuf: wgpu::Buffer,
@@ -1846,6 +1848,7 @@ impl Engine {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
+            self.fill_variation_noise_bg = None;
         }
         let mask_slots = mask_filter_buffer_capacity(self.mask_filter_ubuf_slots, 0);
         if mask_slots != self.mask_filter_ubuf_slots {
@@ -1998,6 +2001,7 @@ impl Engine {
             sampler,
             layer_ubuf,
             layer_ubuf_slots,
+            fill_variation_noise_bg: None,
             stamp_ubuf,
             stamp_sbuf,
             apply_ubuf,
@@ -5098,6 +5102,7 @@ impl Engine {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
+            self.fill_variation_noise_bg = None;
         }
         let mut data = vec![0u8; (UNIFORM_STRIDE as usize) * slots.max(1)];
         for (k, pass) in passes.iter().enumerate() {
@@ -5267,16 +5272,8 @@ impl Engine {
         };
         // The cached variation field is independent of the accumulation below.
         // Generate one FBM channel per pass on a key miss; later composites reuse it.
-        for &(slot, layer_id, roughness) in &variation_noise_slots {
-            let layer = &self.layers[*self.layers.iter().position(|layer| layer.id == layer_id)
-                .as_ref().expect("cached fill variation layer remains in stack")];
-            let cache = &self.fill_variation_noise[&layer_id];
-            let target = if roughness {
-                cache.roughness.as_ref().expect("roughness cache texture")
-            } else {
-                cache.color.as_ref().expect("color cache texture")
-            };
-            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        if !variation_noise_slots.is_empty() && self.fill_variation_noise_bg.is_none() {
+            self.fill_variation_noise_bg = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("fill variation noise"),
                 layout: &self.p.fill_variation_noise_bgl,
                 entries: &[
@@ -5293,7 +5290,18 @@ impl Engine {
                         resource: wgpu::BindingResource::TextureView(&self.pos.view),
                     },
                 ],
-            });
+            }));
+        }
+        for &(slot, layer_id, roughness) in &variation_noise_slots {
+            let layer = &self.layers[*self.layers.iter().position(|layer| layer.id == layer_id)
+                .as_ref().expect("cached fill variation layer remains in stack")];
+            let cache = &self.fill_variation_noise[&layer_id];
+            let target = if roughness {
+                cache.roughness.as_ref().expect("roughness cache texture")
+            } else {
+                cache.color.as_ref().expect("color cache texture")
+            };
+            let bg = self.fill_variation_noise_bg.as_ref().expect("variation bind group created for cache misses");
             let profile_slot = begin_composite_profile_stage(
                 &mut encoder, profile_query.as_deref(), &mut profile_stage_count,
             );
@@ -5835,6 +5843,7 @@ impl Engine {
         self.res = res;
         self.uv_version += 1;
         self.pos = Tex::new(&self.device, "position map", res, res, POS_FORMAT, LAYER_USAGE);
+        self.fill_variation_noise_bg = None;
         self.nrm = Tex::new(&self.device, "normal map", res, res, NRM_FORMAT, LAYER_USAGE);
         self.tan = Tex::new(&self.device, "tangent map", res, res, TAN_FORMAT, LAYER_USAGE);
         self.accum = [accum_set(&self.device, res, "accum A"), accum_set(&self.device, res, "accum B")];
