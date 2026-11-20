@@ -656,7 +656,7 @@ struct CachedViewBindGroup {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct ViewEngineStamp {
-    binding: (u64, u32, usize, u64, u64),
+    binding: (u64, u32, [usize; crate::engine::ACCUM], u64, u64),
     generation: u64,
 }
 

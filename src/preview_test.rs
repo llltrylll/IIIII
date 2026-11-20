@@ -5038,6 +5038,77 @@ fn diff_report(a: &[u8], b: &[u8], bpp: usize, res: u32) -> String {
     }
 }
 
+/// Every optimized per-layer output mask must produce the same material
+/// textures as the reference path that writes all accumulation channels.
+#[test]
+#[ignore]
+fn selective_composite_matches_full_output_reference() {
+    use crate::engine::{ACCUM, FillParams};
+    use crate::undo::UndoStack;
+
+    let rs = render_state();
+    let mesh = crate::mesh::Primitive::Plane.build();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+
+    let render = |force_full: bool| -> Vec<Vec<u8>> {
+        let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 256);
+        engine.force_full_composite_channel_outputs = force_full;
+        let mut undo = UndoStack::default();
+
+        let mut color = FillParams::default();
+        color.mat.enabled = [true, false, false, false, false, false, false, false];
+        color.mat.color = [0.82, 0.12, 0.04];
+        color.mat.opacity = 0.82;
+        let color = engine.add_fill_layer(0, None, "Color only".into(), color, &mut undo);
+        engine.layers[color].opacity = 0.83;
+
+        let mut rough_metal = FillParams::default();
+        rough_metal.mat.enabled = [false, true, true, false, false, false, false, false];
+        rough_metal.mat.rough = 0.23;
+        rough_metal.mat.metal = 0.71;
+        let rm = engine.add_fill_layer(1, None, "Rough and metal".into(), rough_metal, &mut undo);
+        engine.layers[rm].opacity = 0.76;
+
+        let mut height = FillParams::default();
+        height.mat.enabled = [false, false, false, true, false, false, false, false];
+        height.mat.height = 0.31;
+        engine.add_fill_layer(2, None, "Height only".into(), height, &mut undo);
+
+        let mut emission = FillParams::default();
+        emission.mat.enabled = [false, false, false, false, false, true, false, false];
+        emission.mat.emission = [0.63, 0.08, 0.21];
+        engine.add_fill_layer(3, None, "Emission only".into(), emission, &mut undo);
+
+        let mut specular = FillParams::default();
+        specular.mat.enabled = [false, false, false, false, false, false, false, true];
+        specular.mat.specular = 0.91;
+        engine.add_fill_layer(4, None, "Specular only".into(), specular, &mut undo);
+
+        let mut opacity = FillParams::default();
+        opacity.mat.enabled = [false, false, false, false, true, false, false, false];
+        opacity.mat.opacity = 0.42;
+        engine.add_fill_layer(5, None, "Opacity only".into(), opacity, &mut undo);
+
+        // A painted mask exercises the independent coverage path too.
+        engine.add_mask(color, true, None, &mut undo);
+        engine.composite();
+
+        (0..ACCUM)
+            .map(|channel| read_texture(&rs.device, &rs.queue, engine.final_tex(channel)))
+            .collect()
+    };
+
+    let selective = render(false);
+    let reference = render(true);
+    for channel in 0..ACCUM {
+        assert_eq!(
+            selective[channel],
+            reference[channel],
+            "selective composite differs from the all-channel reference on accumulation channel {channel}",
+        );
+    }
+}
+
 /// Incremental stroke recompositions (a few scissors around the stamps) must
 /// match a full composite texel for texel: folders (nested, with opacity), the
 /// stack saved under them, masks with blur/warp filters that read around the
