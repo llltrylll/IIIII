@@ -8,16 +8,16 @@ Read LOCAL_CONTEXT.md if it exists in the working copy. It is machine-local, ign
 
 The goal is not a benchmark spike. Target a stable 60 FPS in representative normal editing conditions, including idle editor, loaded production project, camera interaction, brush interaction, and normal viewport effects. Record separate results for each scenario. Do not promise the target until measured on the owner's Vega 8 machine.
 
-### Initial owner-reported FPS baseline (20 Nov 2026)
+### Initial owner-reported interaction baseline (20 Nov 2026)
 
-The owner reported the following runtime readings:
-- Idle: approximately 30 FPS (33.3 ms/frame).
+The owner initially reported:
+- Cursor-triggered UI redraws (previously labelled "Idle"): approximately 30 FPS (33.3 ms/frame).
 - Moving camera: approximately 22–25 FPS (40.0–45.5 ms/frame).
 - Operating/painting: approximately 18–20 FPS (50.0–55.6 ms/frame).
 
-These are user-reported observations, not yet a controlled benchmark: build configuration (Release/Debug), viewport resolution, project/scene, display refresh/VSync and exact operation are not yet recorded. Preserve them as the starting symptom, but do not treat them as a reproducible performance baseline until the diagnostic trace and test conditions are captured.
+**Methodology correction:** the owner clarified that the application does not execute another UI frame while mouse/keyboard input is idle; frames are event/repaint-driven. The earlier "Idle" capture required moving the cursor to generate redraws, so it is not a static-idle FPS measurement. Treat it as cursor-triggered redraw cadence. Do not request another 1,200-frame idle capture: static idle should be evaluated by confirming that no unnecessary repaints or background UI/GPU work occur.
 
-Initial interpretation: the idle limit means the problem is not exclusively the brush/compositor. Camera movement adds viewport cost, and active operation adds further cost. Investigate all three paths independently. Do not infer a fixed 30 FPS cap or a GPU bottleneck from these numbers alone.
+The first three reports were collected in Release on the owner's AMD Vega 8 using Vulkan, with 1,200 recorded redraws. Their per-redraw CPU spans remain useful, but frame-to-frame intervals during cursor movement describe event/repaint cadence and must not be presented as true idle FPS. Continue to separate UI CPU work, repaint cadence, and GPU execution. Do not infer a fixed 30 FPS cap or a GPU bottleneck from these numbers alone.
 
 ### Required first step: establish the bottleneck
 
