@@ -165,20 +165,19 @@ impl PainterApp {
         }
     }
 
-    /// Composites every parked set for a synchronous operation such as export.
-    /// Never allow an asynchronous cache restore to leave a stale final texture in the export.
+    /// Ensures every parked set has exportable mesh maps and a current final composite.
+    /// This is blocking by design: an export must never snapshot eviction placeholders.
     pub(super) fn composite_parked(&mut self) -> Result<(), String> {
         let mesh = &self.gpu_mesh;
         for (index, parked) in self.sets.parked.iter_mut().enumerate() {
             let Some(parked) = parked else { continue };
+            if !parked.engine.ensure_baked_map_groups_blocking() {
+                return Err(format!(
+                    "Texture Set {index}: baked mesh maps could not be restored from the bake cache; export was cancelled."
+                ));
+            }
+            parked.engine.ensure_surface_maps(mesh);
             if parked.engine.dirty {
-                if !parked.engine.ensure_baked_map_groups_blocking() {
-                    return Err(format!(
-                        "Texture Set {index}: baked mesh maps could not be restored from the bake cache; export was cancelled."
-                    ));
-                }
-                // Procedural layers may sample the surface position, normal and tangent maps.
-                parked.engine.ensure_surface_maps(mesh);
                 parked.engine.composite();
                 if parked.engine.dirty {
                     return Err(format!(
