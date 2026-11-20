@@ -165,18 +165,30 @@ impl PainterApp {
         }
     }
 
-    /// Composites every parked set when a synchronous operation needs final maps (export).
-    pub(super) fn composite_parked(&mut self) {
+    /// Composites every parked set for a synchronous operation such as export.
+    /// Never allow an asynchronous cache restore to leave a stale final texture in the export.
+    pub(super) fn composite_parked(&mut self) -> Result<(), String> {
         let mesh = &self.gpu_mesh;
-        for p in self.sets.parked.iter_mut().flatten() {
-            if p.engine.dirty {
-                // The composite shader can read position, normal and tangent
-                // inputs for procedural layers even while this Engine is parked.
-                p.engine.ensure_surface_maps(mesh);
-                p.engine.composite();
-                p.engine.release_inactive_working_set();
+        for (index, parked) in self.sets.parked.iter_mut().enumerate() {
+            let Some(parked) = parked else { continue };
+            if parked.engine.dirty {
+                if !parked.engine.ensure_baked_map_groups_blocking() {
+                    return Err(format!(
+                        "Texture Set {index}: baked mesh maps could not be restored from the bake cache; export was cancelled."
+                    ));
+                }
+                // Procedural layers may sample the surface position, normal and tangent maps.
+                parked.engine.ensure_surface_maps(mesh);
+                parked.engine.composite();
+                if parked.engine.dirty {
+                    return Err(format!(
+                        "Texture Set {index}: recomposition did not complete; export was cancelled."
+                    ));
+                }
+                parked.engine.release_inactive_working_set();
             }
         }
+        Ok(())
     }
 
     /// Spreads parked-set recomposition across frames during interactive use.
