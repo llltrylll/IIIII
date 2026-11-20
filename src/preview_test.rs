@@ -5446,7 +5446,9 @@ fn parked_surface_maps_release_and_restore_without_visual_changes() {
     let material_after = read_texture(&rs.device, &rs.queue, views.view3d.display_texture());
     assert_eq!(material_after, material_before);
 
-    engine_b.restore_active_working_set(&gpu_mesh);
+    if engine_b.restore_active_working_set(&gpu_mesh) {
+        views.invalidate_texture_set_binding(1);
+    }
     assert!(!engine_b.dirty, "restoring unchanged surface maps must not dirty the composite");
     assert_eq!(engine_b.surface_maps().0.width, 128);
     assert_eq!(engine_b.surface_maps().1.width, 128);
