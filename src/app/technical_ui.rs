@@ -188,6 +188,9 @@ impl Default for TechnicalUi {
             open: false,
             // Keep performance and bake indicators visible by default.
             bottom: vec![TechnicalMetric::Fps, TechnicalMetric::CpuFrame, TechnicalMetric::Bake],
+            capture_scenario: 0,
+            capture_report: None,
+            capture_status: None,
         }
     }
 }
