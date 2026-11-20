@@ -5182,7 +5182,9 @@ impl Engine {
             let offset = slot * UNIFORM_STRIDE as usize;
             data[offset..offset + size_of::<LayerUniform>()].copy_from_slice(bytemuck::bytes_of(&u));
         }
-        self.queue.write_buffer(&self.layer_ubuf, 0, &data);
+        if slots > 0 {
+            self.queue.write_buffer(&self.layer_ubuf, 0, &data);
+        }
         self.layer_uniform_scratch = data;
         // One persistent result per cached mask. Only masks with actual filter
         // operations need the three full-resolution ping-pong scratch targets.
@@ -5277,7 +5279,9 @@ impl Engine {
             let off = i * MASK_FILTER_STRIDE as usize;
             sdata[off..off + 32].copy_from_slice(bytemuck::cast_slice(s));
         }
-        self.queue.write_buffer(&self.mask_filter_ubuf, 0, &sdata);
+        if !steps.is_empty() {
+            self.queue.write_buffer(&self.mask_filter_ubuf, 0, &sdata);
+        }
         self.mask_filter_uniform_scratch = sdata;
         self.mask_filter_steps_scratch = steps;
 
