@@ -5447,3 +5447,68 @@ fn parked_surface_maps_release_and_restore_without_visual_changes() {
     views.invalidate_texture_set_binding(1);
     assert!(!views.has_texture_set_binding(1), "eviction must release hidden cached texture views");
 }
+/// Packed baked map groups B/C can be evicted from a parked Engine and restored
+/// from the selective disk-cache path without changing their texel contents.
+#[test]
+#[ignore = "needs a GPU and a writable bake cache"]
+fn parked_baked_map_groups_release_and_restore_from_cache() {
+    use crate::mesh::Primitive;
+    use std::time::{Duration, Instant};
+
+    let mesh = Primitive::MaterialBall.build();
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let mut settings = BakeSettings::default();
+    settings.apply_quality(crate::bake::Quality::Draft);
+    let (baked, report, _) = run_bake(&rs.device, &rs.queue, &mesh, &gpu_mesh, &settings, 256);
+    let key = crate::bake_cache::key(&mesh, &settings, 256, 0);
+
+    // Wait for the existing asynchronous cache writer before testing eviction.
+    crate::bake_cache::store(key.clone(), &baked, Arc::new(report.clone()), &rs.device, &rs.queue);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut cached = false;
+    while Instant::now() < deadline {
+        if crate::bake_cache::load_selected(&key, &[1, 2]).is_some() {
+            cached = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(cached, "the completed bake must be present in the disk cache before eviction");
+
+    let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 256);
+    engine.set_maps_cached(baked, Arc::new(report), key);
+    engine.composite();
+    assert!(!engine.dirty, "the baseline composite must be clean");
+
+    let map_b_before = engine.read_tex(engine.map_tex(1));
+    let map_c_before = engine.read_tex(engine.map_tex(2));
+    let bytes_before = engine.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
+
+    assert!(engine.release_baked_map_groups(), "cached B/C groups should be evictable");
+    assert_eq!(engine.map_tex(1).width, 1);
+    assert_eq!(engine.map_tex(2).width, 1);
+    let bytes_after = engine.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
+    assert_eq!(bytes_before - bytes_after, 256 * 256 * 12, "B/C should release exactly 12 bytes per texel");
+
+    assert!(!engine.ensure_baked_map_groups(), "first request starts the background cache restore");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut restored = false;
+    while Instant::now() < deadline {
+        if engine.poll_baked_map_restore() {
+            restored = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(restored, "the cache worker should restore both groups");
+    assert!(engine.baked_map_groups_resident());
+    assert_eq!(engine.read_tex(engine.map_tex(1)), map_b_before);
+    assert_eq!(engine.read_tex(engine.map_tex(2)), map_c_before);
+    assert!(!engine.dirty, "restoring unchanged baked maps must not invalidate the material composite");
+    assert_eq!(engine.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap(), bytes_before);
+}
+
