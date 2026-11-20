@@ -468,16 +468,30 @@ impl PainterApp {
                 || (self.view.mode == ViewMode::Material && self.views.has_custom_shader()));
         if kind == ViewKind::V3d {
             self.set_parked_surface_maps_resident(needs_parked_surface_maps);
-            // Packed baked groups B/C are needed by these mesh-map views and by
-            // custom material graphs, but not by the built-in Material viewport.
-            let needs_parked_baked_map_groups = matches!(self.view.mode, ViewMode::Map(4..=9))
-                || (self.view.mode == ViewMode::Material && self.views.has_custom_shader());
+            // Restore only the packed group sampled by the selected map view.
+            // Custom material graphs conservatively retain both B and C.
+            let needs_parked_baked_map_groups = if self.view.mode == ViewMode::Material && self.views.has_custom_shader() {
+                crate::engine::BAKED_MAP_GROUP_ALL
+            } else {
+                match self.view.mode {
+                    ViewMode::Map(4..=7) => crate::engine::BAKED_MAP_GROUP_B,
+                    ViewMode::Map(8..=9) => crate::engine::BAKED_MAP_GROUP_C,
+                    _ => 0,
+                }
+            };
             self.set_parked_baked_map_groups_resident(needs_parked_baked_map_groups);
         }
-        // The UV panel shows only the active Texture Set; do not re-reside all
-        // parked sets just because its map preview needs B/C.
-        if kind == ViewKind::V2d && matches!(self.view.uv_mode, ViewMode::Map(4..=9)) {
-            let _ = self.engine.ensure_baked_map_groups();
+        // The UV panel shows only the active Texture Set; restore only the
+        // packed group represented by the selected map preview.
+        if kind == ViewKind::V2d {
+            let uv_map_mask = match self.view.uv_mode {
+                ViewMode::Map(4..=7) => crate::engine::BAKED_MAP_GROUP_B,
+                ViewMode::Map(8..=9) => crate::engine::BAKED_MAP_GROUP_C,
+                _ => 0,
+            };
+            if uv_map_mask != 0 {
+                let _ = self.engine.ensure_baked_map_mask(uv_map_mask);
+            }
         }
 
         let size = [(rect.width() * self.ppp).round() as u32, (rect.height() * self.ppp).round() as u32];
