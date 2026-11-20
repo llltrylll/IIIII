@@ -1239,17 +1239,17 @@ fn fill_variation_noise_cache_matches_inline_and_invalidates_on_change() {
     let layer = cached.add_fill_layer(0, None, "Micro Roughness".into(), fill, &mut undo);
 
     cached.composite();
-    assert_eq!(cached.last_fill_roughness_cache_misses, 1, "the first composite must generate both FBM channels");
-    assert_eq!(cached.last_fill_roughness_cache_gpu_passes, 1, "color and roughness share one GPU pass");
-    assert_eq!(cached.last_fill_roughness_cache_hits, 0);
+    assert_eq!(cached.last_fill_variation_cache_misses, 1, "the first composite must generate both FBM channels");
+    assert_eq!(cached.last_fill_variation_cache_gpu_passes, 1, "color and roughness share one GPU pass");
+    assert_eq!(cached.last_fill_variation_cache_hits, 0);
     let first_color = read_texture(&rs.device, &rs.queue, cached.final_tex(0));
     let first_roughness = read_texture(&rs.device, &rs.queue, cached.final_tex(1));
 
     cached.mark_dirty();
     cached.composite();
-    assert_eq!(cached.last_fill_roughness_cache_hits, 1, "the unchanged layer should reuse both FBM fields");
-    assert_eq!(cached.last_fill_roughness_cache_misses, 0);
-    assert_eq!(cached.last_fill_roughness_cache_gpu_passes, 0, "a cache hit must not submit another FBM pass");
+    assert_eq!(cached.last_fill_variation_cache_hits, 1, "the unchanged layer should reuse both FBM fields");
+    assert_eq!(cached.last_fill_variation_cache_misses, 0);
+    assert_eq!(cached.last_fill_variation_cache_gpu_passes, 0, "a cache hit must not submit another FBM pass");
     assert_eq!(first_color, read_texture(&rs.device, &rs.queue, cached.final_tex(0)));
     assert_eq!(first_roughness, read_texture(&rs.device, &rs.queue, cached.final_tex(1)));
 
@@ -1262,8 +1262,8 @@ fn fill_variation_noise_cache_matches_inline_and_invalidates_on_change() {
     };
     cached.mark_dirty();
     cached.composite();
-    assert_eq!(cached.last_fill_roughness_cache_misses, 1, "changing the seed must invalidate the cached field");
-    assert_eq!(cached.last_fill_roughness_cache_gpu_passes, 1);
+    assert_eq!(cached.last_fill_variation_cache_misses, 1, "changing the seed must invalidate the cached field");
+    assert_eq!(cached.last_fill_variation_cache_gpu_passes, 1);
 
     let mut reference = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
     reference.force_inline_fill_variation = true;
