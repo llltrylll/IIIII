@@ -2,15 +2,75 @@
 
 Read LOCAL_CONTEXT.md if it exists in the working copy. It is machine-local, ignored by Git, and contains the owner's private project scope and hardware details. Never create, commit, upload, or quote its contents into tracked files, PRs, issues, logs, or external services. If absent, ask the owner for missing private context rather than guessing. This file is the shared operating guide for GPT, Claude, Kimi, and any other coding agent. Humans: see CONTRIBUTING.md too.
 
-## Current priority — establish the production foundation
+## Current priority — 60 FPS frame-time campaign
 
-**Phase 1: finish and validate the core painting and mask systems.** Focus on 3D brush latency and spikes, UV/2D painting correctness, Vertex ID and painted masks, smart-mask generators, mask layers/folders/filters, cache invalidation, incremental recomposition, and the CPU/GPU work directly involved. Validate realistic layer/mask/filter stacks and the representative production workload, not empty or nearly unpainted models.
+**Owner's current top priority: make the editor sustain 60 FPS (16.67 ms/frame) on the owner's real machine, starting from the reported ~20 FPS while the program is open.** This priority supersedes the previous Phase 1 / Phase 2 ordering below. Do not postpone frame-time work behind broad painting-feature completion.
 
-Phase 1 requires relevant unit and GPU tests, correct rendered output, and runtime validation on the owner's actual machine. F6/performance measurements must be comparable. CI compilation alone is not proof. A GPU test marked ignored is not validated unless it was actually run on a GPU-capable setup; state any remaining gap.
+The goal is not a benchmark spike. Target a stable 60 FPS in representative normal editing conditions, including idle editor, loaded production project, camera interaction, brush interaction, and normal viewport effects. Record separate results for each scenario. Do not promise the target until measured on the owner's Vega 8 machine.
 
-**Phase 2: optimize the rest of the production foundation only after Phase 1 is validated.** Then audit memory, CPU allocations, GPU resource lifetime/reuse, viewport, baking, import, project I/O, export, background work, and architecture inside the defined production workload envelope.
+### Required first step: establish the bottleneck
 
-Do not jump to broad cleanup while core painting/masking remains unresolved. Do not let hypothetical huge projects or cosmetic HUD work displace the foundation.
+Before broad rewrites, build a reproducible frame-time baseline and identify the dominant costs. Separate:
+- UI/app CPU time per frame;
+- viewport CPU preparation and cache-key work;
+- GPU command submission and GPU execution;
+- driver/device polling and synchronization;
+- background jobs, async completion polling, and repaint scheduling;
+- memory allocation, uploads, readbacks, and resource churn.
+
+Use F6/F5 and existing startup tracing where appropriate, but do not mistake paint/composite timings for total frame time. Add low-overhead stage instrumentation where the current measurements cannot isolate a bottleneck. Instrumentation must be disabled or cheap in normal use.
+
+The first investigation must explicitly test idle behavior: whether the app continuously repaints, which subsystems request repaints, whether viewport cache hits are actually occurring, and whether the app does unnecessary CPU/GPU work while visually unchanged. The existing 3D/2D viewport caches are a starting point, not proof that the whole frame is cheap.
+
+### Implementation mandate
+
+The owner explicitly authorizes substantial architectural changes to the frame loop, repaint scheduling, viewport/render path, GPU submission, and background work when measurements justify them. Prefer changes capable of materially reducing frame time over cosmetic or sub-millisecond micro-optimizations. Do not preserve an inefficient architecture merely to keep diffs small.
+
+Potential avenues to investigate (not assumptions or permission to implement blindly):
+- demand-driven/dirty-driven rendering and repaint scheduling;
+- avoiding unconditional per-frame work and redundant GPU polling;
+- separating UI updates from expensive viewport refreshes;
+- eliminating repeated cache-key construction and per-frame allocations;
+- reducing GPU pass count, synchronization, unnecessary uploads/readbacks, and resource recreation;
+- moving expensive work off the UI thread or incrementally budgeting it;
+- adaptive quality only where it does not compromise texture correctness or the user's expected visual output.
+
+### Hard invariants
+
+- Preserve exact visual output and shading unless the owner explicitly approves a quality tradeoff. Existing pixel-regression failures are release blockers, not acceptable collateral.
+- Keep old projects loadable. Do not alter project schemas casually; any schema change requires migration and compatibility tests.
+- Protect user data. No destructive project operations, silent data loss, unbounded caches, uncontrolled GPU allocation, or unbounded background queues.
+- Keep painting responsive: brush strokes, UV painting, undo/redo, masks, generators, baking, and export must remain correct.
+- Never block the UI thread on disk, decoding, expensive CPU work, GPU readback, or a wait-for-idle operation in the normal frame loop.
+- Do not remove GPU polling, callbacks, cache invalidation, or repaint requests until their lifecycle requirements are understood and tests cover them.
+- No sleeps, frame-counting, or timeout-based timing hacks.
+- WGSL must compile on DX12, Vulkan, and Metal. Shader compilation under Naga alone is not visual validation.
+- Builds must remain warning-free under -D warnings; avoid unnecessary dependencies.
+
+### Measurement and acceptance
+
+For every optimization, record:
+1. baseline and post-change measurements from equivalent workloads;
+2. average, median, p95 and worst/recent-peak frame time where available;
+3. CPU frame time separately from GPU time;
+4. GPU/backend/driver and viewport resolution;
+5. workload state (project, triangle count, texture sets, UV maps, texture resolution, layers, masks, effects, workspace);
+6. correctness tests and any remaining owner-machine validation.
+
+A 60 FPS claim requires sustained frame intervals at or below 16.67 ms in the stated scenario, not a momentary FPS counter. Report idle and active-editing results separately. If CI hardware differs from the owner's Vega 8, label it clearly. CI passing is not proof of a real-machine FPS gain.
+
+### Execution order
+
+1. Capture current HEAD, open PRs, branch state, CI and diffs. Preserve the owner's master-nosso-reserva-2026-11-20 recovery anchor as read-only.
+2. Establish the idle and representative-workload frame-time baseline; inspect repaint sources, app-frame stages, viewport cache hit/miss behavior, and GPU submission/polling.
+3. Identify the top one or two measured bottlenecks. Write a short design note with expected gain, risks, invalidation rules and rollback strategy.
+4. Implement the highest-impact bounded change first; add regression tests and compare frame-time evidence.
+5. Continue through the next measured bottleneck. Do not accumulate unrelated micro-optimizations.
+6. Validate build, unit tests, relevant GPU tests, output images, project-open compatibility, and real-machine behavior. Clearly mark anything not tested.
+
+## Previous production-foundation requirements (remain mandatory)
+
+The former painting/masking foundation remains a correctness requirement even though it is no longer the gating priority for performance work. Continue to protect 3D brush latency and spikes, UV/2D painting correctness, Vertex ID and painted masks, smart-mask generators, mask layers/folders/filters, cache invalidation, incremental recomposition, and CPU/GPU work directly involved. Validate realistic layer/mask/filter stacks and the representative production workload, not empty or nearly unpainted models.
 
 ## Target workload
 
