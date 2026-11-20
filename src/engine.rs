@@ -2903,6 +2903,23 @@ impl Engine {
         false
     }
 
+    /// Restores evicted baked maps before an explicitly synchronous operation such as export.
+    /// Interactive rendering should continue to use the non-blocking ensure/poll path.
+    pub(crate) fn ensure_baked_map_groups_blocking(&mut self) -> bool {
+        if self.ensure_baked_map_groups() {
+            return true;
+        }
+        loop {
+            if self.poll_baked_map_restore() {
+                return true;
+            }
+            if self.baked_map_restore_rx.is_none() {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     /// Polls the cache worker and uploads only groups B/C, resampling to this
     /// Texture Set's current resolution when the cached bake was lower resolution.
     pub(crate) fn poll_baked_map_restore(&mut self) -> bool {
