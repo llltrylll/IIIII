@@ -5520,6 +5520,10 @@ fn parked_baked_map_groups_release_and_restore_from_cache() {
     assert!(!engine.dirty, "a map-independent composite should finish with B/C evicted");
     assert!(!engine.baked_map_groups_resident(), "map-independent work must not restore B/C");
 
+    // A later level adjustment must also force source-map residency before resolve.
+    engine.map_levels[4] = crate::engine::Levels { black: 0.1, ..Default::default() };
+    assert!(engine.composite_needs_baked_map_groups(), "B/C levels require their original packed maps");
+
     // Synchronous export still explicitly blocks for the maps it snapshots.
     assert!(engine.ensure_baked_map_groups_blocking(), "synchronous operations must wait for cache restoration");
     assert!(engine.baked_map_groups_resident());
