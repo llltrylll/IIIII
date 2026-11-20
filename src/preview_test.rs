@@ -5510,5 +5510,15 @@ fn parked_baked_map_groups_release_and_restore_from_cache() {
     assert!(!engine.dirty, "restoring unchanged baked maps must not invalidate the material composite");
     assert_eq!(engine.gpu_resource_breakdown().iter()
         .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap(), bytes_before);
+
+    // Synchronous export must wait for the same cache restore rather than
+    // snapshotting an old final composite while the maps are placeholders.
+    assert!(engine.release_baked_map_groups(), "the second residency cycle should evict B/C");
+    engine.mark_dirty();
+    assert!(engine.ensure_baked_map_groups_blocking(), "synchronous operations must wait for cache restoration");
+    engine.composite();
+    assert!(!engine.dirty, "the composite must finish after the blocking restore");
+    assert_eq!(engine.read_tex(engine.map_tex(1)), map_b_before);
+    assert_eq!(engine.read_tex(engine.map_tex(2)), map_c_before);
 }
 
