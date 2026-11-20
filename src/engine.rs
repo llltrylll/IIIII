@@ -2877,7 +2877,7 @@ impl Engine {
     /// Starts a background cache read when a parked Engine's B/C map groups are absent.
     /// Returns true only when both groups are already resident.
     pub(crate) fn ensure_baked_map_groups(&mut self) -> bool {
-        if self.baked_map_groups_resident() {
+        if !self.has_bake || self.baked_map_groups_resident() {
             return true;
         }
         if self.baked_map_restore_rx.is_none() {
