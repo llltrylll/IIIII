@@ -1,6 +1,6 @@
 # Claude instructions
 
-Read [PROJECT_SCOPE.md](PROJECT_SCOPE.md) first. It is the source of truth for the production objective, defined production workload ceiling, required sequence (first establish and validate the painting/mask foundation, then optimize the rest), refactor authorization, shared-agent coordination, and repository boundaries. Then read [AGENTS.md](AGENTS.md) for architecture, commands, invariants, and technical conventions.
+Read AGENTS.md first. If LOCAL_CONTEXT.md exists in the owner's local working copy, read it for private scope and hardware details. That file is ignored by Git and must never be committed or copied into any public artifact.
 
 ## Immediate assignment order
 
