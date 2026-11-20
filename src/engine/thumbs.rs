@@ -406,6 +406,7 @@ impl Engine {
                 // Thumbnails do not need the full-resolution procedural roughness cache.
                 // A neutral fallback keeps the shared compositor layout complete.
                 wgpu::BindGroupEntry { binding: 27, resource: view(None) },
+                wgpu::BindGroupEntry { binding: 28, resource: view(None) },
             ],
         });
 
