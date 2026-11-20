@@ -89,8 +89,8 @@ jobs:
       - name: GPU composite - smart mask generator cache
         run: "cargo test --locked --bin material_painter preview_test::smart_mask_generator_cache_matches_uncached_result_and_invalidates_on_change -- --ignored --exact --nocapture --test-threads 1"
 
-      - name: GPU composite - roughness FBM cache fidelity
-        run: "cargo test --locked --bin material_painter preview_test::fill_roughness_noise_cache_matches_inline_and_invalidates_on_change -- --ignored --exact --nocapture --test-threads 1"
+      - name: GPU composite - color + roughness FBM cache fidelity
+        run: "cargo test --locked --bin material_painter preview_test::fill_variation_noise_cache_matches_inline_and_invalidates_on_change -- --ignored --exact --nocapture --test-threads 1"
 
       - name: GPU viewport - cached image invalidation
         run: "cargo test --locked --bin material_painter preview_test::viewport_cache_reuses_unchanged_images_and_invalidates_changes -- --ignored --exact --nocapture --test-threads 1"
