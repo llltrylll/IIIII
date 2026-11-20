@@ -1310,6 +1310,15 @@ fn mask_filters_apply() {
     set(&mut engine, vec![MaskFilter::new(FilterKind::Blur)]);
     let blurred = red(&mut engine);
     assert!(blurred > 0.95, "blurred white mask: {blurred}");
+    // Four filter steps alternate scratch inputs twice. This exercises reuse
+    // of both cached filter bind groups within one mask evaluation.
+    set(&mut engine, vec![
+        MaskFilter::new(FilterKind::Invert),
+        MaskFilter::new(FilterKind::Blur),
+        MaskFilter::new(FilterKind::Invert),
+    ]);
+    let stacked = red(&mut engine);
+    assert!(stacked > 0.95, "invert + blur + invert filter stack: {stacked}");
     set(&mut engine, vec![MaskFilter::new(FilterKind::Invert)]);
     let inverted = red(&mut engine);
     assert!(inverted < 0.01, "inverted: {inverted}");
