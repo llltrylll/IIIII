@@ -1206,12 +1206,12 @@ fn smart_mask_generator_cache_matches_uncached_result_and_invalidates_on_change(
     rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 }
 
-/// Stable roughness FBM is evaluated once, reused on a later composite,
-/// and invalidated when the fill seed changes. The final roughness bytes must
-/// match a fresh engine that evaluates the original inline shader path.
+/// Stable color and roughness FBM fields are evaluated together, reused on a
+/// later composite, and invalidated when the fill seed changes. Both final
+/// channels must match an engine forced through the original inline shader path.
 #[test]
 #[ignore]
-fn fill_roughness_noise_cache_matches_inline_and_invalidates_on_change() {
+fn fill_variation_noise_cache_matches_inline_and_invalidates_on_change() {
     use crate::engine::{Content, FillParams, MatValues};
     use crate::undo::UndoStack;
 
@@ -1221,10 +1221,12 @@ fn fill_roughness_noise_cache_matches_inline_and_invalidates_on_change() {
     let res = 128;
     let fill = FillParams {
         mat: MatValues {
-            enabled: [false, true, false, false, false, false, false, false],
+            enabled: [true, true, false, false, false, false, false, false],
+            color: [0.68, 0.52, 0.34],
             rough: 0.42,
             ..Default::default()
         },
+        color_var: 0.63,
         rough_var: 0.78,
         var_scale: 2.35,
         seed: 17.0,
@@ -1237,17 +1239,19 @@ fn fill_roughness_noise_cache_matches_inline_and_invalidates_on_change() {
     let layer = cached.add_fill_layer(0, None, "Micro Roughness".into(), fill, &mut undo);
 
     cached.composite();
-    assert_eq!(cached.last_fill_roughness_cache_misses, 1, "the first composite must generate the roughness field");
-    assert_eq!(cached.last_fill_roughness_cache_gpu_passes, 1);
+    assert_eq!(cached.last_fill_roughness_cache_misses, 1, "the first composite must generate both FBM channels");
+    assert_eq!(cached.last_fill_roughness_cache_gpu_passes, 1, "color and roughness share one GPU pass");
     assert_eq!(cached.last_fill_roughness_cache_hits, 0);
-    let first = read_texture(&rs.device, &rs.queue, cached.final_tex(1));
+    let first_color = read_texture(&rs.device, &rs.queue, cached.final_tex(0));
+    let first_roughness = read_texture(&rs.device, &rs.queue, cached.final_tex(1));
 
     cached.mark_dirty();
     cached.composite();
-    assert_eq!(cached.last_fill_roughness_cache_hits, 1, "the unchanged layer should reuse its FBM field");
+    assert_eq!(cached.last_fill_roughness_cache_hits, 1, "the unchanged layer should reuse both FBM fields");
     assert_eq!(cached.last_fill_roughness_cache_misses, 0);
     assert_eq!(cached.last_fill_roughness_cache_gpu_passes, 0, "a cache hit must not submit another FBM pass");
-    assert_eq!(first, read_texture(&rs.device, &rs.queue, cached.final_tex(1)));
+    assert_eq!(first_color, read_texture(&rs.device, &rs.queue, cached.final_tex(0)));
+    assert_eq!(first_roughness, read_texture(&rs.device, &rs.queue, cached.final_tex(1)));
 
     let changed = match &mut cached.layers[layer].content {
         Content::Fill(params) => {
@@ -1262,12 +1266,16 @@ fn fill_roughness_noise_cache_matches_inline_and_invalidates_on_change() {
     assert_eq!(cached.last_fill_roughness_cache_gpu_passes, 1);
 
     let mut reference = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+    reference.force_inline_fill_variation = true;
     let mut reference_undo = UndoStack::default();
-    reference.add_fill_layer(0, None, "Micro Roughness".into(), changed, &mut reference_undo);
+    reference.add_fill_layer(0, None, "Silver".into(), changed, &mut reference_undo);
     reference.composite();
-    let actual = read_texture(&rs.device, &rs.queue, cached.final_tex(1));
-    let expected = read_texture(&rs.device, &rs.queue, reference.final_tex(1));
-    assert_eq!(actual, expected, "cached roughness FBM must match the inline evaluation exactly");
+    let actual_color = read_texture(&rs.device, &rs.queue, cached.final_tex(0));
+    let expected_color = read_texture(&rs.device, &rs.queue, reference.final_tex(0));
+    let actual_roughness = read_texture(&rs.device, &rs.queue, cached.final_tex(1));
+    let expected_roughness = read_texture(&rs.device, &rs.queue, reference.final_tex(1));
+    assert_eq!(actual_color, expected_color, "cached color FBM must match the inline evaluation exactly");
+    assert_eq!(actual_roughness, expected_roughness, "cached roughness FBM must match the inline evaluation exactly");
 
     rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 }
