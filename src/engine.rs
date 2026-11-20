@@ -1160,7 +1160,7 @@ struct LayerUniform {
     ns: [f32; 4],
     /// The ID mask's further colors (rgb) with a 1 in w when in use.
     gids: [[f32; 4]; MAX_ID_COLORS - 1],
-    /// Cached procedural roughness FBM is bound at composite texture slot 27.
+    /// Cached procedural color/roughness FBM is bound at composite texture slot 27.
     varc: [f32; 4],
 }
 
@@ -1573,8 +1573,8 @@ impl UvBakeKey {
     }
 }
 
-/// Inputs that actually change the roughness FBM field. The variation amount
-/// is intentionally excluded: it scales the cached noise cheaply in fs_layer.
+/// Inputs that change the color/roughness FBM fields. Variation amounts are
+/// excluded because they scale the cached noise cheaply in fs_layer.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct FillVariationNoiseKey {
     res: u32,
@@ -2302,7 +2302,7 @@ impl Engine {
         entries.push(gpu::tex_entry(25, true));
         // The tangent frame, for normal images projected in world space.
         entries.push(gpu::tex_entry(26, false));
-        // Cached roughness variation is read with textureLoad, not a sampler.
+        // Cached color/roughness variation is read with textureLoad, not a sampler.
         entries.push(gpu::tex_entry(27, false));
         let composite_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("composite"),
@@ -5227,10 +5227,10 @@ impl Engine {
         // Generate both enabled FBM channels on a key miss; later composites reuse it.
         for &(slot, layer_id) in &variation_noise_misses {
             let layer = &self.layers[*self.layers.iter().position(|layer| layer.id == layer_id)
-                .as_ref().expect("cached roughness layer remains in stack")];
+                .as_ref().expect("cached fill variation layer remains in stack")];
             let cache = &self.fill_variation_noise[&layer_id];
             let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("fill roughness noise"),
+                label: Some("fill variation noise"),
                 layout: &self.p.fill_variation_noise_bgl,
                 entries: &[
                     wgpu::BindGroupEntry {
