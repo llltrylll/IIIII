@@ -54,7 +54,8 @@ pub const FINAL_SPECULAR: usize = 6;
 const ACCUM_FORMATS: [F; ACCUM] = [F::Rgba8Unorm, F::R8Unorm, F::R8Unorm, F::R16Float, F::Rgba8Unorm, F::Rgba8Unorm, F::R8Unorm];
 pub(crate) const BAKED_MAP_GROUP_B: u8 = 1 << 0;
 pub(crate) const BAKED_MAP_GROUP_C: u8 = 1 << 1;
-pub(crate) const BAKED_MAP_GROUP_ALL: u8 = BAKED_MAP_GROUP_B | BAKED_MAP_GROUP_C;
+pub(crate) const BAKED_MAP_GROUP_D: u8 = 1 << 2;
+pub(crate) const BAKED_MAP_GROUP_ALL: u8 = BAKED_MAP_GROUP_B | BAKED_MAP_GROUP_C | BAKED_MAP_GROUP_D;
 
 const POS_FORMAT: F = F::Rgba16Float;
 const NRM_FORMAT: F = F::Rgba8Unorm;
@@ -2919,6 +2920,7 @@ impl Engine {
     pub(crate) fn baked_map_mask_resident(&self, mask: u8) -> bool {
         (mask & BAKED_MAP_GROUP_B == 0 || self.maps[1].width == self.res)
             && (mask & BAKED_MAP_GROUP_C == 0 || self.maps[2].width == self.res)
+            && (mask & BAKED_MAP_GROUP_D == 0 || self.maps[3].width == self.res)
     }
 
     pub(crate) fn baked_map_groups_resident(&self) -> bool {
@@ -2936,6 +2938,7 @@ impl Engine {
         let groups = [
             (BAKED_MAP_GROUP_B, 1usize, 4usize, 7usize),
             (BAKED_MAP_GROUP_C, 2usize, 8usize, 9usize),
+            (BAKED_MAP_GROUP_D, 3usize, 10usize, 11usize),
         ];
         let mut released = false;
         for (bit, texture, first_map, last_map) in groups {
@@ -2975,6 +2978,9 @@ impl Engine {
             }
             if mask & BAKED_MAP_GROUP_C != 0 && self.maps[2].width != self.res {
                 requested.push(2usize);
+            }
+            if mask & BAKED_MAP_GROUP_D != 0 && self.maps[3].width != self.res {
+                requested.push(3usize);
             }
             if requested.is_empty() {
                 return true;
@@ -3045,7 +3051,7 @@ impl Engine {
         };
         maps.sort_by_key(|map| map.index);
         if maps.is_empty()
-            || maps.iter().any(|map| !matches!(map.index, 1 | 2))
+            || maps.iter().any(|map| !matches!(map.index, 1 | 2 | 3))
             || maps.windows(2).any(|pair| pair[0].index == pair[1].index)
         {
             self.bake_cache_key = None;
@@ -3095,7 +3101,11 @@ impl Engine {
             2 => {
                 queue.write_texture(tex.copy_info(), &[128, 255, 128, 128], Default::default(), tex.extent());
             }
-            _ => unreachable!("only packed maps B and C are evictable"),
+            3 => {
+                let half: [u16; 4] = [0, 0, 0x3800, 0];
+                queue.write_texture(tex.copy_info(), bytemuck::cast_slice(&half), Default::default(), tex.extent());
+            }
+            _ => unreachable!("only packed maps B, C and D are evictable"),
         }
         tex
     }

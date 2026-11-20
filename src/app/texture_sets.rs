@@ -130,8 +130,8 @@ impl PainterApp {
         }
     }
 
-    /// Keeps only the requested packed baked-map group resident across visible sets.
-    /// For example, an Edge Distance view needs B but not C; a Part Gradient view needs C.
+    /// Keeps only the requested packed baked-map groups resident across visible sets.
+    /// Edge Distance needs B, Part Gradient needs C, and baked Normal/Height needs D.
     pub(super) fn set_parked_baked_map_groups_resident(&mut self, requested_mask: u8) {
         if requested_mask != 0 {
             let _ = self.engine.ensure_baked_map_mask(requested_mask);

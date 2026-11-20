@@ -227,10 +227,13 @@ pub fn load_selected(key: &Key, requested: &[usize]) -> Option<Vec<CachedMapText
     let mut file = fs::File::open(&path).ok()?;
     let file_len = file.metadata().ok()?.len();
     if file_len > MAX_BYTES {
+        drop(file);
         let _ = fs::remove_file(&path);
         return None;
     }
-    match decode_selected_reader(&mut file, file_len, requested) {
+    let decoded = decode_selected_reader(&mut file, file_len, requested);
+    drop(file);
+    match decoded {
         Some(maps) => {
             if let Ok(f) = fs::File::options().write(true).open(&path) {
                 let _ = f.set_modified(std::time::SystemTime::now());

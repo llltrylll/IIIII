@@ -5491,7 +5491,7 @@ fn parked_baked_map_groups_release_and_restore_from_cache() {
     assert_eq!(engine.map_tex(2).width, 1);
     let bytes_after = engine.gpu_resource_breakdown().iter()
         .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
-    assert_eq!(bytes_before - bytes_after, (256 * 256 - 1) * 12, "B/C should retain only their 1x1 placeholders");
+    assert_eq!(bytes_before - bytes_after, (256 * 256 - 1) * 20, "B/C/D should retain only their 1x1 placeholders");
 
     assert!(!engine.ensure_baked_map_groups(), "first request starts the background cache restore");
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -5527,6 +5527,7 @@ fn parked_baked_map_groups_release_and_restore_from_cache() {
     assert!(engine.baked_map_mask_resident(crate::engine::BAKED_MAP_GROUP_B));
     assert_eq!(engine.map_tex(1).width, 256);
     assert_eq!(engine.map_tex(2).width, 1, "B-only residency must leave C evicted");
+    assert_eq!(engine.map_tex(3).width, 1, "B-only residency must leave D evicted");
     assert_eq!(engine.read_tex(engine.map_tex(1)), map_b_before);
 
     // Restoring Part Gradient/Bent Normal needs only C, not B.
@@ -5573,6 +5574,53 @@ fn parked_baked_map_groups_release_and_restore_from_cache() {
     assert_eq!(engine.map_tex(1).width, 1, "C-only restoration must leave B evicted");
     assert_eq!(engine.map_tex(2).width, 256);
     assert_eq!(engine.read_tex(engine.map_tex(2)), map_c_before);
+
+    // Baked Normal/Height is group D. It can be restored without bringing B
+    // back, and its neutral placeholder must preserve the default no-normal state.
+    assert!(!engine.ensure_baked_map_mask(crate::engine::BAKED_MAP_GROUP_D));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut restored_d_only = false;
+    while Instant::now() < deadline {
+        if engine.poll_baked_map_restore() {
+            restored_d_only = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(restored_d_only, "the D-only cache request should complete");
+    assert_eq!(engine.map_tex(1).width, 1, "D-only restoration must leave B evicted");
+    assert_eq!(engine.map_tex(2).width, 256);
+    assert_eq!(engine.map_tex(3).width, 256);
+
+    let all_resident_bytes = engine.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
+    assert!(engine.release_baked_map_mask(crate::engine::BAKED_MAP_GROUP_B));
+    let without_b_bytes = engine.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
+    assert_eq!(all_resident_bytes - without_b_bytes, (256 * 256 - 1) * 8);
+    assert!(engine.release_baked_map_mask(crate::engine::BAKED_MAP_GROUP_C));
+    let without_c_bytes = engine.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
+    assert_eq!(without_b_bytes - without_c_bytes, (256 * 256 - 1) * 4);
+    assert!(engine.release_baked_map_mask(crate::engine::BAKED_MAP_GROUP_D));
+    let without_d_bytes = engine.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
+    assert_eq!(without_c_bytes - without_d_bytes, (256 * 256 - 1) * 8);
+
+    assert!(!engine.ensure_baked_map_mask(crate::engine::BAKED_MAP_GROUP_C));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut restored_c_only_after_all_evicted = false;
+    while Instant::now() < deadline {
+        if engine.poll_baked_map_restore() {
+            restored_c_only_after_all_evicted = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(restored_c_only_after_all_evicted, "C should restore independently after all groups are evicted");
+    assert_eq!(engine.map_tex(1).width, 1);
+    assert_eq!(engine.map_tex(2).width, 256);
+    assert_eq!(engine.map_tex(3).width, 1);
 
     // A paint-only stack has no B/C dependency, so its next composite must
     // leave the groups evicted instead of restoring 48 MiB needlessly.
