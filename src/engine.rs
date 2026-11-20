@@ -1883,6 +1883,34 @@ impl Engine {
         self.thumbs.release_scratch();
     }
 
+    /// Releases world-space UV maps while this Texture Set is parked.
+    /// The built-in Material viewport does not sample them. Their bake key is
+    /// retained so restoring the same mesh/range does not invalidate the material.
+    pub(crate) fn release_surface_maps(&mut self) -> bool {
+        if self.pos.width == 1 && self.nrm.width == 1 && self.tan.width == 1 {
+            return false;
+        }
+        self.pos = Tex::new(&self.device, "parked position map", 1, 1, POS_FORMAT, LAYER_USAGE);
+        self.nrm = Tex::new(&self.device, "parked normal map", 1, 1, NRM_FORMAT, LAYER_USAGE);
+        self.tan = Tex::new(&self.device, "parked tangent map", 1, 1, TAN_FORMAT, LAYER_USAGE);
+        self.uv_version = self.uv_version.wrapping_add(1);
+        true
+    }
+
+    /// Ensures world-space UV maps exist. An unchanged bake does not invalidate
+    /// the already-correct material composite.
+    pub(crate) fn ensure_surface_maps(&mut self, mesh: &GpuMesh) {
+        let resident = self.pos.width == self.res
+            && self.nrm.width == self.res
+            && self.tan.width == self.res;
+        let same_bake = UvBakeKey::is_current(self.uv_baked.as_ref(), mesh.mesh_id, &self.tris, self.res);
+        if !resident {
+            self.bake_uv_internal(mesh, !same_bake);
+        } else if !same_bake {
+            self.bake_uv(mesh);
+        }
+    }
+
     fn ensure_composite_working_set(&mut self) {
         for i in 0..2 {
             if self.accum[i][0].width != self.res {
@@ -1901,9 +1929,10 @@ impl Engine {
         }
     }
 
-    pub(crate) fn restore_active_working_set(&mut self) {
+    pub(crate) fn restore_active_working_set(&mut self, mesh: &GpuMesh) {
         self.ensure_composite_working_set();
         self.ensure_stroke_target();
+        self.ensure_surface_maps(mesh);
     }
 
     /// Creates an engine for another mesh while reusing immutable GPU pipelines.
@@ -2471,7 +2500,16 @@ impl Engine {
     /// Rasterizes position and normal maps for the current mesh at the
     /// current resolution, with dilation past UV island borders.
     pub fn bake_uv(&mut self, mesh: &GpuMesh) {
+        self.bake_uv_internal(mesh, true);
+    }
+
+    fn bake_uv_internal(&mut self, mesh: &GpuMesh, invalidate_composite: bool) {
         self.apply_bg = None;
+        if self.pos.width != self.res || self.nrm.width != self.res || self.tan.width != self.res {
+            self.pos = Tex::new(&self.device, "position map", self.res, self.res, POS_FORMAT, LAYER_USAGE);
+            self.nrm = Tex::new(&self.device, "normal map", self.res, self.res, NRM_FORMAT, LAYER_USAGE);
+            self.tan = Tex::new(&self.device, "tangent map", self.res, self.res, TAN_FORMAT, LAYER_USAGE);
+        }
         // A mesh change can leave the range past the end; the app sets the
         // new range right after, and this draws nothing meanwhile.
         let tris = self.tris.start.min(mesh.index_count)..self.tris.end.min(mesh.index_count);
@@ -2530,8 +2568,10 @@ impl Engine {
         self.queue.submit([encoder.finish()]);
         self.uv_version += 1;
         self.uv_baked = Some(UvBakeKey { mesh_id: mesh.mesh_id, tris: self.tris.clone(), res: self.res });
-        self.mask_final.clear();
-        self.mark_dirty();
+        if invalidate_composite {
+            self.mask_final.clear();
+            self.mark_dirty();
+        }
     }
 
     pub fn bounds(&self) -> (Vec3, Vec3) {
@@ -2561,6 +2601,8 @@ impl Engine {
         self.tris = tris;
         if !repeat {
             self.bake_uv(mesh);
+        } else if self.pos.width != self.res || self.nrm.width != self.res || self.tan.width != self.res {
+            self.ensure_surface_maps(mesh);
         }
     }
 

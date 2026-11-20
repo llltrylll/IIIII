@@ -69,18 +69,45 @@ impl PainterApp {
         self.sets.parked.get_mut(k)?.as_mut().map(|p| &mut p.engine)
     }
 
+    /// Applies the world-space map residency policy to parked Texture Sets.
+    /// Maps remain resident only for views or live graphs that consume them.
+    pub(super) fn set_parked_surface_maps_resident(&mut self, resident: bool) {
+        let mesh = &self.gpu_mesh;
+        let docs = &self.graphs.docs;
+        let lib = &self.graphs.lib;
+        let views = &mut self.views;
+        let parked_sets = &mut self.sets.parked;
+        for (index, parked) in parked_sets.iter_mut().enumerate() {
+            let Some(parked) = parked else { continue };
+            let graph_needs_surface = super::graph_ui::engine_uses_surface_graph(&parked.engine, docs, lib);
+            let visible = !views.set_looks.get(index).is_some_and(|look| look.hidden);
+            if (resident && visible) || graph_needs_surface {
+                parked.engine.ensure_surface_maps(mesh);
+            } else if parked.engine.release_surface_maps() {
+                views.invalidate_texture_set_binding(index);
+            }
+        }
+    }
+
     /// Makes set `k` the one being edited.
     pub(super) fn switch_set(&mut self, k: usize) {
         if k == self.sets.active || self.stroke.is_some() {
             return;
         }
         let Some(mut p) = self.sets.parked.get_mut(k).and_then(Option::take) else { return };
+        let previous_active = self.sets.active;
+        let keep_surface_maps = super::graph_ui::engine_uses_surface_graph(
+            &p.engine, &self.graphs.docs, &self.graphs.lib,
+        );
         // A bake preview shows on the set being edited; the full bake comes back first.
         self.end_preview(true);
         self.engine.commit_props(&mut self.undo);
         std::mem::swap(&mut self.engine, &mut p.engine);
-        self.engine.restore_active_working_set();
+        self.engine.restore_active_working_set(&self.gpu_mesh);
         p.engine.release_inactive_working_set();
+        if !keep_surface_maps && p.engine.release_surface_maps() {
+            self.views.invalidate_texture_set_binding(previous_active);
+        }
         self.engine_epoch = self.engine_epoch.wrapping_add(1);
         std::mem::swap(&mut self.selected, &mut p.selected);
         std::mem::swap(&mut self.target, &mut p.target);
@@ -109,8 +136,10 @@ impl PainterApp {
 
     /// Composites every parked set when a synchronous operation needs final maps (export).
     pub(super) fn composite_parked(&mut self) {
+        let mesh = &self.gpu_mesh;
         for p in self.sets.parked.iter_mut().flatten() {
             if p.engine.dirty {
+                p.engine.ensure_surface_maps(mesh);
                 p.engine.composite();
                 p.engine.release_inactive_working_set();
             }
@@ -119,7 +148,9 @@ impl PainterApp {
 
     /// Spreads parked-set recomposition across frames during interactive use.
     pub(super) fn composite_parked_one(&mut self, ctx: &egui::Context) {
+        let mesh = &self.gpu_mesh;
         if let Some(p) = self.sets.parked.iter_mut().flatten().find(|p| p.engine.dirty) {
+            p.engine.ensure_surface_maps(mesh);
             p.engine.composite();
             p.engine.release_inactive_working_set();
             ctx.request_repaint();

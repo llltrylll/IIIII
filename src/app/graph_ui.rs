@@ -4,7 +4,7 @@
 //! saved graphs.
 
 use super::{Action, PainterApp, labeled, section, theme};
-use crate::engine::{Content, FillParams, MAPS};
+use crate::engine::{Content, Engine, FillParams, MAPS};
 use crate::gpu::Tex;
 use crate::graph::{self, Graph, Library, ParamKind, Runtime, Value};
 use crate::undo::StrokeTarget;
@@ -31,6 +31,33 @@ pub(super) struct GraphDoc {
     /// A folder's live graph as last brought in line with its layers: what
     /// differs since are the artist's edits.
     pub(super) seen: Option<Graph>,
+}
+
+/// Whether an Engine has a live graph-backed layer or mask that reads the
+/// world-space Surface input. Such maps must stay resident because parked
+/// graph evaluation happens before the viewport renders.
+pub(super) fn engine_uses_surface_graph(engine: &Engine, docs: &[GraphDoc], lib: &Library) -> bool {
+    let graph_uses_surface = |id: u64| {
+        docs.iter()
+            .find(|doc| doc.id == id && !doc.shading)
+            .is_some_and(|doc| {
+                doc.graph.nodes.iter().any(|node| {
+                    lib.find(&node.def).is_some_and(|definition| definition.surface)
+                })
+            })
+    };
+    engine.layers.iter().any(|layer| {
+        let fill_uses_surface = if let Content::Fill(fill) = &layer.content {
+            layer.images.iter().all(Option::is_none)
+                && fill.graph.is_some_and(|id| graph_uses_surface(id))
+        } else {
+            false
+        };
+        let mask_uses_surface = layer.mask.as_ref()
+            .and_then(|mask| mask.graph)
+            .is_some_and(|id| graph_uses_surface(id));
+        fill_uses_surface || mask_uses_surface
+    })
 }
 
 /// The floating add-node menu: where it opened (canvas units and screen)

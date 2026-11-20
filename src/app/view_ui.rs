@@ -407,6 +407,12 @@ impl PainterApp {
         }
     }
 
+    /// Whether the current 3D preview samples world-space position/normal maps.
+    fn parked_surface_maps_needed(&self) -> bool {
+        matches!(self.view.mode, ViewMode::WorldNormal | ViewMode::Position)
+            || (self.view.mode == ViewMode::Material && self.views.has_custom_shader())
+    }
+
     /// One viewport (a dock tab): input, the GPU render at the tab's size,
     /// overlays and the brush cursor.
     pub(super) fn view_pane(&mut self, ui: &mut egui::Ui, kind: ViewKind) {
@@ -462,6 +468,8 @@ impl PainterApp {
         match kind {
             ViewKind::V3d => {
                 self.views.set_looks = self.set_looks(ui.ctx());
+                let needs_surface_maps = self.parked_surface_maps_needed();
+                self.set_parked_surface_maps_resident(needs_surface_maps);
                 let engines = texture_sets::engines(&self.engine, &self.sets, self.mesh.sets.len());
                 {
                     let _s = crate::startup_trace::span("app viewport: 3D render call");
@@ -699,6 +707,9 @@ impl PainterApp {
         self.update_poly_highlight();
         if !self.drew_3d {
             let size = self.views.view3d.size;
+            self.views.set_looks = self.set_looks(ctx);
+            let needs_surface_maps = self.parked_surface_maps_needed();
+            self.set_parked_surface_maps_resident(needs_surface_maps);
             let engines = texture_sets::engines(&self.engine, &self.sets, self.mesh.sets.len());
             {
                 let _s = crate::startup_trace::span("app viewport: fallback 3D render call");

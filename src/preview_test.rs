@@ -5392,3 +5392,80 @@ fn first_paint_pass_lazily_captures_undo_before_snapshot() {
     let redone = read_texture(&rs.device, &rs.queue, engine.final_tex(0));
     assert_eq!(redone, painted, "Redo must restore the exact painted texture");
 }
+
+/// Parked world-space UV maps can be evicted without changing the Material
+/// viewport, then reconstructed exactly when a view or operation needs them.
+#[test]
+#[ignore]
+fn parked_surface_maps_release_and_restore_without_visual_changes() {
+    use crate::mesh::set_tests::split_plane;
+    use crate::viewport::SetLook;
+
+    let mesh = split_plane();
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let bounds = (mesh.bounds_min, mesh.bounds_max);
+    let first = mesh.sets[0].index_range();
+    let second = mesh.sets[1].index_range();
+
+    let mut engine_a = Engine::new(&rs, &gpu_mesh, bounds, 128);
+    engine_a.set_triangles(first, &gpu_mesh);
+    engine_a.composite();
+    let mut engine_b = engine_a.sibling(&gpu_mesh, second, 128);
+    engine_b.composite();
+
+    let pos_before = engine_b.read_tex(&engine_b.surface_maps().0);
+    let nrm_before = engine_b.read_tex(&engine_b.surface_maps().1);
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+    let mut views = ViewRenderer::new(&rs);
+    let size = [320, 240];
+    let cam = OrbitCam::default();
+    let mut settings = ViewSettings::default();
+
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    let material_before = read_texture(&rs.device, &rs.queue, views.view3d.display_texture());
+
+    settings.mode = ViewMode::Position;
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    let position_before = read_texture(&rs.device, &rs.queue, views.view3d.display_texture());
+
+    engine_b.release_inactive_working_set();
+    let bytes_before = engine_b.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "surface maps").map(|(_, bytes)| *bytes).unwrap();
+    assert!(engine_b.release_surface_maps());
+    let bytes_after = engine_b.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "surface maps").map(|(_, bytes)| *bytes).unwrap();
+    assert!(bytes_after < bytes_before, "parked surface maps must release GPU memory");
+    assert_eq!(engine_b.surface_maps().0.width, 1);
+    assert_eq!(engine_b.surface_maps().1.width, 1);
+    views.invalidate_texture_set_binding(1);
+
+    settings.mode = ViewMode::Material;
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    let material_after = read_texture(&rs.device, &rs.queue, views.view3d.display_texture());
+    assert_eq!(material_after, material_before);
+
+    engine_b.restore_active_working_set(&gpu_mesh);
+    assert!(!engine_b.dirty, "restoring unchanged surface maps must not dirty the composite");
+    assert_eq!(engine_b.surface_maps().0.width, 128);
+    assert_eq!(engine_b.surface_maps().1.width, 128);
+    assert_eq!(engine_b.read_tex(&engine_b.surface_maps().0), pos_before);
+    assert_eq!(engine_b.read_tex(&engine_b.surface_maps().1), nrm_before);
+
+    settings.mode = ViewMode::Position;
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    let position_after = read_texture(&rs.device, &rs.queue, views.view3d.display_texture());
+    assert_eq!(position_after, position_before);
+
+    views.set_looks = vec![SetLook::default(); 2];
+    settings.mode = ViewMode::Material;
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    assert!(views.has_texture_set_binding(1));
+    views.set_looks[1].hidden = true;
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    assert!(views.has_texture_set_binding(1));
+    assert!(engine_b.release_surface_maps());
+    views.invalidate_texture_set_binding(1);
+    assert!(!views.has_texture_set_binding(1));
+}
