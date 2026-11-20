@@ -4821,6 +4821,17 @@ fn bloom_glows_around_red_emission() {
     let n = halo(&glow);
     println!("  default strength {strength}: {n} background pixels glow red");
     assert!(n > 3000, "red emission blooms onto the background at the default settings ({n})");
+
+    // Exercise target replacement while the cached post/Bloom bind groups exist,
+    // then return to the original dimensions and require identical pixels.
+    drop(frame);
+    let mut resize_settings = ViewSettings::default();
+    resize_settings.post.bloom = 1.0;
+    views.render_3d(&rs, [384, 384], &[&engine], &env, &gpu_mesh, &cam, &resize_settings, None);
+    let _resized = read_texture(&rs.device, &rs.queue, views.view3d.image());
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &resize_settings, None);
+    let restored = read_texture(&rs.device, &rs.queue, views.view3d.image());
+    assert_eq!(restored, glow, "post-processing output changed after viewport target resize");
 }
 
 /// Emission: a fill that emits fills the final emission texture, a stroke
