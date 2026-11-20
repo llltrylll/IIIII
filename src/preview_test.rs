@@ -5483,6 +5483,7 @@ fn parked_baked_map_groups_release_and_restore_from_cache() {
 
     let map_b_before = engine.read_tex(engine.map_tex(1));
     let map_c_before = engine.read_tex(engine.map_tex(2));
+    let map_d_before = engine.read_tex(engine.map_tex(3));
     let bytes_before = engine.gpu_resource_breakdown().iter()
         .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
 
@@ -5591,6 +5592,7 @@ fn parked_baked_map_groups_release_and_restore_from_cache() {
     assert_eq!(engine.map_tex(1).width, 1, "D-only restoration must leave B evicted");
     assert_eq!(engine.map_tex(2).width, 256);
     assert_eq!(engine.map_tex(3).width, 256);
+    assert_eq!(engine.read_tex(engine.map_tex(3)), map_d_before);
 
     let all_resident_bytes = engine.gpu_resource_breakdown().iter()
         .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
@@ -5640,5 +5642,6 @@ fn parked_baked_map_groups_release_and_restore_from_cache() {
     assert!(engine.baked_map_groups_resident());
     assert_eq!(engine.read_tex(engine.map_tex(1)), map_b_before);
     assert_eq!(engine.read_tex(engine.map_tex(2)), map_c_before);
+    assert_eq!(engine.read_tex(engine.map_tex(3)), map_d_before);
 }
 

@@ -136,11 +136,24 @@ impl PainterApp {
         if requested_mask != 0 {
             let _ = self.engine.ensure_baked_map_mask(requested_mask);
         }
+        // RayTracer builds one texture array for every set, including sets hidden
+        // in the raster viewport. Keep D resident for those sets while the
+        // path tracer is sampling baked normals.
+        let raytracer_needs_hidden_baked_maps = self.rt.enabled
+            && self.view.mode == crate::viewport::ViewMode::Material
+            && self.view.use_baked_normal
+            && requested_mask & crate::engine::BAKED_MAP_GROUP_D != 0;
         let views = &mut self.views;
         for (index, parked) in self.sets.parked.iter_mut().enumerate() {
             let Some(parked) = parked else { continue };
             let visible = !views.set_looks.get(index).is_some_and(|look| look.hidden);
-            let required = if visible { requested_mask } else { 0 };
+            let required = if visible {
+                requested_mask
+            } else if raytracer_needs_hidden_baked_maps {
+                requested_mask & crate::engine::BAKED_MAP_GROUP_D
+            } else {
+                0
+            };
             let release = BAKED_MAP_GROUP_ALL & !required;
             if required != 0 {
                 let _ = parked.engine.ensure_baked_map_mask(required);

@@ -469,7 +469,7 @@ impl PainterApp {
         if kind == ViewKind::V3d {
             self.set_parked_surface_maps_resident(needs_parked_surface_maps);
             // Restore only the packed group sampled by the selected map view.
-            // Custom material graphs conservatively retain both B and C.
+            // Custom material graphs conservatively retain all evictable groups.
             let needs_parked_baked_map_groups = if self.view.mode == ViewMode::Material && self.views.has_custom_shader() {
                 crate::engine::BAKED_MAP_GROUP_ALL
             } else {
@@ -491,12 +491,17 @@ impl PainterApp {
         // The UV panel shows only the active Texture Set; restore only the
         // packed group represented by the selected map preview.
         if kind == ViewKind::V2d {
-            let uv_map_mask = match self.view.uv_mode {
+            let mut uv_map_mask = match self.view.uv_mode {
                 ViewMode::Map(4..=7) => crate::engine::BAKED_MAP_GROUP_B,
                 ViewMode::Map(8..=9) => crate::engine::BAKED_MAP_GROUP_C,
                 ViewMode::Map(10..=11) => crate::engine::BAKED_MAP_GROUP_D,
                 _ => 0,
             };
+            if self.view.use_baked_normal
+                && matches!(self.view.uv_mode, ViewMode::Material | ViewMode::Normal)
+            {
+                uv_map_mask |= crate::engine::BAKED_MAP_GROUP_D;
+            }
             if uv_map_mask != 0 {
                 let _ = self.engine.ensure_baked_map_mask(uv_map_mask);
             }

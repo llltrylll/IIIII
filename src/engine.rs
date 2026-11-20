@@ -2916,7 +2916,7 @@ impl Engine {
         self.mark_dirty();
     }
 
-    /// Whether the requested subset of packed B/C maps is fully resident.
+    /// Whether the requested subset of packed baked-map groups B/C/D is fully resident.
     pub(crate) fn baked_map_mask_resident(&self, mask: u8) -> bool {
         (mask & BAKED_MAP_GROUP_B == 0 || self.maps[1].width == self.res)
             && (mask & BAKED_MAP_GROUP_C == 0 || self.maps[2].width == self.res)
@@ -2963,7 +2963,7 @@ impl Engine {
         self.release_baked_map_mask(BAKED_MAP_GROUP_ALL)
     }
 
-    /// Starts a background cache read for only the requested missing B/C maps.
+    /// Starts a background cache read for only the requested missing baked-map groups.
     /// The worker decompresses precisely the packed groups the current view needs.
     pub(crate) fn ensure_baked_map_mask(&mut self, mask: u8) -> bool {
         let mask = mask & BAKED_MAP_GROUP_ALL;
@@ -2999,7 +2999,7 @@ impl Engine {
         false
     }
 
-    /// Ensures both packed groups B/C are resident (used by export and full snapshots).
+    /// Ensures every evictable packed map group is resident (used by export and full snapshots).
     pub(crate) fn ensure_baked_map_groups(&mut self) -> bool {
         self.ensure_baked_map_mask(BAKED_MAP_GROUP_ALL)
     }
@@ -3009,6 +3009,7 @@ impl Engine {
         if self.ensure_baked_map_mask(mask) {
             return true;
         }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             if self.poll_baked_map_restore() && self.baked_map_mask_resident(mask) {
                 return true;
@@ -3023,6 +3024,9 @@ impl Engine {
                     return false;
                 }
             }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
@@ -3031,7 +3035,7 @@ impl Engine {
         self.ensure_baked_map_mask_blocking(BAKED_MAP_GROUP_ALL)
     }
 
-    /// Polls a selective cache read and uploads only the returned groups.
+    /// Polls a selective cache read and uploads only the returned baked-map groups.
     /// Lower-resolution cached bakes are resampled to this Texture Set's resolution.
     pub(crate) fn poll_baked_map_restore(&mut self) -> bool {
         let result = match self.baked_map_restore_rx.as_ref() {
