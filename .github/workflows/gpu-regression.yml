@@ -95,6 +95,9 @@ jobs:
       - name: GPU viewport - cached image invalidation
         run: "cargo test --locked --bin material_painter preview_test::viewport_cache_reuses_unchanged_images_and_invalidates_changes -- --ignored --exact --nocapture --test-threads 1"
 
+      - name: GPU viewport - post-processing cache survives Bloom toggle and resize
+        run: "cargo test --locked --bin material_painter preview_test::bloom_glows_around_red_emission -- --ignored --exact --nocapture --test-threads 1"
+
       - name: GPU viewport - custom shading graph previews
         run: "cargo test --locked --bin material_painter preview_test::preview_shaders_compile_and_render -- --ignored --exact --nocapture --test-threads 1"
 
