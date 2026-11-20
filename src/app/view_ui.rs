@@ -467,6 +467,16 @@ impl PainterApp {
             && (matches!(self.view.mode, ViewMode::WorldNormal | ViewMode::Position)
                 || (self.view.mode == ViewMode::Material && self.views.has_custom_shader()));
         self.set_parked_surface_maps_resident(needs_parked_surface_maps);
+        // Packed baked groups B/C are needed by these mesh-map views and by
+        // custom material graphs, but not by the built-in Material viewport.
+        let needs_baked_map_groups = match kind {
+            ViewKind::V3d => {
+                matches!(self.view.mode, ViewMode::Map(4..=9))
+                    || (self.view.mode == ViewMode::Material && self.views.has_custom_shader())
+            }
+            ViewKind::V2d => matches!(self.view.uv_mode, ViewMode::Map(4..=9)),
+        };
+        self.set_parked_baked_map_groups_resident(needs_baked_map_groups);
 
         let size = [(rect.width() * self.ppp).round() as u32, (rect.height() * self.ppp).round() as u32];
         let mut rt_view = None;
@@ -645,6 +655,7 @@ impl PainterApp {
     /// After every view drew: strokes end when the button is released, and
     /// the 3D depth the brush reads stays valid when no 3D view is showing.
     pub(super) fn views_end_frame(&mut self, ctx: &egui::Context) {
+        self.poll_baked_map_restores(ctx);
         if let Some((forced_composite, stamp_ms, apply_ms, composite_ms, composite_total_ms, composite_clear_ms, composite_body_ms, pass_times)) =
             self.engine.poll_gpu_stroke_times()
         {
