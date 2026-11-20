@@ -469,14 +469,15 @@ impl PainterApp {
         self.set_parked_surface_maps_resident(needs_parked_surface_maps);
         // Packed baked groups B/C are needed by these mesh-map views and by
         // custom material graphs, but not by the built-in Material viewport.
-        let needs_baked_map_groups = match kind {
-            ViewKind::V3d => {
-                matches!(self.view.mode, ViewMode::Map(4..=9))
-                    || (self.view.mode == ViewMode::Material && self.views.has_custom_shader())
-            }
-            ViewKind::V2d => matches!(self.view.uv_mode, ViewMode::Map(4..=9)),
-        };
-        self.set_parked_baked_map_groups_resident(needs_baked_map_groups);
+        let needs_parked_baked_map_groups = kind == ViewKind::V3d
+            && (matches!(self.view.mode, ViewMode::Map(4..=9))
+                || (self.view.mode == ViewMode::Material && self.views.has_custom_shader()));
+        self.set_parked_baked_map_groups_resident(needs_parked_baked_map_groups);
+        // The UV panel shows only the active Texture Set; do not re-reside all
+        // parked sets just because its map preview needs B/C.
+        if kind == ViewKind::V2d && matches!(self.view.uv_mode, ViewMode::Map(4..=9)) {
+            let _ = self.engine.ensure_baked_map_groups();
+        }
 
         let size = [(rect.width() * self.ppp).round() as u32, (rect.height() * self.ppp).round() as u32];
         let mut rt_view = None;
