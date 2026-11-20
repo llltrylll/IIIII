@@ -511,7 +511,7 @@ pub fn clear() {
         .unwrap_or_default();
     for (path, ..) in entries() {
         let key = path.file_stem().and_then(|stem| stem.to_str());
-        if !key.is_some_and(|key| pinned.contains(key)) {
+        if !key.is_some_and(|key| pinned.contains_key(key)) {
             let _ = fs::remove_file(path);
         }
     }
