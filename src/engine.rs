@@ -1467,6 +1467,8 @@ pub struct Engine {
     pub has_bake: bool,
     /// Disk-cache identity for the baked maps; only cache-loaded bakes are evictable.
     bake_cache_key: Option<crate::bake_cache::Key>,
+    /// Keeps the cache file alive while this Engine may need to restore B/C.
+    _bake_cache_pin: Option<crate::bake_cache::CachePin>,
     /// Pending background read of evicted packed map groups B and C.
     baked_map_restore_rx: Option<mpsc::Receiver<Option<Vec<crate::bake_cache::CachedMapTexture>>>>,
     /// Bumped whenever the mesh maps (or their levels and fixes) change.
@@ -2013,6 +2015,7 @@ impl Engine {
             maps_dirty: true,
             has_bake: false,
             bake_cache_key: None,
+            _bake_cache_pin: None,
             baked_map_restore_rx: None,
             maps_version: 0,
             uv_version: 0,
@@ -2722,6 +2725,7 @@ impl Engine {
     /// Back to the neutral maps of a document that was never baked.
     pub fn clear_maps(&mut self) {
         self.bake_cache_key = None;
+        self._bake_cache_pin = None;
         self.baked_map_restore_rx = None;
         self.custom.clear();
         self.custom_ids.clear();
@@ -2762,11 +2766,13 @@ impl Engine {
         key: crate::bake_cache::Key,
     ) {
         self.set_maps(baked, report);
+        self._bake_cache_pin = Some(crate::bake_cache::pin(&key));
         self.bake_cache_key = Some(key);
     }
 
     pub fn set_maps(&mut self, baked: BakedMaps, report: Arc<BakeReport>) {
         self.bake_cache_key = None;
+        self._bake_cache_pin = None;
         self.baked_map_restore_rx = None;
         // Bakes stop at `bake::MAX_BAKE_RES`; bigger texture sets get them upscaled.
         let mut encoder = self.device.create_command_encoder(&Default::default());
