@@ -1490,6 +1490,10 @@ pub struct Engine {
     pub last_mask_cache_hits: u32,
     pub last_mask_cache_misses: u32,
     pub last_mask_gpu_passes: u32,
+    /// Procedural fill roughness FBM cache activity from the most recent composite.
+    pub last_fill_roughness_cache_hits: u32,
+    pub last_fill_roughness_cache_misses: u32,
+    pub last_fill_roughness_cache_gpu_passes: u32,
     /// IDs whose final filtered mask texture currently holds valid contents.
     mask_final: HashSet<u64>,
     pub bake_report: Option<Arc<BakeReport>>,
@@ -1974,6 +1978,9 @@ impl Engine {
             last_mask_cache_hits: 0,
             last_mask_cache_misses: 0,
             last_mask_gpu_passes: 0,
+            last_fill_roughness_cache_hits: 0,
+            last_fill_roughness_cache_misses: 0,
+            last_fill_roughness_cache_gpu_passes: 0,
             mask_final: HashSet::new(),
             bake_report: None,
             edge_max: 0.2,
@@ -4993,6 +5000,7 @@ impl Engine {
         // cheap multiplier in the main layer pass and can change without a rebake.
         let mut roughness_noise_needed = HashSet::new();
         let mut roughness_noise_misses: Vec<(usize, u64)> = Vec::new();
+        let mut roughness_noise_hits = 0u32;
         for (slot, pass) in passes.iter().enumerate() {
             let Pass::Layer(li) = *pass else { continue };
             let layer = &self.layers[li];
@@ -5010,6 +5018,7 @@ impl Engine {
             let current = self.fill_roughness_noise.get(&layer.id)
                 .is_some_and(|cache| cache.key == key && cache.texture.width == self.res);
             if current {
+                roughness_noise_hits += 1;
                 continue;
             }
             self.fill_roughness_noise.insert(layer.id, FillRoughnessNoiseCache {
@@ -5021,6 +5030,9 @@ impl Engine {
         self.fill_roughness_noise.retain(|id, cache| {
             roughness_noise_needed.contains(id) && cache.texture.width == self.res
         });
+        self.last_fill_roughness_cache_hits = roughness_noise_hits;
+        self.last_fill_roughness_cache_misses = roughness_noise_misses.len() as u32;
+        self.last_fill_roughness_cache_gpu_passes = roughness_noise_misses.len() as u32;
 
         // Cached mask sources get an extra uniform slot after the layer passes.
         // Filtered masks run their filter stack after the source; generator-only
