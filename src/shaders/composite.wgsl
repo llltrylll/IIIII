@@ -295,22 +295,18 @@ fn fs_mask_source(in: FsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(layer_mask(c, uv), 0.0, 0.0, 1.0);
 }
 
-// Generate one stable Fill variation field per pass. Keeping one FBM per
-// entry point avoids a much larger shader pipeline on integrated GPUs.
+// One FBM evaluation per prepass. varc.z selects the exact input transform
+// for color or roughness, keeping the compiled pipeline small on integrated GPUs.
 @fragment
-fn fs_fill_color_noise(in: FsOut) -> @location(0) f32 {
+fn fs_fill_variation_noise(in: FsOut) -> @location(0) f32 {
     let c = vec2<i32>(in.pos.xy);
     let p = textureLoad(pos_map, c, 0).xyz;
     let seed = vec3<f32>(u.var1.x * 13.7);
-    return fbm(p * u.var0.y + seed);
-}
-
-@fragment
-fn fs_fill_roughness_noise(in: FsOut) -> @location(0) f32 {
-    let c = vec2<i32>(in.pos.xy);
-    let p = textureLoad(pos_map, c, 0).xyz;
-    let seed = vec3<f32>(u.var1.x * 13.7);
-    return fbm(p * u.var0.y * 1.7 + seed + vec3<f32>(5.2));
+    var q = p * u.var0.y + seed;
+    if (u.varc.z > 0.5) {
+        q = p * u.var0.y * 1.7 + seed + vec3<f32>(5.2);
+    }
+    return fbm(q);
 }
 
 @fragment
