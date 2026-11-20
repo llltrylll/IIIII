@@ -1555,6 +1555,8 @@ pub struct Engine {
     mask_filter_ubuf_slots: u64,
     /// Reused CPU staging for per-composite mask-filter uniforms.
     mask_filter_uniform_scratch: Vec<u8>,
+    /// Reused CPU list of filter/combine steps for the mask pass encoder.
+    mask_filter_steps_scratch: Vec<[f32; 8]>,
     /// Disjoint UV-space rectangles changed by the active stroke, in texels.
     /// Multiple scissors keep distant UV islands from forcing one large bbox.
     stroke_regions: Vec<[u32; 4]>,
@@ -1837,6 +1839,8 @@ impl Engine {
         self.layer_uniform_scratch.shrink_to_fit();
         self.mask_filter_uniform_scratch.clear();
         self.mask_filter_uniform_scratch.shrink_to_fit();
+        self.mask_filter_steps_scratch.clear();
+        self.mask_filter_steps_scratch.shrink_to_fit();
         self.apply_bg = None;
         // Cached stamp bind groups retain views such as the last viewport depth target.
         // A parked Engine won't paint; recreate these lazily on its next stroke.
@@ -2048,6 +2052,7 @@ impl Engine {
             }),
             mask_filter_ubuf_slots: INITIAL_MASK_FILTER_STEPS,
             mask_filter_uniform_scratch: Vec::new(),
+            mask_filter_steps_scratch: Vec::new(),
             stroke_regions: Vec::new(),
             region_unknown: false,
             generation: 0,
@@ -5195,7 +5200,8 @@ impl Engine {
             self.mask_scratch = Some([t(), t(), t()]);
         }
         // Filter steps' uniforms, written up front: (kind, a, b, c), (dir x, dir y, scale).
-        let mut steps: Vec<[f32; 8]> = Vec::new();
+        let mut steps = std::mem::take(&mut self.mask_filter_steps_scratch);
+        steps.clear();
         let mut layer_ops: HashMap<usize, Vec<MaskOp>> = HashMap::new();
         let mut layer_op_labels: HashMap<usize, Vec<String>> = HashMap::new();
         for &li in source_slot.keys() {
@@ -5260,6 +5266,7 @@ impl Engine {
         }
         self.queue.write_buffer(&self.mask_filter_ubuf, 0, &sdata);
         self.mask_filter_uniform_scratch = sdata;
+        self.mask_filter_steps_scratch = steps;
 
         // While painting, everything below the painted layer is unchanged:
         // start at its pass from the kept prefix instead of the bottom.
