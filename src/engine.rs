@@ -5008,7 +5008,7 @@ impl Engine {
         // position map, variation scale and seed; channel amounts and per-part
         // variation remain cheap controls in the main layer pass.
         let mut variation_noise_needed = HashSet::new();
-        let mut variation_noise_misses: Vec<(usize, u64)> = Vec::new();
+        let mut variation_noise_misses: Vec<(usize, u64, bool)> = Vec::new();
         let mut variation_noise_hits = 0u32;
         for (slot, pass) in passes.iter().enumerate() {
             let Pass::Layer(li) = *pass else { continue };
@@ -5053,7 +5053,9 @@ impl Engine {
             }
         }
         self.fill_variation_noise.retain(|id, cache| {
-            variation_noise_needed.contains(id) && cache.texture.width == self.res
+            variation_noise_needed.contains(id)
+                && cache.color.as_ref().is_none_or(|texture| texture.width == self.res)
+                && cache.roughness.as_ref().is_none_or(|texture| texture.width == self.res)
         });
         self.last_fill_variation_cache_hits = variation_noise_hits;
         self.last_fill_variation_cache_misses = variation_noise_needed.len() as u32 - variation_noise_hits;
