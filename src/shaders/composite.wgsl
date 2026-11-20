@@ -23,6 +23,7 @@ struct LayerU {
     emis: vec4<f32>,        // fill emission (sRGB rgb), emission channel enable
     ns: vec4<f32>,          // normal image strength, normal channel enable, fill specular, specular channel enable
     gids: array<vec4<f32>, 7>, // more ID mask colors (rgb), 1 in w when in use
+    varc: vec4<f32>,         // procedural roughness noise cache enabled
 };
 
 @group(0) @binding(0) var<uniform> u: LayerU;
@@ -51,7 +52,8 @@ struct LayerU {
 @group(0) @binding(23) var l_normal: texture_2d<f32>;  // the layer's normals (paint) or normal-map image (fill)
 @group(0) @binding(24) var prev_spec: texture_2d<f32>;
 @group(0) @binding(25) var l_spec: texture_2d<f32>;  // the layer's specular (paint) or specular image (fill)
-@group(0) @binding(26) var tan_map: texture_2d<f32>;  // tangent (xyz) and bitangent sign (w), encoded 0..1
+@group(0) @binding(26) var tan_map: texture_2d<f32>;
+@group(0) @binding(27) var fill_roughness_noise: texture_2d<f32>;  // tangent (xyz) and bitangent sign (w), encoded 0..1
 
 fn weight(i: i32) -> f32 {
     var w = u.gw;
@@ -292,6 +294,18 @@ fn fs_mask_source(in: FsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(layer_mask(c, uv), 0.0, 0.0, 1.0);
 }
 
+// Precompute the expensive 5-octave roughness variation once per fill
+// layer. The cache key is owned by Engine and includes scale, seed, UV-map
+// revision and resolution; the ordinary layer pass then performs one texel load
+// instead of evaluating 40 lattice hashes for every texel on every composite.
+@fragment
+fn fs_fill_roughness_noise(in: FsOut) -> @location(0) f32 {
+    let c = vec2<i32>(in.pos.xy);
+    let p = textureLoad(pos_map, c, 0).xyz;
+    let seed = vec3<f32>(u.var1.x * 13.7);
+    return fbm(p * u.var0.y * 1.7 + seed + vec3<f32>(5.2));
+}
+
 @fragment
 fn fs_layer(in: FsOut) -> AccumOut {
     let c = vec2<i32>(in.pos.xy);
@@ -419,7 +433,16 @@ fn fs_layer(in: FsOut) -> AccumOut {
         let part = textureSampleLevel(map_b, samp, uv, 0.0).a;
         let vs = u.var0.y;
         sc = fill_variation(sc, 0, p, u.var0.x, vs, u.var1.x, u.var1.y, part);
-        sr = fill_variation(vec3<f32>(sr), 1, p, u.var0.z, vs, u.var1.x, u.var1.y, part).x;
+        if (u.varc.x > 0.5) {
+            // Same 5-octave FBM value as fill_variation(), precomputed for this
+            // stable layer. Keep part variation in this pass because it is cheap
+            // and remains a separate, independently adjustable control.
+            let noise = textureLoad(fill_roughness_noise, c, 0).r;
+            let part_delta = select(0.0, (fract(part * 7.31) - 0.5) * u.var1.y * 0.6, u.var1.y != 0.0);
+            sr = clamp(sr + (noise - 0.5) * u.var0.z + part_delta, 0.0, 1.0);
+        } else {
+            sr = fill_variation(vec3<f32>(sr), 1, p, u.var0.z, vs, u.var1.x, u.var1.y, part).x;
+        }
         sh = fill_variation(vec3<f32>(sh), 3, p, u.var0.w, vs, u.var1.x, 0.0, part).x;
     }
 
