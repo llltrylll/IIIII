@@ -344,7 +344,7 @@ impl PainterApp {
                             if ui.button("Stop and keep partial result").clicked() {
                                 if let Some(report) = crate::startup_trace::stop_capture() {
                                     self.technical_ui.capture_report = Some(format!(
-                                        "{}\\n\\nTEST CONTEXT\\nbuild_profile={}\\n{}",
+                                        "{}\n\nTEST CONTEXT\nbuild_profile={}\n{}",
                                         report,
                                         if cfg!(debug_assertions) { "debug (not suitable for FPS comparison)" } else { "release" },
                                         self.technical_report(),
