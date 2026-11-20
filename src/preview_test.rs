@@ -1274,8 +1274,23 @@ fn fill_variation_noise_cache_matches_inline_and_invalidates_on_change() {
     let expected_color = read_texture(&rs.device, &rs.queue, reference.final_tex(0));
     let actual_roughness = read_texture(&rs.device, &rs.queue, cached.final_tex(1));
     let expected_roughness = read_texture(&rs.device, &rs.queue, reference.final_tex(1));
-    assert_eq!(actual_color, expected_color, "cached color FBM must match the inline evaluation exactly");
-    assert_eq!(actual_roughness, expected_roughness, "cached roughness FBM must match the inline evaluation exactly");
+    // The cached FBM fields are stored in R16Float while the inline path
+    // keeps the procedural value in f32. After the final 8-bit readback this
+    // can move an individual color/roughness byte by one LSB; larger changes
+    // indicate a real mismatch. Cache hits above must still remain identical.
+    let assert_within_one_lsb = |actual: &[u8], expected: &[u8], label: &str| {
+        assert_eq!(actual.len(), expected.len(), "{label}: output sizes differ");
+        let max_delta = actual.iter().zip(expected)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_delta <= 1,
+            "{label}: cached FBM differs from inline evaluation by up to {max_delta} 8-bit levels"
+        );
+    };
+    assert_within_one_lsb(&actual_color, &expected_color, "cached color FBM");
+    assert_within_one_lsb(&actual_roughness, &expected_roughness, "cached roughness FBM");
 
     rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 }
