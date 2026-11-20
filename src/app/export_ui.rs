@@ -291,13 +291,15 @@ impl PainterApp {
                 .map(|set| set.name.clone())
                 .unwrap_or_else(|| format!("set {index}"));
             if index == self.sets.active {
+                // Export snapshots read all baked maps and the surface maps even
+                // when the final material composite is already clean.
+                if !self.engine.ensure_baked_map_groups_blocking() {
+                    return Err(format!(
+                        "Texture Set {set_name}: baked mesh maps could not be restored; export was cancelled."
+                    ));
+                }
+                self.engine.ensure_surface_maps(gpu_mesh);
                 if self.engine.dirty {
-                    if !self.engine.ensure_baked_map_groups_blocking() {
-                        return Err(format!(
-                            "Texture Set {set_name}: baked mesh maps could not be restored; export was cancelled."
-                        ));
-                    }
-                    self.engine.ensure_surface_maps(gpu_mesh);
                     self.engine.composite();
                     if self.engine.dirty {
                         return Err(format!(
@@ -305,22 +307,27 @@ impl PainterApp {
                         ));
                     }
                 }
-            } else if let Some(parked) = self.sets.parked.get_mut(index).and_then(Option::as_mut)
-                && parked.engine.dirty
-            {
+            } else {
+                let Some(parked) = self.sets.parked.get_mut(index).and_then(Option::as_mut) else {
+                    return Err(format!(
+                        "Texture Set {set_name}: Engine is not resident; export was cancelled."
+                    ));
+                };
                 if !parked.engine.ensure_baked_map_groups_blocking() {
                     return Err(format!(
                         "Texture Set {set_name}: baked mesh maps could not be restored; export was cancelled."
                     ));
                 }
                 parked.engine.ensure_surface_maps(gpu_mesh);
-                parked.engine.composite();
                 if parked.engine.dirty {
-                    return Err(format!(
-                        "Texture Set {set_name}: recomposition did not complete; export was cancelled."
-                    ));
+                    parked.engine.composite();
+                    if parked.engine.dirty {
+                        return Err(format!(
+                            "Texture Set {set_name}: recomposition did not complete; export was cancelled."
+                        ));
+                    }
+                    parked.engine.release_inactive_working_set();
                 }
-                parked.engine.release_inactive_working_set();
             }
         }
 
