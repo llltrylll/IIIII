@@ -5365,3 +5365,64 @@ fn first_paint_pass_lazily_captures_undo_before_snapshot() {
     let redone = read_texture(&rs.device, &rs.queue, engine.final_tex(0));
     assert_eq!(redone, painted, "Redo must restore the exact painted texture");
 }
+
+/// Parked world-space UV targets can be evicted without changing the multi-set
+/// Material viewport, then regenerated exactly for Position/World Normal views.
+#[test]
+#[ignore]
+fn parked_surface_maps_release_and_restore_without_visual_changes() {
+    use crate::mesh::set_tests::split_plane;
+
+    let mesh = split_plane();
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let bounds = (mesh.bounds_min, mesh.bounds_max);
+    let first = mesh.sets[0].index_range();
+    let second = mesh.sets[1].index_range();
+
+    let mut engine_a = Engine::new(&rs, &gpu_mesh, bounds, 128);
+    engine_a.set_triangles(first, &gpu_mesh);
+    engine_a.composite();
+    let mut engine_b = engine_a.sibling(&gpu_mesh, second, 128);
+    engine_b.composite();
+
+    let pos_before = engine_b.read_tex(&engine_b.surface_maps().0);
+    let nrm_before = engine_b.read_tex(&engine_b.surface_maps().1);
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+    let mut views = ViewRenderer::new(&rs);
+    let size = [320, 240];
+    let cam = OrbitCam::default();
+    let engines = [&engine_a, &engine_b];
+    let mut settings = ViewSettings::default();
+
+    // Capture both visible sets with the complete surface-map working set.
+    views.render_3d(&rs, size, &engines, &env, &gpu_mesh, &cam, &settings, None);
+    let material_before = read_texture(&rs.device, &rs.queue, views.view3d.display_texture());
+
+    settings.mode = ViewMode::Position;
+    views.render_3d(&rs, size, &engines, &env, &gpu_mesh, &cam, &settings, None);
+    let position_before = read_texture(&rs.device, &rs.queue, views.view3d.display_texture());
+
+    engine_b.release_surface_maps();
+    assert_eq!(engine_b.surface_maps().0.width, 1);
+    assert_eq!(engine_b.surface_maps().1.width, 1);
+
+    // A parked set remains in the viewport, and its Material output is byte-identical.
+    settings.mode = ViewMode::Material;
+    views.render_3d(&rs, size, &engines, &env, &gpu_mesh, &cam, &settings, None);
+    let material_after = read_texture(&rs.device, &rs.queue, views.view3d.display_texture());
+    assert_eq!(material_after, material_before);
+
+    // The Position mode's residency request rebuilds the parked surface maps.
+    engine_b.ensure_surface_maps(&gpu_mesh);
+    assert_eq!(engine_b.surface_maps().0.width, 128);
+    assert_eq!(engine_b.surface_maps().1.width, 128);
+    assert_eq!(engine_b.read_tex(&engine_b.surface_maps().0), pos_before);
+    assert_eq!(engine_b.read_tex(&engine_b.surface_maps().1), nrm_before);
+
+    settings.mode = ViewMode::Position;
+    views.render_3d(&rs, size, &engines, &env, &gpu_mesh, &cam, &settings, None);
+    let position_after = read_texture(&rs.device, &rs.queue, views.view3d.display_texture());
+    assert_eq!(position_after, position_before);
+}

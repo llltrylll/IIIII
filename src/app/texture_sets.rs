@@ -79,8 +79,9 @@ impl PainterApp {
         self.end_preview(true);
         self.engine.commit_props(&mut self.undo);
         std::mem::swap(&mut self.engine, &mut p.engine);
-        self.engine.restore_active_working_set();
+        self.engine.restore_active_working_set(&self.gpu_mesh);
         p.engine.release_inactive_working_set();
+        p.engine.release_surface_maps();
         self.engine_epoch = self.engine_epoch.wrapping_add(1);
         std::mem::swap(&mut self.selected, &mut p.selected);
         std::mem::swap(&mut self.target, &mut p.target);
@@ -107,10 +108,28 @@ impl PainterApp {
         }
     }
 
+    /// Applies the per-view residency policy to parked world-space UV maps.
+    /// Material and baked mesh-map modes use the final maps directly; Position,
+    /// World Normal and custom preview shaders need the per-set surface maps.
+    pub(super) fn set_parked_surface_maps_resident(&mut self, resident: bool) {
+        let mesh = &self.gpu_mesh;
+        for parked in self.sets.parked.iter_mut().flatten() {
+            if resident {
+                parked.engine.ensure_surface_maps(mesh);
+            } else {
+                parked.engine.release_surface_maps();
+            }
+        }
+    }
+
     /// Composites every parked set when a synchronous operation needs final maps (export).
     pub(super) fn composite_parked(&mut self) {
+        let mesh = &self.gpu_mesh;
         for p in self.sets.parked.iter_mut().flatten() {
             if p.engine.dirty {
+                // The composite shader can read position, normal and tangent
+                // inputs for procedural layers even while this Engine is parked.
+                p.engine.ensure_surface_maps(mesh);
                 p.engine.composite();
                 p.engine.release_inactive_working_set();
             }
@@ -119,7 +138,9 @@ impl PainterApp {
 
     /// Spreads parked-set recomposition across frames during interactive use.
     pub(super) fn composite_parked_one(&mut self, ctx: &egui::Context) {
+        let mesh = &self.gpu_mesh;
         if let Some(p) = self.sets.parked.iter_mut().flatten().find(|p| p.engine.dirty) {
+            p.engine.ensure_surface_maps(mesh);
             p.engine.composite();
             p.engine.release_inactive_working_set();
             ctx.request_repaint();

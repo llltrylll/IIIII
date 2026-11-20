@@ -457,6 +457,14 @@ impl PainterApp {
                 );
             }
         }
+        // The built-in Material shader does not sample the world-space UV maps.
+        // Restore them for the diagnostic modes that display them, or for a
+        // custom material graph that consumes the complete Surface input.
+        let needs_parked_surface_maps = kind == ViewKind::V3d
+            && (matches!(self.view.mode, ViewMode::WorldNormal | ViewMode::Position)
+                || (self.view.mode == ViewMode::Material && self.views.has_custom_shader()));
+        self.set_parked_surface_maps_resident(needs_parked_surface_maps);
+
         let size = [(rect.width() * self.ppp).round() as u32, (rect.height() * self.ppp).round() as u32];
         let mut rt_view = None;
         match kind {

@@ -1800,6 +1800,34 @@ impl Engine {
         }
     }
 
+    /// Releases world-space UV maps while this Texture Set is parked.
+    ///
+    /// The ordinary raster Material view reads the final material and baked
+    /// mesh maps, not these position/normal/tangent targets. Keep 1x1
+    /// placeholders bound for dormant view modes, then regenerate the maps
+    /// from the mesh when a mode or operation actually needs them.
+    pub(crate) fn release_surface_maps(&mut self) {
+        if self.pos.width == 1 && self.nrm.width == 1 && self.tan.width == 1 {
+            return;
+        }
+        self.pos = Tex::new(&self.device, "parked position map", 1, 1, POS_FORMAT, LAYER_USAGE);
+        self.nrm = Tex::new(&self.device, "parked normal map", 1, 1, NRM_FORMAT, LAYER_USAGE);
+        self.tan = Tex::new(&self.device, "parked tangent map", 1, 1, TAN_FORMAT, LAYER_USAGE);
+        self.uv_baked = None;
+        self.uv_version = self.uv_version.wrapping_add(1);
+    }
+
+    /// Ensures the world-space UV maps exist for this mesh/range.
+    /// Re-baking is deterministic and does not touch the painted layer data.
+    pub(crate) fn ensure_surface_maps(&mut self, mesh: &GpuMesh) {
+        let resident = self.pos.width == self.res
+            && self.nrm.width == self.res
+            && self.tan.width == self.res;
+        if !resident || !UvBakeKey::is_current(self.uv_baked.as_ref(), mesh.mesh_id, &self.tris, self.res) {
+            self.bake_uv(mesh);
+        }
+    }
+
     /// Drops GPU resources used only while this Texture Set is being edited.
     /// The final composited result stays resident for the viewport. The next
     /// composite/paint recreates the released workspace lazily.
@@ -1881,9 +1909,10 @@ impl Engine {
         }
     }
 
-    pub(crate) fn restore_active_working_set(&mut self) {
+    pub(crate) fn restore_active_working_set(&mut self, mesh: &GpuMesh) {
         self.ensure_composite_working_set();
         self.ensure_stroke_target();
+        self.ensure_surface_maps(mesh);
     }
 
     /// Creates an engine for another mesh while reusing immutable GPU pipelines.
@@ -2449,6 +2478,13 @@ impl Engine {
     /// current resolution, with dilation past UV island borders.
     pub fn bake_uv(&mut self, mesh: &GpuMesh) {
         self.apply_bg = None;
+        // Parked Texture Sets keep 1x1 placeholders. Recreate their full-size
+        // targets only when editing, compositing or a world-space view needs them.
+        if self.pos.width != self.res || self.nrm.width != self.res || self.tan.width != self.res {
+            self.pos = Tex::new(&self.device, "position map", self.res, self.res, POS_FORMAT, LAYER_USAGE);
+            self.nrm = Tex::new(&self.device, "normal map", self.res, self.res, NRM_FORMAT, LAYER_USAGE);
+            self.tan = Tex::new(&self.device, "tangent map", self.res, self.res, TAN_FORMAT, LAYER_USAGE);
+        }
         // A mesh change can leave the range past the end; the app sets the
         // new range right after, and this draws nothing meanwhile.
         let tris = self.tris.start.min(mesh.index_count)..self.tris.end.min(mesh.index_count);

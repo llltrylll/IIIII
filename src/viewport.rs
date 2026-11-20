@@ -468,6 +468,11 @@ pub struct ViewTarget {
 }
 
 impl ViewTarget {
+    #[cfg(test)]
+    pub(crate) fn display_texture(&self) -> &Tex {
+        self.display.as_ref().expect("the 3D viewport has a display texture")
+    }
+
     fn create(device: &wgpu::Device, size: [u32; 2], hdr: bool) -> Targets {
         let [w, h] = size;
         // COPY_SRC lets tests and MCP read rendered images back.
