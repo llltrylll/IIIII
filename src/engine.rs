@@ -5216,10 +5216,15 @@ impl Engine {
             if !self.has_mask_filters(li) {
                 continue;
             }
-            let mut ops = Vec::new();
-            let mut op_labels: Vec<String> = Vec::new();
             let scale = self.res as f32 / FILTER_REF_RES;
             let mask = self.layers[li].mask.as_ref().expect("filtered layers have masks");
+            let enabled_layers = mask.layers.iter().filter(|ml| ml.enabled).count();
+            let filter_steps = mask.filters.iter().filter(|filter| filter.enabled)
+                .map(|filter| if filter.kind == FilterKind::Blur { 2 } else { 1 })
+                .sum::<usize>();
+            let operation_capacity = enabled_layers + filter_steps;
+            let mut ops = Vec::with_capacity(operation_capacity);
+            let mut op_labels = Vec::with_capacity(if profile_query.is_some() { operation_capacity } else { 0 });
             let mut mask_layer_number = 0usize;
             for (ml, &slot) in mask.layers.iter().filter(|ml| ml.enabled).zip(&item_slots[&li]) {
                 mask_layer_number += 1;
