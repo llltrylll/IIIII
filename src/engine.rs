@@ -1240,7 +1240,9 @@ struct Pipelines {
     composite: wgpu::RenderPipeline,
     folder_merge: wgpu::RenderPipeline,
     composite_bgl: wgpu::BindGroupLayout,
-    fill_variation_noise: wgpu::RenderPipeline,
+    /// Built only when a Fill layer actually uses color or roughness variation.
+    composite_module: wgpu::ShaderModule,
+    fill_variation_noise: std::sync::OnceLock<wgpu::RenderPipeline>,
     fill_variation_noise_bgl: wgpu::BindGroupLayout,
     mask_source: wgpu::RenderPipeline,
     mask_filter: wgpu::RenderPipeline,
@@ -2315,14 +2317,10 @@ impl Engine {
             label: Some("fill variation noise"),
             entries: &[gpu::uniform_entry(0, true), gpu::tex_entry(10, false)],
         });
-        let fill_variation_noise = gpu::fullscreen_pipeline(
-            device,
-            "fill variation noise",
-            &composite_module,
-            "fs_fill_variation_noise",
-            &gpu::layout(device, &fill_variation_noise_bgl),
-            &[gpu::target(F::R16Float)],
-        );
+        // The variation prepass pipeline is intentionally lazy. Paint-only
+        // layers and projects without Fill variation should not compile an
+        // expensive FBM shader during Engine construction.
+        let fill_variation_noise = std::sync::OnceLock::new();
         let composite = gpu::fullscreen_pipeline(
             device,
             "composite",
@@ -2432,6 +2430,7 @@ impl Engine {
             composite,
             folder_merge,
             composite_bgl,
+            composite_module,
             fill_variation_noise,
             fill_variation_noise_bgl,
             mask_source,
@@ -5251,8 +5250,23 @@ impl Engine {
             && let Some(p) = &self.active_gpu_profile {
                 encoder.write_timestamp(&p.query_set, 6);
             }
+        // Compile the FBM prepass only when a cache miss actually needs it.
+        let variation_pipeline = if variation_noise_slots.is_empty() {
+            None
+        } else {
+            Some(self.p.fill_variation_noise.get_or_init(|| {
+                gpu::fullscreen_pipeline(
+                    &self.device,
+                    "fill variation noise",
+                    &self.p.composite_module,
+                    "fs_fill_variation_noise",
+                    &gpu::layout(&self.device, &self.p.fill_variation_noise_bgl),
+                    &[gpu::target(F::R16Float)],
+                )
+            }))
+        };
         // The cached variation field is independent of the accumulation below.
-        // Generate both enabled FBM channels on a key miss; later composites reuse it.
+        // Generate one FBM channel per pass on a key miss; later composites reuse it.
         for &(slot, layer_id, roughness) in &variation_noise_slots {
             let layer = &self.layers[*self.layers.iter().position(|layer| layer.id == layer_id)
                 .as_ref().expect("cached fill variation layer remains in stack")];
@@ -5288,7 +5302,7 @@ impl Engine {
                 "fill variation noise cache",
                 &[gpu::color_attachment(&target.view, wgpu::LoadOp::Clear(wgpu::Color::BLACK))],
             );
-            pass.set_pipeline(&self.p.fill_variation_noise);
+            pass.set_pipeline(variation_pipeline.expect("variation pipeline created for cache misses"));
             pass.set_bind_group(0, &bg, &[(slot as u64 * UNIFORM_STRIDE) as u32]);
             pass.draw(0..3, 0..1);
             drop(pass);
