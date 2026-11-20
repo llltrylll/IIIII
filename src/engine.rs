@@ -1507,6 +1507,8 @@ pub struct Engine {
     sampler: wgpu::Sampler,
     layer_ubuf: wgpu::Buffer,
     layer_ubuf_slots: u64,
+    /// Reused CPU staging for per-composite layer uniforms.
+    layer_uniform_scratch: Vec<u8>,
     stamp_ubuf: wgpu::Buffer,
     stamp_sbuf: wgpu::Buffer,
     apply_ubuf: wgpu::Buffer,
@@ -1551,6 +1553,8 @@ pub struct Engine {
     mask_scratch: Option<[Tex; 3]>,
     mask_filter_ubuf: wgpu::Buffer,
     mask_filter_ubuf_slots: u64,
+    /// Reused CPU staging for per-composite mask-filter uniforms.
+    mask_filter_uniform_scratch: Vec<u8>,
     /// Disjoint UV-space rectangles changed by the active stroke, in texels.
     /// Multiple scissors keep distant UV islands from forcing one large bbox.
     stroke_regions: Vec<[u32; 4]>,
@@ -1829,6 +1833,10 @@ impl Engine {
         self.mask_out.clear();
         self.fill_variation_noise.clear();
         self.mask_final.clear();
+        self.layer_uniform_scratch.clear();
+        self.layer_uniform_scratch.shrink_to_fit();
+        self.mask_filter_uniform_scratch.clear();
+        self.mask_filter_uniform_scratch.shrink_to_fit();
         self.apply_bg = None;
         // Cached stamp bind groups retain views such as the last viewport depth target.
         // A parked Engine won't paint; recreate these lazily on its next stroke.
@@ -1998,6 +2006,7 @@ impl Engine {
             sampler,
             layer_ubuf,
             layer_ubuf_slots,
+            layer_uniform_scratch: Vec::new(),
             stamp_ubuf,
             stamp_sbuf,
             apply_ubuf,
@@ -2038,6 +2047,7 @@ impl Engine {
                 mapped_at_creation: false,
             }),
             mask_filter_ubuf_slots: INITIAL_MASK_FILTER_STEPS,
+            mask_filter_uniform_scratch: Vec::new(),
             stroke_regions: Vec::new(),
             region_unknown: false,
             generation: 0,
@@ -5113,7 +5123,9 @@ impl Engine {
             });
             self.fill_variation_noise_bg = None;
         }
-        let mut data = vec![0u8; (UNIFORM_STRIDE as usize) * slots.max(1)];
+        let mut data = std::mem::take(&mut self.layer_uniform_scratch);
+        data.resize((UNIFORM_STRIDE as usize) * slots.max(1), 0);
+        data.fill(0);
         for (k, pass) in passes.iter().enumerate() {
             let (Pass::Layer(li) | Pass::End(li)) = *pass else { continue };
             let mut u = self.layer_uniform(&self.layers[li]);
@@ -5158,6 +5170,7 @@ impl Engine {
             data[offset..offset + size_of::<LayerUniform>()].copy_from_slice(bytemuck::bytes_of(&u));
         }
         self.queue.write_buffer(&self.layer_ubuf, 0, &data);
+        self.layer_uniform_scratch = data;
         // One persistent result per cached mask. Only masks with actual filter
         // operations need the three full-resolution ping-pong scratch targets.
         let cached_ids: HashSet<u64> = source_slot.keys().map(|&li| self.layers[li].id).collect();
@@ -5238,12 +5251,15 @@ impl Engine {
                 mapped_at_creation: false,
             });
         }
-        let mut sdata = vec![0u8; (MASK_FILTER_STRIDE as usize) * steps.len().max(1)];
+        let mut sdata = std::mem::take(&mut self.mask_filter_uniform_scratch);
+        sdata.resize((MASK_FILTER_STRIDE as usize) * steps.len().max(1), 0);
+        sdata.fill(0);
         for (i, s) in steps.iter().enumerate() {
             let off = i * MASK_FILTER_STRIDE as usize;
             sdata[off..off + 32].copy_from_slice(bytemuck::cast_slice(s));
         }
         self.queue.write_buffer(&self.mask_filter_ubuf, 0, &sdata);
+        self.mask_filter_uniform_scratch = sdata;
 
         // While painting, everything below the painted layer is unchanged:
         // start at its pass from the kept prefix instead of the bottom.
