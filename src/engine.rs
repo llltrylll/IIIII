@@ -5179,10 +5179,47 @@ impl Engine {
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
     }
 
+    fn generator_needs_baked_map_groups(generator: &Generator) -> bool {
+        // Packed groups B/C contain built-in maps 4 through 9:
+        // Sky Exposure, Edge/Crease Distance, Part Random/Gradient and Bent Normal.
+        const B_C_MAPS: u32 = (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8) | (1 << 9);
+        generator.needs_maps() & B_C_MAPS != 0
+    }
+
+    fn mask_needs_baked_map_groups(mask: &Mask) -> bool {
+        mask.graph.is_some()
+            || mask.generator.as_ref().is_some_and(Self::generator_needs_baked_map_groups)
+            || mask.layers.iter().any(|layer| {
+                layer.enabled
+                    && layer.opacity > 1e-4
+                    && matches!(
+                        &layer.source,
+                        MaskSource::Generator(generator)
+                            if Self::generator_needs_baked_map_groups(generator)
+                    )
+            })
+    }
+
+    /// Whether the current layer stack can read packed baked-map groups B/C.
+    /// This lets ordinary paint-only composites run while those maps stay evicted.
+    pub(crate) fn composite_needs_baked_map_groups(&self) -> bool {
+        self.layers.iter().any(|layer| {
+            let fill_needs_maps = matches!(
+                &layer.content,
+                Content::Fill(fill) if fill.part_var.abs() > 1e-4 || fill.graph.is_some()
+            );
+            fill_needs_maps
+                || layer.mask.as_ref().is_some_and(Self::mask_needs_baked_map_groups)
+        })
+    }
+
+    pub(crate) fn ensure_composite_baked_map_groups(&mut self) -> bool {
+        !self.composite_needs_baked_map_groups() || self.ensure_baked_map_groups()
+    }
+
     pub fn composite(&mut self) {
-        // Smart masks and procedural fill variations may sample packed baked
-        // maps B/C. Never composite against eviction placeholders.
-        if !self.ensure_baked_map_groups() {
+        // Only restore packed maps when this layer stack can actually sample B/C.
+        if !self.ensure_composite_baked_map_groups() {
             return;
         }
         if self.composite_profile_requested {
