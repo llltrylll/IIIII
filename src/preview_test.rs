@@ -5609,12 +5609,16 @@ fn parked_baked_map_groups_release_and_restore_from_cache() {
     assert_eq!(engine.map_tex(3).width, 256);
     assert_eq!(engine.read_tex(engine.map_tex(3)), map_d_before);
 
-    let all_resident_bytes = engine.gpu_resource_breakdown().iter()
+    let before_remaining_releases = engine.gpu_resource_breakdown().iter()
         .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
-    assert!(engine.release_baked_map_mask(crate::engine::BAKED_MAP_GROUP_B));
-    let without_b_bytes = engine.gpu_resource_breakdown().iter()
+    assert_eq!(engine.map_tex(1).width, 1, "B was already evicted before the C/D-only restoration cycle");
+    assert!(!engine.release_baked_map_mask(crate::engine::BAKED_MAP_GROUP_B),
+        "releasing an already-evicted B group must not report a second release");
+    let after_repeated_b_release = engine.gpu_resource_breakdown().iter()
         .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
-    assert_eq!(all_resident_bytes - without_b_bytes, (256 * 256 - 1) * 8);
+    assert_eq!(before_remaining_releases, after_repeated_b_release,
+        "an already-evicted B group must not change the resource allocation");
+    let without_b_bytes = after_repeated_b_release;
     assert!(engine.release_baked_map_mask(crate::engine::BAKED_MAP_GROUP_C));
     let without_c_bytes = engine.gpu_resource_breakdown().iter()
         .find(|(name, _)| *name == "mesh maps and fixes").map(|(_, bytes)| *bytes).unwrap();
