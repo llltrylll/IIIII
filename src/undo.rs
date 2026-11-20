@@ -110,7 +110,7 @@ impl SnapshotBufferPool {
 /// for the snapshots that cannot fit in smaller buffers.
 fn snapshot_buffer_allocation_order(sizes: &[u64]) -> Vec<usize> {
     let mut order = (0..sizes.len()).collect::<Vec<_>>();
-    order.sort_unstable_by_key(|&index| std::cmp::Reverse(sizes[index]));
+    order.sort_by_key(|&index| std::cmp::Reverse(sizes[index]));
     order
 }
 
