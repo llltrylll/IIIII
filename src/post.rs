@@ -92,6 +92,9 @@ struct BloomChain {
     levels: Vec<Tex>,
     /// One per down pass, then one per up pass.
     uniforms: Vec<wgpu::Buffer>,
+    /// These resources are stable until the chain is resized.
+    down_groups: Vec<wgpu::BindGroup>,
+    up_groups: Vec<Option<wgpu::BindGroup>>,
 }
 
 pub struct PostFx {
@@ -104,6 +107,8 @@ pub struct PostFx {
     sampler: wgpu::Sampler,
     black: Tex,
     chain: Option<BloomChain>,
+    post_bind_group: Option<wgpu::BindGroup>,
+    post_bind_group_key: Option<([u32; 2], bool)>,
 }
 
 impl PostFx {
@@ -152,10 +157,12 @@ impl PostFx {
             sampler: gpu::linear_sampler(device, wgpu::AddressMode::ClampToEdge),
             black,
             chain: None,
+            post_bind_group: None,
+            post_bind_group_key: None,
         }
     }
 
-    fn ensure_chain(&mut self, device: &wgpu::Device, size: [u32; 2]) {
+    fn ensure_chain(&mut self, device: &wgpu::Device, size: [u32; 2], input: &wgpu::TextureView) {
         if self.chain.as_ref().is_some_and(|c| c.size == size) {
             return;
         }
@@ -167,7 +174,7 @@ impl PostFx {
             w /= 2;
             h /= 2;
         }
-        let uniforms = (0..levels.len() * 2)
+        let uniforms: Vec<_> = (0..levels.len() * 2)
             .map(|_| {
                 device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("bloom uniform"),
@@ -177,7 +184,44 @@ impl PostFx {
                 })
             })
             .collect();
-        self.chain = Some(BloomChain { size, levels, uniforms });
+
+        // All source views and uniform buffers are stable until a resize.
+        // Build these bind groups once instead of once per bloom pass per frame.
+        let mut down_groups = Vec::with_capacity(levels.len());
+        for i in 0..levels.len() {
+            let src = if i == 0 { input } else { &levels[i - 1].view };
+            down_groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("bloom down"),
+                layout: &self.bloom_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: uniforms[i].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(src) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                ],
+            }));
+        }
+        let mut up_groups: Vec<Option<wgpu::BindGroup>> = (0..levels.len()).map(|_| None).collect();
+        for i in 1..levels.len() {
+            up_groups[i] = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("bloom up"),
+                layout: &self.bloom_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: uniforms[levels.len() + i].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&levels[i].view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                ],
+            }));
+        }
+        self.chain = Some(BloomChain { size, levels, uniforms, down_groups, up_groups });
+        self.post_bind_group = None;
+        self.post_bind_group_key = None;
+    }
+
+    /// The viewport replaces its input/output textures when its size changes.
+    pub fn invalidate_targets(&mut self) {
+        self.chain = None;
+        self.post_bind_group = None;
+        self.post_bind_group_key = None;
     }
 
     /// Records bloom and the final pass from `input` (HDR, premultiplied) into
@@ -196,41 +240,29 @@ impl PostFx {
         let size = [input.width, input.height];
         let bloom_on = !raw && settings.bloom > 0.0;
         if bloom_on {
-            self.ensure_chain(device, size);
+            self.ensure_chain(device, size, &input.view);
         }
         let bloom_view = match &self.chain {
             Some(chain) if bloom_on && !chain.levels.is_empty() => {
-                let group = |buf: &wgpu::Buffer, src: &wgpu::TextureView| {
-                    device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: None,
-                        layout: &self.bloom_bgl,
-                        entries: &[
-                            wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
-                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(src) },
-                            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                        ],
-                    })
-                };
                 let n = chain.levels.len();
                 for i in 0..n {
                     let src = if i == 0 { input } else { &chain.levels[i - 1] };
                     let first = if i == 0 { 1.0 } else { 0.0 };
                     let u = [1.0 / src.width as f32, 1.0 / src.height as f32, settings.bloom_threshold, first];
                     rs.queue.write_buffer(&chain.uniforms[i], 0, bytemuck::cast_slice(&u));
-                    let bg = group(&chain.uniforms[i], &src.view);
                     let mut pass = gpu::pass(encoder, "bloom down", &[gpu::color_attachment(&chain.levels[i].view, wgpu::LoadOp::Clear(wgpu::Color::BLACK))]);
                     pass.set_pipeline(&self.down);
-                    pass.set_bind_group(0, &bg, &[]);
+                    pass.set_bind_group(0, &chain.down_groups[i], &[]);
                     pass.draw(0..3, 0..1);
                 }
                 for i in (1..n).rev() {
                     let src = &chain.levels[i];
                     let u = [1.0 / src.width as f32, 1.0 / src.height as f32, 0.0, 0.0];
                     rs.queue.write_buffer(&chain.uniforms[n + i], 0, bytemuck::cast_slice(&u));
-                    let bg = group(&chain.uniforms[n + i], &src.view);
+                    let bg = chain.up_groups[i].as_ref().expect("bloom up bind group");
                     let mut pass = gpu::pass(encoder, "bloom up", &[gpu::color_attachment(&chain.levels[i - 1].view, wgpu::LoadOp::Load)]);
                     pass.set_pipeline(&self.up);
-                    pass.set_bind_group(0, &bg, &[]);
+                    pass.set_bind_group(0, bg, &[]);
                     pass.draw(0..3, 0..1);
                 }
                 Some((&chain.levels[0].view, n as f32))
@@ -246,19 +278,24 @@ impl PostFx {
             d: [1.0 / size[0] as f32, 1.0 / size[1] as f32, size[0] as f32 / size[1] as f32, 0.0],
         };
         rs.queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&u));
-        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("post"),
-            layout: &self.post_bgl,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.uniform.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&input.view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(bloom_tex) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-            ],
-        });
+        let post_key = (size, bloom_view.is_some());
+        if self.post_bind_group_key != Some(post_key) || self.post_bind_group.is_none() {
+            self.post_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("post"),
+                layout: &self.post_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.uniform.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&input.view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(bloom_tex) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                ],
+            }));
+            self.post_bind_group_key = Some(post_key);
+        }
+        let bg = self.post_bind_group.as_ref().expect("post bind group");
         let mut pass = gpu::pass(encoder, "post", &[gpu::color_attachment(output, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT))]);
         pass.set_pipeline(&self.post);
-        pass.set_bind_group(0, &bg, &[]);
+        pass.set_bind_group(0, bg, &[]);
         pass.draw(0..3, 0..1);
     }
 }
