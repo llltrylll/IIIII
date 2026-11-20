@@ -4988,6 +4988,40 @@ impl Engine {
             self.folder_below.push(set);
         }
 
+        // Cache the expensive roughness FBM for stable fill layers. The FBM
+        // depends only on the position map, scale and seed; rough_var remains a
+        // cheap multiplier in the main layer pass and can change without a rebake.
+        let mut roughness_noise_needed = HashSet::new();
+        let mut roughness_noise_misses: Vec<(usize, u64)> = Vec::new();
+        for (slot, pass) in passes.iter().enumerate() {
+            let Pass::Layer(li) = *pass else { continue };
+            let layer = &self.layers[li];
+            let Content::Fill(fill) = &layer.content else { continue };
+            if fill.rough_var == 0.0 || !fill.mat.enabled[1] || layer.disabled_channels[1] {
+                continue;
+            }
+            let key = FillRoughnessNoiseKey {
+                res: self.res,
+                uv_version: self.uv_version,
+                scale_bits: fill.var_scale.to_bits(),
+                seed_bits: fill.seed.to_bits(),
+            };
+            roughness_noise_needed.insert(layer.id);
+            let current = self.fill_roughness_noise.get(&layer.id)
+                .is_some_and(|cache| cache.key == key && cache.texture.width == self.res);
+            if current {
+                continue;
+            }
+            self.fill_roughness_noise.insert(layer.id, FillRoughnessNoiseCache {
+                key,
+                texture: Tex::new(&self.device, "fill roughness FBM cache", self.res, self.res, MASK_FILTER_FORMAT, LAYER_USAGE),
+            });
+            roughness_noise_misses.push((slot, layer.id));
+        }
+        self.fill_roughness_noise.retain(|id, cache| {
+            roughness_noise_needed.contains(id) && cache.texture.width == self.res
+        });
+
         // Cached mask sources get an extra uniform slot after the layer passes.
         // Filtered masks run their filter stack after the source; generator-only
         // masks go directly into the persistent result texture.
@@ -5022,6 +5056,9 @@ impl Engine {
         for (k, pass) in passes.iter().enumerate() {
             let (Pass::Layer(li) | Pass::End(li)) = *pass else { continue };
             let mut u = self.layer_uniform(&self.layers[li]);
+            if self.fill_roughness_noise.contains_key(&self.layers[li].id) {
+                u.varc[0] = 1.0;
+            }
             if let Some(&slot) = source_slot.get(&li) {
                 let off = slot * UNIFORM_STRIDE as usize;
                 data[off..off + size_of::<LayerUniform>()].copy_from_slice(bytemuck::bytes_of(&u));
@@ -5158,6 +5195,50 @@ impl Engine {
             && let Some(p) = &self.active_gpu_profile {
                 encoder.write_timestamp(&p.query_set, 6);
             }
+        // The cached noise field is independent of the accumulation below.
+        // Generate only on a key miss; future composites reuse the same texture.
+        for &(slot, layer_id) in &roughness_noise_misses {
+            let layer = &self.layers[*self.layers.iter().position(|layer| layer.id == layer_id)
+                .as_ref().expect("cached roughness layer remains in stack")];
+            let cache = &self.fill_roughness_noise[&layer_id];
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("fill roughness noise"),
+                layout: &self.p.fill_roughness_noise_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &self.layer_ubuf,
+                            offset: 0,
+                            size: NonZeroU64::new(size_of::<LayerUniform>() as u64),
+                        }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: wgpu::BindingResource::TextureView(&self.pos.view),
+                    },
+                ],
+            });
+            let profile_slot = begin_composite_profile_stage(
+                &mut encoder, profile_query.as_deref(), &mut profile_stage_count,
+            );
+            let mut pass = gpu::pass(
+                &mut encoder,
+                "fill roughness noise cache",
+                &[gpu::color_attachment(&cache.texture.view, wgpu::LoadOp::Clear(wgpu::Color::BLACK))],
+            );
+            pass.set_pipeline(&self.p.fill_roughness_noise);
+            pass.set_bind_group(0, &bg, &[(slot as u64 * UNIFORM_STRIDE) as u32]);
+            pass.draw(0..3, 0..1);
+            drop(pass);
+            end_composite_profile_stage(
+                &mut encoder,
+                profile_query.as_deref(),
+                profile_slot,
+                format!("Roughness FBM cache · {}", layer.name),
+                &mut profile_labels,
+            );
+        }
         if resume.is_none() {
             let c = |v: f64| wgpu::LoadOp::Clear(wgpu::Color { r: v, g: v, b: v, a: 1.0 });
             let a = &self.accum[0];
@@ -5315,6 +5396,7 @@ impl Engine {
             };
             let mask = layer.mask.as_ref().and_then(|m| m.paint.as_ref());
             let prev = if from_cache { self.prefix_cache.as_ref().expect("prefix cache") } else { &self.accum[src] };
+            let roughness_noise = self.fill_roughness_noise.get(&layer.id).map(|cache| &cache.texture);
             let make_bg = |mask: Option<&Tex>| self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("composite"),
                 layout: &self.p.composite_bgl,
@@ -5354,6 +5436,7 @@ impl Engine {
                     wgpu::BindGroupEntry { binding: 24, resource: view(Some(&prev[FINAL_SPECULAR])) },
                     wgpu::BindGroupEntry { binding: 25, resource: view(chans[SPECULAR]) },
                     wgpu::BindGroupEntry { binding: 26, resource: view(Some(&self.tan)) },
+                    wgpu::BindGroupEntry { binding: 27, resource: view(roughness_noise) },
                 ],
             });
             // A filtered mask depends on its own paint/generator/filter data,
