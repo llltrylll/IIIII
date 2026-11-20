@@ -494,7 +494,7 @@ impl PainterApp {
             let mut uv_map_mask = match self.view.uv_mode {
                 ViewMode::Map(4..=7) => crate::engine::BAKED_MAP_GROUP_B,
                 ViewMode::Map(8..=9) => crate::engine::BAKED_MAP_GROUP_C,
-                ViewMode::Map(10..=11) => crate::engine::BAKED_MAP_GROUP_D,
+                ViewMode::Map(10..=11) | ViewMode::MissedRays => crate::engine::BAKED_MAP_GROUP_D,
                 _ => 0,
             };
             if self.view.use_baked_normal
