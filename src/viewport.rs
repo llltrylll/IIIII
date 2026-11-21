@@ -2164,7 +2164,7 @@ mod gl_view_shader_tests {
 
     #[test]
     fn gl_view_shader_omits_shadow_texture_and_keeps_material_features() {
-        let gl = view_shader_source(true);
+        let gl = view_shader_source(true, true);
         assert!(!gl.contains("@binding(16) var shadow_map"));
         assert!(!gl.contains("@binding(17) var shadow_samp"));
         assert!(gl.contains("fn key_shadow(p: vec3<f32>, gn: vec3<f32>) -> f32 {\n    return 1.0;"));
@@ -2172,7 +2172,7 @@ mod gl_view_shader_tests {
         assert!(gl.contains("var t_wnrm: texture_2d<f32>"));
         assert!(gl.contains("var t_wpos: texture_2d<f32>"));
 
-        let vk = view_shader_source(false);
+        let vk = view_shader_source(false, false);
         assert!(vk.contains("@binding(16) var shadow_map"));
         assert!(vk.contains("textureSampleCompareLevel(shadow_map"));
     }
