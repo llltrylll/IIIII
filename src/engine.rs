@@ -1284,6 +1284,13 @@ fn unpack_depth24(packed: vec4<f32>) -> f32 {
     const UV_LOAD_GL: &str = "let sample_depth = unpack_depth24(textureLoad(depth_map, sp, i32(sample))) * u.clip.y;";
     assert_eq!(source.matches(UV_LOAD).count(), 1, "stamp UV depth load must remain unique");
     source = source.replacen(UV_LOAD, UV_LOAD_GL, 1);
+
+    // The viewport's packed GL depth target is fixed at the same 4x MSAA
+    // count as the native depth target. Keep the GLSL path independent of
+    // textureNumSamples(), which is not needed for this fixed attachment.
+    const SAMPLE_COUNT: &str = "let sample_count = textureNumSamples(depth_map);";
+    assert_eq!(source.matches(SAMPLE_COUNT).count(), 1, "stamp sample-count query must remain unique");
+    source = source.replacen(SAMPLE_COUNT, "let sample_count = 4u;", 1);
     source
 }
 
