@@ -57,6 +57,9 @@ fn main() -> eframe::Result {
     // Request the adapter's full limits: high-poly bake sources need large
     // storage buffers, and the compositor binds many textures per pass.
     if let egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
+        // Apply WGPU_BACKEND to the instance descriptor. Without this, wgpu's
+        // default descriptor ignores the launcher environment and may choose Vulkan.
+        setup.instance_descriptor.backends = setup.instance_descriptor.backends.with_env();
         setup.power_preference = app::prefs::Preferences::power_preference();
         setup.device_descriptor = Arc::new(|adapter| wgpu::DeviceDescriptor {
             label: Some("material painter device"),
