@@ -2622,29 +2622,35 @@ impl Engine {
         // expensive FBM shader during Engine construction.
         let fill_variation_noise = std::sync::OnceLock::new();
         let composite_layout = gpu::layout(device, &composite_bgl);
-        let composite = gpu::fullscreen_pipeline(
-            device,
-            "composite",
-            &composite_module,
-            "fs_layer",
-            &composite_layout,
-            &ACCUM_FORMATS.map(gpu::target),
-        );
-        let folder_merge = gpu::fullscreen_pipeline(
-            device,
-            "folder merge",
-            &composite_module,
-            "fs_folder_merge",
-            &composite_layout,
-            &ACCUM_FORMATS.map(gpu::target),
-        );
+        let gl_extra_layout = gpu::layout(device, &gl_extra_bgl);
+        let gl_folder_layout = gpu::layout(device, &gl_folder_bgl);
+        let gl_mask_layout = gpu::layout(device, &gl_mask_bgl);
+        let composite = if gl_depth_color {
+            let targets = (0..4).map(|channel| gpu::target(ACCUM_FORMATS[channel])).collect::<Vec<_>>();
+            gpu::fullscreen_pipeline(
+                device, "OpenGL composite core", &composite_module, "fs_layer_gl_core",
+                &composite_layout, &targets,
+            )
+        } else {
+            gpu::fullscreen_pipeline(
+                device, "composite", &composite_module, "fs_layer",
+                &composite_layout, &ACCUM_FORMATS.map(gpu::target),
+            )
+        };
+        let folder_merge = if gl_depth_color {
+            gpu::fullscreen_pipeline(
+                device, "OpenGL folder merge", &composite_module, "fs_folder_merge_gl",
+                &gl_folder_layout, &ACCUM_FORMATS.map(gpu::target),
+            )
+        } else {
+            gpu::fullscreen_pipeline(
+                device, "folder merge", &composite_module, "fs_folder_merge",
+                &composite_layout, &ACCUM_FORMATS.map(gpu::target),
+            )
+        };
         let mask_source = gpu::fullscreen_pipeline(
-            device,
-            "mask source",
-            &composite_module,
-            "fs_mask_source",
-            &gpu::layout(device, &composite_bgl),
-            &[gpu::target(MASK_FILTER_FORMAT)],
+            device, "mask source", &composite_module, "fs_mask_source",
+            &gl_mask_layout, &[gpu::target(MASK_FILTER_FORMAT)],
         );
         let mask_filter_module = gpu::shader(device, "mask filter", include_str!("shaders/mask_filter.wgsl"));
         let mask_filter_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -2733,6 +2739,13 @@ impl Engine {
             composite_layout,
             composite_variants: Default::default(),
             composite_bgl,
+            gl_composite: gl_depth_color,
+            gl_extra_layout,
+            gl_folder_layout,
+            gl_extra_bgl,
+            gl_folder_bgl,
+            gl_mask_bgl,
+            gl_composite_variants: Default::default(),
             composite_module,
             fill_variation_noise,
             fill_variation_noise_bgl,
