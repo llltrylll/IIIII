@@ -6101,19 +6101,9 @@ impl Engine {
             if filtered.is_some() && !self.mask_final.contains(&layer.id) {
                 finals.push(layer.id);
             }
-            let bg = make_bg(filtered.or(mask));
             // A patch keeps what is around it. Inactive channel attachments
             // are absent from the pass to avoid read/write traffic.
             let load = if scissors.is_some() { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(wgpu::Color::BLACK) };
-            let attachments: [Option<wgpu::RenderPassColorAttachment<'_>>; ACCUM] =
-                std::array::from_fn(|channel| {
-                    if output_mask & (1 << channel) == 0 {
-                        None
-                    } else {
-                        let dst = 1 - src_indices[channel];
-                        gpu::color_attachment(&self.accum[dst][channel].view, load)
-                    }
-                });
             let profile = self.active_gpu_profile.as_ref().filter(|_| profile_layer == Some(layer.id));
             composite_profiled |= profile.is_some();
             let detailed_profile_slot = if profile_query.is_some() && profile_stage_count < GPU_PROFILE_MAX_LAYER_PASSES {
@@ -6128,30 +6118,157 @@ impl Engine {
                 let kind = if matches!(*pass, Pass::End(_)) { "Folder merge" } else { "Layer" };
                 format!("{kind} #{} {}", li + 1, layer.name)
             });
-            let pipeline = self.p.composite_pipeline(&self.device, output_mask, layer.is_folder());
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("composite layer"),
-                color_attachments: &attachments,
-                depth_stencil_attachment: None,
-                timestamp_writes: profile.map(|p| wgpu::RenderPassTimestampWrites {
-                    query_set: &p.query_set,
-                    beginning_of_pass_write_index: Some(4),
-                    end_of_pass_write_index: Some(5),
-                }),
-                occlusion_query_set: None,
-                multiview_mask: None,
-            }).forget_lifetime();
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(0, &bg, &[(k as u64 * UNIFORM_STRIDE) as u32]);
-            if let Some(rects) = &scissors {
-                for &[x0, y0, x1, y1] in rects {
-                    pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
-                    pass.draw(0..3, 0..1);
+
+            if self.p.gl_composite {
+                let resolved_mask = filtered.or(mask);
+                if layer.is_folder() {
+                    let bg = make_gl_folder_bg(resolved_mask);
+                    let attachments: [Option<wgpu::RenderPassColorAttachment<'_>>; ACCUM] =
+                        std::array::from_fn(|channel| {
+                            if output_mask & (1 << channel) == 0 {
+                                None
+                            } else {
+                                let dst = 1 - src_indices[channel];
+                                gpu::color_attachment(&self.accum[dst][channel].view, load)
+                            }
+                        });
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("OpenGL folder merge"),
+                        color_attachments: &attachments,
+                        depth_stencil_attachment: None,
+                        timestamp_writes: profile.map(|p| wgpu::RenderPassTimestampWrites {
+                            query_set: &p.query_set,
+                            beginning_of_pass_write_index: Some(4),
+                            end_of_pass_write_index: Some(5),
+                        }),
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    }).forget_lifetime();
+                    pass.set_pipeline(&self.p.folder_merge);
+                    pass.set_bind_group(0, &bg, &[(k as u64 * UNIFORM_STRIDE) as u32]);
+                    if let Some(rects) = &scissors {
+                        for &[x0, y0, x1, y1] in rects {
+                            pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                            pass.draw(0..3, 0..1);
+                        }
+                    } else {
+                        pass.draw(0..3, 0..1);
+                    }
+                    drop(pass);
+                } else {
+                    let (core_pipeline, extra_pipeline) = self.p.gl_layer_pipelines(&self.device, output_mask);
+                    let has_core = core_pipeline.is_some();
+                    let has_extra = extra_pipeline.is_some();
+                    if let Some(pipeline) = core_pipeline.as_ref() {
+                        let bg = make_gl_core_bg(resolved_mask);
+                        let core_mask = output_mask & 0x0f;
+                        let attachments: [Option<wgpu::RenderPassColorAttachment<'_>>; 4] =
+                            std::array::from_fn(|channel| {
+                                if core_mask & (1 << channel) == 0 {
+                                    None
+                                } else {
+                                    let dst = 1 - src_indices[channel];
+                                    gpu::color_attachment(&self.accum[dst][channel].view, load)
+                                }
+                            });
+                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("OpenGL layer core"),
+                            color_attachments: &attachments,
+                            depth_stencil_attachment: None,
+                            timestamp_writes: profile.map(|p| wgpu::RenderPassTimestampWrites {
+                                query_set: &p.query_set,
+                                beginning_of_pass_write_index: Some(4),
+                                end_of_pass_write_index: if has_extra { None } else { Some(5) },
+                            }),
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        }).forget_lifetime();
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(0, &bg, &[(k as u64 * UNIFORM_STRIDE) as u32]);
+                        if let Some(rects) = &scissors {
+                            for &[x0, y0, x1, y1] in rects {
+                                pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                                pass.draw(0..3, 0..1);
+                            }
+                        } else {
+                            pass.draw(0..3, 0..1);
+                        }
+                        drop(pass);
+                    }
+                    if let Some(pipeline) = extra_pipeline.as_ref() {
+                        let bg = make_gl_extra_bg(resolved_mask);
+                        let extra_mask = (output_mask >> 4) & 0x07;
+                        let attachments: [Option<wgpu::RenderPassColorAttachment<'_>>; 3] =
+                            std::array::from_fn(|channel| {
+                                if extra_mask & (1 << channel) == 0 {
+                                    None
+                                } else {
+                                    let output_channel = channel + 4;
+                                    let dst = 1 - src_indices[output_channel];
+                                    gpu::color_attachment(&self.accum[dst][output_channel].view, load)
+                                }
+                            });
+                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("OpenGL layer extra"),
+                            color_attachments: &attachments,
+                            depth_stencil_attachment: None,
+                            timestamp_writes: profile.map(|p| wgpu::RenderPassTimestampWrites {
+                                query_set: &p.query_set,
+                                beginning_of_pass_write_index: if has_core { None } else { Some(4) },
+                                end_of_pass_write_index: Some(5),
+                            }),
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        }).forget_lifetime();
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(0, &bg, &[(k as u64 * UNIFORM_STRIDE) as u32]);
+                        if let Some(rects) = &scissors {
+                            for &[x0, y0, x1, y1] in rects {
+                                pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                                pass.draw(0..3, 0..1);
+                            }
+                        } else {
+                            pass.draw(0..3, 0..1);
+                        }
+                        drop(pass);
+                    }
                 }
             } else {
-                pass.draw(0..3, 0..1);
+                let bg = make_bg(filtered.or(mask));
+                let attachments: [Option<wgpu::RenderPassColorAttachment<'_>>; ACCUM] =
+                    std::array::from_fn(|channel| {
+                        if output_mask & (1 << channel) == 0 {
+                            None
+                        } else {
+                            let dst = 1 - src_indices[channel];
+                            gpu::color_attachment(&self.accum[dst][channel].view, load)
+                        }
+                    });
+                let pipeline = self.p.composite_pipeline(&self.device, output_mask, layer.is_folder());
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("composite layer"),
+                    color_attachments: &attachments,
+                    depth_stencil_attachment: None,
+                    timestamp_writes: profile.map(|p| wgpu::RenderPassTimestampWrites {
+                        query_set: &p.query_set,
+                        beginning_of_pass_write_index: Some(4),
+                        end_of_pass_write_index: Some(5),
+                    }),
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                }).forget_lifetime();
+                pass.set_pipeline(&pipeline);
+                pass.set_bind_group(0, &bg, &[(k as u64 * UNIFORM_STRIDE) as u32]);
+                if let Some(rects) = &scissors {
+                    for &[x0, y0, x1, y1] in rects {
+                        pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                        pass.draw(0..3, 0..1);
+                    }
+                } else {
+                    pass.draw(0..3, 0..1);
+                }
+                drop(pass);
             }
-            drop(pass);
             if let Some(slot) = detailed_profile_slot {
                 encoder.write_timestamp(profile_query.as_deref().expect("profile slot requires query set"), GPU_PROFILE_BASE_QUERY_COUNT + (slot as u32 * 2) + 1);
                 if let Some(label) = detailed_profile_label {
