@@ -6,8 +6,7 @@ impl PainterApp {
     pub(super) fn ensure_baker(&mut self) {
         if self.baker.is_none() {
             let _s = crate::startup_trace::span("baker: lazy GpuBaker::new");
-            let backend = self.rs.adapter.get_info().backend;
-            self.baker = Some(GpuBaker::new_for_backend(&self.rs.device, backend));
+            self.baker = Some(GpuBaker::new_for_adapter(&self.rs.device, &self.rs.adapter));
         }
     }
 
