@@ -390,9 +390,92 @@ impl Engine {
         if painted.is_some() {
             self.thumb_pass(encoder, &g.shrink_mask, painted.unwrap(), &g.mask_paint, [0.0, SHRINK_TAPS, RENDER as f32, 0.0]);
         }
-        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("thumbnail composite"),
-            layout: &self.p.composite_bgl,
+        // The GL core compositor uses a reduced layout (four accumulation
+        // channels). Vulkan keeps the full layout. Do not reuse either group
+        // for the mask-source pass: that pipeline has its own compact layout.
+        let composite_bg = if self.p.gl_composite {
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("OpenGL thumbnail composite core"),
+                layout: &self.p.composite_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &ubuf,
+                            offset: 0,
+                            size: NonZeroU64::new(size_of::<LayerUniform>() as u64),
+                        }),
+                    },
+                    wgpu::BindGroupEntry { binding: 1, resource: view(Some(&g.below[0])) },
+                    wgpu::BindGroupEntry { binding: 2, resource: view(Some(&g.below[1])) },
+                    wgpu::BindGroupEntry { binding: 3, resource: view(Some(&g.below[2])) },
+                    wgpu::BindGroupEntry { binding: 4, resource: view(Some(&g.below[3])) },
+                    wgpu::BindGroupEntry { binding: 5, resource: view(images[0]) },
+                    wgpu::BindGroupEntry { binding: 6, resource: view(images[1]) },
+                    wgpu::BindGroupEntry { binding: 7, resource: view(images[2]) },
+                    wgpu::BindGroupEntry { binding: 8, resource: view(images[3]) },
+                    wgpu::BindGroupEntry { binding: 9, resource: view(painted.map(|_| &g.mask_paint)) },
+                    wgpu::BindGroupEntry { binding: 10, resource: view(Some(small_pos)) },
+                    wgpu::BindGroupEntry { binding: 11, resource: view(Some(small_nrm)) },
+                    wgpu::BindGroupEntry { binding: 13, resource: view(Some(self.map_tex(1))) },
+                    wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                    wgpu::BindGroupEntry { binding: 18, resource: wgpu::BindingResource::Sampler(&self.repeat_sampler) },
+                    wgpu::BindGroupEntry { binding: 19, resource: view(images[super::OPACITY]) },
+                    wgpu::BindGroupEntry { binding: 27, resource: view(None) },
+                    wgpu::BindGroupEntry { binding: 28, resource: view(None) },
+                ],
+            })
+        } else {
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("thumbnail composite"),
+                layout: &self.p.composite_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &ubuf,
+                            offset: 0,
+                            size: NonZeroU64::new(size_of::<LayerUniform>() as u64),
+                        }),
+                    },
+                    wgpu::BindGroupEntry { binding: 1, resource: view(Some(&g.below[0])) },
+                    wgpu::BindGroupEntry { binding: 2, resource: view(Some(&g.below[1])) },
+                    wgpu::BindGroupEntry { binding: 3, resource: view(Some(&g.below[2])) },
+                    wgpu::BindGroupEntry { binding: 4, resource: view(Some(&g.below[3])) },
+                    wgpu::BindGroupEntry { binding: 5, resource: view(images[0]) },
+                    wgpu::BindGroupEntry { binding: 6, resource: view(images[1]) },
+                    wgpu::BindGroupEntry { binding: 7, resource: view(images[2]) },
+                    wgpu::BindGroupEntry { binding: 8, resource: view(images[3]) },
+                    wgpu::BindGroupEntry { binding: 9, resource: view(painted.map(|_| &g.mask_paint)) },
+                    wgpu::BindGroupEntry { binding: 10, resource: view(Some(small_pos)) },
+                    wgpu::BindGroupEntry { binding: 11, resource: view(Some(small_nrm)) },
+                    wgpu::BindGroupEntry { binding: 12, resource: view(Some(self.map_tex(0))) },
+                    wgpu::BindGroupEntry { binding: 13, resource: view(Some(self.map_tex(1))) },
+                    wgpu::BindGroupEntry { binding: 14, resource: view(Some(self.map_tex(2))) },
+                    wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(&self.custom_array.1) },
+                    wgpu::BindGroupEntry { binding: 16, resource: view(Some(self.map_tex(4))) },
+                    wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                    wgpu::BindGroupEntry { binding: 18, resource: wgpu::BindingResource::Sampler(&self.repeat_sampler) },
+                    wgpu::BindGroupEntry { binding: 19, resource: view(images[super::OPACITY]) },
+                    wgpu::BindGroupEntry { binding: 20, resource: view(Some(&g.below[super::FINAL_EMISSION])) },
+                    wgpu::BindGroupEntry { binding: 21, resource: view(images[super::EMISSION]) },
+                    wgpu::BindGroupEntry { binding: 22, resource: view(Some(&g.below[super::FINAL_NORMAL])) },
+                    wgpu::BindGroupEntry { binding: 23, resource: view(images[super::NORMAL]) },
+                    wgpu::BindGroupEntry { binding: 24, resource: view(Some(&g.below[super::FINAL_SPECULAR])) },
+                    wgpu::BindGroupEntry { binding: 25, resource: view(images[super::SPECULAR]) },
+                    // Full size, unlike the thumbnail's position and normal: it
+                    // only turns normal images, which thumbnails don't show.
+                    wgpu::BindGroupEntry { binding: 26, resource: view(Some(&self.tan)) },
+                    // Thumbnails do not need the full-resolution procedural variation caches.
+                    // Neutral fallbacks keep the shared compositor layout complete.
+                    wgpu::BindGroupEntry { binding: 27, resource: view(None) },
+                    wgpu::BindGroupEntry { binding: 28, resource: view(None) },
+                ],
+            })
+        };
+        let mask_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("thumbnail mask source"),
+            layout: &self.p.gl_mask_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -402,14 +485,6 @@ impl Engine {
                         size: NonZeroU64::new(size_of::<LayerUniform>() as u64),
                     }),
                 },
-                wgpu::BindGroupEntry { binding: 1, resource: view(Some(&g.below[0])) },
-                wgpu::BindGroupEntry { binding: 2, resource: view(Some(&g.below[1])) },
-                wgpu::BindGroupEntry { binding: 3, resource: view(Some(&g.below[2])) },
-                wgpu::BindGroupEntry { binding: 4, resource: view(Some(&g.below[3])) },
-                wgpu::BindGroupEntry { binding: 5, resource: view(images[0]) },
-                wgpu::BindGroupEntry { binding: 6, resource: view(images[1]) },
-                wgpu::BindGroupEntry { binding: 7, resource: view(images[2]) },
-                wgpu::BindGroupEntry { binding: 8, resource: view(images[3]) },
                 wgpu::BindGroupEntry { binding: 9, resource: view(painted.map(|_| &g.mask_paint)) },
                 wgpu::BindGroupEntry { binding: 10, resource: view(Some(small_pos)) },
                 wgpu::BindGroupEntry { binding: 11, resource: view(Some(small_nrm)) },
@@ -419,21 +494,6 @@ impl Engine {
                 wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(&self.custom_array.1) },
                 wgpu::BindGroupEntry { binding: 16, resource: view(Some(self.map_tex(4))) },
                 wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                wgpu::BindGroupEntry { binding: 18, resource: wgpu::BindingResource::Sampler(&self.repeat_sampler) },
-                wgpu::BindGroupEntry { binding: 19, resource: view(images[super::OPACITY]) },
-                wgpu::BindGroupEntry { binding: 20, resource: view(Some(&g.below[super::FINAL_EMISSION])) },
-                wgpu::BindGroupEntry { binding: 21, resource: view(images[super::EMISSION]) },
-                wgpu::BindGroupEntry { binding: 22, resource: view(Some(&g.below[super::FINAL_NORMAL])) },
-                wgpu::BindGroupEntry { binding: 23, resource: view(images[super::NORMAL]) },
-                wgpu::BindGroupEntry { binding: 24, resource: view(Some(&g.below[super::FINAL_SPECULAR])) },
-                wgpu::BindGroupEntry { binding: 25, resource: view(images[super::SPECULAR]) },
-                // Full size, unlike the thumbnail's position and normal: it
-                // only turns normal images, which thumbnails don't show.
-                wgpu::BindGroupEntry { binding: 26, resource: view(Some(&self.tan)) },
-                // Thumbnails do not need the full-resolution procedural variation caches.
-                // Neutral fallbacks keep the shared compositor layout complete.
-                wgpu::BindGroupEntry { binding: 27, resource: view(None) },
-                wgpu::BindGroupEntry { binding: 28, resource: view(None) },
             ],
         });
 
@@ -461,7 +521,7 @@ impl Engine {
                 let att: Vec<_> = g.out.iter().map(|t| gpu::color_attachment(&t.view, clear)).collect();
                 let mut pass = gpu::pass(encoder, "thumb layer", &att);
                 pass.set_pipeline(&self.p.composite);
-                pass.set_bind_group(0, &bg, &[0]);
+                pass.set_bind_group(0, &composite_bg, &[0]);
                 pass.draw(0..3, 0..1);
             }
             let channel = (0..4).find(|&c| f.mat.enabled[c] || layer.images[c].is_some()).unwrap_or(0);
@@ -484,7 +544,7 @@ impl Engine {
                     {
                         let mut pass = gpu::pass(encoder, "thumb mask", &[gpu::color_attachment(&g.mask_value.view, wgpu::LoadOp::Clear(wgpu::Color::BLACK))]);
                         pass.set_pipeline(&self.p.mask_source);
-                        pass.set_bind_group(0, &bg, &[UNIFORM_STRIDE as u32]);
+                        pass.set_bind_group(0, &mask_bg, &[UNIFORM_STRIDE as u32]);
                         pass.draw(0..3, 0..1);
                     }
                     self.thumb_pass(encoder, &g.show, &g.mask_value, &shown.tex, [1.0, (RENDER / THUMB) as f32, THUMB as f32, 0.0]);
