@@ -89,7 +89,7 @@ fn write_startup_failure(error: &eframe::Error) {
     }
     let backend = std::env::var("WGPU_BACKEND").unwrap_or_else(|_| "(unset)".into());
     let report = format!(
-        "Material Painter {} startup failed\\n\\nWGPU_BACKEND={backend}\\nOS: {} {}\\n\\nError:\\n{error:#?}\\n",
+        "Material Painter {} startup failed\n\nWGPU_BACKEND={backend}\nOS: {} {}\n\nError:\n{error:#?}\n",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH,
