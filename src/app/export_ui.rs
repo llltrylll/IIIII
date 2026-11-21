@@ -293,22 +293,36 @@ impl PainterApp {
             } else if let Some(parked) = self.sets.parked.get_mut(index).and_then(Option::as_mut)
                 && parked.engine.dirty
             {
+                parked.engine.restore_surface_maps(&self.gpu_mesh);
                 parked.engine.composite();
-                parked.engine.release_inactive_working_set();
+                // Keep the maps resident until this export has read them.
+                parked.engine.release_inactive_working_set_keep_surface_maps();
             }
         }
 
         let mesh = self.mesh.clone();
-        let engines = self.set_engines();
-        selected_indices.into_iter().filter_map(|index| {
-            let set = mesh.sets.get(index)?;
-            let engine = engines.get(index)?;
-            let snapshot = export::snapshot(engine, &self.rs.device, &self.rs.queue, mesh.clone());
-            Some((snapshot, export::Settings {
+        let mut snapshots = Vec::with_capacity(selected_indices.len());
+        for index in selected_indices {
+            let set = match mesh.sets.get(index) {
+                Some(set) => set,
+                None => continue,
+            };
+            let snapshot = if index == self.sets.active {
+                export::snapshot(&self.engine, &self.rs.device, &self.rs.queue, mesh.clone())
+            } else {
+                let Some(parked) = self.sets.parked.get_mut(index).and_then(Option::as_mut) else { continue };
+                // Export reads world position and normal in addition to final material channels.
+                parked.engine.restore_surface_maps(&self.gpu_mesh);
+                let snapshot = export::snapshot(&parked.engine, &self.rs.device, &self.rs.queue, mesh.clone());
+                parked.engine.release_surface_maps();
+                snapshot
+            };
+            snapshots.push((snapshot, export::Settings {
                 set_name: set.name.replace(' ', ""),
                 ..settings.clone()
-            }))
-        }).collect()
+            }));
+        }
+        snapshots
     }
 
     /// Read the chosen maps and write their files on a worker thread.

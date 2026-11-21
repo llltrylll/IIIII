@@ -1776,6 +1776,7 @@ impl Engine {
             bounds,
             res,
             Arc::new(crate::undo::SnapshotBufferPool::default()),
+            true,
         )
     }
 
@@ -1783,10 +1784,33 @@ impl Engine {
     /// mesh's index buffer. Shares this engine's pipelines and document bounds.
     pub fn sibling(&self, mesh: &GpuMesh, tris: std::ops::Range<u32>, res: u32) -> Engine {
         let mut sibling = Self::with_pipelines(
-            &self.rs, self.p.clone(), mesh, tris, self.bounds, res, self.snapshot_buffer_pool.clone(),
+            &self.rs, self.p.clone(), mesh, tris, self.bounds, res, self.snapshot_buffer_pool.clone(), true,
         );
         sibling.image_cache = self.image_cache.clone();
         sibling
+    }
+
+    /// Another Texture Set that starts parked: allocate only neutral 1x1
+    /// surface maps and defer its UV bake until it is edited or previewed.
+    pub(crate) fn sibling_parked(&self, mesh: &GpuMesh, tris: std::ops::Range<u32>, res: u32) -> Engine {
+        let mut sibling = Self::with_pipelines(
+            &self.rs, self.p.clone(), mesh, tris, self.bounds, res, self.snapshot_buffer_pool.clone(), false,
+        );
+        sibling.image_cache = self.image_cache.clone();
+        sibling
+    }
+
+    /// Small, valid bindings for a parked Engine. They are never used to
+    /// paint or composite; full maps are restored before those operations.
+    fn surface_map_placeholders(device: &wgpu::Device, queue: &wgpu::Queue) -> (Tex, Tex, Tex) {
+        let pos = Tex::new(device, "parked position map", 1, 1, POS_FORMAT, LAYER_USAGE);
+        let nrm = Tex::new(device, "parked normal map", 1, 1, NRM_FORMAT, LAYER_USAGE);
+        let tan = Tex::new(device, "parked tangent map", 1, 1, TAN_FORMAT, LAYER_USAGE);
+        let zero_pos = [0u16; 4];
+        queue.write_texture(pos.copy_info(), bytemuck::cast_slice(&zero_pos), Default::default(), pos.extent());
+        queue.write_texture(nrm.copy_info(), &[128, 128, 255, 255], Default::default(), nrm.extent());
+        queue.write_texture(tan.copy_info(), &[255, 128, 128, 255], Default::default(), tan.extent());
+        (pos, nrm, tan)
     }
 
     /// Remove expired weak entries from the document-shared Fill image cache.
@@ -1800,11 +1824,71 @@ impl Engine {
         }
     }
 
+    /// Whether the full-resolution position, normal and tangent maps are resident.
+    pub(crate) fn surface_maps_resident(&self) -> bool {
+        self.pos.width == self.res && self.pos.height == self.res
+            && self.nrm.width == self.res && self.nrm.height == self.res
+            && self.tan.width == self.res && self.tan.height == self.res
+    }
+
+    /// Replaces full-resolution surface maps with tiny neutral bindings.
+    /// Bumping uv_version invalidates cached viewport bind groups.
+    pub(crate) fn release_surface_maps(&mut self) {
+        if self.pos.width == 1 && self.nrm.width == 1 && self.tan.width == 1 {
+            self.uv_baked = None;
+            return;
+        }
+        let (pos, nrm, tan) = Self::surface_map_placeholders(&self.device, &self.queue);
+        self.pos = pos;
+        self.nrm = nrm;
+        self.tan = tan;
+        self.uv_baked = None;
+        self.uv_version = self.uv_version.wrapping_add(1);
+        self.apply_bg = None;
+        self.stamp_bg = [None, None];
+    }
+
+    fn ensure_surface_map_textures(&mut self) {
+        if self.surface_maps_resident() {
+            return;
+        }
+        self.pos = Tex::new(&self.device, "position map (restored)", self.res, self.res, POS_FORMAT, LAYER_USAGE);
+        self.nrm = Tex::new(&self.device, "normal map (restored)", self.res, self.res, NRM_FORMAT, LAYER_USAGE);
+        self.tan = Tex::new(&self.device, "tangent map (restored)", self.res, self.res, TAN_FORMAT, LAYER_USAGE);
+        self.uv_baked = None;
+    }
+
+    /// Recreates the world-space maps before a parked Engine is edited,
+    /// recomposited, or displayed in a mode that reads those maps.
+    pub(crate) fn restore_surface_maps(&mut self, mesh: &GpuMesh) {
+        if self.surface_maps_resident() {
+            return;
+        }
+        self.ensure_surface_map_textures();
+        self.bake_uv(mesh);
+    }
+
     /// Drops GPU resources used only while this Texture Set is being edited.
     /// The final composited result stays resident for the viewport. The next
     /// composite/paint recreates the released workspace lazily.
     pub(crate) fn release_inactive_working_set(&mut self) {
-        if self.active.is_some() || self.generation == 0 {
+        self.release_inactive_working_set_inner(false);
+    }
+
+    /// Same as release_inactive_working_set, but keeps surface maps while
+    /// a view mode needs them for parked Texture Sets.
+    pub(crate) fn release_inactive_working_set_keep_surface_maps(&mut self) {
+        self.release_inactive_working_set_inner(true);
+    }
+
+    fn release_inactive_working_set_inner(&mut self, keep_surface_maps: bool) {
+        if self.active.is_some() {
+            return;
+        }
+        if !keep_surface_maps {
+            self.release_surface_maps();
+        }
+        if self.generation == 0 {
             return;
         }
         // Drop expired path/Weak bookkeeping from the document-wide cache on
@@ -1881,7 +1965,8 @@ impl Engine {
         }
     }
 
-    pub(crate) fn restore_active_working_set(&mut self) {
+    pub(crate) fn restore_active_working_set(&mut self, mesh: &GpuMesh) {
+        self.restore_surface_maps(mesh);
         self.ensure_composite_working_set();
         self.ensure_stroke_target();
     }
@@ -1896,7 +1981,7 @@ impl Engine {
         res: u32,
     ) -> Engine {
         let mut sibling = Self::with_pipelines(
-            &self.rs, self.p.clone(), mesh, tris, bounds, res, self.snapshot_buffer_pool.clone(),
+            &self.rs, self.p.clone(), mesh, tris, bounds, res, self.snapshot_buffer_pool.clone(), true,
         );
         sibling.image_cache = self.image_cache.clone();
         sibling
@@ -1910,6 +1995,7 @@ impl Engine {
         bounds: (Vec3, Vec3),
         res: u32,
         snapshot_buffer_pool: Arc<crate::undo::SnapshotBufferPool>,
+        bake_surface_maps: bool,
     ) -> Engine {
         static NEXT_ENGINE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let id = NEXT_ENGINE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1944,6 +2030,15 @@ impl Engine {
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let (pos, nrm, tan) = if bake_surface_maps {
+            (
+                Tex::new(&device, "position map", res, res, POS_FORMAT, LAYER_USAGE),
+                Tex::new(&device, "normal map", res, res, NRM_FORMAT, LAYER_USAGE),
+                Tex::new(&device, "tangent map", res, res, TAN_FORMAT, LAYER_USAGE),
+            )
+        } else {
+            Self::surface_map_placeholders(&device, &queue)
+        };
         let mut engine = {
             let _textures = crate::startup_trace::span("Engine::with_pipelines texture/buffer allocation");
             Engine {
@@ -1954,9 +2049,9 @@ impl Engine {
             composite_profile_requested: false,
             forced_composite_profile: false,
             last_end_stages_ms: [0.0; 5],
-            pos: Tex::new(&device, "position map", res, res, POS_FORMAT, LAYER_USAGE),
-            nrm: Tex::new(&device, "normal map", res, res, NRM_FORMAT, LAYER_USAGE),
-            tan: Tex::new(&device, "tangent map", res, res, TAN_FORMAT, LAYER_USAGE),
+            pos,
+            nrm,
+            tan,
             accum: [accum_set(&device, res, "accum A"), accum_set(&device, res, "accum B")],
             final_idx: 0,
             stroke: Tex::new(&device, "stroke mask", res, res, STROKE_FORMAT, LAYER_USAGE),
@@ -2053,7 +2148,7 @@ impl Engine {
             queue,
             }
         };
-        {
+        if bake_surface_maps {
             let _s = crate::startup_trace::span("Engine::bake_uv");
             engine.bake_uv(mesh);
         }
@@ -2524,6 +2619,15 @@ impl Engine {
     /// its position and normal maps. The bake is skipped when the maps were
     /// already baked from this same GPU mesh, range and size.
     pub fn set_triangles(&mut self, tris: std::ops::Range<u32>, mesh: &GpuMesh) {
+        self.set_triangles_inner(tris, mesh, true);
+    }
+
+    /// Updates a parked Engine range without allocating or baking its maps.
+    pub(crate) fn set_triangles_parked(&mut self, tris: std::ops::Range<u32>, mesh: &GpuMesh) {
+        self.set_triangles_inner(tris, mesh, false);
+    }
+
+    fn set_triangles_inner(&mut self, tris: std::ops::Range<u32>, mesh: &GpuMesh, bake_surface_maps: bool) {
         let needed = (tris.end - tris.start).max(3);
         if needed > self.screen_index_capacity {
             self.screen_index_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -2536,8 +2640,22 @@ impl Engine {
         }
         let repeat = UvBakeKey::is_current(self.uv_baked.as_ref(), mesh.mesh_id, &tris, self.res);
         self.tris = tris;
-        if !repeat {
-            self.bake_uv(mesh);
+        if bake_surface_maps {
+            if !repeat {
+                self.ensure_surface_map_textures();
+                self.bake_uv(mesh);
+            }
+        } else {
+            if !repeat {
+                self.uv_baked = None;
+                self.mask_final.clear();
+                self.mark_dirty();
+            }
+            let had_maps = self.surface_maps_resident();
+            self.release_surface_maps();
+            if !had_maps && !repeat {
+                self.uv_version = self.uv_version.wrapping_add(1);
+            }
         }
     }
 

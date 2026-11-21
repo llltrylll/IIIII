@@ -38,6 +38,39 @@ fn map_mode(name: &str) -> ViewMode {
 
 #[test]
 #[ignore]
+fn parked_engines_release_and_restore_surface_maps() {
+    use crate::mesh::Primitive;
+
+    let mesh = Primitive::RoundedCube.build();
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let active = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 64);
+    let mut parked = active.sibling_parked(&gpu_mesh, 0..gpu_mesh.index_count, 64);
+    let mut undo = crate::undo::UndoStack::default();
+    parked.add_paint_layer(0, None, None, &mut undo);
+
+    assert!(!parked.surface_maps_resident(), "a newly parked Engine must not allocate full-resolution surface maps");
+    let initial_uv_version = parked.viewport_binding_identity().3;
+
+    parked.restore_surface_maps(&gpu_mesh);
+    assert!(parked.surface_maps_resident(), "restoration must rebuild position, normal and tangent maps");
+    assert_ne!(parked.viewport_binding_identity().3, initial_uv_version, "restoring maps must invalidate viewport bindings");
+
+    // Exercise the map-dependent composite path before returning the Engine to its parked state.
+    parked.composite();
+    parked.release_inactive_working_set();
+    assert!(!parked.surface_maps_resident(), "parking must release the restored maps");
+
+    let parked_uv_version = parked.viewport_binding_identity().3;
+    parked.restore_active_working_set(&gpu_mesh);
+    assert!(parked.surface_maps_resident(), "activation must restore full-resolution maps");
+    assert_ne!(parked.viewport_binding_identity().3, parked_uv_version, "activation must invalidate placeholder bindings");
+
+    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+}
+
+#[test]
+#[ignore]
 fn viewport_cache_reuses_unchanged_images_and_invalidates_changes() {
     use crate::mesh::Primitive;
     use crate::viewport::Cam2d;

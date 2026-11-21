@@ -462,6 +462,7 @@ impl PainterApp {
         match kind {
             ViewKind::V3d => {
                 self.views.set_looks = self.set_looks(ui.ctx());
+                self.update_parked_surface_maps_for_view();
                 let engines = texture_sets::engines(&self.engine, &self.sets, self.mesh.sets.len());
                 self.views.render_3d_with_object_visibility_and_paint_depth(
                     &self.rs, size, &engines, &self.env, &self.gpu_mesh, self.mesh.as_ref(),
@@ -693,6 +694,7 @@ impl PainterApp {
         self.update_poly_highlight();
         if !self.drew_3d {
             let size = self.views.view3d.size;
+            self.update_parked_surface_maps_for_view();
             let engines = texture_sets::engines(&self.engine, &self.sets, self.mesh.sets.len());
             self.views.render_3d_with_object_visibility_and_paint_depth(
                     &self.rs, size, &engines, &self.env, &self.gpu_mesh, self.mesh.as_ref(),

@@ -498,6 +498,7 @@ impl PainterApp {
     /// mesh maps.
     fn fill_parked_graphs(&mut self) {
         let active_channels = self.active_channels;
+        let gpu_mesh = &self.gpu_mesh;
         let (lib, docs) = (&self.graphs.lib, &mut self.graphs.docs);
         for p in self.sets.parked.iter_mut().flatten() {
             let engine = &mut p.engine;
@@ -506,6 +507,7 @@ impl PainterApp {
                 let Content::Fill(f) = &l.content else { continue };
                 let Some(id) = f.graph.filter(|_| l.images.iter().all(Option::is_none)) else { continue };
                 let Some(d) = docs.iter_mut().find(|d| d.id == id && !d.shading) else { continue };
+                engine.restore_surface_maps(gpu_mesh);
                 let version = engine.maps_version;
                 if d.graph.match_set {
                     d.graph.res = engine.res;
