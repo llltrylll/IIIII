@@ -2806,9 +2806,9 @@ impl Engine {
         // new range right after, and this draws nothing meanwhile.
         let tris = self.tris.start.min(mesh.index_count)..self.tris.end.min(mesh.index_count);
         let device = &self.device;
-        let tmp_pos = Tex::new_without_srgb_view(device, "dilate self.res, self.res, POS_FORMAT, LAYER_USAGE);
-        let tmp_nrm = Tex::new_without_srgb_view(device, "dilate self.res, self.res, NRM_FORMAT, LAYER_USAGE);
-        let tmp_tan = Tex::new_without_srgb_view(device, "dilate self.res, self.res, TAN_FORMAT, LAYER_USAGE);
+        let tmp_pos = Tex::new_without_srgb_view(device, "dilate pos", self.res, self.res, POS_FORMAT, LAYER_USAGE);
+        let tmp_nrm = Tex::new_without_srgb_view(device, "dilate nrm", self.res, self.res, NRM_FORMAT, LAYER_USAGE);
+        let tmp_tan = Tex::new_without_srgb_view(device, "dilate tan", self.res, self.res, TAN_FORMAT, LAYER_USAGE);
         let mut encoder = device.create_command_encoder(&Default::default());
         {
             let clear = wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT);
