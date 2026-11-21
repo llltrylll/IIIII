@@ -522,7 +522,7 @@ impl ViewTarget {
                 paint_depth: Some(Tex::new_ms(
                     device, "screen paint depth", w, h, DEPTH_FORMAT, paint_depth_usage, MSAA
                 )),
-                paint_depth_color: gl_depth_color.then(|| Tex::new_ms(
+                paint_depth_color: gl_depth_color.then(|| Tex::new_ms_without_srgb_view(
                     device, "screen paint packed depth", w, h,
                     wgpu::TextureFormat::Rgba8Unorm,
                     wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
