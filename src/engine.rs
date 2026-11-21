@@ -2506,49 +2506,112 @@ impl Engine {
         // Layer compositing.
         let composite_module =
             gpu::shader(device, "composite", concat!(include_str!("shaders/wear.wgsl"), include_str!("shaders/composite.wgsl")));
-        let mut entries = vec![gpu::uniform_entry(0, true)];
-        for b in 1..=11 {
-            // Layer slots 5-8 also hold fill images, which are filtered.
-            entries.push(gpu::tex_entry(b, (5..=8).contains(&b)));
-        }
-        for b in 12..=16 {
-            // 15: the custom maps, an array.
-            entries.push(if b == 15 {
-                wgpu::BindGroupLayoutEntry {
-                    binding: b,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        multisampled: false,
-                    },
-                    count: None,
-                }
-            } else {
-                gpu::tex_entry(b, true)
-            });
-        }
-        entries.push(gpu::sampler_entry(17));
-        entries.push(gpu::sampler_entry(18));
-        // The layer's opacity channel (paint) or image (fill).
-        entries.push(gpu::tex_entry(19, true));
-        // The stack's emission so far, and the layer's emission (paint) or image (fill).
-        entries.push(gpu::tex_entry(20, false));
-        entries.push(gpu::tex_entry(21, true));
-        // Normal and specular: the stack's so far, and the layer's (paint or fill image).
-        entries.push(gpu::tex_entry(22, false));
-        entries.push(gpu::tex_entry(23, true));
-        entries.push(gpu::tex_entry(24, false));
-        entries.push(gpu::tex_entry(25, true));
-        // The tangent frame, for normal images projected in world space.
-        entries.push(gpu::tex_entry(26, false));
-        // Cached color/roughness variation is read with textureLoad, not a sampler.
-        entries.push(gpu::tex_entry(27, false));
-        entries.push(gpu::tex_entry(28, false));
-        let composite_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("composite"),
-            entries: &entries,
+        let custom_maps_entry = wgpu::BindGroupLayoutEntry {
+            binding: 15,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        };
+
+        // A smart mask is evaluated in its own pass and cached in l_mask.
+        // Its source pipeline therefore has a compact, independent layout.
+        let gl_mask_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("composite mask source"),
+            entries: &[
+                gpu::uniform_entry(0, true),
+                gpu::tex_entry(9, false),
+                gpu::tex_entry(10, false),
+                gpu::tex_entry(11, false),
+                gpu::tex_entry(12, true),
+                gpu::tex_entry(13, true),
+                gpu::tex_entry(14, true),
+                custom_maps_entry,
+                gpu::tex_entry(16, true),
+                gpu::sampler_entry(17),
+            ],
         });
+
+        // The OpenGL core pass composites color, roughness, metal, and height.
+        // It binds 15 sampled textures at most, including the cached mask.
+        let mut gl_core_entries = vec![gpu::uniform_entry(0, true)];
+        for b in 1..=11 {
+            gl_core_entries.push(gpu::tex_entry(b, (5..=8).contains(&b)));
+        }
+        gl_core_entries.push(gpu::tex_entry(13, true)); // part-random map
+        gl_core_entries.push(gpu::sampler_entry(17));
+        gl_core_entries.push(gpu::sampler_entry(18));
+        gl_core_entries.push(gpu::tex_entry(19, true)); // opacity image/channel
+        gl_core_entries.push(gpu::tex_entry(27, false)); // cached color variation
+        gl_core_entries.push(gpu::tex_entry(28, false)); // cached roughness variation
+
+        // The OpenGL extra pass handles emission, normal, and specular.
+        let gl_extra_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("OpenGL composite extra"),
+            entries: &[
+                gpu::uniform_entry(0, true),
+                gpu::tex_entry(9, false),
+                gpu::tex_entry(10, false),
+                gpu::tex_entry(11, false),
+                gpu::sampler_entry(18),
+                gpu::tex_entry(20, false),
+                gpu::tex_entry(21, true),
+                gpu::tex_entry(22, false),
+                gpu::tex_entry(23, true),
+                gpu::tex_entry(24, false),
+                gpu::tex_entry(25, true),
+                gpu::tex_entry(26, false),
+            ],
+        });
+
+        // Folder merging reads seven prior channels, seven folder channels,
+        // and the cached mask: exactly 15 sampled textures.
+        let mut gl_folder_entries = vec![gpu::uniform_entry(0, true)];
+        for b in 1..=9 {
+            gl_folder_entries.push(gpu::tex_entry(b, false));
+        }
+        for b in 20..=25 {
+            gl_folder_entries.push(gpu::tex_entry(b, false));
+        }
+        let gl_folder_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("OpenGL folder merge"),
+            entries: &gl_folder_entries,
+        });
+
+        let composite_bgl = if gl_depth_color {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("OpenGL composite core"),
+                entries: &gl_core_entries,
+            })
+        } else {
+            let mut entries = vec![gpu::uniform_entry(0, true)];
+            for b in 1..=11 {
+                // Layer slots 5-8 also hold fill images, which are filtered.
+                entries.push(gpu::tex_entry(b, (5..=8).contains(&b)));
+            }
+            for b in 12..=16 {
+                entries.push(if b == 15 { custom_maps_entry } else { gpu::tex_entry(b, true) });
+            }
+            entries.push(gpu::sampler_entry(17));
+            entries.push(gpu::sampler_entry(18));
+            entries.push(gpu::tex_entry(19, true));
+            entries.push(gpu::tex_entry(20, false));
+            entries.push(gpu::tex_entry(21, true));
+            entries.push(gpu::tex_entry(22, false));
+            entries.push(gpu::tex_entry(23, true));
+            entries.push(gpu::tex_entry(24, false));
+            entries.push(gpu::tex_entry(25, true));
+            entries.push(gpu::tex_entry(26, false));
+            entries.push(gpu::tex_entry(27, false));
+            entries.push(gpu::tex_entry(28, false));
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("composite"),
+                entries: &entries,
+            })
+        };
         // The color/roughness FBM prepass needs only the layer uniform and position map.
         let fill_variation_noise_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fill variation noise"),
