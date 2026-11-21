@@ -461,6 +461,34 @@ fn view_shader_source(gl_depth_color: bool) -> String {
     source = source.replacen(SHADOW_MAP, "", 1);
     source = source.replacen(SHADOW_SAMPLER, "", 1);
 
+    // GL cannot expose alternate sRGB views on all downlevel adapters. The
+    // regular UNORM views therefore need the same decode that an sRGB view
+    // would have applied when sampling the final color and emission channels.
+    const PI_DECL: &str = "const PI: f32 = 3.14159265;\n";
+    assert_eq!(source.matches(PI_DECL).count(), 1, "viewport PI declaration must remain unique");
+    source = source.replacen(
+        PI_DECL,
+        concat!(
+            "const PI: f32 = 3.14159265;\n",
+            "fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {\n",
+            "    let low = c / 12.92;\n",
+            "    let high = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));\n",
+            "    return select(low, high, c > vec3<f32>(0.04045));\n",
+            "}\n",
+        ),
+        1,
+    );
+    const ALBEDO_ASSIGN: &str = "        s.albedo = col.rgb;\n";
+    const EMISSION_ASSIGN: &str = "        s.emission = textureSampleLevel(t_emission, samp, uv, 0.0).rgb;\n";
+    assert_eq!(source.matches(ALBEDO_ASSIGN).count(), 1, "viewport albedo sample must remain unique");
+    assert_eq!(source.matches(EMISSION_ASSIGN).count(), 1, "viewport emission sample must remain unique");
+    source = source.replacen(ALBEDO_ASSIGN, "        s.albedo = srgb_to_linear(col.rgb);\n", 1);
+    source = source.replacen(
+        EMISSION_ASSIGN,
+        "        s.emission = srgb_to_linear(textureSampleLevel(t_emission, samp, uv, 0.0).rgb);\n",
+        1,
+    );
+
     const SHADOW_START: &str = "fn key_shadow(p: vec3<f32>, gn: vec3<f32>) -> f32 {";
     const SHADOW_END: &str = "\n}\n\n// GGX specular and Lambert diffuse from a directional light.";
     let start = source.find(SHADOW_START).expect("key shadow function must exist");
