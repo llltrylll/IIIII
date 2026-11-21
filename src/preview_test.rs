@@ -1440,6 +1440,61 @@ fn vertex_id_mask_selects_same_color_across_disconnected_objects_in_one_texture_
     rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 }
 
+/// The single-sample 3D viewport writes HDR directly and must not require a
+/// multisample resolve target. Exercise the full raster + post path on Vulkan.
+#[test]
+#[ignore]
+fn viewport_msaa_one_sample_renders_without_resolve() {
+    use crate::environment::{EnvBaker, EnvSource, decode};
+    use crate::mesh::Primitive;
+    use crate::gpu::{GpuMesh, read_texture};
+    use crate::engine::Engine;
+    use crate::viewport::{OrbitCam, ViewRenderer, ViewSettings};
+
+    struct RestoreMsaa(Option<std::ffi::OsString>);
+    impl Drop for RestoreMsaa {
+        fn drop(&mut self) {
+            unsafe {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("MP_VIEWPORT_MSAA", value),
+                    None => std::env::remove_var("MP_VIEWPORT_MSAA"),
+                }
+            }
+        }
+    }
+
+    let previous = std::env::var_os("MP_VIEWPORT_MSAA");
+    let _restore = RestoreMsaa(previous);
+    unsafe { std::env::set_var("MP_VIEWPORT_MSAA", "1"); }
+
+    let mesh = Primitive::RoundedCube.build();
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 128);
+    engine.composite();
+
+    let env = EnvBaker::new(&rs.device)
+        .upload(&rs, &decode(&EnvSource::Builtin(0)).unwrap());
+    let mut views = ViewRenderer::new(&rs);
+    assert_eq!(views.msaa_samples, 1, "the requested single-sample viewport must be selected");
+
+    let size = [320, 240];
+    views.render_3d(
+        &rs,
+        size,
+        &[&engine],
+        &env,
+        &gpu_mesh,
+        &OrbitCam::default(),
+        &ViewSettings::default(),
+        None,
+    );
+    let image = views.view3d.image();
+    let pixels = read_texture(&rs.device, &rs.queue, image);
+    assert_eq!(pixels.len(), (size[0] * size[1] * 4) as usize, "direct HDR post path must produce the expected display image");
+    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+}
+
 /// Stable color and roughness FBM fields are evaluated together, reused on a
 /// later composite, and invalidated when the fill seed changes. Both final
 /// channels must match an engine forced through the original inline shader path.

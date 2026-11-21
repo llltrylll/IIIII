@@ -51,6 +51,9 @@ jobs:
 
       # Keep the correctness gates focused on brush/mask GPU parity.
       # The broader preview suite also contains unrelated interactive UI tests.
+      - name: GPU viewport - 1x MSAA direct HDR post path
+        run: "cargo test --locked --bin material_painter preview_test::viewport_msaa_one_sample_renders_without_resolve -- --ignored --exact --nocapture --test-threads 1"
+
       - name: GPU parity - stacked UV screen paint
         run: "cargo test --locked --bin material_painter preview_test::screen_projection_paints_visible_face_of_overlapped_uvs -- --ignored --exact --nocapture --test-threads 1"
 
