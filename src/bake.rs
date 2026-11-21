@@ -3068,6 +3068,45 @@ pub(crate) mod tests {
         (maps, run.report, low_pos)
     }
 
+    /// Executes a tiny low-poly bake on the selected adapter. This covers the
+    /// integer UV render targets, their bitcast reads in compute, and the
+    /// write-only surface-curvature storage texture on OpenGL.
+    #[test]
+    #[ignore]
+    fn gl_adapter_low_poly_bake_roundtrip() {
+        let (_instance, adapter, device, queue) = gpu_with_adapter();
+        assert_eq!(adapter.get_info().backend, wgpu::Backend::Gl, "expected an OpenGL adapter");
+
+        let mesh = Primitive::RoundedCube.build();
+        let gpu_mesh = GpuMesh::new(&device, &mesh);
+        let mut settings = BakeSettings::default();
+        settings.maps = 0;
+        settings.aa = 1;
+        let mut scene = prepare(&mesh, &settings, 0).expect("low-poly bake preparation");
+        let baker = GpuBaker::new_for_adapter(&device, &adapter);
+        let mut run = baker.start_owned(&device, &queue, &gpu_mesh, &mut scene, &settings, 64);
+        let ctx = egui::Context::default();
+
+        let _maps = loop {
+            if let Some(maps) = baker.pump(&mut run, &device, &queue, &ctx) {
+                break maps;
+            }
+            device.poll(wgpu::PollType::wait_indefinitely()).expect("OpenGL bake poll");
+        };
+        device.poll(wgpu::PollType::wait_indefinitely()).expect("OpenGL bake completion");
+
+        if run.low[0].format == F::Rgba32Uint {
+            assert_eq!(run.low[2].format, F::Rgba32Uint);
+            assert_eq!(run.surf_curv.format, F::Rgba32Float);
+        }
+        let bytes = read_texture(&device, &queue, &run.low[0]);
+        let inside = bytes
+            .chunks_exact(16)
+            .filter(|pixel| f32::from_le_bytes([pixel[12], pixel[13], pixel[14], pixel[15]]) > 0.75)
+            .count();
+        assert!(inside > 0, "the low-poly UV raster produced no interior texels");
+    }
+
     struct Baked {
         res: u32,
         /// Texel lies inside a UV island (not padding or empty).
