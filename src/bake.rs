@@ -1872,7 +1872,8 @@ impl GpuBaker {
                     "out.pos = vec4<u32>(s.xyz, bitcast<u32>(0.5));",
                 )
                 .replace("if (s.a > 0.25)", "if (bitcast<f32>(s.a) > 0.25)")
-                .replace("out.pos = vec4<f32>(0.0);", "out.pos = vec4<u32>(0u);");
+                .replace("out.pos = vec4<f32>(0.0);", "out.pos = vec4<u32>(0u);")
+                .replace("out.tan = vec4<f32>(0.0);", "out.tan = vec4<u32>(0u);");
 
             for (from, to) in [
                 ("var low_pos: texture_2d<f32>;", "var low_pos: texture_2d<u32>;"),
