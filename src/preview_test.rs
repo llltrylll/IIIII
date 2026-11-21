@@ -1339,7 +1339,7 @@ fn vertex_id_mask_selects_same_color_across_disconnected_objects_in_one_texture_
         tri_object.extend([object as u32; 2]);
         let color = if object < 2 { id_color } else { other_color };
         tri_color.extend([color; 2]);
-        tri_vertex_color.extend([[[color; 3]; 3]; 2]);
+        tri_vertex_color.extend([[color; 3]; 2]);
     }
 
     let mut mesh = Mesh::from_parts(
