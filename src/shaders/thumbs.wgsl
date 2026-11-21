@@ -57,13 +57,20 @@ fn coverage(uv: vec2<f32>) -> f32 {
 // A thumbnail to display (stored sRGB-encoded, like painted color, with
 // premultiplied alpha). Off the UV islands a layer's content is clear (the
 // panel's checker shows), a mask dark gray.
+fn display_linear_if_needed(c: vec3<f32>) -> vec3<f32> {
+    if (show.w < 0.5) { return c; }
+    let low = c / 12.92;
+    let high = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return select(low, high, c > vec3<f32>(0.04045));
+}
+
 @fragment
 fn fs_show(in: FsOut) -> @location(0) vec4<f32> {
     let v = footprint(in.uv);
     let a = coverage(in.uv);
     switch i32(show.x) {
-        case 1: { return vec4<f32>(mix(vec3<f32>(0.16), v.rrr, a), 1.0); }
-        case 2: { return vec4<f32>(vec3<f32>(clamp(v.r * 0.5 + 0.5, 0.0, 1.0)) * a, a); }
-        default: { return vec4<f32>(v.rgb * a, a); }
+        case 1: { return vec4<f32>(display_linear_if_needed(mix(vec3<f32>(0.16), v.rrr, a)), 1.0); }
+        case 2: { return vec4<f32>(display_linear_if_needed(vec3<f32>(clamp(v.r * 0.5 + 0.5, 0.0, 1.0)) * a), a); }
+        default: { return vec4<f32>(display_linear_if_needed(v.rgb * a), a); }
     }
 }

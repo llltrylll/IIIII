@@ -428,13 +428,10 @@ fn pack_depth24(depth: f32) -> vec3<f32> {
     return vec3<f32>(f32(r), f32(g8), f32(b8)) / 255.0;
 }
 
-// GL reads depth from a multisampled color target, while this same pass still
-// uses the native depth attachment for hardware occlusion.
+// OpenGL samples a single-sample packed color depth target. The main
+// viewport remains MSAA; only this auxiliary brush-visibility pass is 1x.
 @fragment
-fn fs_paint_depth_gl(
-    in: MeshOut,
-    @builtin(sample_index) sample_index: u32,
-) -> @location(0) vec4<f32> {
+fn fs_paint_depth_gl(in: MeshOut) -> @location(0) vec4<f32> {
     if (dot(in.n, in.n) <= 1e-12 || dot(in.n, g.cam_pos.xyz - in.wpos) <= 0.0) {
         discard;
     }
@@ -442,11 +439,7 @@ fn fs_paint_depth_gl(
     let far = g.clip.y;
     let denom = max(far - in.clip.z * (far - near), 1e-20);
     let linear_depth = near * far / denom;
-    let packed = pack_depth24(linear_depth / far);
-    // A sample-varying output forces per-sample fragment evaluation, retaining
-    // the subpixel depth slope of slanted surfaces.
-    let sample_tag = f32(sample_index + 1u) / 255.0;
-    return vec4<f32>(packed, sample_tag);
+    return vec4<f32>(pack_depth24(linear_depth / far), 1.0);
 }
 
 

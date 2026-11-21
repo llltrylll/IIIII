@@ -5,7 +5,7 @@
 //!
 //! `MP_PREVIEW_MESH=path.fbx cargo test --bin material_painter preview -- --ignored --nocapture`
 
-use crate::bake::BakeSettings;
+use crate::bake::{BakeSettings, GpuBaker};
 use crate::bake::tests::{gpu_with_adapter, run_bake};
 use crate::engine::{Engine, MAPS};
 use crate::gpu::{GpuMesh, read_texture};
@@ -16,6 +16,7 @@ use eframe::{egui, egui_wgpu, wgpu};
 use glam::Vec3;
 use std::path::Path;
 use std::sync::Arc;
+
 
 fn render_state() -> egui_wgpu::RenderState {
     let (instance, adapter, device, queue) = gpu_with_adapter();
@@ -30,6 +31,29 @@ fn render_state() -> egui_wgpu::RenderState {
         target_format,
         renderer: Arc::new(egui::mutex::RwLock::new(renderer)),
     }
+}
+
+/// Reports the actual OpenGL texture-format capabilities available to the bake.
+#[test]
+#[ignore]
+fn gl_format_capabilities() {
+    let rs = render_state();
+    let backend = rs.adapter.get_info().backend;
+    assert_eq!(backend, wgpu::Backend::Gl, "OpenGL smoke test did not obtain a GL adapter");
+    let adapter_features = rs.adapter.features();
+    let mut report = format!(
+        "adapter: {:?}\nfeatures: {adapter_features:?}\nTEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES supported: {}\n",
+        rs.adapter.get_info(),
+        adapter_features.contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES),
+    );
+    let report_dir = std::path::Path::new("target/bake_test");
+    std::fs::create_dir_all(report_dir).unwrap();
+    let report_path = report_dir.join("gl-format-capabilities.txt");
+    std::fs::write(&report_path, &report).unwrap();
+    println!("{report}");
+    let _baker = GpuBaker::new_for_adapter(&rs.device, &rs.adapter);
+    report.push_str("GpuBaker pipeline constructor: success\n");
+    std::fs::write(report_path, report).unwrap();
 }
 
 fn map_mode(name: &str) -> ViewMode {
@@ -2631,6 +2655,15 @@ fn screen_projection_paints_visible_face_of_overlapped_uvs() {
     legacy.add_paint_layer(0, None, None, &mut legacy_undo);
     legacy.composite();
     views.render_3d(&rs, size, &[&legacy], &env, &gpu_mesh, &cam, &ViewSettings::default(), None);
+    if rs.adapter.get_info().backend == wgpu::Backend::Gl {
+        let depth = views.view3d.paint_depth_color_texture().expect("GL packed depth target exists");
+        let bytes = read_texture(&rs.device, &rs.queue, depth);
+        let center = ((size[1] / 2 * size[0] + size[0] / 2) * 4) as usize;
+        let center_pixel = &bytes[center..center + 4];
+        let written = bytes.chunks_exact(4).filter(|pixel| pixel[..3] != [255, 255, 255]).count();
+        println!("  OpenGL single-sample packed depth: center {:?}; {written} written pixels / {}", center_pixel, size[0] * size[1]);
+        assert!(written > 500, "OpenGL packed depth pass must write visible mesh pixels, got {written}");
+    }
     assert!(legacy.begin_stroke(0, StrokeTarget::Content, paint.mat.enabled, false));
     let legacy_region = stroke_region(&mesh, &bvh, legacy.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps);
     legacy.stroke_step(&stamps, su, views.view3d.paint_depth_view(), &paint, legacy_region);

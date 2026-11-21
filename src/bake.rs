@@ -6,7 +6,7 @@
 //! single dispatch can trip the OS GPU watchdog.
 
 use crate::bvh::Bvh;
-use crate::gpu::{self, GpuMesh, LAYER_USAGE, Tex};
+use crate::gpu::{self, GpuMesh, Tex};
 use crate::mesh::{HighPoly, Mesh, smooth_normals, weld_positions};
 use eframe::{egui, wgpu};
 use glam::Vec3;
@@ -1642,6 +1642,7 @@ fn v(t: &Tex) -> wgpu::BindingResource<'_> {
 enum Entry {
     Uniform,
     Tex,
+    TexUint,
     Storage(bool),
     StorageTex(F),
 }
@@ -1733,6 +1734,11 @@ impl SceneUploads {
 }
 
 pub struct GpuBaker {
+    /// Format of the rasterized low-poly position and tangent maps.
+    uv_pos_format: F,
+    uv_tan_format: F,
+    /// Storage format for the per-texel curvature/triangle-size pair.
+    surface_curv_format: F,
     uv: wgpu::RenderPipeline,
     dilate: wgpu::RenderPipeline,
     dilate_bgl: wgpu::BindGroupLayout,
@@ -1791,10 +1797,116 @@ impl BakeRun {
 }
 
 impl GpuBaker {
+    /// Test helper for paths that use the original floating-point UV targets.
+    #[cfg(test)]
     pub fn new(device: &wgpu::Device) -> GpuBaker {
-        let uv_module = gpu::shader(device, "bake uv", include_str!("shaders/bake_uv.wgsl"));
+        Self::new_with_formats(device, F::Rgba32Float, F::Rgba32Float, false, F::Rg32Float)
+    }
+
+    /// Selects render-target and storage formats from the adapter's actual capabilities.
+    pub fn new_for_adapter(device: &wgpu::Device, adapter: &wgpu::Adapter) -> GpuBaker {
+        let required_uv_usages = wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST;
+        let float_uv = adapter.get_texture_format_features(F::Rgba32Float);
+        let uint_uv = adapter.get_texture_format_features(F::Rgba32Uint);
+        let (uv_pos_format, uv_tan_format, integer_uv_textures) =
+            if float_uv.allowed_usages.contains(required_uv_usages) {
+                (F::Rgba32Float, F::Rgba32Float, false)
+            } else if uint_uv.allowed_usages.contains(required_uv_usages) {
+                (F::Rgba32Uint, F::Rgba32Uint, true)
+            } else {
+                panic!(
+                    "GPU adapter {:?} supports neither Rgba32Float nor Rgba32Uint for bake UV render/sample/storage usage",
+                    adapter.get_info()
+                );
+            };
+
+        let rg32 = adapter.get_texture_format_features(F::Rg32Float);
+        let rgba32 = adapter.get_texture_format_features(F::Rgba32Float);
+        let surface_curv_format = if rg32.allowed_usages.contains(wgpu::TextureUsages::STORAGE_BINDING)
+            && rg32.flags.contains(wgpu::TextureFormatFeatureFlags::STORAGE_WRITE_ONLY)
+        {
+            F::Rg32Float
+        } else if rgba32.allowed_usages.contains(wgpu::TextureUsages::STORAGE_BINDING)
+            && rgba32.flags.contains(wgpu::TextureFormatFeatureFlags::STORAGE_WRITE_ONLY)
+        {
+            F::Rgba32Float
+        } else {
+            panic!(
+                "GPU adapter {:?} supports neither Rg32Float nor Rgba32Float write-only storage textures for surface curvature",
+                adapter.get_info()
+            );
+        };
+
+        Self::new_with_formats(device, uv_pos_format, uv_tan_format, integer_uv_textures, surface_curv_format)
+    }
+
+    fn new_with_formats(
+        device: &wgpu::Device,
+        uv_pos_format: F,
+        uv_tan_format: F,
+        integer_uv_textures: bool,
+        surface_curv_format: F,
+    ) -> GpuBaker {
+        let mut uv_source = include_str!("shaders/bake_uv.wgsl").to_owned();
+        let mut bake_source = include_str!("shaders/bake.wgsl").to_owned();
+        if integer_uv_textures {
+            uv_source = uv_source
+                .replace("@location(0) pos: vec4<f32>", "@location(0) pos: vec4<u32>")
+                .replace("@location(2) tan: vec4<f32>", "@location(2) tan: vec4<u32>")
+                .replace(
+                    "out.pos = vec4<f32>(in.wpos, 1.0);",
+                    "out.pos = bitcast<vec4<u32>>(vec4<f32>(in.wpos, 1.0));",
+                )
+                .replace(
+                    "out.tan = vec4<f32>(in.t.xyz, in.tw);",
+                    "out.tan = bitcast<vec4<u32>>(vec4<f32>(in.t.xyz, in.tw));",
+                )
+                .replace("var src_pos: texture_2d<f32>;", "var src_pos: texture_2d<u32>;")
+                .replace("var src_tan: texture_2d<f32>;", "var src_tan: texture_2d<u32>;")
+                .replace("if (p.a > 0.25)", "if (bitcast<f32>(p.a) > 0.25)")
+                .replace(
+                    "out.pos = vec4<f32>(s.xyz, 0.5);",
+                    "out.pos = vec4<u32>(s.xyz, bitcast<u32>(0.5));",
+                )
+                .replace("if (s.a > 0.25)", "if (bitcast<f32>(s.a) > 0.25)")
+                .replace("out.pos = vec4<f32>(0.0);", "out.pos = vec4<u32>(0u);")
+                .replace("out.tan = vec4<f32>(0.0);", "out.tan = vec4<u32>(0u);");
+
+            for (from, to) in [
+                ("var low_pos: texture_2d<f32>;", "var low_pos: texture_2d<u32>;"),
+                ("var low_tan: texture_2d<f32>;", "var low_tan: texture_2d<u32>;"),
+                ("var cage_pos: texture_2d<f32>;", "var cage_pos: texture_2d<u32>;"),
+                ("var cage_tan: texture_2d<f32>;", "var cage_tan: texture_2d<u32>;"),
+                (
+                    "textureLoad(low_pos, clamp(c + dir, vec2<i32>(0), vec2<i32>(r)), 0)",
+                    "bitcast<vec4<f32>>(textureLoad(low_pos, clamp(c + dir, vec2<i32>(0), vec2<i32>(r)), 0))",
+                ),
+                (
+                    "textureLoad(low_pos, clamp(c - dir, vec2<i32>(0), vec2<i32>(r)), 0)",
+                    "bitcast<vec4<f32>>(textureLoad(low_pos, clamp(c - dir, vec2<i32>(0), vec2<i32>(r)), 0))",
+                ),
+                ("textureLoad(low_pos, q, 0)", "bitcast<vec4<f32>>(textureLoad(low_pos, q, 0))"),
+                ("textureLoad(low_pos, c, 0)", "bitcast<vec4<f32>>(textureLoad(low_pos, c, 0))"),
+                ("textureLoad(low_tan, q, 0)", "bitcast<vec4<f32>>(textureLoad(low_tan, q, 0))"),
+                ("textureLoad(low_tan, c, 0)", "bitcast<vec4<f32>>(textureLoad(low_tan, c, 0))"),
+                ("textureLoad(cage_pos, c, 0)", "bitcast<vec4<f32>>(textureLoad(cage_pos, c, 0))"),
+                ("textureLoad(cage_tan, c, 0)", "bitcast<vec4<f32>>(textureLoad(cage_tan, c, 0))"),
+            ] {
+                bake_source = bake_source.replace(from, to);
+            }
+        }
+        if surface_curv_format == F::Rgba32Float {
+            bake_source = bake_source.replace(
+                "texture_storage_2d<rg32float, write>",
+                "texture_storage_2d<rgba32float, write>",
+            );
+        }
+        let uv_module = gpu::shader(device, "bake uv", &uv_source);
         // Tangent is f32: its w carries a triangle slot (see `low_corners`).
-        let surface_formats = [F::Rgba32Float, F::Rgba16Float, F::Rgba32Float];
+        let surface_formats = [uv_pos_format, F::Rgba16Float, uv_tan_format];
         let empty = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
             bind_group_layouts: &[],
@@ -1821,9 +1933,14 @@ impl GpuBaker {
             multiview_mask: None,
             cache: None,
         });
+        let dilate_entries = if integer_uv_textures {
+            vec![gpu::uint_tex_entry(0), gpu::tex_entry(1, false), gpu::uint_tex_entry(2)]
+        } else {
+            vec![gpu::tex_entry(0, false), gpu::tex_entry(1, false), gpu::tex_entry(2, false)]
+        };
         let dilate_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("bake dilate"),
-            entries: &[gpu::tex_entry(0, false), gpu::tex_entry(1, false), gpu::tex_entry(2, false)],
+            entries: &dilate_entries,
         });
         let dilate = gpu::fullscreen_pipeline(
             device,
@@ -1834,7 +1951,7 @@ impl GpuBaker {
             &surface_formats.map(gpu::target),
         );
 
-        let module = gpu::shader(device, "bake", include_str!("shaders/bake.wgsl"));
+        let module = gpu::shader(device, "bake", &bake_source);
         let compute = |entry: &str, bindings: &[(u32, Entry)]| {
             let entries: Vec<wgpu::BindGroupLayoutEntry> = bindings
                 .iter()
@@ -1849,6 +1966,11 @@ impl GpuBaker {
                         },
                         Entry::Tex => wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        Entry::TexUint => wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Uint,
                             view_dimension: wgpu::TextureViewDimension::D2,
                             multisampled: false,
                         },
@@ -1879,13 +2001,17 @@ impl GpuBaker {
             (pipeline, bgl)
         };
         use Entry::*;
+        // Position/tangent UV targets are f32 on adapters with float render
+        // support and bitcast u32 on adapters that need integer render targets.
+        // Every sampled view of those maps must use the matching sample type.
+        let uv_tex = if integer_uv_textures { TexUint } else { Tex };
         let surface = compute(
             "cs_surface",
             &[
                 (0, Uniform),
-                (1, Tex),
+                (1, uv_tex),
                 (2, Tex),
-                (3, Tex),
+                (3, uv_tex),
                 (4, Storage(false)),
                 (5, Storage(false)),
                 (6, Storage(false)),
@@ -1898,16 +2024,16 @@ impl GpuBaker {
                 (12, StorageTex(F::Rgba8Unorm)),
                 (26, Storage(true)),
                 (27, StorageTex(F::Rgba32Float)),
-                (34, StorageTex(F::Rg32Float)),
-                (33, Tex),
-                (38, Tex),
+                (34, StorageTex(surface_curv_format)),
+                (33, uv_tex),
+                (38, uv_tex),
             ],
         );
         let occlusion = compute(
             "cs_occlusion",
             &[
                 (0, Uniform),
-                (1, Tex),
+                (1, uv_tex),
                 (4, Storage(false)),
                 (5, Storage(false)),
                 (6, Storage(false)),
@@ -1920,9 +2046,9 @@ impl GpuBaker {
             ],
         );
         let curvature =
-            compute("cs_curvature", &[(0, Uniform), (1, Tex), (13, Tex), (14, Tex), (17, StorageTex(F::Rgba16Float)), (35, Tex)]);
+            compute("cs_curvature", &[(0, Uniform), (1, uv_tex), (13, Tex), (14, Tex), (17, StorageTex(F::Rgba16Float)), (35, Tex)]);
         let jfa_init =
-            compute("cs_jfa_init", &[(0, Uniform), (1, Tex), (13, Tex), (18, Tex), (19, StorageTex(F::Rgba32Float))]);
+            compute("cs_jfa_init", &[(0, Uniform), (1, uv_tex), (13, Tex), (18, Tex), (19, StorageTex(F::Rgba32Float))]);
         let jfa_step = compute("cs_jfa_step", &[(0, Uniform), (13, Tex), (20, Tex), (19, StorageTex(F::Rgba32Float)), (28, Tex)]);
         let edges = compute(
             "cs_edges",
@@ -1940,7 +2066,7 @@ impl GpuBaker {
             "cs_denoise",
             &[
                 (0, Uniform),
-                (1, Tex),
+                (1, uv_tex),
                 (13, Tex),
                 (14, Tex),
                 (21, Tex),
@@ -1950,7 +2076,7 @@ impl GpuBaker {
             ],
         );
         let smooth_inputs = |io: &[(u32, Entry)]| {
-            let mut e = vec![(0, Uniform), (1, Tex), (13, Tex), (14, Tex), (28, Tex), (35, Tex)];
+            let mut e = vec![(0, Uniform), (1, uv_tex), (13, Tex), (14, Tex), (28, Tex), (35, Tex)];
             e.extend(io.iter().map(|(b, k)| (*b, *k)));
             e
         };
@@ -1963,7 +2089,7 @@ impl GpuBaker {
             "cs_pack",
             &[
                 (0, Uniform),
-                (1, Tex),
+                (1, uv_tex),
                 (13, Tex),
                 (14, Tex),
                 (18, Tex),
@@ -1979,7 +2105,7 @@ impl GpuBaker {
             "cs_custom",
             &[
                 (0, Uniform),
-                (1, Tex),
+                (1, uv_tex),
                 (4, Storage(false)),
                 (5, Storage(false)),
                 (6, Storage(false)),
@@ -1992,6 +2118,9 @@ impl GpuBaker {
         );
         let cust_smooth = compute("cs_cust_smooth", &smooth_inputs(&[(37, Tex), (36, StorageTex(F::Rgba16Float))]));
         GpuBaker {
+            uv_pos_format,
+            uv_tan_format,
+            surface_curv_format,
             uv,
             dilate,
             dilate_bgl,
@@ -2126,10 +2255,18 @@ impl GpuBaker {
             low_corners, low_draws, cage: cage_vertices,
         } = uploads;
         let res = res.min(MAX_BAKE_RES);
-        let usage = LAYER_USAGE | wgpu::TextureUsages::STORAGE_BINDING;
-        let t = |label: &str, f: F| Tex::new(device, label, res, res, f, usage);
-        let low = [t("bake pos", F::Rgba32Float), t("bake nrm", F::Rgba16Float), t("bake tan", F::Rgba32Float)];
-        let tmp = [t("bake pos 2", F::Rgba32Float), t("bake nrm 2", F::Rgba16Float), t("bake tan 2", F::Rgba32Float)];
+        let storage_usage = wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::STORAGE_BINDING;
+        let uv_usage = wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::RENDER_ATTACHMENT;
+        let t = |label: &str, f: F| Tex::new_without_srgb_view(device, label, res, res, f, storage_usage);
+        let rt = |label: &str, f: F| Tex::new_without_srgb_view(device, label, res, res, f, uv_usage);
+        let low = [rt("bake pos", self.uv_pos_format), rt("bake nrm", F::Rgba16Float), rt("bake tan", self.uv_tan_format)];
+        let tmp = [rt("bake pos 2", self.uv_pos_format), rt("bake nrm 2", F::Rgba16Float), rt("bake tan 2", self.uv_tan_format)];
 
         let mut encoder = device.create_command_encoder(&Default::default());
         {
@@ -2175,7 +2312,7 @@ impl GpuBaker {
 
         // The cage, rasterized at the low poly's UVs and dilated the same way.
         let cage = cage_vertices.as_ref().map(|vertices| {
-            let set = [t("cage pos", F::Rgba32Float), t("cage nrm", F::Rgba16Float), t("cage tan", F::Rgba32Float)];
+            let set = [rt("cage pos", self.uv_pos_format), rt("cage nrm", F::Rgba16Float), rt("cage tan", self.uv_tan_format)];
             {
                 let clear = wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT);
                 let att: Vec<_> = set.iter().map(|t| gpu::color_attachment(&t.view, clear)).collect();
@@ -2232,7 +2369,7 @@ impl GpuBaker {
         let surf_pos = t("surface pos", F::Rgba32Float);
         let surf_nrm = t("surface nrm", F::Rgba16Float);
         let surf_geo = t("surface geo", F::Rgba32Float);
-        let surf_curv = t("surface curvature", F::Rg32Float);
+        let surf_curv = t("surface curvature", self.surface_curv_format);
         let maps = [
             t("map A", MAP_FORMATS[0]),
             t("map B", MAP_FORMATS[1]),
@@ -2429,15 +2566,18 @@ impl GpuBaker {
 
         // Every occlusion tile is queued: curvature, edge distance and packing.
         let res = run.res;
-        let usage = LAYER_USAGE | wgpu::TextureUsages::STORAGE_BINDING;
-        let curv = Tex::new(device, "curvature", res, res, F::Rgba16Float, usage);
+        let usage = wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::STORAGE_BINDING;
+        let curv = Tex::new_without_srgb_view(device, "curvature", res, res, F::Rgba16Float, usage);
         let jfa = [
-            Tex::new(device, "jfa a", res, res, F::Rgba32Float, usage),
-            Tex::new(device, "jfa b", res, res, F::Rgba32Float, usage),
+            Tex::new_without_srgb_view(device, "jfa a", res, res, F::Rgba32Float, usage),
+            Tex::new_without_srgb_view(device, "jfa b", res, res, F::Rgba32Float, usage),
         ];
         let ubuf = Self::uniform_buffer(device, &run.uniform);
         let mut encoder = device.create_command_encoder(&Default::default());
-        let edges = Tex::new(device, "edge distance", res, res, F::Rgba16Float, usage);
+        let edges = Tex::new_without_srgb_view(device, "edge distance", res, res, F::Rgba16Float, usage);
         // Curvature seeds the edge search, so the three are baked together.
         let baked = run.uniform.g[1] as u32;
         if baked & 0b110_0010 != 0 {
@@ -2456,7 +2596,7 @@ impl GpuBaker {
         Self::dispatch(&mut encoder, &self.curvature.0, &g, res, res);
         // Triangle-scale smoothing (see `cs_curv_smooth`), before edges are
         // seeded from it. An even pass count ends back in `curv`.
-        let curv_scratch = Tex::new(device, "curvature 2", res, res, F::Rgba16Float, usage);
+        let curv_scratch = Tex::new_without_srgb_view(device, "curvature 2", res, res, F::Rgba16Float, usage);
         Self::smooth_passes(device, &mut encoder, &self.curv_smooth, run, &[(&curv, &curv_scratch, 18, 17)], 2);
         let g = Self::group(
             device,
@@ -2515,8 +2655,8 @@ impl GpuBaker {
         // softens contact shadows and cavity.
         let passes = denoise_passes(run.uniform.b[0] as u32);
         let scratch = [
-            Tex::new(device, "occlusion 2", res, res, F::Rgba8Unorm, usage),
-            Tex::new(device, "bent normal 2", res, res, F::Rgba8Unorm, usage),
+            Tex::new_without_srgb_view(device, "occlusion 2", res, res, F::Rgba8Unorm, usage),
+            Tex::new_without_srgb_view(device, "bent normal 2", res, res, F::Rgba8Unorm, usage),
         ];
         for i in 0..passes {
             let (src_occ, src_bent, dst_occ, dst_bent) = if i % 2 == 0 {
@@ -2557,7 +2697,7 @@ impl GpuBaker {
             6,
         );
         if !run.custom.is_empty() {
-            let scratch = Tex::new(device, "custom maps 2", res, res, CUSTOM_FORMAT, usage);
+            let scratch = Tex::new_without_srgb_view(device, "custom maps 2", res, res, CUSTOM_FORMAT, usage);
             for (target, _) in &run.custom {
                 Self::smooth_passes(device, &mut encoder, &self.cust_smooth, run, &[(target, &scratch, 37, 36)], 4);
             }
@@ -2870,9 +3010,11 @@ pub(crate) mod tests {
             ..Default::default()
         }))
         .expect("a GPU adapter");
-        let (device, queue) =
-            ready(adapter.request_device(&wgpu::DeviceDescriptor { required_limits: adapter.limits(), ..Default::default() }))
-                .expect("a GPU device");
+        let (device, queue) = ready(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: adapter.features() & wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
+            required_limits: adapter.limits(),
+            ..Default::default()
+        })).expect("a GPU device");
         (instance, adapter, device, queue)
     }
 
@@ -2928,6 +3070,45 @@ pub(crate) mod tests {
         );
         let [low_pos, _, _] = run.low;
         (maps, run.report, low_pos)
+    }
+
+    /// Executes a tiny low-poly bake on the selected adapter. This covers the
+    /// integer UV render targets, their bitcast reads in compute, and the
+    /// write-only surface-curvature storage texture on OpenGL.
+    #[test]
+    #[ignore]
+    fn gl_adapter_low_poly_bake_roundtrip() {
+        let (_instance, adapter, device, queue) = gpu_with_adapter();
+        assert_eq!(adapter.get_info().backend, wgpu::Backend::Gl, "expected an OpenGL adapter");
+
+        let mesh = Primitive::RoundedCube.build();
+        let gpu_mesh = GpuMesh::new(&device, &mesh);
+        let mut settings = BakeSettings::default();
+        settings.maps = 0;
+        settings.aa = 1;
+        let mut scene = prepare(&mesh, &settings, 0).expect("low-poly bake preparation");
+        let baker = GpuBaker::new_for_adapter(&device, &adapter);
+        let mut run = baker.start_owned(&device, &queue, &gpu_mesh, &mut scene, &settings, 64);
+        let ctx = egui::Context::default();
+
+        let _maps = loop {
+            if let Some(maps) = baker.pump(&mut run, &device, &queue, &ctx) {
+                break maps;
+            }
+            device.poll(wgpu::PollType::wait_indefinitely()).expect("OpenGL bake poll");
+        };
+        device.poll(wgpu::PollType::wait_indefinitely()).expect("OpenGL bake completion");
+
+        if run.low[0].format == F::Rgba32Uint {
+            assert_eq!(run.low[2].format, F::Rgba32Uint);
+            assert_eq!(run.surf_curv.format, F::Rgba32Float);
+        }
+        let bytes = read_texture(&device, &queue, &run.low[0]);
+        let inside = bytes
+            .chunks_exact(16)
+            .filter(|pixel| f32::from_le_bytes([pixel[12], pixel[13], pixel[14], pixel[15]]) > 0.75)
+            .count();
+        assert!(inside > 0, "the low-poly UV raster produced no interior texels");
     }
 
     struct Baked {
