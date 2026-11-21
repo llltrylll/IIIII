@@ -1344,7 +1344,6 @@ struct Pipelines {
     /// OpenGL uses separate core/extra passes and a narrow, precomputed-mask layout.
     gl_composite: bool,
     gl_extra_layout: wgpu::PipelineLayout,
-    gl_folder_layout: wgpu::PipelineLayout,
     gl_extra_bgl: wgpu::BindGroupLayout,
     gl_folder_bgl: wgpu::BindGroupLayout,
     gl_mask_bgl: wgpu::BindGroupLayout,
@@ -2741,7 +2740,6 @@ impl Engine {
             composite_bgl,
             gl_composite: gl_depth_color,
             gl_extra_layout,
-            gl_folder_layout,
             gl_extra_bgl,
             gl_folder_bgl,
             gl_mask_bgl,
