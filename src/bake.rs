@@ -2127,7 +2127,7 @@ impl GpuBaker {
         } = uploads;
         let res = res.min(MAX_BAKE_RES);
         let usage = LAYER_USAGE | wgpu::TextureUsages::STORAGE_BINDING;
-        let t = |label: &str, f: F| Tex::new(device, label, res, res, f, usage);
+        let t = |label: &str, f: F| Tex::new_without_srgb_view(device, label, res, res, f, usage);
         let low = [t("bake pos", F::Rgba32Float), t("bake nrm", F::Rgba16Float), t("bake tan", F::Rgba32Float)];
         let tmp = [t("bake pos 2", F::Rgba32Float), t("bake nrm 2", F::Rgba16Float), t("bake tan 2", F::Rgba32Float)];
 
@@ -2430,14 +2430,14 @@ impl GpuBaker {
         // Every occlusion tile is queued: curvature, edge distance and packing.
         let res = run.res;
         let usage = LAYER_USAGE | wgpu::TextureUsages::STORAGE_BINDING;
-        let curv = Tex::new(device, "curvature", res, res, F::Rgba16Float, usage);
+        let curv = Tex::new_without_srgb_view(device, "curvature", res, res, F::Rgba16Float, usage);
         let jfa = [
-            Tex::new(device, "jfa a", res, res, F::Rgba32Float, usage),
-            Tex::new(device, "jfa b", res, res, F::Rgba32Float, usage),
+            Tex::new_without_srgb_view(device, "jfa a", res, res, F::Rgba32Float, usage),
+            Tex::new_without_srgb_view(device, "jfa b", res, res, F::Rgba32Float, usage),
         ];
         let ubuf = Self::uniform_buffer(device, &run.uniform);
         let mut encoder = device.create_command_encoder(&Default::default());
-        let edges = Tex::new(device, "edge distance", res, res, F::Rgba16Float, usage);
+        let edges = Tex::new_without_srgb_view(device, "edge distance", res, res, F::Rgba16Float, usage);
         // Curvature seeds the edge search, so the three are baked together.
         let baked = run.uniform.g[1] as u32;
         if baked & 0b110_0010 != 0 {
@@ -2456,7 +2456,7 @@ impl GpuBaker {
         Self::dispatch(&mut encoder, &self.curvature.0, &g, res, res);
         // Triangle-scale smoothing (see `cs_curv_smooth`), before edges are
         // seeded from it. An even pass count ends back in `curv`.
-        let curv_scratch = Tex::new(device, "curvature 2", res, res, F::Rgba16Float, usage);
+        let curv_scratch = Tex::new_without_srgb_view(device, "curvature 2", res, res, F::Rgba16Float, usage);
         Self::smooth_passes(device, &mut encoder, &self.curv_smooth, run, &[(&curv, &curv_scratch, 18, 17)], 2);
         let g = Self::group(
             device,
@@ -2515,8 +2515,8 @@ impl GpuBaker {
         // softens contact shadows and cavity.
         let passes = denoise_passes(run.uniform.b[0] as u32);
         let scratch = [
-            Tex::new(device, "occlusion 2", res, res, F::Rgba8Unorm, usage),
-            Tex::new(device, "bent normal 2", res, res, F::Rgba8Unorm, usage),
+            Tex::new_without_srgb_view(device, "occlusion 2", res, res, F::Rgba8Unorm, usage),
+            Tex::new_without_srgb_view(device, "bent normal 2", res, res, F::Rgba8Unorm, usage),
         ];
         for i in 0..passes {
             let (src_occ, src_bent, dst_occ, dst_bent) = if i % 2 == 0 {
@@ -2557,7 +2557,7 @@ impl GpuBaker {
             6,
         );
         if !run.custom.is_empty() {
-            let scratch = Tex::new(device, "custom maps 2", res, res, CUSTOM_FORMAT, usage);
+            let scratch = Tex::new_without_srgb_view(device, "custom maps 2", res, res, CUSTOM_FORMAT, usage);
             for (target, _) in &run.custom {
                 Self::smooth_passes(device, &mut encoder, &self.cust_smooth, run, &[(target, &scratch, 37, 36)], 4);
             }
