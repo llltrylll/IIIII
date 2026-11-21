@@ -8,7 +8,7 @@
 use crate::bake::BakeSettings;
 use crate::bake::tests::{gpu_with_adapter, run_bake};
 use crate::engine::{Engine, MAPS};
-use crate::gpu::{GpuMesh, Tex, read_texture};
+use crate::gpu::{GpuMesh, read_texture};
 use crate::mesh::Mesh;
 use crate::presets;
 use crate::viewport::{OrbitCam, ViewMode, ViewRenderer, ViewSettings};
@@ -17,125 +17,6 @@ use glam::Vec3;
 use std::path::Path;
 use std::sync::Arc;
 
-
-// Test-only diagnostic: read one sample of a multisampled RGBA8 target by
-// sampling it in a single-sampled pass. This avoids relying on hardware resolve.
-fn read_multisampled_rgba8_sample(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    source: &Tex,
-    sample_index: u32,
-) -> Vec<u8> {
-    let output = Tex::new_without_srgb_view(
-        device,
-        "diagnostic packed-depth sample",
-        source.width,
-        source.height,
-        wgpu::TextureFormat::Rgba8Unorm,
-        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-    );
-    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("diagnostic multisampled color source"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: true,
-            },
-            count: None,
-        }],
-    });
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("diagnostic multisampled color source"),
-        layout: &bgl,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: wgpu::BindingResource::TextureView(&source.view),
-        }],
-    });
-    let shader_source = format!(r#"
-struct VOut {{
-    @builtin(position) position: vec4<f32>,
-}}
-@group(0) @binding(0) var source_tex: texture_multisampled_2d<f32>;
-@vertex
-fn vs_main(@builtin(vertex_index) vi: u32) -> VOut {{
-    let points = array<vec2<f32>, 3>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(3.0, -1.0),
-        vec2<f32>(-1.0, 3.0)
-    );
-    var out: VOut;
-    out.position = vec4<f32>(points[vi], 0.0, 1.0);
-    return out;
-}}
-@fragment
-fn fs_main(in: VOut) -> @location(0) vec4<f32> {{
-    return textureLoad(source_tex, vec2<i32>(in.position.xy), {sample_index});
-}}
-"#);
-    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("diagnostic multisampled color read"),
-        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
-    });
-    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("diagnostic multisampled color read"),
-        bind_group_layouts: &[Some(&bgl)],
-        immediate_size: 0,
-    });
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("diagnostic multisampled color read"),
-        layout: Some(&layout),
-        vertex: wgpu::VertexState {
-            module: &module,
-            entry_point: Some("vs_main"),
-            compilation_options: Default::default(),
-            buffers: &[],
-        },
-        primitive: Default::default(),
-        depth_stencil: None,
-        multisample: Default::default(),
-        fragment: Some(wgpu::FragmentState {
-            module: &module,
-            entry_point: Some("fs_main"),
-            compilation_options: Default::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-        }),
-        multiview_mask: None,
-        cache: None,
-    });
-    let mut encoder = device.create_command_encoder(&Default::default());
-    {
-        let attachments = [Some(wgpu::RenderPassColorAttachment {
-            view: &output.view,
-            depth_slice: None,
-            resolve_target: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                store: wgpu::StoreOp::Store,
-            },
-        })];
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("diagnostic multisampled color read"),
-            color_attachments: &attachments,
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &bg, &[]);
-        pass.draw(0..3, 0..1);
-    }
-    queue.submit([encoder.finish()]);
-    read_texture(device, queue, &output)
-}
 
 fn render_state() -> egui_wgpu::RenderState {
     let (instance, adapter, device, queue) = gpu_with_adapter();
@@ -2752,23 +2633,13 @@ fn screen_projection_paints_visible_face_of_overlapped_uvs() {
     legacy.composite();
     views.render_3d(&rs, size, &[&legacy], &env, &gpu_mesh, &cam, &ViewSettings::default(), None);
     if rs.adapter.get_info().backend == wgpu::Backend::Gl {
-        let depth = views.view3d.paint_depth_color_texture().expect("GL packed depth MSAA target exists");
-        for sample in 0..depth.samples {
-            let bytes = read_multisampled_rgba8_sample(&rs.device, &rs.queue, depth, sample);
-            let center = ((size[1] / 2 * size[0] + size[0] / 2) * 4) as usize;
-            let center_pixel = &bytes[center..center + 4];
-            let non_zero = bytes.chunks_exact(4).filter(|pixel| pixel.iter().any(|&v| v != 0)).count();
-            let non_clear_white = bytes.chunks_exact(4).filter(|pixel| pixel[..3] != [255, 255, 255]).count();
-            println!("  OpenGL packed-depth sample {sample}: center {:?}; {non_zero} non-zero, {non_clear_white} non-white / {}", center_pixel, size[0] * size[1]);
-        }
-        if let Some(resolved) = views.view3d.paint_depth_color_resolve_texture() {
-            let bytes = read_texture(&rs.device, &rs.queue, resolved);
-            let center = ((size[1] / 2 * size[0] + size[0] / 2) * 4) as usize;
-            let center_pixel = &bytes[center..center + 4];
-            let non_black = bytes.chunks_exact(4).filter(|pixel| pixel[..3] != [0, 0, 0]).count();
-            let non_white = bytes.chunks_exact(4).filter(|pixel| pixel[..3] != [255, 255, 255]).count();
-            println!("  OpenGL packed-depth hardware resolve: center {:?}; {non_black} non-black, {non_white} non-white / {}", center_pixel, size[0] * size[1]);
-        }
+        let depth = views.view3d.paint_depth_color_texture().expect("GL packed depth target exists");
+        let bytes = read_texture(&rs.device, &rs.queue, depth);
+        let center = ((size[1] / 2 * size[0] + size[0] / 2) * 4) as usize;
+        let center_pixel = &bytes[center..center + 4];
+        let written = bytes.chunks_exact(4).filter(|pixel| pixel[..3] != [255, 255, 255]).count();
+        println!("  OpenGL single-sample packed depth: center {:?}; {written} written pixels / {}", center_pixel, size[0] * size[1]);
+        assert!(written > 500, "OpenGL packed depth pass must write visible mesh pixels, got {written}");
     }
     assert!(legacy.begin_stroke(0, StrokeTarget::Content, paint.mat.enabled, false));
     let legacy_region = stroke_region(&mesh, &bvh, legacy.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps);
