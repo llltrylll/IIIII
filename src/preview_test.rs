@@ -51,7 +51,7 @@ fn gl_format_capabilities() {
     let report_path = report_dir.join("gl-format-capabilities.txt");
     std::fs::write(&report_path, &report).unwrap();
     println!("{report}");
-    let _baker = GpuBaker::new_for_backend(&rs.device, backend);
+    let _baker = GpuBaker::new_for_adapter(&rs.device, &rs.adapter);
     report.push_str("GpuBaker pipeline constructor: success\n");
     std::fs::write(report_path, report).unwrap();
 }
