@@ -464,7 +464,8 @@ fn view_shader_source(gl_depth_color: bool, manual_srgb_decode: bool) -> String 
     // Only adapters without alternate view-format support need shader-side
     // sRGB decoding; GL drivers that do support the views keep hardware decode.
     if manual_srgb_decode {
-        // `gpu::shader` prepends common.wgsl, which already defines srgb_to_linear.\n        const ALBEDO_ASSIGN: &str = "        s.albedo = col.rgb;\n";
+        // `gpu::shader` prepends common.wgsl, which already defines srgb_to_linear.
+        const ALBEDO_ASSIGN: &str = "        s.albedo = col.rgb;\n";
         const EMISSION_ASSIGN: &str = "        s.emission = textureSampleLevel(t_emission, samp, uv, 0.0).rgb;\n";
         assert_eq!(source.matches(ALBEDO_ASSIGN).count(), 1, "viewport albedo sample must remain unique");
         assert_eq!(source.matches(EMISSION_ASSIGN).count(), 1, "viewport emission sample must remain unique");
