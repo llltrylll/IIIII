@@ -5,7 +5,7 @@
 //!
 //! `MP_PREVIEW_MESH=path.fbx cargo test --bin material_painter preview -- --ignored --nocapture`
 
-use crate::bake::{BakeSettings, GpuBaker};
+use crate::bake::BakeSettings;
 use crate::bake::tests::{gpu_with_adapter, run_bake};
 use crate::engine::{Engine, MAPS};
 use crate::gpu::{GpuMesh, read_texture};
