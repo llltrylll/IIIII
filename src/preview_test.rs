@@ -5,7 +5,7 @@
 //!
 //! `MP_PREVIEW_MESH=path.fbx cargo test --bin material_painter preview -- --ignored --nocapture`
 
-use crate::bake::BakeSettings;
+use crate::bake::{BakeSettings, GpuBaker};
 use crate::bake::tests::{gpu_with_adapter, run_bake};
 use crate::engine::{Engine, MAPS};
 use crate::gpu::{GpuMesh, read_texture};
@@ -32,6 +32,20 @@ fn render_state() -> egui_wgpu::RenderState {
         renderer: Arc::new(egui::mutex::RwLock::new(renderer)),
     }
 }
+
+/// OpenGL must be able to construct the complete GPU bake pipeline. This
+/// catches backend-specific storage texture format/layout failures before
+/// the user starts a real bake.
+#[test]
+#[ignore]
+fn gl_bake_pipeline_compiles() {
+    let rs = render_state();
+    let backend = rs.adapter.get_info().backend;
+    assert_eq!(backend, wgpu::Backend::Gl, "OpenGL smoke test did not obtain a GL adapter");
+    let _baker = GpuBaker::new_for_backend(&rs.device, backend);
+    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+}
+
 
 fn map_mode(name: &str) -> ViewMode {
     ViewMode::Map(MAPS.iter().position(|m| m.name == name).unwrap_or_else(|| panic!("no map {name}")))
