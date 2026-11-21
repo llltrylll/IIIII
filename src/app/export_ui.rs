@@ -314,7 +314,9 @@ impl PainterApp {
                 // Export reads world position and normal in addition to final material channels.
                 parked.engine.restore_surface_maps(&self.gpu_mesh);
                 let snapshot = export::snapshot(&parked.engine, &self.rs.device, &self.rs.queue, mesh.clone());
-                parked.engine.release_surface_maps();
+                if parked.engine.release_surface_maps() {
+                    self.views.invalidate_texture_set_binding(index);
+                }
                 snapshot
             };
             snapshots.push((snapshot, export::Settings {

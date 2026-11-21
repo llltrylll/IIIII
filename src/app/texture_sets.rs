@@ -67,15 +67,19 @@ impl PainterApp {
             || (self.view.mode == ViewMode::Material && self.views.has_custom_shader())
     }
 
-    /// Restores parked maps only while the selected 3D preview needs them.
+    /// Keeps world-space maps only for visible parked sets whose current view uses them.
     pub(super) fn update_parked_surface_maps_for_view(&mut self) {
         let needed = self.needs_surface_maps_for_view();
         let gpu_mesh = &self.gpu_mesh;
-        for parked in self.sets.parked.iter_mut().flatten() {
-            if needed {
+        let views = &mut self.views;
+        for (index, parked) in self.sets.parked.iter_mut().enumerate() {
+            let Some(parked) = parked else { continue };
+            let visible = !views.set_looks.get(index).is_some_and(|look| look.hidden);
+            if needed && visible {
                 parked.engine.restore_surface_maps(gpu_mesh);
-            } else if !parked.engine.dirty {
-                parked.engine.release_surface_maps();
+            } else if parked.engine.release_surface_maps() {
+                // Hidden sets skip bind-group refresh, so invalidate their cached views explicitly.
+                views.invalidate_texture_set_binding(index);
             }
         }
     }
@@ -97,9 +101,12 @@ impl PainterApp {
         // A bake preview shows on the set being edited; the full bake comes back first.
         self.end_preview(true);
         self.engine.commit_props(&mut self.undo);
+        let previous_active = self.sets.active;
         std::mem::swap(&mut self.engine, &mut p.engine);
         self.engine.restore_active_working_set(&self.gpu_mesh);
-        p.engine.release_inactive_working_set();
+        if p.engine.release_inactive_working_set() {
+            self.views.invalidate_texture_set_binding(previous_active);
+        }
         self.engine_epoch = self.engine_epoch.wrapping_add(1);
         std::mem::swap(&mut self.selected, &mut p.selected);
         std::mem::swap(&mut self.target, &mut p.target);
@@ -129,11 +136,15 @@ impl PainterApp {
     /// Composites every parked set when a synchronous operation needs final maps (export).
     pub(super) fn composite_parked(&mut self) {
         let gpu_mesh = &self.gpu_mesh;
-        for p in self.sets.parked.iter_mut().flatten() {
-            if p.engine.dirty {
-                p.engine.restore_surface_maps(gpu_mesh);
-                p.engine.composite();
-                p.engine.release_inactive_working_set();
+        let views = &mut self.views;
+        for (index, parked) in self.sets.parked.iter_mut().enumerate() {
+            let Some(parked) = parked else { continue };
+            if parked.engine.dirty {
+                parked.engine.restore_surface_maps(gpu_mesh);
+                parked.engine.composite();
+                if parked.engine.release_inactive_working_set() {
+                    views.invalidate_texture_set_binding(index);
+                }
             }
         }
     }
@@ -142,13 +153,16 @@ impl PainterApp {
     pub(super) fn composite_parked_one(&mut self, ctx: &egui::Context) {
         let gpu_mesh = &self.gpu_mesh;
         let keep_surface_maps = self.needs_surface_maps_for_view();
-        if let Some(p) = self.sets.parked.iter_mut().flatten().find(|p| p.engine.dirty) {
+        let views = &mut self.views;
+        if let Some((index, p)) = self.sets.parked.iter_mut().enumerate().find_map(|(i, p)| {
+            p.as_mut().filter(|p| p.engine.dirty).map(|p| (i, p))
+        }) {
             p.engine.restore_surface_maps(gpu_mesh);
             p.engine.composite();
-            if keep_surface_maps {
-                p.engine.release_inactive_working_set_keep_surface_maps();
-            } else {
-                p.engine.release_inactive_working_set();
+            p.engine.release_inactive_working_set_keep_surface_maps();
+            let visible = !views.set_looks.get(index).is_some_and(|look| look.hidden);
+            if !(keep_surface_maps && visible) && p.engine.release_surface_maps() {
+                views.invalidate_texture_set_binding(index);
             }
             ctx.request_repaint();
         }

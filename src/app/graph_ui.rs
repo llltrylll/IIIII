@@ -507,15 +507,20 @@ impl PainterApp {
                 let Content::Fill(f) = &l.content else { continue };
                 let Some(id) = f.graph.filter(|_| l.images.iter().all(Option::is_none)) else { continue };
                 let Some(d) = docs.iter_mut().find(|d| d.id == id && !d.shading) else { continue };
-                engine.restore_surface_maps(gpu_mesh);
+                let needs_surface = d.graph.nodes.iter().any(|node| {
+                    lib.find(&node.def).is_some_and(|definition| definition.surface)
+                });
+                if needs_surface {
+                    engine.restore_surface_maps(gpu_mesh);
+                }
                 let version = engine.maps_version;
                 if d.graph.match_set {
                     d.graph.res = engine.res;
                 }
                 {
                     let maps = |m: usize| engine.mesh_map(m);
-                    let surface = engine.graph_surface();
-                    d.rt.evaluate(&self.rs.device, &self.rs.queue, &d.graph, lib, &maps, Some(&surface), version, true);
+                    let surface = needs_surface.then(|| engine.graph_surface());
+                    d.rt.evaluate(&self.rs.device, &self.rs.queue, &d.graph, lib, &maps, surface.as_ref(), version, true);
                 }
                 // The edited set's outputs are made again on its own maps.
                 d.maps_seen = u64::MAX;

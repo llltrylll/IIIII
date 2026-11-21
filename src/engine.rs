@@ -1832,64 +1832,58 @@ impl Engine {
     }
 
     /// Replaces full-resolution surface maps with tiny neutral bindings.
-    /// Bumping uv_version invalidates cached viewport bind groups.
-    pub(crate) fn release_surface_maps(&mut self) {
+    /// The UV bake key is retained so restoring the same mesh/range does not
+    /// invalidate the already-correct material composite.
+    pub(crate) fn release_surface_maps(&mut self) -> bool {
         if self.pos.width == 1 && self.nrm.width == 1 && self.tan.width == 1 {
-            self.uv_baked = None;
-            return;
+            return false;
         }
         let (pos, nrm, tan) = Self::surface_map_placeholders(&self.device, &self.queue);
         self.pos = pos;
         self.nrm = nrm;
         self.tan = tan;
-        self.uv_baked = None;
         self.uv_version = self.uv_version.wrapping_add(1);
         self.apply_bg = None;
         self.stamp_bg = [None, None];
+        true
     }
 
-    fn ensure_surface_map_textures(&mut self) {
-        if self.surface_maps_resident() {
-            return;
+    /// Recreates world-space maps when they are needed. If the mesh, range and
+    /// resolution are unchanged, this only changes the viewport binding identity.
+    pub(crate) fn restore_surface_maps(&mut self, mesh: &GpuMesh) -> bool {
+        let resident = self.surface_maps_resident();
+        let same_bake = UvBakeKey::is_current(self.uv_baked.as_ref(), mesh.mesh_id, &self.tris, self.res);
+        if !resident {
+            self.bake_uv_internal(mesh, !same_bake);
+            true
+        } else if !same_bake {
+            self.bake_uv(mesh);
+            true
+        } else {
+            false
         }
-        self.pos = Tex::new(&self.device, "position map (restored)", self.res, self.res, POS_FORMAT, LAYER_USAGE);
-        self.nrm = Tex::new(&self.device, "normal map (restored)", self.res, self.res, NRM_FORMAT, LAYER_USAGE);
-        self.tan = Tex::new(&self.device, "tangent map (restored)", self.res, self.res, TAN_FORMAT, LAYER_USAGE);
-        self.uv_baked = None;
-    }
-
-    /// Recreates the world-space maps before a parked Engine is edited,
-    /// recomposited, or displayed in a mode that reads those maps.
-    pub(crate) fn restore_surface_maps(&mut self, mesh: &GpuMesh) {
-        if self.surface_maps_resident() {
-            return;
-        }
-        self.ensure_surface_map_textures();
-        self.bake_uv(mesh);
     }
 
     /// Drops GPU resources used only while this Texture Set is being edited.
     /// The final composited result stays resident for the viewport. The next
     /// composite/paint recreates the released workspace lazily.
-    pub(crate) fn release_inactive_working_set(&mut self) {
-        self.release_inactive_working_set_inner(false);
+    pub(crate) fn release_inactive_working_set(&mut self) -> bool {
+        self.release_inactive_working_set_inner(false)
     }
 
     /// Same as release_inactive_working_set, but keeps surface maps while
     /// a view mode needs them for parked Texture Sets.
-    pub(crate) fn release_inactive_working_set_keep_surface_maps(&mut self) {
-        self.release_inactive_working_set_inner(true);
+    pub(crate) fn release_inactive_working_set_keep_surface_maps(&mut self) -> bool {
+        self.release_inactive_working_set_inner(true)
     }
 
-    fn release_inactive_working_set_inner(&mut self, keep_surface_maps: bool) {
+    fn release_inactive_working_set_inner(&mut self, keep_surface_maps: bool) -> bool {
         if self.active.is_some() {
-            return;
+            return false;
         }
-        if !keep_surface_maps {
-            self.release_surface_maps();
-        }
+        let released_surface_maps = !keep_surface_maps && self.release_surface_maps();
         if self.generation == 0 {
-            return;
+            return released_surface_maps;
         }
         // Drop expired path/Weak bookkeeping from the document-wide cache on
         // set switches, not on every frame or image lookup.
@@ -1945,6 +1939,7 @@ impl Engine {
         // Keep the already-rendered UI thumbnails, but drop the 512²
         // render targets and reduced surface maps used only to regenerate them.
         self.thumbs.release_scratch();
+        released_surface_maps
     }
 
     fn ensure_composite_working_set(&mut self) {
@@ -2543,7 +2538,18 @@ impl Engine {
     /// Rasterizes position and normal maps for the current mesh at the
     /// current resolution, with dilation past UV island borders.
     pub fn bake_uv(&mut self, mesh: &GpuMesh) {
+        self.bake_uv_internal(mesh, true);
+    }
+
+    fn bake_uv_internal(&mut self, mesh: &GpuMesh, invalidate_composite: bool) {
         self.apply_bg = None;
+        // Parked Texture Sets keep 1x1 placeholders. Recreate their full-size
+        // targets only when editing, compositing or a world-space view needs them.
+        if !self.surface_maps_resident() {
+            self.pos = Tex::new(&self.device, "position map", self.res, self.res, POS_FORMAT, LAYER_USAGE);
+            self.nrm = Tex::new(&self.device, "normal map", self.res, self.res, NRM_FORMAT, LAYER_USAGE);
+            self.tan = Tex::new(&self.device, "tangent map", self.res, self.res, TAN_FORMAT, LAYER_USAGE);
+        }
         // A mesh change can leave the range past the end; the app sets the
         // new range right after, and this draws nothing meanwhile.
         let tris = self.tris.start.min(mesh.index_count)..self.tris.end.min(mesh.index_count);
@@ -2600,10 +2606,12 @@ impl Engine {
         }
         // DILATE_PASSES is even, so the result ends up back in pos/nrm.
         self.queue.submit([encoder.finish()]);
-        self.uv_version += 1;
+        self.uv_version = self.uv_version.wrapping_add(1);
         self.uv_baked = Some(UvBakeKey { mesh_id: mesh.mesh_id, tris: self.tris.clone(), res: self.res });
-        self.mask_final.clear();
-        self.mark_dirty();
+        if invalidate_composite {
+            self.mask_final.clear();
+            self.mark_dirty();
+        }
     }
 
     pub fn bounds(&self) -> (Vec3, Vec3) {
@@ -2642,18 +2650,15 @@ impl Engine {
         self.tris = tris;
         if bake_surface_maps {
             if !repeat {
-                self.ensure_surface_map_textures();
                 self.bake_uv(mesh);
             }
         } else {
             if !repeat {
-                self.uv_baked = None;
                 self.mask_final.clear();
                 self.mark_dirty();
             }
-            let had_maps = self.surface_maps_resident();
-            self.release_surface_maps();
-            if !had_maps && !repeat {
+            let released = self.release_surface_maps();
+            if !released && !repeat {
                 self.uv_version = self.uv_version.wrapping_add(1);
             }
         }
