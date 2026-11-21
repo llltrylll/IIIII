@@ -1258,7 +1258,7 @@ fn stamp_shader_source(gl_depth_color: bool) -> String {
     }
 
     const DEPTH_BINDING: &str = "@group(0) @binding(4) var depth_map: texture_depth_multisampled_2d;";
-    const COLOR_BINDING: &str = "@group(0) @binding(4) var depth_map: texture_multisampled_2d<f32>;";
+    const COLOR_BINDING: &str = "@group(0) @binding(4) var depth_map: texture_2d<f32>;";
     const UNPACK: &str = r#"
 fn unpack_depth24(packed: vec4<f32>) -> f32 {
     let bytes = vec3<u32>(round(clamp(packed.rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0));
@@ -1280,17 +1280,17 @@ fn unpack_depth24(packed: vec4<f32>) -> f32 {
     assert_eq!(source.matches(POSITION_LOAD).count(), 1, "stamp position depth load must remain unique");
     source = source.replacen(POSITION_LOAD, POSITION_LOAD_GL, 1);
 
-    const UV_LOAD: &str = "let sample_depth = lin_depth(textureLoad(depth_map, sp, i32(sample)));";
-    const UV_LOAD_GL: &str = "let sample_depth = unpack_depth24(textureLoad(depth_map, sp, i32(sample))) * u.clip.y;";
-    assert_eq!(source.matches(UV_LOAD).count(), 1, "stamp UV depth load must remain unique");
-    source = source.replacen(UV_LOAD, UV_LOAD_GL, 1);
-
-    // The viewport's packed GL depth target is fixed at the same 4x MSAA
-    // count as the native depth target. Keep the GLSL path independent of
-    // textureNumSamples(), which is not needed for this fixed attachment.
-    const SAMPLE_COUNT: &str = "let sample_count = textureNumSamples(depth_map);";
-    assert_eq!(source.matches(SAMPLE_COUNT).count(), 1, "stamp sample-count query must remain unique");
-    source = source.replacen(SAMPLE_COUNT, "let sample_count = 4u;", 1);
+    const SAMPLE_START: &str = "        let sample_count = textureNumSamples(depth_map);";
+    const SAMPLE_END: &str = "        visibility = f32(visible_samples) / f32(sample_count);";
+    let start = source.find(SAMPLE_START).expect("stamp MSAA visibility loop must exist");
+    let tail = &source[start..];
+    let end = tail.find(SAMPLE_END).expect("stamp MSAA visibility loop terminator must exist") + SAMPLE_END.len();
+    const SINGLE_SAMPLE: &str = r#"        let sample_depth = unpack_depth24(textureLoad(depth_map, sp, 0)) * u.clip.y;
+        if (abs(surface_linear - sample_depth) > epsilon) {
+            return vec3<f32>(0.0);
+        }
+        visibility = 1.0;"#;
+    source.replace_range(start..start + end, SINGLE_SAMPLE);
     source
 }
 
@@ -1300,10 +1300,12 @@ mod stamp_shader_variant_tests {
     use eframe::wgpu;
 
     #[test]
-    fn gl_stamp_variant_uses_multisampled_color_depth_and_valid_wgsl() {
+    fn gl_stamp_variant_uses_single_sample_color_depth_and_valid_wgsl() {
         let source = stamp_shader_source(true);
-        assert!(source.contains("texture_multisampled_2d<f32>"));
+        assert!(source.contains("texture_2d<f32>"));
+        assert!(!source.contains("texture_multisampled_2d"));
         assert!(!source.contains("texture_depth_multisampled_2d"));
+        assert!(!source.contains("textureNumSamples(depth_map)"));
         assert_eq!(source.matches("unpack_depth24(textureLoad(").count(), 2);
 
         let full = format!("{}\n{}", include_str!("shaders/common.wgsl"), source);
@@ -1316,7 +1318,6 @@ mod stamp_shader_variant_tests {
         .validate(&module)
         .unwrap_or_else(|error| panic!("{error:?}"));
     }
-
     #[test]
     fn vulkan_stamp_shader_remains_byte_identical() {
         assert_eq!(stamp_shader_source(false), include_str!("shaders/stamp.wgsl"));
@@ -2405,7 +2406,7 @@ impl Engine {
                     ty: wgpu::BindingType::Texture {
                         sample_type: if gl_depth_color { wgpu::TextureSampleType::Float { filterable: false } } else { wgpu::TextureSampleType::Depth },
                         view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: true,
+                        multisampled: !gl_depth_color,
                     },
                     count: None,
                 },
