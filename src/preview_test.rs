@@ -2631,6 +2631,14 @@ fn screen_projection_paints_visible_face_of_overlapped_uvs() {
     legacy.add_paint_layer(0, None, None, &mut legacy_undo);
     legacy.composite();
     views.render_3d(&rs, size, &[&legacy], &env, &gpu_mesh, &cam, &ViewSettings::default(), None);
+    if rs.adapter.get_info().backend == wgpu::Backend::Gl {
+        let depth = views.view3d.paint_depth_color_resolve_texture().expect("GL packed depth resolve exists");
+        let bytes = read_texture(&rs.device, &rs.queue, depth);
+        let center = ((size[1] / 2 * size[0] + size[0] / 2) * 4) as usize;
+        let center_pixel = &bytes[center..center + 4];
+        let non_clear = bytes.chunks_exact(4).filter(|pixel| pixel[..3] != [255, 255, 255]).count();
+        println!("  OpenGL packed-depth resolve: center {:?}; {non_clear} non-clear pixels / {}", center_pixel, size[0] * size[1]);
+    }
     assert!(legacy.begin_stroke(0, StrokeTarget::Content, paint.mat.enabled, false));
     let legacy_region = stroke_region(&mesh, &bvh, legacy.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps);
     legacy.stroke_step(&stamps, su, views.view3d.paint_depth_view(), &paint, legacy_region);
