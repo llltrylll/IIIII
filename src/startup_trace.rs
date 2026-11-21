@@ -113,7 +113,7 @@ pub fn begin_capture(frame_count: usize, label: &str) -> bool {
         return false;
     }
     let Ok(mut guard) = TRACE.lock() else { return false; };
-    let mut trace = Trace {
+    let trace = Trace {
         t0: Instant::now(),
         recs: Vec::new(),
         thumbs: Vec::new(),
