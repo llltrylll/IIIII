@@ -19,6 +19,31 @@ Copy-Item target/release/material_painter.exe (Join-Path $stage "MaterialPainter
 Copy-Item -Recurse assets (Join-Path $stage "assets")
 Copy-Item LICENSE, THIRD_PARTY_NOTICES.html, README.md $stage
 
+# Explicit launchers keep backend/MSAA comparisons reproducible.
+@'
+@echo off
+set "WGPU_BACKEND=vulkan"
+set "MP_VIEWPORT_MSAA=4"
+cd /d "%~dp0"
+"%~dp0MaterialPainter.exe"
+'@ | Set-Content -Encoding ascii (Join-Path $stage "Start-Vulkan-4x.bat")
+
+@'
+@echo off
+set "WGPU_BACKEND=gl"
+set "MP_VIEWPORT_MSAA=4"
+cd /d "%~dp0"
+"%~dp0MaterialPainter.exe"
+'@ | Set-Content -Encoding ascii (Join-Path $stage "Start-OpenGL-4x.bat")
+
+@'
+@echo off
+set "WGPU_BACKEND=gl"
+set "MP_VIEWPORT_MSAA=1"
+cd /d "%~dp0"
+"%~dp0MaterialPainter.exe"
+'@ | Set-Content -Encoding ascii (Join-Path $stage "Start-OpenGL-1x.bat")
+
 $zip = Join-Path $root "dist/MaterialPainter-$version-windows-x64.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }
 Compress-Archive -Path $stage -DestinationPath $zip

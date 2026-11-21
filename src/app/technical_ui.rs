@@ -326,6 +326,7 @@ impl PainterApp {
                     ui.label(format!("Frame interval: {:.3} ms", self.frame_interval_ms));
                     ui.label(format!("Application CPU frame: {:.2} ms average · {:.2} ms recent peak", self.frame_ms, self.frame_peak_ms));
                     ui.label(format!("3D viewport: {:?} px", self.views.view3d.size));
+                    ui.label(format!("3D MSAA: {}x", self.views.msaa_samples));
                     ui.label(format!("UV viewport: {:?} px", self.views.view2d.size));
                     ui.label(format!("Pixels per point: {:.3}", self.ppp));
                     ui.label(format!("Ray-traced preview: {}", if self.rt.enabled { "enabled" } else { "disabled" }));
@@ -680,8 +681,9 @@ impl PainterApp {
         };
 
         format!(
-            "{}\n\nAPPLICATION / FRAME\nframe_interval_ms={:.6}\neffective_fps_basis_ms={:.6}\nviewport_fps_estimate={:.3}\nui_frame_cpu_ema_ms={:.6}\nui_frame_recent_peak_ms={:.6}\nstatus={}\n\nGPU ADAPTER\n{:#?}\n\nGPU DEVICE LIMITS\n{:#?}\ngpu_resource_allocation_estimate_bytes={}\ndocument_shared_undo_readback_cache_bytes={}\nundo_memory_bytes={}\nundo_memory_limit_bytes={}\nundo_steps={}\n\nBAKE REPORT\n{}\nCURRENT BAKE SETTINGS\n{:#?}\n\nF6 PAINT PROFILER\n{}\n\nMESH / UV / NORMAL / TANGENT DIAGNOSTICS\n{}",
+            "{}\n\nVIEWPORT\nviewport_msaa_samples={}\n\nAPPLICATION / FRAME\nframe_interval_ms={:.6}\neffective_fps_basis_ms={:.6}\nviewport_fps_estimate={:.3}\nui_frame_cpu_ema_ms={:.6}\nui_frame_recent_peak_ms={:.6}\nstatus={}\n\nGPU ADAPTER\n{:#?}\n\nGPU DEVICE LIMITS\n{:#?}\ngpu_resource_allocation_estimate_bytes={}\ndocument_shared_undo_readback_cache_bytes={}\nundo_memory_bytes={}\nundo_memory_limit_bytes={}\nundo_steps={}\n\nBAKE REPORT\n{}\nCURRENT BAKE SETTINGS\n{:#?}\n\nF6 PAINT PROFILER\n{}\n\nMESH / UV / NORMAL / TANGENT DIAGNOSTICS\n{}",
             self.diagnostic_context_report("technical panel copy"),
+            self.views.msaa_samples,
             self.frame_interval_ms,
             self.frame_interval_ms.max(self.frame_ms),
             if self.frame_interval_ms.max(self.frame_ms) > 0.01 {

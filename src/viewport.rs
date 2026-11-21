@@ -10,9 +10,33 @@ use glam::{Mat4, Vec2, Vec3, Vec4};
 
 pub const NEAR: f32 = 0.02;
 pub const FAR: f32 = 100.0;
-const MSAA: u32 = 4;
+const DEFAULT_VIEW_MSAA: u32 = 4;
+const SCREEN_PAINT_DEPTH_MSAA: u32 = 4;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+/// Select the 3D viewport's multisampling at startup. The 4x default preserves
+/// current quality; MP_VIEWPORT_MSAA=1 enables a lower-bandwidth test path.
+/// Screen-projection paint depth keeps its independent 4x contract with stamp.wgsl.
+fn viewport_msaa_samples(adapter: &wgpu::Adapter) -> u32 {
+    let requested = std::env::var("MP_VIEWPORT_MSAA")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|&samples| matches!(samples, 1 | 2 | 4))
+        .unwrap_or(DEFAULT_VIEW_MSAA);
+    let hdr = adapter.get_texture_format_features(HDR_FORMAT);
+    let depth = adapter.get_texture_format_features(DEPTH_FORMAT);
+    let resolve_supported = requested == 1
+        || hdr.flags.contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE);
+    if hdr.flags.sample_count_supported(requested)
+        && depth.flags.sample_count_supported(requested)
+        && resolve_supported
+    {
+        requested
+    } else {
+        1
+    }
+}
 
 /// What the viewports display. Discriminants match `shade()` in view.wgsl;
 /// `Map(i)` shows baked map `engine::MAPS[i]`, `Custom(id)` a custom bake map.
@@ -463,23 +487,39 @@ pub struct ViewTarget {
     depth: Option<Tex>,
     paint_depth: Option<Tex>,
     display: Option<Tex>,
+    samples: u32,
     pub egui_id: egui::TextureId,
     pub size: [u32; 2],
 }
 
 impl ViewTarget {
-    fn create(device: &wgpu::Device, size: [u32; 2], hdr: bool) -> Targets {
+    fn create(device: &wgpu::Device, size: [u32; 2], hdr: bool, samples: u32) -> Targets {
         let [w, h] = size;
         // COPY_SRC lets tests and MCP read rendered images back.
         let display = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC;
         if hdr {
+            let (color, resolve, depth) = if samples > 1 {
+                (
+                    Tex::new_ms(device, "view msaa", w, h, HDR_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT, samples),
+                    Some(Tex::new(device, "view hdr", w, h, HDR_FORMAT, display)),
+                    Some(Tex::new_ms(device, "view depth", w, h, DEPTH_FORMAT, display, samples)),
+                )
+            } else {
+                (
+                    Tex::new(device, "view hdr direct", w, h, HDR_FORMAT, display),
+                    None,
+                    Some(Tex::new(device, "view depth", w, h, DEPTH_FORMAT, display)),
+                )
+            };
             Targets {
-                color: Tex::new_ms(device, "view msaa", w, h, HDR_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT, MSAA),
-                resolve: Some(Tex::new(device, "view hdr", w, h, HDR_FORMAT, display)),
-                depth: Some(Tex::new_ms(device, "view depth", w, h, DEPTH_FORMAT, display, MSAA)),
+                color,
+                resolve,
+                depth,
+                // Screen-paint occlusion has a separate 4x contract with stamp.wgsl.
                 paint_depth: Some(Tex::new_ms(
                     device, "screen paint depth", w, h, DEPTH_FORMAT,
-                    wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING, MSAA
+                    wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                    SCREEN_PAINT_DEPTH_MSAA,
                 )),
                 display: Some(Tex::new(device, "view", w, h, COLOR_FORMAT, display)),
             }
@@ -492,11 +532,12 @@ impl ViewTarget {
         t.display.as_ref().unwrap_or(&t.color)
     }
 
-    fn new(rs: &egui_wgpu::RenderState, hdr: bool) -> ViewTarget {
+    fn new(rs: &egui_wgpu::RenderState, hdr: bool, samples: u32) -> ViewTarget {
         let size = [64, 64];
-        let t = Self::create(&rs.device, size, hdr);
+        let samples = if hdr { samples } else { 1 };
+        let t = Self::create(&rs.device, size, hdr, samples);
         let egui_id = rs.renderer.write().register_native_texture(&rs.device, &Self::shown(&t).view, wgpu::FilterMode::Linear);
-        ViewTarget { color: t.color, resolve: t.resolve, depth: t.depth, paint_depth: t.paint_depth, display: t.display, egui_id, size }
+        ViewTarget { color: t.color, resolve: t.resolve, depth: t.depth, paint_depth: t.paint_depth, display: t.display, samples, egui_id, size }
     }
 
     fn ensure_size(&mut self, rs: &egui_wgpu::RenderState, size: [u32; 2]) -> bool {
@@ -504,7 +545,7 @@ impl ViewTarget {
         if size == self.size {
             return false;
         }
-        let t = Self::create(&rs.device, size, self.display.is_some());
+        let t = Self::create(&rs.device, size, self.display.is_some(), self.samples);
         rs.renderer.write().update_egui_texture_from_wgpu_texture(
             &rs.device,
             &Self::shown(&t).view,
@@ -842,11 +883,14 @@ pub struct ViewRenderer {
     sampler: wgpu::Sampler,
     pub view3d: ViewTarget,
     pub view2d: ViewTarget,
+    /// Actual 3D viewport MSAA after checking adapter format support.
+    pub msaa_samples: u32,
 }
 
 impl ViewRenderer {
     pub fn new(rs: &egui_wgpu::RenderState) -> ViewRenderer {
         let device = &rs.device;
+        let msaa_samples = viewport_msaa_samples(&rs.adapter);
         let module = gpu::shader(device, "view", include_str!("shaders/view.wgsl"));
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("view"),
@@ -954,8 +998,8 @@ impl ViewRenderer {
         };
         let tri = wgpu::PrimitiveTopology::TriangleList;
         let vb = [Some(gpu::vertex_layout())];
-        let sky = pipeline("sky", "vs_fullscreen", "fs_sky", &[], tri, depth(false, wgpu::CompareFunction::Always), MSAA, &hdr);
-        let mesh = pipeline("mesh", "vs_mesh", "fs_mesh", &vb, tri, depth(true, wgpu::CompareFunction::Less), MSAA, &hdr);
+        let sky = pipeline("sky", "vs_fullscreen", "fs_sky", &[], tri, depth(false, wgpu::CompareFunction::Always), msaa_samples, &hdr);
+        let mesh = pipeline("mesh", "vs_mesh", "fs_mesh", &vb, tri, depth(true, wgpu::CompareFunction::Less), msaa_samples, &hdr);
         let paint_depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("screen paint depth (front-facing normals)"),
             layout: Some(&layout),
@@ -967,7 +1011,7 @@ impl ViewRenderer {
             },
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: depth(true, wgpu::CompareFunction::Less),
-            multisample: ms(MSAA),
+            multisample: ms(SCREEN_PAINT_DEPTH_MSAA),
             fragment: Some(wgpu::FragmentState {
                 module: &module,
                 entry_point: Some("fs_paint_depth"),
@@ -982,7 +1026,7 @@ impl ViewRenderer {
             blend: Some(wgpu::BlendState::ALPHA_BLENDING),
             write_mask: wgpu::ColorWrites::ALL,
         });
-        let mesh_t = pipeline("mesh (see-through)", "vs_mesh", "fs_mesh_t", &vb, tri, depth(true, wgpu::CompareFunction::Less), MSAA, &hdr_over);
+        let mesh_t = pipeline("mesh (see-through)", "vs_mesh", "fs_mesh_t", &vb, tri, depth(true, wgpu::CompareFunction::Less), msaa_samples, &hdr_over);
         let quad = pipeline("quad", "vs_quad", "fs_quad", &[], tri, None, 1, &color);
         let wire = pipeline("wire", "vs_wire", "fs_wire", &vb, wgpu::PrimitiveTopology::LineList, None, 1, &blended);
         // Overlays test against the mesh depth but never write it.
@@ -993,17 +1037,17 @@ impl ViewRenderer {
         });
         let over = || depth(false, wgpu::CompareFunction::LessEqual);
         let line = wgpu::PrimitiveTopology::LineList;
-        let wire3d = pipeline("wire 3d", "vs_wire3d", "fs_overlay", &vb, line, over(), MSAA, &hdr_blended);
+        let wire3d = pipeline("wire 3d", "vs_wire3d", "fs_overlay", &vb, line, over(), msaa_samples, &hdr_blended);
         let seam2d = pipeline("seams 2d", "vs_wire", "fs_seam", &vb, line, None, 1, &blended);
-        let seam3d = pipeline("seams 3d", "vs_seam3d", "fs_overlay", &vb, line, over(), MSAA, &hdr_blended);
+        let seam3d = pipeline("seams 3d", "vs_seam3d", "fs_overlay", &vb, line, over(), msaa_samples, &hdr_blended);
         const OVERLAY_ATTRS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4];
         let ob = [Some(wgpu::VertexBufferLayout {
             array_stride: size_of::<OverlayVertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &OVERLAY_ATTRS,
         })];
-        let overlay_tris = pipeline("overlay tris", "vs_overlay", "fs_overlay", &ob, tri, over(), MSAA, &hdr_blended);
-        let overlay_lines = pipeline("overlay lines", "vs_overlay", "fs_overlay", &ob, line, over(), MSAA, &hdr_blended);
+        let overlay_tris = pipeline("overlay tris", "vs_overlay", "fs_overlay", &ob, tri, over(), msaa_samples, &hdr_blended);
+        let overlay_lines = pipeline("overlay lines", "vs_overlay", "fs_overlay", &ob, line, over(), msaa_samples, &hdr_blended);
         // Key light shadow map: depth only, both faces (meshes may be open),
         // with slope-scaled bias against acne. Its own layout holds just the
         // globals: the view's bind group samples the shadow map it writes.
@@ -1100,8 +1144,9 @@ impl ViewRenderer {
             view2d_cache_hits: 0,
             shown_sets: Vec::new(),
             sampler: gpu::linear_sampler(device, wgpu::AddressMode::ClampToEdge),
-            view3d: ViewTarget::new(rs, true),
-            view2d: ViewTarget::new(rs, false),
+            view3d: ViewTarget::new(rs, true, msaa_samples),
+            view2d: ViewTarget::new(rs, false, 1),
+            msaa_samples,
         }
     }
 
@@ -1137,7 +1182,7 @@ impl ViewRenderer {
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
-                multisample: wgpu::MultisampleState { count: MSAA, ..Default::default() },
+                multisample: wgpu::MultisampleState { count: self.msaa_samples, ..Default::default() },
                 fragment: Some(wgpu::FragmentState {
                     module: &module,
                     entry_point: Some("fs_mesh_custom"),
@@ -1597,7 +1642,7 @@ impl ViewRenderer {
                     resolve_target: t.resolve.as_ref().map(|r| &r.view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(if transparent { wgpu::Color::TRANSPARENT } else { wgpu::Color::BLACK }),
-                        store: wgpu::StoreOp::Discard,
+                        store: if t.resolve.is_some() { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store },
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -1708,7 +1753,7 @@ impl ViewRenderer {
             }
         }
         let t = &self.view3d;
-        let (hdr, display) = (t.resolve.as_ref().expect("3D view is HDR"), t.display.as_ref().expect("3D view has a display image"));
+        let (hdr, display) = (t.resolve.as_ref().unwrap_or(&t.color), t.display.as_ref().expect("3D view has a display image"));
         let raw = settings.mode != ViewMode::Material;
         self.post.record(rs, &mut encoder, hdr, &display.view, &settings.post, settings.exposure, raw);
         rs.queue.submit([encoder.finish()]);
