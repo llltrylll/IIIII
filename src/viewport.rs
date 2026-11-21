@@ -445,6 +445,31 @@ struct Globals {
     clip: [f32; 4],
 }
 
+/// OpenGL adapters commonly expose only 16 sampled fragment textures.
+/// The full viewport layout has 17; omit the comparison shadow map only on GL.
+/// Key lighting remains active, but without cast shadows on this backend.
+fn view_shader_source(gl_depth_color: bool) -> String {
+    let mut source = include_str!("shaders/view.wgsl").to_owned();
+    if !gl_depth_color {
+        return source;
+    }
+
+    const SHADOW_MAP: &str = "@group(0) @binding(16) var shadow_map: texture_depth_2d;\n";
+    const SHADOW_SAMPLER: &str = "@group(0) @binding(17) var shadow_samp: sampler_comparison;\n";
+    assert_eq!(source.matches(SHADOW_MAP).count(), 1, "view shadow map binding must remain unique");
+    assert_eq!(source.matches(SHADOW_SAMPLER).count(), 1, "view shadow sampler binding must remain unique");
+    source = source.replacen(SHADOW_MAP, "", 1);
+    source = source.replacen(SHADOW_SAMPLER, "", 1);
+
+    const SHADOW_START: &str = "fn key_shadow(p: vec3<f32>, gn: vec3<f32>) -> f32 {";
+    const SHADOW_END: &str = "\n}\n\n// GGX specular and Lambert diffuse from a directional light.";
+    let start = source.find(SHADOW_START).expect("key shadow function must exist");
+    let tail = &source[start..];
+    let end = tail.find(SHADOW_END).expect("key shadow function terminator must exist") + 2;
+    source.replace_range(start..start + end, "fn key_shadow(p: vec3<f32>, gn: vec3<f32>) -> f32 {\n    return 1.0;\n}");
+    source
+}
+
 const SHADOW_SIZE: u32 = 2048;
 
 /// The 3D view renders scene-linear HDR with MSAA, resolves it, and post
@@ -898,57 +923,62 @@ impl ViewRenderer {
     pub fn new(rs: &egui_wgpu::RenderState) -> ViewRenderer {
         let device = &rs.device;
         let gl_depth_color = rs.adapter.get_info().backend == wgpu::Backend::Gl;
-        let module = gpu::shader(device, "view", include_str!("shaders/view.wgsl"));
+        let view_source = view_shader_source(gl_depth_color);
+        let module = gpu::shader(device, "view", &view_source);
+        let mut view_entries = vec![
+            gpu::uniform_entry(0, false),
+            gpu::tex_entry(1, true),
+            gpu::tex_entry(2, true),
+            gpu::tex_entry(3, true),
+            gpu::tex_entry(4, true),
+            gpu::tex_entry(5, true),
+            gpu::tex_entry(6, true),
+            gpu::tex_entry(7, true),
+            gpu::tex_entry(8, true),
+            gpu::tex_entry(9, true),
+            wgpu::BindGroupLayoutEntry {
+                binding: 19,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            gpu::sampler_entry(10),
+            gpu::tex_entry(11, true),
+            gpu::tex_entry(12, true),
+            gpu::tex_entry(13, true),
+            gpu::sampler_entry(14),
+            gpu::uniform_entry(15, false),
+            wgpu::BindGroupLayoutEntry {
+                binding: 16,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 17,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                count: None,
+            },
+            gpu::uniform_entry(18, false),
+            gpu::tex_entry(20, true),
+            gpu::tex_entry(21, true),
+            gpu::tex_entry(22, true),
+        ];
+        if gl_depth_color {
+            view_entries.retain(|entry| entry.binding != 16 && entry.binding != 17);
+        }
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("view"),
-            entries: &[
-                gpu::uniform_entry(0, false),
-                gpu::tex_entry(1, true),
-                gpu::tex_entry(2, true),
-                gpu::tex_entry(3, true),
-                gpu::tex_entry(4, true),
-                gpu::tex_entry(5, true),
-                gpu::tex_entry(6, true),
-                gpu::tex_entry(7, true),
-                gpu::tex_entry(8, true),
-                gpu::tex_entry(9, true),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 19,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                gpu::sampler_entry(10),
-                gpu::tex_entry(11, true),
-                gpu::tex_entry(12, true),
-                gpu::tex_entry(13, true),
-                gpu::sampler_entry(14),
-                gpu::uniform_entry(15, false),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 16,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 17,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
-                    count: None,
-                },
-                gpu::uniform_entry(18, false),
-                gpu::tex_entry(20, true),
-                gpu::tex_entry(21, true),
-                gpu::tex_entry(22, true),
-            ],
+            entries: &view_entries,
         });
         let layout = gpu::layout(device, &bgl);
         let depth = |write: bool, compare| {
@@ -1256,34 +1286,37 @@ impl ViewRenderer {
         fn v(view: &wgpu::TextureView) -> wgpu::BindingResource<'_> {
             wgpu::BindingResource::TextureView(view)
         }
+        let mut entries = vec![
+            wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: v(engine.final_tex(0).srgb()) },
+            wgpu::BindGroupEntry { binding: 2, resource: v(&engine.final_tex(1).view) },
+            wgpu::BindGroupEntry { binding: 3, resource: v(&engine.final_tex(2).view) },
+            wgpu::BindGroupEntry { binding: 4, resource: v(&engine.final_tex(3).view) },
+            wgpu::BindGroupEntry { binding: 5, resource: v(&engine.map_tex(0).view) },
+            wgpu::BindGroupEntry { binding: 6, resource: v(&engine.map_tex(1).view) },
+            wgpu::BindGroupEntry { binding: 7, resource: v(&engine.map_tex(2).view) },
+            wgpu::BindGroupEntry { binding: 8, resource: v(&engine.map_tex(3).view) },
+            wgpu::BindGroupEntry { binding: 9, resource: v(&engine.map_tex(4).view) },
+            wgpu::BindGroupEntry { binding: 19, resource: v(engine.custom_maps_view()) },
+            wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            wgpu::BindGroupEntry { binding: 11, resource: v(&engine.surface_maps().1.view) },
+            wgpu::BindGroupEntry { binding: 12, resource: v(&engine.surface_maps().0.view) },
+            wgpu::BindGroupEntry { binding: 13, resource: v(&env.radiance) },
+            wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::Sampler(&self.env_sampler) },
+            wgpu::BindGroupEntry { binding: 15, resource: env.sh.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 18, resource: self.custom_params.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 20, resource: v(engine.final_tex(crate::engine::FINAL_EMISSION).srgb()) },
+            wgpu::BindGroupEntry { binding: 21, resource: v(&engine.final_tex(crate::engine::FINAL_NORMAL).view) },
+            wgpu::BindGroupEntry { binding: 22, resource: v(&engine.final_tex(crate::engine::FINAL_SPECULAR).view) },
+        ];
+        if !self.view3d.gl_depth_color {
+            entries.push(wgpu::BindGroupEntry { binding: 16, resource: v(&self.shadow_map.view) });
+            entries.push(wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self.shadow_sampler) });
+        }
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("view"),
             layout: &self.bgl,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: v(engine.final_tex(0).srgb()) },
-                wgpu::BindGroupEntry { binding: 2, resource: v(&engine.final_tex(1).view) },
-                wgpu::BindGroupEntry { binding: 3, resource: v(&engine.final_tex(2).view) },
-                wgpu::BindGroupEntry { binding: 4, resource: v(&engine.final_tex(3).view) },
-                wgpu::BindGroupEntry { binding: 5, resource: v(&engine.map_tex(0).view) },
-                wgpu::BindGroupEntry { binding: 6, resource: v(&engine.map_tex(1).view) },
-                wgpu::BindGroupEntry { binding: 7, resource: v(&engine.map_tex(2).view) },
-                wgpu::BindGroupEntry { binding: 8, resource: v(&engine.map_tex(3).view) },
-                wgpu::BindGroupEntry { binding: 9, resource: v(&engine.map_tex(4).view) },
-                wgpu::BindGroupEntry { binding: 19, resource: v(engine.custom_maps_view()) },
-                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                wgpu::BindGroupEntry { binding: 11, resource: v(&engine.surface_maps().1.view) },
-                wgpu::BindGroupEntry { binding: 12, resource: v(&engine.surface_maps().0.view) },
-                wgpu::BindGroupEntry { binding: 13, resource: v(&env.radiance) },
-                wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::Sampler(&self.env_sampler) },
-                wgpu::BindGroupEntry { binding: 15, resource: env.sh.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 16, resource: v(&self.shadow_map.view) },
-                wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self.shadow_sampler) },
-                wgpu::BindGroupEntry { binding: 18, resource: self.custom_params.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 20, resource: v(engine.final_tex(crate::engine::FINAL_EMISSION).srgb()) },
-                wgpu::BindGroupEntry { binding: 21, resource: v(&engine.final_tex(crate::engine::FINAL_NORMAL).view) },
-                wgpu::BindGroupEntry { binding: 22, resource: v(&engine.final_tex(crate::engine::FINAL_SPECULAR).view) },
-            ],
+            entries: &entries,
         })
     }
 
@@ -1621,7 +1654,7 @@ impl ViewRenderer {
             self.paint_depth_key = None;
         }
 
-        if settings.key.on {
+        if settings.key.on && !self.view3d.gl_depth_color {
             Self::shadow_cache_key(engines[0], mesh, shown, settings, hidden_objects, &mut self.shadow_key_scratch);
             if self.shadow_key.as_ref() != Some(&self.shadow_key_scratch) {
                 self.shadow_key.get_or_insert_with(Vec::new).clone_from(&self.shadow_key_scratch);
@@ -2081,5 +2114,26 @@ mod shadow_cache_tests {
         assert_ne!(original, moved_light);
         assert_ne!(original, hidden_set);
         assert_ne!(original, changed_ranges);
+    }
+}
+
+
+#[cfg(test)]
+mod gl_view_shader_tests {
+    use super::view_shader_source;
+
+    #[test]
+    fn gl_view_shader_omits_shadow_texture_and_keeps_material_features() {
+        let gl = view_shader_source(true);
+        assert!(!gl.contains("@binding(16) var shadow_map"));
+        assert!(!gl.contains("@binding(17) var shadow_samp"));
+        assert!(gl.contains("fn key_shadow(p: vec3<f32>, gn: vec3<f32>) -> f32 {\n    return 1.0;"));
+        assert!(gl.contains("var t_spec: texture_2d<f32>"));
+        assert!(gl.contains("var t_wnrm: texture_2d<f32>"));
+        assert!(gl.contains("var t_wpos: texture_2d<f32>"));
+
+        let vk = view_shader_source(false);
+        assert!(vk.contains("@binding(16) var shadow_map"));
+        assert!(vk.contains("textureSampleCompareLevel(shadow_map"));
     }
 }
