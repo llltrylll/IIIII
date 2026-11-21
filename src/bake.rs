@@ -6,7 +6,7 @@
 //! single dispatch can trip the OS GPU watchdog.
 
 use crate::bvh::Bvh;
-use crate::gpu::{self, GpuMesh, LAYER_USAGE, Tex};
+use crate::gpu::{self, GpuMesh, Tex};
 use crate::mesh::{HighPoly, Mesh, smooth_normals, weld_positions};
 use eframe::{egui, wgpu};
 use glam::Vec3;
@@ -1809,7 +1809,6 @@ impl GpuBaker {
     pub fn new_for_adapter(device: &wgpu::Device, adapter: &wgpu::Adapter) -> GpuBaker {
         let required_uv_usages = wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::STORAGE_BINDING
             | wgpu::TextureUsages::COPY_SRC
             | wgpu::TextureUsages::COPY_DST;
         let float_uv = adapter.get_texture_format_features(F::Rgba32Float);
@@ -2258,9 +2257,12 @@ impl GpuBaker {
             | wgpu::TextureUsages::COPY_SRC
             | wgpu::TextureUsages::COPY_DST
             | wgpu::TextureUsages::STORAGE_BINDING;
-        let render_usage = storage_usage | wgpu::TextureUsages::RENDER_ATTACHMENT;
+        let uv_usage = wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::RENDER_ATTACHMENT;
         let t = |label: &str, f: F| Tex::new_without_srgb_view(device, label, res, res, f, storage_usage);
-        let rt = |label: &str, f: F| Tex::new_without_srgb_view(device, label, res, res, f, render_usage);
+        let rt = |label: &str, f: F| Tex::new_without_srgb_view(device, label, res, res, f, uv_usage);
         let low = [rt("bake pos", self.uv_pos_format), rt("bake nrm", F::Rgba16Float), rt("bake tan", self.uv_tan_format)];
         let tmp = [rt("bake pos 2", self.uv_pos_format), rt("bake nrm 2", F::Rgba16Float), rt("bake tan 2", self.uv_tan_format)];
 
