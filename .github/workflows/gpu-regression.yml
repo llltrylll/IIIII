@@ -52,7 +52,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: OpenGL diagnostic - adapter texture format capabilities
-        run: "xvfb-run -a cargo test --locked --bin material_painter preview_test::gl_bake_pipeline_compiles -- --ignored --exact --nocapture --test-threads 1"
+        run: "xvfb-run -a cargo test --locked --bin material_painter preview_test::gl_format_capabilities -- --ignored --exact --nocapture --test-threads 1"
         env:
           WGPU_BACKEND: gl
           LIBGL_ALWAYS_SOFTWARE: "1"
