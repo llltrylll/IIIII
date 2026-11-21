@@ -149,8 +149,7 @@ impl ShelfPreviews {
         }
         if self.baker.is_none() {
             let _s = crate::startup_trace::span("shelf deferred init: GpuBaker::new");
-            let backend = rs.adapter.get_info().backend;
-            self.baker = Some(GpuBaker::new_for_backend(&rs.device, backend));
+            self.baker = Some(GpuBaker::new_for_adapter(&rs.device, &rs.adapter));
             ctx.request_repaint();
             return true;
         }
