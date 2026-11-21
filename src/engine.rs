@@ -5387,7 +5387,7 @@ impl Engine {
                     &self.p.composite_module,
                     "fs_fill_variation_noise",
                     &gpu::layout(&self.device, &self.p.fill_variation_noise_bgl),
-                    &[gpu::target(F::R16Float)],
+                    &[gpu::target(F::R32Float)],
                 )
             }))
         };
