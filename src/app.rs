@@ -993,6 +993,8 @@ pub struct PainterApp {
     frame_ms: f32,
     /// Smoothed interval between UI/viewport frames, in milliseconds.
     frame_interval_ms: f32,
+    /// Start of the previous UI frame, used by the 80 FPS limiter.
+    frame_limiter_last_frame: Option<Instant>,
     /// The slowest recent frame (decays), to spot stutter that the average hides.
     frame_peak_ms: f32,
     ppp: f32,
@@ -2547,6 +2549,7 @@ impl PainterApp {
             crash_report: crate::crash::take_report(),
             frame_ms: 0.0,
             frame_interval_ms: 0.0,
+            frame_limiter_last_frame: None,
             frame_peak_ms: 0.0,
             ppp: cc.egui_ctx.pixels_per_point(),
             mcp: None,
@@ -5920,6 +5923,18 @@ impl PainterApp {
 
 impl eframe::App for PainterApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // A short sleep at frame entry provides a real upper bound even when
+        // continuous viewport repaint requests would otherwise bypass a timer.
+        const FRAME_INTERVAL: Duration = Duration::from_micros(12_500);
+        if let Some(previous) = self.frame_limiter_last_frame {
+            let next_frame = previous + FRAME_INTERVAL;
+            let now = Instant::now();
+            if now < next_frame {
+                std::thread::sleep(next_frame - now);
+            }
+        }
+        self.frame_limiter_last_frame = Some(Instant::now());
+
         let _trace_frame = crate::startup_trace::frame();
         let start = Instant::now();
         let ctx = ui.ctx().clone();
