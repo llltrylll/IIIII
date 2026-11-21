@@ -1341,6 +1341,14 @@ struct Pipelines {
     composite_layout: wgpu::PipelineLayout,
     composite_variants: std::sync::Mutex<HashMap<(bool, u8), wgpu::RenderPipeline>>,
     composite_bgl: wgpu::BindGroupLayout,
+    /// OpenGL uses separate core/extra passes and a narrow, precomputed-mask layout.
+    gl_composite: bool,
+    gl_extra_layout: wgpu::PipelineLayout,
+    gl_folder_layout: wgpu::PipelineLayout,
+    gl_extra_bgl: wgpu::BindGroupLayout,
+    gl_folder_bgl: wgpu::BindGroupLayout,
+    gl_mask_bgl: wgpu::BindGroupLayout,
+    gl_composite_variants: std::sync::Mutex<HashMap<u8, (Option<wgpu::RenderPipeline>, Option<wgpu::RenderPipeline>)>>,
     /// Built only when a Fill layer actually uses color or roughness variation.
     composite_module: wgpu::ShaderModule,
     fill_variation_noise: std::sync::OnceLock<wgpu::RenderPipeline>,
@@ -1367,6 +1375,44 @@ impl Pipelines {
             }).collect::<Vec<_>>();
             let (label, entry) = if folder_merge { ("folder merge channels", "fs_folder_merge") } else { ("composite channels", "fs_layer") };
             gpu::fullscreen_pipeline(device, label, &self.composite_module, entry, &self.composite_layout, &targets)
+        }).clone()
+    }
+
+    /// OpenGL's 16-texture floor is met by splitting the seven accumulation
+    /// channels across two pipelines. Each pipeline binds only the resources
+    /// its entry point reads; the mask has already been resolved to l_mask.
+    fn gl_layer_pipelines(
+        &self,
+        device: &wgpu::Device,
+        output_mask: u8,
+    ) -> (Option<wgpu::RenderPipeline>, Option<wgpu::RenderPipeline>) {
+        let mut cache = self.gl_composite_variants.lock().unwrap_or_else(|e| e.into_inner());
+        cache.entry(output_mask).or_insert_with(|| {
+            let core_mask = output_mask & 0x0f;
+            let extra_mask = (output_mask >> 4) & 0x07;
+            let core = if core_mask != 0 {
+                let targets = (0..4).map(|channel| {
+                    if core_mask & (1 << channel) != 0 { gpu::target(ACCUM_FORMATS[channel]) } else { None }
+                }).collect::<Vec<_>>();
+                Some(gpu::fullscreen_pipeline(
+                    device, "OpenGL layer core", &self.composite_module, "fs_layer_gl_core",
+                    &self.composite_layout, &targets,
+                ))
+            } else {
+                None
+            };
+            let extra = if extra_mask != 0 {
+                let targets = (0..3).map(|channel| {
+                    if extra_mask & (1 << channel) != 0 { gpu::target(ACCUM_FORMATS[channel + 4]) } else { None }
+                }).collect::<Vec<_>>();
+                Some(gpu::fullscreen_pipeline(
+                    device, "OpenGL layer extra", &self.composite_module, "fs_layer_gl_extra",
+                    &self.gl_extra_layout, &targets,
+                ))
+            } else {
+                None
+            };
+            (core, extra)
         }).clone()
     }
 }
