@@ -46,6 +46,19 @@ impl Tex {
         Self::new_ms_with_srgb_view(device, label, width, height, format, usage, samples, true)
     }
 
+    /// Creates a single-sampled texture without requesting alternate sRGB views.
+    /// Use this for placeholder/data textures that are never sampled as color.
+    pub fn new_without_srgb_view(
+        device: &wgpu::Device,
+        label: &str,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+        usage: wgpu::TextureUsages,
+    ) -> Tex {
+        Self::new_ms_with_srgb_view(device, label, width, height, format, usage, 1, false)
+    }
+
     /// Creates a multisampled texture without requesting alternate sRGB views.
     /// Useful for data textures whose RGBA8 values must remain linear.
     pub fn new_ms_without_srgb_view(
