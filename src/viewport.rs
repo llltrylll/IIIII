@@ -498,6 +498,8 @@ struct Targets {
     paint_depth: Option<Tex>,
     /// GL-sampleable depth encoded in an RGBA8 multisampled color target.
     paint_depth_color: Option<Tex>,
+    #[cfg(test)]
+    paint_depth_color_resolve: Option<Tex>,
     display: Option<Tex>,
 }
 
@@ -507,6 +509,8 @@ pub struct ViewTarget {
     depth: Option<Tex>,
     paint_depth: Option<Tex>,
     paint_depth_color: Option<Tex>,
+    #[cfg(test)]
+    paint_depth_color_resolve: Option<Tex>,
     display: Option<Tex>,
     gl_depth_color: bool,
     pub egui_id: egui::TextureId,
@@ -544,6 +548,12 @@ impl ViewTarget {
                     wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
                     MSAA,
                 )),
+                #[cfg(test)]
+                paint_depth_color_resolve: gl_depth_color.then(|| Tex::new_without_srgb_view(
+                    device, "screen paint packed depth resolve", w, h,
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                )),
                 display: Some(Tex::new(device, "view", w, h, COLOR_FORMAT, display)),
             }
         } else {
@@ -553,6 +563,8 @@ impl ViewTarget {
                 depth: None,
                 paint_depth: None,
                 paint_depth_color: None,
+                #[cfg(test)]
+                paint_depth_color_resolve: None,
                 display: None,
             }
         }
@@ -572,6 +584,8 @@ impl ViewTarget {
             depth: t.depth,
             paint_depth: t.paint_depth,
             paint_depth_color: t.paint_depth_color,
+            #[cfg(test)]
+            paint_depth_color_resolve: t.paint_depth_color_resolve,
             display: t.display,
             gl_depth_color,
             egui_id,
@@ -596,6 +610,8 @@ impl ViewTarget {
         self.depth = t.depth;
         self.paint_depth = t.paint_depth;
         self.paint_depth_color = t.paint_depth_color;
+        #[cfg(test)]
+        { self.paint_depth_color_resolve = t.paint_depth_color_resolve; }
         self.display = t.display;
         self.size = size;
         true
@@ -618,6 +634,11 @@ impl ViewTarget {
         } else {
             &self.paint_depth.as_ref().expect("3D view has screen paint depth").view
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn paint_depth_color_resolve_texture(&self) -> Option<&Tex> {
+        self.paint_depth_color_resolve.as_ref()
     }
 
     /// Actual depth attachment used while rasterizing the visibility pass.
@@ -1632,7 +1653,7 @@ impl ViewRenderer {
                     vec![Some(wgpu::RenderPassColorAttachment {
                         view: &color.view,
                         depth_slice: None,
-                        resolve_target: None,
+                        resolve_target: t.paint_depth_color_resolve.as_ref().map(|resolved| &resolved.view),
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
                             store: wgpu::StoreOp::Store,
