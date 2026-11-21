@@ -2046,9 +2046,9 @@ impl GpuBaker {
             ],
         );
         let curvature =
-            compute("cs_curvature", &[(0, Uniform), (1, TexUint), (13, Tex), (14, Tex), (17, StorageTex(F::Rgba16Float)), (35, Tex)]);
+            compute("cs_curvature", &[(0, Uniform), (1, uv_tex), (13, Tex), (14, Tex), (17, StorageTex(F::Rgba16Float)), (35, Tex)]);
         let jfa_init =
-            compute("cs_jfa_init", &[(0, Uniform), (1, TexUint), (13, Tex), (18, Tex), (19, StorageTex(F::Rgba32Float))]);
+            compute("cs_jfa_init", &[(0, Uniform), (1, uv_tex), (13, Tex), (18, Tex), (19, StorageTex(F::Rgba32Float))]);
         let jfa_step = compute("cs_jfa_step", &[(0, Uniform), (13, Tex), (20, Tex), (19, StorageTex(F::Rgba32Float)), (28, Tex)]);
         let edges = compute(
             "cs_edges",
@@ -2066,7 +2066,7 @@ impl GpuBaker {
             "cs_denoise",
             &[
                 (0, Uniform),
-                (1, TexUint),
+                (1, uv_tex),
                 (13, Tex),
                 (14, Tex),
                 (21, Tex),
@@ -2076,7 +2076,7 @@ impl GpuBaker {
             ],
         );
         let smooth_inputs = |io: &[(u32, Entry)]| {
-            let mut e = vec![(0, Uniform), (1, TexUint), (13, Tex), (14, Tex), (28, Tex), (35, Tex)];
+            let mut e = vec![(0, Uniform), (1, uv_tex), (13, Tex), (14, Tex), (28, Tex), (35, Tex)];
             e.extend(io.iter().map(|(b, k)| (*b, *k)));
             e
         };
@@ -2089,7 +2089,7 @@ impl GpuBaker {
             "cs_pack",
             &[
                 (0, Uniform),
-                (1, TexUint),
+                (1, uv_tex),
                 (13, Tex),
                 (14, Tex),
                 (18, Tex),
@@ -2105,7 +2105,7 @@ impl GpuBaker {
             "cs_custom",
             &[
                 (0, Uniform),
-                (1, TexUint),
+                (1, uv_tex),
                 (4, Storage(false)),
                 (5, Storage(false)),
                 (6, Storage(false)),
