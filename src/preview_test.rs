@@ -41,6 +41,12 @@ fn gl_bake_pipeline_compiles() {
     let rs = render_state();
     let backend = rs.adapter.get_info().backend;
     assert_eq!(backend, wgpu::Backend::Gl, "OpenGL smoke test did not obtain a GL adapter");
+    let adapter_features = rs.adapter.features();
+    println!("OpenGL adapter features: {adapter_features:?}");
+    println!(
+        "TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES supported: {}",
+        adapter_features.contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+    );
     for format in [
         wgpu::TextureFormat::Rgba32Float,
         wgpu::TextureFormat::Rg32Float,
