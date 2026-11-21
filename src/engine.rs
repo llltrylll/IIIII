@@ -1575,6 +1575,8 @@ pub struct Engine {
     /// composited, one set per nesting level; only allocated while needed.
     folder_below: Vec<[Tex; ACCUM]>,
     rs: egui_wgpu::RenderState,
+    /// Whether this adapter supports alternate sRGB views of UNORM textures.
+    srgb_views_supported: bool,
     device: wgpu::Device,
     queue: wgpu::Queue,
     /// Optional non-blocking GPU timings when the adapter supports timestamps.
@@ -1766,8 +1768,14 @@ struct FillVariationNoiseCache {
     roughness: Option<Tex>,
 }
 
-fn accum_set(device: &wgpu::Device, res: u32, label: &str) -> [Tex; ACCUM] {
-    ACCUM_FORMATS.map(|f| Tex::new(device, label, res, res, f, LAYER_USAGE))
+fn accum_set(device: &wgpu::Device, res: u32, label: &str, srgb_views_supported: bool) -> [Tex; ACCUM] {
+    ACCUM_FORMATS.map(|f| {
+        if srgb_views_supported && f == F::Rgba8Unorm {
+            Tex::new(device, label, res, res, f, LAYER_USAGE)
+        } else {
+            Tex::new_without_srgb_view(device, label, res, res, f, LAYER_USAGE)
+        }
+    })
 }
 
 /// Maximum number of disjoint scissors per composite. Above this, merge
@@ -1991,13 +1999,12 @@ impl Engine {
         for channel in 0..ACCUM {
             let scratch = 1 - self.final_indices[channel];
             if self.accum[scratch][channel].width != 1 {
-                self.accum[scratch][channel] = Tex::new(
-                    &self.device, "parked composite scratch", 1, 1, ACCUM_FORMATS[channel], LAYER_USAGE,
+                self.accum[scratch][channel] = self.new_tex( "parked composite scratch", 1, 1, ACCUM_FORMATS[channel], LAYER_USAGE,
                 );
             }
         }
         if self.stroke.width != 1 {
-            self.stroke = Tex::new(&self.device, "parked stroke mask", 1, 1, STROKE_FORMAT, LAYER_USAGE);
+            self.stroke = self.new_tex( "parked stroke mask", 1, 1, STROKE_FORMAT, LAYER_USAGE);
         }
         self.snap = Default::default();
         self.snap_mask = None;
@@ -2062,9 +2069,9 @@ impl Engine {
         if self.pos.width == 1 && self.nrm.width == 1 && self.tan.width == 1 {
             return false;
         }
-        self.pos = Tex::new(&self.device, "parked position map", 1, 1, POS_FORMAT, LAYER_USAGE);
-        self.nrm = Tex::new(&self.device, "parked normal map", 1, 1, NRM_FORMAT, LAYER_USAGE);
-        self.tan = Tex::new(&self.device, "parked tangent map", 1, 1, TAN_FORMAT, LAYER_USAGE);
+        self.pos = self.new_tex( "parked position map", 1, 1, POS_FORMAT, LAYER_USAGE);
+        self.nrm = self.new_tex( "parked normal map", 1, 1, NRM_FORMAT, LAYER_USAGE);
+        self.tan = self.new_tex( "parked tangent map", 1, 1, TAN_FORMAT, LAYER_USAGE);
         self.uv_version = self.uv_version.wrapping_add(1);
         true
     }
@@ -2087,12 +2094,26 @@ impl Engine {
         }
     }
 
+    fn new_tex(
+        &self,
+        label: &str,
+        width: u32,
+        height: u32,
+        format: F,
+        usage: wgpu::TextureUsages,
+    ) -> Tex {
+        if self.srgb_views_supported {
+            Tex::new(&self.device, label, width, height, format, usage)
+        } else {
+            Tex::new_without_srgb_view(&self.device, label, width, height, format, usage)
+        }
+    }
+
     fn ensure_composite_working_set(&mut self) {
         for set in 0..2 {
             for channel in 0..ACCUM {
                 if self.accum[set][channel].width != self.res {
-                    self.accum[set][channel] = Tex::new(
-                        &self.device,
+                    self.accum[set][channel] = self.new_tex(
                         if set == 0 { "accum A (restored)" } else { "accum B (restored)" },
                         self.res,
                         self.res,
@@ -2106,7 +2127,7 @@ impl Engine {
 
     fn ensure_stroke_target(&mut self) {
         if self.stroke.width != self.res {
-            self.stroke = Tex::new(&self.device, "stroke mask (restored)", self.res, self.res, STROKE_FORMAT, LAYER_USAGE);
+            self.stroke = self.new_tex( "stroke mask (restored)", self.res, self.res, STROKE_FORMAT, LAYER_USAGE);
         }
     }
 
@@ -2146,6 +2167,11 @@ impl Engine {
         let _allocation = crate::startup_trace::span("Engine::with_pipelines GPU allocations");
         let device = rs.device.clone();
         let queue = rs.queue.clone();
+        let srgb_views_supported = rs
+            .adapter
+            .get_downlevel_capabilities()
+            .flags
+            .contains(wgpu::DownlevelFlags::VIEW_FORMATS);
         let sampler = gpu::linear_sampler(&device, wgpu::AddressMode::ClampToEdge);
         let gpu_profiler = device.features().contains(wgpu::Features::TIMESTAMP_QUERY).then(|| GpuStrokeProfiler::new(&device));
 
@@ -2179,17 +2205,21 @@ impl Engine {
             Engine {
             id,
             rs: rs.clone(),
-            gpu_profiler,
+            srgb_views_supported,
+gpu_profiler,
             active_gpu_profile: None,
             composite_profile_requested: false,
             forced_composite_profile: false,
             last_end_stages_ms: [0.0; 5],
-            pos: Tex::new(&device, "position map", res, res, POS_FORMAT, LAYER_USAGE),
-            nrm: Tex::new(&device, "normal map", res, res, NRM_FORMAT, LAYER_USAGE),
-            tan: Tex::new(&device, "tangent map", res, res, TAN_FORMAT, LAYER_USAGE),
-            accum: [accum_set(&device, res, "accum A"), accum_set(&device, res, "accum B")],
+            pos: Tex::new_without_srgb_view(&device, "position map", res, res, POS_FORMAT, LAYER_USAGE),
+            nrm: Tex::new_without_srgb_view(&device, "normal map", res, res, NRM_FORMAT, LAYER_USAGE),
+            tan: Tex::new_without_srgb_view(&device, "tangent map", res, res, TAN_FORMAT, LAYER_USAGE),
+            accum: [
+                accum_set(&device, res, "accum A", srgb_views_supported),
+                accum_set(&device, res, "accum B", srgb_views_supported),
+            ],
             final_indices: [0; ACCUM],
-            stroke: Tex::new(&device, "stroke mask", res, res, STROKE_FORMAT, LAYER_USAGE),
+            stroke: Tex::new_without_srgb_view(&device, "stroke mask", res, res, STROKE_FORMAT, LAYER_USAGE),
             snap: Default::default(),
             snap_mask: None,
             maps,
@@ -2234,8 +2264,8 @@ impl Engine {
             stamp_ubuf,
             stamp_sbuf,
             apply_ubuf,
-            brush_alpha: Tex::new(&device, "brush alpha", 1, 1, F::R8Unorm, LAYER_USAGE),
-            brush_grain: Tex::new(&device, "brush grain", 1, 1, F::R8Unorm, LAYER_USAGE),
+            brush_alpha: Tex::new_without_srgb_view(&device, "brush alpha", 1, 1, F::R8Unorm, LAYER_USAGE),
+            brush_grain: Tex::new_without_srgb_view(&device, "brush grain", 1, 1, F::R8Unorm, LAYER_USAGE),
             image_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             fill_image_ids_scratch: Default::default(),
             layers: Vec::new(),
@@ -2768,9 +2798,9 @@ impl Engine {
     fn bake_uv_internal(&mut self, mesh: &GpuMesh, invalidate_composite: bool) {
         self.apply_bg = None;
         if self.pos.width != self.res || self.nrm.width != self.res || self.tan.width != self.res {
-            self.pos = Tex::new(&self.device, "position map", self.res, self.res, POS_FORMAT, LAYER_USAGE);
-            self.nrm = Tex::new(&self.device, "normal map", self.res, self.res, NRM_FORMAT, LAYER_USAGE);
-            self.tan = Tex::new(&self.device, "tangent map", self.res, self.res, TAN_FORMAT, LAYER_USAGE);
+            self.pos = self.new_tex( "position map", self.res, self.res, POS_FORMAT, LAYER_USAGE);
+            self.nrm = self.new_tex( "normal map", self.res, self.res, NRM_FORMAT, LAYER_USAGE);
+            self.tan = self.new_tex( "tangent map", self.res, self.res, TAN_FORMAT, LAYER_USAGE);
         }
         // A mesh change can leave the range past the end; the app sets the
         // new range right after, and this draws nothing meanwhile.
@@ -2878,7 +2908,7 @@ impl Engine {
 
     /// 1x1 neutral maps used until the first bake.
     fn default_maps(device: &wgpu::Device, queue: &wgpu::Queue) -> [Tex; MAP_TEXTURES] {
-        let maps = std::array::from_fn(|i| Tex::new(device, "mesh map", 1, 1, MAP_FORMATS[i], LAYER_USAGE));
+        let maps = std::array::from_fn(|i| Tex::new_without_srgb_view(device, "mesh map", 1, 1, MAP_FORMATS[i], LAYER_USAGE));
         // f16 bit patterns: 0.0 = 0x0000, 0.5 = 0x3800, 1.0 = 0x3C00.
         let map_b: [u16; 4] = [0x3C00, 0x3C00, 0x3C00, 0x3800];
         let half: [u16; 4] = [0, 0, 0x3800, 0];
@@ -3186,7 +3216,7 @@ impl Engine {
             let res = self.res;
             let reuse = self.resolved[t].as_ref().is_some_and(|r| r.width == res);
             if !reuse {
-                self.resolved[t] = Some(Tex::new(&self.device, "resolved map", res, res, MAP_FORMATS[t], LAYER_USAGE));
+                self.resolved[t] = Some(self.new_tex( "resolved map", res, res, MAP_FORMATS[t], LAYER_USAGE));
             }
             let out = self.resolved[t].as_ref().unwrap();
             let mut pass = gpu::pass(&mut encoder, "maps resolve", &[gpu::color_attachment(&out.view, wgpu::LoadOp::Load)]);
@@ -3229,7 +3259,7 @@ impl Engine {
 
     /// A layer-sized texture holding `bytes` (tightly packed texels).
     pub fn texture_from_bytes(&self, label: &str, format: F, width: u32, height: u32, bytes: &[u8]) -> Tex {
-        let tex = Tex::new(&self.device, label, width, height, format, LAYER_USAGE);
+        let tex = self.new_tex( label, width, height, format, LAYER_USAGE);
         let row = width * gpu::bytes_per_texel(format);
         self.queue.write_texture(
             tex.copy_info(),
@@ -3602,7 +3632,7 @@ impl Engine {
             if texels.len() != (size * size * gpu::bytes_per_texel(format)) as usize {
                 continue;
             }
-            let src = Tex::new(&self.device, CH_NAMES[ch], size, size, format, LAYER_USAGE);
+            let src = self.new_tex( CH_NAMES[ch], size, size, format, LAYER_USAGE);
             let layout = wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(size * gpu::bytes_per_texel(format)), rows_per_image: Some(size) };
             self.queue.write_texture(src.copy_info(), &texels, layout, src.extent());
             chans[ch] = Some(if size == self.res { src } else { self.resample(&mut encoder, &src, self.res) });
@@ -3778,7 +3808,7 @@ impl Engine {
         let src = &self.layers[idx];
         let mut encoder = self.device.create_command_encoder(&Default::default());
         let copy = |encoder: &mut wgpu::CommandEncoder, t: &Tex| {
-            let n = Tex::new(&self.device, "layer", t.width, t.height, t.format, LAYER_USAGE);
+            let n = self.new_tex( "layer", t.width, t.height, t.format, LAYER_USAGE);
             encoder.copy_texture_to_texture(t.copy_info(), n.copy_info(), t.extent());
             n
         };
@@ -4236,7 +4266,7 @@ impl Engine {
     }
 
     fn new_mask_texture(&self, white: bool) -> Tex {
-        let tex = Tex::new(&self.device, "mask", self.res, self.res, MASK_FORMAT, LAYER_USAGE);
+        let tex = self.new_tex( "mask", self.res, self.res, MASK_FORMAT, LAYER_USAGE);
         let mut encoder = self.device.create_command_encoder(&Default::default());
         let v = if white { 1.0 } else { 0.0 };
         gpu::clear_texture(&mut encoder, &tex, wgpu::Color { r: v, g: v, b: v, a: 1.0 });
@@ -4251,7 +4281,7 @@ impl Engine {
         if chans[ch].is_some() {
             return;
         }
-        let tex = Tex::new(&self.device, CH_NAMES[ch], res, res, PAINT_FORMATS[ch], LAYER_USAGE);
+        let tex = self.new_tex( CH_NAMES[ch], res, res, PAINT_FORMATS[ch], LAYER_USAGE);
         let mut encoder = self.device.create_command_encoder(&Default::default());
         gpu::clear_texture(&mut encoder, &tex, wgpu::Color::TRANSPARENT);
         self.queue.submit([encoder.finish()]);
@@ -4294,7 +4324,7 @@ impl Engine {
             if erase {
                 return false;
             }
-            let tex = Tex::new(&self.device, "map fix", self.res, self.res, PAINT_FORMATS[Self::FIX_CHANNEL], LAYER_USAGE);
+            let tex = self.new_tex( "map fix", self.res, self.res, PAINT_FORMATS[Self::FIX_CHANNEL], LAYER_USAGE);
             let mut encoder = self.device.create_command_encoder(&Default::default());
             gpu::clear_texture(&mut encoder, &tex, wgpu::Color::TRANSPARENT);
             self.queue.submit([encoder.finish()]);
@@ -4361,8 +4391,7 @@ impl Engine {
                 for &channel in &channels {
                     self.ensure_channel(idx, channel);
                     if self.snap[channel].is_none() {
-                        self.snap[channel] = Some(Tex::new(
-                            &self.device, "snapshot", self.res, self.res, PAINT_FORMATS[channel], LAYER_USAGE,
+                        self.snap[channel] = Some(self.new_tex( "snapshot", self.res, self.res, PAINT_FORMATS[channel], LAYER_USAGE,
                         ));
                     }
                 }
@@ -4372,16 +4401,14 @@ impl Engine {
                     .expect("active mask layer still exists");
                 self.ensure_mask_paint(idx);
                 if self.snap_mask.is_none() {
-                    self.snap_mask = Some(Tex::new(
-                        &self.device, "mask snapshot", self.res, self.res, MASK_FORMAT, LAYER_USAGE,
+                    self.snap_mask = Some(self.new_tex( "mask snapshot", self.res, self.res, MASK_FORMAT, LAYER_USAGE,
                     ));
                 }
             }
             StrokeTarget::BakeFix(_) => {
                 let channel = Self::FIX_CHANNEL;
                 if self.snap[channel].is_none() {
-                    self.snap[channel] = Some(Tex::new(
-                        &self.device, "snapshot", self.res, self.res, PAINT_FORMATS[channel], LAYER_USAGE,
+                    self.snap[channel] = Some(self.new_tex( "snapshot", self.res, self.res, PAINT_FORMATS[channel], LAYER_USAGE,
                     ));
                 }
             }
@@ -4716,7 +4743,7 @@ impl Engine {
         self.apply_bg = None;
         let (pixels, size) = grain.unwrap_or((&[255], 1));
         if self.brush_grain.width != size {
-            self.brush_grain = Tex::new(&self.device, "brush grain", size, size, F::R8Unorm, LAYER_USAGE);
+            self.brush_grain = self.new_tex( "brush grain", size, size, F::R8Unorm, LAYER_USAGE);
         }
         self.queue.write_texture(
             self.brush_grain.copy_info(),
@@ -4731,7 +4758,7 @@ impl Engine {
         let (pixels, size) = alpha.unwrap_or((&[255], 1));
         if self.brush_alpha.width != size {
             self.stamp_bg = [None, None];
-            self.brush_alpha = Tex::new(&self.device, "brush alpha", size, size, F::R8Unorm, LAYER_USAGE);
+            self.brush_alpha = self.new_tex( "brush alpha", size, size, F::R8Unorm, LAYER_USAGE);
         }
         self.queue.write_texture(
             self.brush_alpha.copy_info(),
@@ -5339,7 +5366,7 @@ impl Engine {
         let retained_depth = retained_folder_depth(self.folder_below.len(), max_depth);
         self.folder_below.truncate(retained_depth);
         while self.folder_below.len() < retained_depth {
-            let set = ACCUM_FORMATS.map(|f| Tex::new(&self.device, "folder below", self.res, self.res, f, LAYER_USAGE));
+            let set = ACCUM_FORMATS.map(|f| self.new_tex( "folder below", self.res, self.res, f, LAYER_USAGE));
             self.folder_below.push(set);
         }
 
@@ -5381,8 +5408,8 @@ impl Engine {
                 variation_noise_hits += 1;
                 continue;
             }
-            let color = color_enabled.then(|| Tex::new(&self.device, "fill color FBM cache", self.res, self.res, F::R32Float, LAYER_USAGE));
-            let roughness = roughness_enabled.then(|| Tex::new(&self.device, "fill roughness FBM cache", self.res, self.res, F::R32Float, LAYER_USAGE));
+            let color = color_enabled.then(|| self.new_tex( "fill color FBM cache", self.res, self.res, F::R32Float, LAYER_USAGE));
+            let roughness = roughness_enabled.then(|| self.new_tex( "fill roughness FBM cache", self.res, self.res, F::R32Float, LAYER_USAGE));
             self.fill_variation_noise.insert(layer.id, FillVariationNoiseCache { key, color, roughness });
             if color_enabled {
                 variation_noise_misses.push((slot, li, layer.id, false));
@@ -5523,14 +5550,14 @@ impl Engine {
         });
         for id in &cached_ids {
             if !self.mask_out.contains_key(id) {
-                let t = Tex::new(&self.device, "cached mask result", res, res, MASK_FILTER_FORMAT, LAYER_USAGE);
+                let t = self.new_tex( "cached mask result", res, res, MASK_FILTER_FORMAT, LAYER_USAGE);
                 self.mask_out.insert(*id, t);
             }
         }
         if !has_filtered_masks {
             self.mask_scratch = None;
         } else if self.mask_scratch.as_ref().is_none_or(|set| set[0].width != res) {
-            let t = || Tex::new(&self.device, "filtered mask scratch", res, res, MASK_FILTER_FORMAT, LAYER_USAGE);
+            let t = || self.new_tex( "filtered mask scratch", res, res, MASK_FILTER_FORMAT, LAYER_USAGE);
             self.mask_scratch = Some([t(), t(), t()]);
         }
         // Filter steps' uniforms, written up front: (kind, a, b, c), (dir x, dir y, scale).
@@ -5622,7 +5649,7 @@ impl Engine {
             passes.iter().position(|p| matches!(*p, Pass::Layer(li) | Pass::End(li) if self.layers[li].id == id))
         });
         if record.is_some_and(|k| k + 1 < passes.len()) && self.prefix_cache.as_ref().is_none_or(|c| c[0].width != self.res) {
-            self.prefix_cache = Some(ACCUM_FORMATS.map(|f| Tex::new(&self.device, "composite prefix", self.res, self.res, f, LAYER_USAGE)));
+            self.prefix_cache = Some(ACCUM_FORMATS.map(|f| self.new_tex( "composite prefix", self.res, self.res, f, LAYER_USAGE)));
         }
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -6415,7 +6442,7 @@ impl Engine {
     }
 
     fn resample(&self, encoder: &mut wgpu::CommandEncoder, src: &Tex, res: u32) -> Tex {
-        let dst = Tex::new(&self.device, "resampled", res, res, src.format, LAYER_USAGE);
+        let dst = self.new_tex( "resampled", res, res, src.format, LAYER_USAGE);
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &self.p.resample_bgl,
@@ -6481,12 +6508,15 @@ impl Engine {
         self.apply_bg = None;
         self.res = res;
         self.uv_version += 1;
-        self.pos = Tex::new(&self.device, "position map", res, res, POS_FORMAT, LAYER_USAGE);
+        self.pos = self.new_tex( "position map", res, res, POS_FORMAT, LAYER_USAGE);
 
-        self.nrm = Tex::new(&self.device, "normal map", res, res, NRM_FORMAT, LAYER_USAGE);
-        self.tan = Tex::new(&self.device, "tangent map", res, res, TAN_FORMAT, LAYER_USAGE);
-        self.accum = [accum_set(&self.device, res, "accum A"), accum_set(&self.device, res, "accum B")];
-        self.stroke = Tex::new(&self.device, "stroke mask", res, res, STROKE_FORMAT, LAYER_USAGE);
+        self.nrm = self.new_tex( "normal map", res, res, NRM_FORMAT, LAYER_USAGE);
+        self.tan = self.new_tex( "tangent map", res, res, TAN_FORMAT, LAYER_USAGE);
+        self.accum = [
+            accum_set(&self.device, res, "accum A", self.srgb_views_supported),
+            accum_set(&self.device, res, "accum B", self.srgb_views_supported),
+        ];
+        self.stroke = self.new_tex( "stroke mask", res, res, STROKE_FORMAT, LAYER_USAGE);
         self.snap = Default::default();
         self.snap_mask = None;
         undo.clear();
