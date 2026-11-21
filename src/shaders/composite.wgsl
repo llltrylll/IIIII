@@ -190,7 +190,10 @@ fn generator(c: vec2<i32>, uv: vec2<f32>) -> f32 {
         && all(u.gc < vec4<f32>(0.0))
         && u.gp0.w == 0.0;
     if (only_id) {
-        let id = textureSampleLevel(map_e, samp, uv, 0.0).rgb;
+        // ID colors are categorical, not continuous data: linear filtering
+        // blends neighboring islands/material IDs and can make a narrow region
+        // fail its color comparison. Read the exact texel under this fragment.
+        let id = textureLoad(map_e, c, 0).rgb;
         let tolerance = max(u.gid.w, 1e-3);
         var value = 1.0 - smoothstep(tolerance * 0.5, tolerance, distance(id, u.gid.rgb));
         for (var k = 0; k < 7; k++) {
@@ -218,7 +221,8 @@ fn generator(c: vec2<i32>, uv: vec2<f32>) -> f32 {
     if (need_a) { s.a = textureSampleLevel(map_a, samp, uv, 0.0); }
     if (need_b) { s.b = textureSampleLevel(map_b, samp, uv, 0.0); }
     if (need_c) { s.c = textureSampleLevel(map_c, samp, uv, 0.0); }
-    if (need_e) { s.e = textureSampleLevel(map_e, samp, uv, 0.0); }
+    // The ID map is categorical. Never bilinear-filter colors across ID borders.
+    if (need_e) { s.e = textureLoad(map_e, c, 0); }
 
     let need_position = u.gp0.w != 0.0 || weight(9) != 0.0 || weight(12) != 0.0
         || weight(13) != 0.0 || weight(16) != 0.0 || weight(17) != 0.0
