@@ -56,6 +56,12 @@ jobs:
         env:
           WGPU_BACKEND: gl
           LIBGL_ALWAYS_SOFTWARE: "1"
+
+      - name: OpenGL smoke - seven-slot composite pipeline compatibility
+        run: "xvfb-run -a cargo test --locked --bin material_painter engine::composite_pass_tests::gl_composite_core_matches_full_accum_attachment_slots -- --ignored --exact --nocapture --test-threads 1"
+        env:
+          WGPU_BACKEND: gl
+          LIBGL_ALWAYS_SOFTWARE: "1"
       - name: Upload OpenGL format capability report
         if: always()
         uses: actions/upload-artifact@v4
