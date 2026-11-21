@@ -2529,7 +2529,7 @@ impl Engine {
                 gpu::tex_entry(12, true),
                 gpu::tex_entry(13, true),
                 gpu::tex_entry(14, true),
-                custom_maps_entry,
+                custom_maps_entry.clone(),
                 gpu::tex_entry(16, true),
                 gpu::sampler_entry(17),
             ],
