@@ -1737,8 +1737,6 @@ pub struct GpuBaker {
     /// Format of the rasterized low-poly position and tangent maps.
     uv_pos_format: F,
     uv_tan_format: F,
-    /// True when those maps carry bitcast f32 values in Rgba32Uint textures.
-    integer_uv_textures: bool,
     /// Storage format for the per-texel curvature/triangle-size pair.
     surface_curv_format: F,
     uv: wgpu::RenderPipeline,
@@ -2117,7 +2115,6 @@ impl GpuBaker {
         GpuBaker {
             uv_pos_format,
             uv_tan_format,
-            integer_uv_textures,
             surface_curv_format,
             uv,
             dilate,
