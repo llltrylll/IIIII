@@ -144,7 +144,9 @@ pub fn bytes_per_texel(format: wgpu::TextureFormat) -> u32 {
         F::Rg8Unorm | F::R16Float => 2,
         F::Rgba8Unorm | F::Rgba8UnormSrgb | F::Rg16Float | F::R32Float | F::Depth32Float => 4,
         F::Rgba16Float => 8,
-        F::Rgba32Float => 16,
+        F::Rgba32Float | F::Rgba32Uint => 16,
+        F::Rg32Uint => 8,
+        F::R32Uint => 4,
         _ => 4,
     }
 }
