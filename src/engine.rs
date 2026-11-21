@@ -2627,15 +2627,16 @@ impl Engine {
     /// its position and normal maps. The bake is skipped when the maps were
     /// already baked from this same GPU mesh, range and size.
     pub fn set_triangles(&mut self, tris: std::ops::Range<u32>, mesh: &GpuMesh) {
-        self.set_triangles_inner(tris, mesh, true);
+        let _ = self.set_triangles_inner(tris, mesh, true);
     }
 
     /// Updates a parked Engine range without allocating or baking its maps.
-    pub(crate) fn set_triangles_parked(&mut self, tris: std::ops::Range<u32>, mesh: &GpuMesh) {
-        self.set_triangles_inner(tris, mesh, false);
+    /// Returns true when full-resolution maps were released.
+    pub(crate) fn set_triangles_parked(&mut self, tris: std::ops::Range<u32>, mesh: &GpuMesh) -> bool {
+        self.set_triangles_inner(tris, mesh, false)
     }
 
-    fn set_triangles_inner(&mut self, tris: std::ops::Range<u32>, mesh: &GpuMesh, bake_surface_maps: bool) {
+    fn set_triangles_inner(&mut self, tris: std::ops::Range<u32>, mesh: &GpuMesh, bake_surface_maps: bool) -> bool {
         let needed = (tris.end - tris.start).max(3);
         if needed > self.screen_index_capacity {
             self.screen_index_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -2652,6 +2653,7 @@ impl Engine {
             if !repeat {
                 self.bake_uv(mesh);
             }
+            false
         } else {
             if !repeat {
                 self.mask_final.clear();
@@ -2661,6 +2663,7 @@ impl Engine {
             if !released && !repeat {
                 self.uv_version = self.uv_version.wrapping_add(1);
             }
+            released
         }
     }
 

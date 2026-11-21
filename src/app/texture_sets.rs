@@ -248,8 +248,8 @@ impl PainterApp {
             e.set_bounds(bounds);
             if k == self.sets.active {
                 e.set_triangles(range, gpu_mesh);
-            } else {
-                e.set_triangles_parked(range, gpu_mesh);
+            } else if e.set_triangles_parked(range, gpu_mesh) {
+                self.views.invalidate_texture_set_binding(k);
             }
         }
         for d in &mut self.graphs.docs {
