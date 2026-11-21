@@ -70,7 +70,7 @@ struct Shown {
 }
 
 impl ThumbGpu {
-    fn new(device: &wgpu::Device) -> ThumbGpu {
+    fn new(device: &wgpu::Device, srgb_views_supported: bool) -> ThumbGpu {
         let module = gpu::shader(device, "layer thumbnails", include_str!("../shaders/thumbs.wgsl"));
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("layer thumbnails"),
@@ -78,7 +78,13 @@ impl ThumbGpu {
         });
         let layout = gpu::layout(device, &bgl);
         let pipe = |entry: &str, format: F| gpu::fullscreen_pipeline(device, "layer thumbnail", &module, entry, &layout, &[gpu::target(format)]);
-        let t = |label: &str, f: F| Tex::new(device, label, RENDER, RENDER, f, LAYER_USAGE);
+        let t = |label: &str, f: F| {
+            if srgb_views_supported {
+                Tex::new(device, label, RENDER, RENDER, f, LAYER_USAGE)
+            } else {
+                Tex::new_without_srgb_view(device, label, RENDER, RENDER, f, LAYER_USAGE)
+            }
+        };
         ThumbGpu {
             nearest_pos: pipe("fs_nearest", POS_FORMAT),
             nearest_nrm: pipe("fs_nearest", NRM_FORMAT),
@@ -247,7 +253,7 @@ impl Engine {
             return;
         }
         if self.thumbs.gpu.is_none() {
-            self.thumbs.gpu = Some(ThumbGpu::new(&self.device));
+            self.thumbs.gpu = Some(ThumbGpu::new(&self.device, self.srgb_views_supported));
         }
         let mut encoder = self.device.create_command_encoder(&Default::default());
         let profile_slot = begin_composite_profile_stage(&mut encoder, profile_query, profile_stage_count);
@@ -277,6 +283,10 @@ impl Engine {
         // Island coverage for `fs_show`: the shrunk position map once there is one.
         let cover = self.thumbs.small.as_ref().map_or(&self.pos, |(_, pos, _)| pos);
         let g = self.thumbs.gpu.as_ref().expect("thumbnail pipelines");
+        let mut show = show;
+        // Without an sRGB view, store a linearized display value so egui's
+        // ordinary UNORM sampling still produces the same screen color.
+        show[3] = if self.srgb_views_supported { 0.0 } else { 1.0 };
         let ubuf = wgpu::util::DeviceExt::create_buffer_init(
             &self.device,
             &wgpu::util::BufferInitDescriptor { label: Some("thumbnail"), contents: bytemuck::bytes_of(&show), usage: wgpu::BufferUsages::UNIFORM },
@@ -302,8 +312,8 @@ impl Engine {
         if self.thumbs.small.as_ref().is_some_and(|(v, _, _)| *v == self.uv_version) {
             return;
         }
-        let pos = Tex::new(&self.device, "thumb position", RENDER, RENDER, POS_FORMAT, LAYER_USAGE);
-        let nrm = Tex::new(&self.device, "thumb normal", RENDER, RENDER, NRM_FORMAT, LAYER_USAGE);
+        let pos = self.new_tex("thumb position", RENDER, RENDER, POS_FORMAT, LAYER_USAGE);
+        let nrm = self.new_tex("thumb normal", RENDER, RENDER, NRM_FORMAT, LAYER_USAGE);
         let g = self.thumbs.gpu.as_ref().expect("thumbnail pipelines");
         self.thumb_pass(encoder, &g.nearest_pos, &self.pos, &pos, [0.0; 4]);
         self.thumb_pass(encoder, &g.nearest_nrm, &self.nrm, &nrm, [0.0; 4]);
@@ -315,7 +325,7 @@ impl Engine {
         let entry = self.thumbs.entries.entry(layer_id).or_insert(Entry { key: 0, mask_stale: false, content: None, mask: None });
         let slot = if mask { &mut entry.mask } else { &mut entry.content };
         if slot.is_none() {
-            let tex = Tex::new(&self.device, "layer thumbnail", THUMB, THUMB, F::Rgba8Unorm, LAYER_USAGE);
+            let tex = self.new_tex("layer thumbnail", THUMB, THUMB, F::Rgba8Unorm, LAYER_USAGE);
             let id = self.rs.renderer.write().register_native_texture(&self.device, tex.srgb(), wgpu::FilterMode::Linear);
             *slot = Some(Shown { tex, id });
         }
