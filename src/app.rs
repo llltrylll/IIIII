@@ -5925,7 +5925,10 @@ impl eframe::App for PainterApp {
         let ctx = ui.ctx().clone();
         self.frame_interval_ms = ctx.input(|i| i.stable_dt.max(0.0) * 1000.0);
         self.ppp = ctx.pixels_per_point();
-        let _ = self.rs.device.poll(wgpu::PollType::Poll);
+        {
+            let _s = crate::startup_trace::span("frame: device.poll");
+            let _ = self.rs.device.poll(wgpu::PollType::Poll);
+        }
         {
             let _s = crate::startup_trace::span("frame: async job polling");
             self.undo.update();
@@ -5973,30 +5976,42 @@ impl eframe::App for PainterApp {
 
         {
             let _s = crate::startup_trace::span("frame: menu and top/bottom toolbars");
-            egui::Panel::top("menu").frame(theme::bar().inner_margin(egui::Margin::symmetric(10, 5))).show(ui, |ui| self.menu_bar(ui));
+            {
+                let _s = crate::startup_trace::span("toolbar: menu bar");
+                egui::Panel::top("menu").frame(theme::bar().inner_margin(egui::Margin::symmetric(10, 5))).show(ui, |ui| self.menu_bar(ui));
+            }
         let paint = self.workspace == Workspace::Paint;
         if paint {
+            let _s = crate::startup_trace::span("toolbar: context toolbar");
             egui::Panel::top("toolbar")
                 .exact_size(46.0)
                 .frame(theme::card(theme::PANEL).inner_margin(egui::Margin::symmetric(12, 4)))
                 .show(ui, |ui| self.context_toolbar(ui));
         }
-        egui::Panel::bottom("status")
-            .exact_size(if paint { 76.0 } else { 24.0 })
-            .frame(theme::bar())
-            .show(ui, |ui| self.status_bar(ui));
+        {
+            let _s = crate::startup_trace::span("toolbar: status bar");
+            egui::Panel::bottom("status")
+                .exact_size(if paint { 76.0 } else { 24.0 })
+                .frame(theme::bar())
+                .show(ui, |ui| self.status_bar(ui));
+        }
         if paint {
-            egui::Panel::left("tools")
-                .exact_size(56.0)
-                .frame(theme::card(theme::PANEL).inner_margin(egui::Margin::symmetric(7, 10)))
-                .show(ui, |ui| self.tool_strip(ui));
+            {
+                let _s = crate::startup_trace::span("toolbar: tool strip");
+                egui::Panel::left("tools")
+                    .exact_size(56.0)
+                    .frame(theme::card(theme::PANEL).inner_margin(egui::Margin::symmetric(7, 10)))
+                    .show(ui, |ui| self.tool_strip(ui));
+            }
             if self.technical_ui.open {
+                let _s = crate::startup_trace::span("toolbar: technical info panel");
                 egui::Panel::left("technical_info")
                     .exact_size(340.0)
                     .frame(theme::card(theme::PANEL).inner_margin(egui::Margin::same(10)))
                     .show(ui, |ui| self.technical_info_panel(ui));
             }
             if self.project_panel_open {
+                let _s = crate::startup_trace::span("toolbar: project settings panel");
                 egui::Panel::left("project_settings")
                     .exact_size(320.0)
                     .frame(theme::card(theme::PANEL).inner_margin(egui::Margin::same(10)))
@@ -6062,6 +6077,7 @@ impl eframe::App for PainterApp {
         // button held (slider drags) and no text field focused (typing).
         let idle = !ctx.input(|i| i.pointer.any_down()) && ctx.memory(|m| m.focused().is_none());
         if idle && self.stroke.is_none() {
+            let _s = crate::startup_trace::span("frame: commit idle properties");
             self.engine.commit_props(&mut self.undo);
         }
         let ms = start.elapsed().as_secs_f32() * 1000.0;

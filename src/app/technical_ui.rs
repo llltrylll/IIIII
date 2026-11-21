@@ -173,6 +173,13 @@ impl MemoryTotals {
 pub(super) struct TechnicalUi {
     pub(super) open: bool,
     pub(super) bottom: Vec<TechnicalMetric>,
+    /// Temporary benchmark controls/results; never persisted.
+    #[serde(skip)]
+    capture_scenario: usize,
+    #[serde(skip)]
+    capture_report: Option<String>,
+    #[serde(skip)]
+    capture_status: Option<String>,
 }
 
 impl Default for TechnicalUi {
@@ -181,6 +188,9 @@ impl Default for TechnicalUi {
             open: false,
             // Keep performance and bake indicators visible by default.
             bottom: vec![TechnicalMetric::Fps, TechnicalMetric::CpuFrame, TechnicalMetric::Bake],
+            capture_scenario: 0,
+            capture_report: None,
+            capture_status: None,
         }
     }
 }
@@ -270,6 +280,15 @@ impl PainterApp {
     }
 
     pub(super) fn technical_info_panel(&mut self, ui: &mut egui::Ui) {
+        if let Some(report) = crate::startup_trace::take_completed_report() {
+            self.technical_ui.capture_report = Some(format!(
+                "{}\n\nTEST CONTEXT\nbuild_profile={}\n{}",
+                report,
+                if cfg!(debug_assertions) { "debug (not suitable for FPS comparison)" } else { "release" },
+                self.technical_report(),
+            ));
+            self.technical_ui.capture_status = Some("Capture completed: 1,200 frames recorded.".into());
+        }
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Technical Info");
@@ -303,15 +322,88 @@ impl PainterApp {
             egui::CollapsingHeader::new("Viewport performance")
                 .default_open(true)
                 .show(ui, |ui| {
-                    ui.label(format!("Viewport FPS (frame interval): {}", TechnicalMetric::Fps.short_value(self)));
+                    ui.label(format!("Effective viewport FPS estimate: {}", TechnicalMetric::Fps.short_value(self)));
                     ui.label(format!("Frame interval: {:.3} ms", self.frame_interval_ms));
                     ui.label(format!("Application CPU frame: {:.2} ms average · {:.2} ms recent peak", self.frame_ms, self.frame_peak_ms));
                     ui.label(format!("3D viewport: {:?} px", self.views.view3d.size));
                     ui.label(format!("UV viewport: {:?} px", self.views.view2d.size));
                     ui.label(format!("Pixels per point: {:.3}", self.ppp));
                     ui.label(format!("Ray-traced preview: {}", if self.rt.enabled { "enabled" } else { "disabled" }));
-                    ui.label(RichText::new("FPS is the measured UI/viewport update interval, not a dedicated GPU timestamp query.")
+                    ui.label(RichText::new("Effective FPS uses the slower of the frame interval and CPU work time. It is not a GPU timestamp measurement.")
                         .small().color(theme::TEXT_DIM));
+                });
+
+            egui::CollapsingHeader::new("Frame-time test · 1,200 frames")
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.label("Run three separate captures using the same project, viewport size and display settings. Each capture ends automatically after 1,200 frames. Use the Release build for meaningful FPS comparisons.");
+                    ui.label(RichText::new("Idle: do not touch the mouse or keyboard. Camera: orbit continuously at a steady pace. Painting: make continuous strokes with the same brush and texture set.")
+                        .small().color(theme::TEXT_DIM));
+                    ui.label(RichText::new("Frame spans measure CPU-side work and submission. F6 measures the paint pipeline, not total viewport GPU time.")
+                        .small().color(theme::TEXT_DIM));
+                    let scenarios = ["Idle — no interaction", "Camera — continuous orbit", "Painting — continuous strokes"];
+                    if crate::startup_trace::capture_active() {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("CAPTURING").strong().color(theme::ACCENT));
+                            ui.label(format!("{} / 1,200 frames", crate::startup_trace::capture_frame_count()));
+                            if ui.button("Stop and keep partial result").clicked() {
+                                if let Some(report) = crate::startup_trace::stop_capture() {
+                                    self.technical_ui.capture_report = Some(format!(
+                                        "{}\n\nTEST CONTEXT\nbuild_profile={}\n{}",
+                                        report,
+                                        if cfg!(debug_assertions) { "debug (not suitable for FPS comparison)" } else { "release" },
+                                        self.technical_report(),
+                                    ));
+                                    self.technical_ui.capture_status = Some("Partial capture stopped and retained.".into());
+                                }
+                            }
+                        });
+                        let progress = (crate::startup_trace::capture_frame_count() as f32 / 1200.0).clamp(0.0, 1.0);
+                        ui.add(egui::ProgressBar::new(progress).desired_width(ui.available_width()));
+                    } else {
+                        egui::ComboBox::from_label("Scenario")
+                            .selected_text(scenarios[self.technical_ui.capture_scenario.min(2)])
+                            .show_ui(ui, |ui| {
+                                for (index, name) in scenarios.iter().enumerate() {
+                                    ui.selectable_value(&mut self.technical_ui.capture_scenario, index, *name);
+                                }
+                            });
+                        if ui.button("Start 1,200-frame capture").clicked() {
+                            self.technical_ui.capture_report = None;
+                            let started = crate::startup_trace::begin_capture(
+                                1200,
+                                scenarios[self.technical_ui.capture_scenario.min(2)],
+                            );
+                            self.technical_ui.capture_status = Some(if started {
+                                "Capture started. Keep the selected activity consistent until it completes.".into()
+                            } else {
+                                "A capture is already active; finish it before starting another.".into()
+                            });
+                        }
+                    }
+                    if let Some(status) = &self.technical_ui.capture_status {
+                        ui.label(RichText::new(status).small().color(theme::TEXT_DIM));
+                    }
+                    if let Some(report) = &self.technical_ui.capture_report {
+                        ui.separator();
+                        ui.label(RichText::new("Latest capture report is ready.").strong());
+                        ui.horizontal(|ui| {
+                            if ui.button("Copy test report").clicked() {
+                                ui.ctx().copy_text(report.clone());
+                                self.status = "Frame-time test report copied to clipboard.".into();
+                            }
+                            if ui.button("Save test report .txt").clicked()
+                                && let Some(path) = rfd::FileDialog::new()
+                                    .set_file_name("MaterialPainter-Frame-Time-Test.txt")
+                                    .save_file()
+                            {
+                                match std::fs::write(&path, report) {
+                                    Ok(()) => self.status = format!("Frame-time report saved to {}.", path.display()),
+                                    Err(error) => self.status = format!("Could not save frame-time report: {error}"),
+                                }
+                            }
+                        });
+                    }
                 });
 
             egui::CollapsingHeader::new("Bake information")
@@ -529,7 +621,7 @@ impl PainterApp {
                                 let text = metric.short_value(self);
                                 let label = ui.label(RichText::new(text).small());
                                 if metric == TechnicalMetric::Fps {
-                                    label.on_hover_text("Estimated from the real interval between application/viewport frames; not a GPU timestamp query.");
+                                    label.on_hover_text("Conservative estimate from max(frame interval, CPU work time); not a GPU timestamp query.");
                                 } else {
                                     label.on_hover_text(metric.description());
                                 }
@@ -588,10 +680,15 @@ impl PainterApp {
         };
 
         format!(
-            "{}\n\nAPPLICATION / FRAME\nframe_interval_ms={:.6}\nviewport_fps_estimate={:.3}\nui_frame_cpu_ema_ms={:.6}\nui_frame_recent_peak_ms={:.6}\nstatus={}\n\nGPU ADAPTER\n{:#?}\n\nGPU DEVICE LIMITS\n{:#?}\ngpu_resource_allocation_estimate_bytes={}\ndocument_shared_undo_readback_cache_bytes={}\nundo_memory_bytes={}\nundo_memory_limit_bytes={}\nundo_steps={}\n\nBAKE REPORT\n{}\nCURRENT BAKE SETTINGS\n{:#?}\n\nF6 PAINT PROFILER\n{}\n\nMESH / UV / NORMAL / TANGENT DIAGNOSTICS\n{}",
+            "{}\n\nAPPLICATION / FRAME\nframe_interval_ms={:.6}\neffective_fps_basis_ms={:.6}\nviewport_fps_estimate={:.3}\nui_frame_cpu_ema_ms={:.6}\nui_frame_recent_peak_ms={:.6}\nstatus={}\n\nGPU ADAPTER\n{:#?}\n\nGPU DEVICE LIMITS\n{:#?}\ngpu_resource_allocation_estimate_bytes={}\ndocument_shared_undo_readback_cache_bytes={}\nundo_memory_bytes={}\nundo_memory_limit_bytes={}\nundo_steps={}\n\nBAKE REPORT\n{}\nCURRENT BAKE SETTINGS\n{:#?}\n\nF6 PAINT PROFILER\n{}\n\nMESH / UV / NORMAL / TANGENT DIAGNOSTICS\n{}",
             self.diagnostic_context_report("technical panel copy"),
             self.frame_interval_ms,
-            if self.frame_interval_ms > 0.01 { 1000.0 / self.frame_interval_ms } else { 0.0 },
+            self.frame_interval_ms.max(self.frame_ms),
+            if self.frame_interval_ms.max(self.frame_ms) > 0.01 {
+                1000.0 / self.frame_interval_ms.max(self.frame_ms)
+            } else {
+                0.0
+            },
             self.frame_ms,
             self.frame_peak_ms,
             self.status.replace('\n', " | "),
@@ -665,6 +762,7 @@ mod memory_breakdown_tests {
                 TechnicalMetric::F6Meter,
                 TechnicalMetric::Bake,
             ],
+            ..TechnicalUi::default()
         };
         assert_eq!(
             ui.sanitized().bottom,

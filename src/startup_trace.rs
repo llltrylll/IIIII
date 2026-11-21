@@ -11,6 +11,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -54,10 +55,14 @@ struct Trace {
     smart_files: Vec<(String, Vec<String>)>,
     requests: HashMap<String, (String, Instant)>,
     decoded: HashSet<String>,
+    capture_label: String,
 }
 
 static ON: OnceLock<Option<String>> = OnceLock::new();
 static TRACE: Mutex<Option<Trace>> = Mutex::new(None);
+static RUNTIME_CAPTURE: AtomicBool = AtomicBool::new(false);
+static CAPTURE_DONE: AtomicBool = AtomicBool::new(false);
+static RUNTIME_FRAME_LIMIT: AtomicUsize = AtomicUsize::new(1200);
 
 thread_local! {
     static DETAIL: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -73,7 +78,9 @@ fn frames_limit() -> usize {
 }
 
 fn with<R>(f: impl FnOnce(&mut Trace) -> R) -> Option<R> {
-    target().as_ref()?;
+    if !enabled() {
+        return None;
+    }
     let mut g = TRACE.lock().ok()?;
     let t = g.get_or_insert_with(|| Trace {
         t0: Instant::now(),
@@ -86,6 +93,7 @@ fn with<R>(f: impl FnOnce(&mut Trace) -> R) -> Option<R> {
         smart_files: Vec::new(),
         requests: HashMap::new(),
         decoded: HashSet::new(),
+        capture_label: String::new(),
     });
     Some(f(t))
 }
@@ -96,7 +104,59 @@ fn thread_name() -> String {
 }
 
 pub fn enabled() -> bool {
-    target().is_some()
+    RUNTIME_CAPTURE.load(Ordering::Relaxed) || target().is_some()
+}
+
+/// Starts a bounded, user-triggered frame capture without environment variables.
+pub fn begin_capture(frame_count: usize, label: &str) -> bool {
+    if frame_count == 0 || RUNTIME_CAPTURE.load(Ordering::Acquire) {
+        return false;
+    }
+    let Ok(mut guard) = TRACE.lock() else { return false; };
+    let mut trace = Trace {
+        t0: Instant::now(),
+        recs: Vec::new(),
+        thumbs: Vec::new(),
+        events: vec![("manual frame capture started", 0.0)],
+        counters: Vec::new(),
+        frames: Vec::with_capacity(frame_count.min(4096)),
+        last_frame_start: None,
+        smart_files: Vec::new(),
+        requests: HashMap::new(),
+        decoded: HashSet::new(),
+        capture_label: label.to_string(),
+    };
+    *guard = Some(trace);
+    RUNTIME_FRAME_LIMIT.store(frame_count, Ordering::Relaxed);
+    CAPTURE_DONE.store(false, Ordering::Release);
+    RUNTIME_CAPTURE.store(true, Ordering::Release);
+    true
+}
+
+/// Current number of frames in the manual capture.
+pub fn capture_frame_count() -> usize {
+    TRACE.lock().ok().and_then(|g| g.as_ref().map(|t| t.frames.len())).unwrap_or(0)
+}
+
+pub fn capture_active() -> bool {
+    RUNTIME_CAPTURE.load(Ordering::Acquire)
+}
+
+/// Stops a manual capture and returns the partial report.
+pub fn stop_capture() -> Option<String> {
+    if !RUNTIME_CAPTURE.swap(false, Ordering::AcqRel) {
+        return None;
+    }
+    CAPTURE_DONE.store(false, Ordering::Release);
+    TRACE.lock().ok().and_then(|g| g.as_ref().map(render))
+}
+
+/// Takes the report after the requested number of frames have completed.
+pub fn take_completed_report() -> Option<String> {
+    if !CAPTURE_DONE.swap(false, Ordering::AcqRel) {
+        return None;
+    }
+    TRACE.lock().ok().and_then(|g| g.as_ref().map(render))
 }
 
 /// Milliseconds since the trace started (0 when disabled).
@@ -120,11 +180,11 @@ pub fn file_key(path: &Path) -> String {
 pub struct Span(Option<(&'static str, Instant, Option<String>)>);
 
 pub fn span(name: &'static str) -> Span {
-    Span(target().as_ref().map(|_| (name, Instant::now(), None)))
+    Span(enabled().then(|| (name, Instant::now(), None)))
 }
 
 pub fn span_d(name: &'static str, detail: String) -> Span {
-    Span(target().as_ref().map(|_| (name, Instant::now(), Some(detail))))
+    Span(enabled().then(|| (name, Instant::now(), Some(detail))))
 }
 
 impl Drop for Span {
@@ -250,18 +310,24 @@ impl Drop for FrameGuard {
     fn drop(&mut self) {
         let Some(start) = self.0.take() else { return };
         let work = start.elapsed().as_secs_f64() * 1e3;
+        let runtime = RUNTIME_CAPTURE.load(Ordering::Acquire);
+        let limit = if runtime { RUNTIME_FRAME_LIMIT.load(Ordering::Relaxed) } else { frames_limit() };
         let done = with(|t| {
             let delta = t.last_frame_start.map_or(0.0, |p| start.duration_since(p).as_secs_f64() * 1e3);
             t.last_frame_start = Some(start);
             let at = start.duration_since(t.t0).as_secs_f64() * 1e3;
-            if t.frames.len() < frames_limit() {
+            if t.frames.len() < limit {
                 t.frames.push(Frame { at, delta, work });
             }
-            t.frames.len() == frames_limit()
-        })
-        .unwrap_or(false);
+            t.frames.len() == limit
+        }).unwrap_or(false);
         if done {
-            write_report();
+            if runtime {
+                RUNTIME_CAPTURE.store(false, Ordering::Release);
+                CAPTURE_DONE.store(true, Ordering::Release);
+            } else {
+                write_report();
+            }
         }
     }
 }
@@ -292,8 +358,11 @@ fn pct(sorted: &[f64], p: f64) -> f64 {
 fn render(t: &Trace) -> String {
     use std::fmt::Write;
     let mut o = String::new();
-    let _ = writeln!(o, "== startup trace, all times in ms since process start unless noted ==");
-    let _ = writeln!(o, "(written at {:.0} ms)", t.t0.elapsed().as_secs_f64() * 1e3);
+    let _ = writeln!(o, "== frame-time trace, all times in ms unless noted ==");
+    if !t.capture_label.is_empty() {
+        let _ = writeln!(o, "scenario: {}", t.capture_label);
+    }
+    let _ = writeln!(o, "(written at {:.0} ms after capture start)", t.t0.elapsed().as_secs_f64() * 1e3);
 
     // 1. Milestones.
     let _ = writeln!(o, "\n-- 1. milestones --");
