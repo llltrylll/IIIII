@@ -2663,7 +2663,14 @@ impl Engine {
         let gl_folder_layout = gpu::layout(device, &gl_folder_bgl);
         let gl_mask_layout = gpu::layout(device, &gl_mask_bgl);
         let composite = if gl_depth_color {
-            let targets = (0..4).map(|channel| gpu::target(ACCUM_FORMATS[channel])).collect::<Vec<_>>();
+            // This shared core pipeline may be selected by the full seven-slot
+            // accumulation pass. Keep all attachment slots in the pipeline
+            // signature, while disabling the three outputs owned by the extra
+            // OpenGL pass. The dedicated per-layer core pipelines below still
+            // use four slots because their render passes have four attachments.
+            let targets = (0..ACCUM).map(|channel| {
+                if channel < 4 { gpu::target(ACCUM_FORMATS[channel]) } else { None }
+            }).collect::<Vec<_>>();
             gpu::fullscreen_pipeline(
                 device, "OpenGL composite core", &composite_module, "fs_layer_gl_core",
                 &composite_layout, &targets,
@@ -6745,6 +6752,55 @@ mod composite_pass_tests {
             GPU_PROFILE_BASE_QUERY_COUNT + GPU_PROFILE_MAX_LAYER_PASSES as u32 * 2,
         );
         assert!(GPU_PROFILE_QUERY_COUNT > 10);
+    }
+
+    /// The shared GL core pipeline can be used with the full seven-slot
+    /// accumulation render pass. Its fragment shader writes only core outputs;
+    /// the trailing extra-channel attachments must remain disabled, not absent.
+    #[test]
+    #[ignore]
+    fn gl_composite_core_matches_full_accum_attachment_slots() {
+        let (_instance, adapter, device, queue) = crate::bake::tests::gpu_with_adapter();
+        assert_eq!(
+            adapter.get_info().backend,
+            wgpu::Backend::Gl,
+            "OpenGL compatibility test did not obtain a GL adapter",
+        );
+
+        let pipelines = Engine::create_pipelines(&device, true);
+        let textures = ACCUM_FORMATS.iter().enumerate().map(|(index, &format)| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("OpenGL composite compatibility target"),
+                size: wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+        }).collect::<Vec<_>>();
+        assert_eq!(textures.len(), ACCUM, "test must bind every accumulation channel");
+        let views = textures.iter().map(|texture| texture.create_view(&Default::default())).collect::<Vec<_>>();
+        let attachments = views.iter().map(|view| {
+            Some(gpu::color_attachment(view, wgpu::LoadOp::Clear(wgpu::Color::BLACK)))
+        }).collect::<Vec<_>>();
+
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("OpenGL seven-slot composite compatibility"),
+                color_attachments: &attachments,
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            // This is the exact operation that failed while opening the user's project.
+            pass.set_pipeline(&pipelines.composite);
+        }
+        queue.submit([encoder.finish()]);
+        device.poll(wgpu::PollType::wait_indefinitely()).expect("OpenGL composite compatibility poll");
     }
 
     #[test]
