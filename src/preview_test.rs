@@ -33,17 +33,16 @@ fn render_state() -> egui_wgpu::RenderState {
     }
 }
 
-/// Reports the actual OpenGL format capabilities so the bake can select
-/// attachments that are both renderable and usable by the compute passes.
+/// Reports the actual OpenGL texture-format capabilities available to the bake.
 #[test]
 #[ignore]
-fn gl_bake_pipeline_compiles() {
+fn gl_format_capabilities() {
     let rs = render_state();
     let backend = rs.adapter.get_info().backend;
     assert_eq!(backend, wgpu::Backend::Gl, "OpenGL smoke test did not obtain a GL adapter");
     let adapter_features = rs.adapter.features();
     let mut report = format!(
-        "adapter: {:?}\\nfeatures: {adapter_features:?}\\nTEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES supported: {}\\n",
+        "adapter: {:?}\nfeatures: {adapter_features:?}\nTEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES supported: {}\n",
         rs.adapter.get_info(),
         adapter_features.contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES),
     );
@@ -60,7 +59,7 @@ fn gl_bake_pipeline_compiles() {
         wgpu::TextureFormat::R32Uint,
     ] {
         let features = rs.adapter.get_texture_format_features(format);
-        let line = format!("OpenGL format {format:?}: {features:?}\\n");
+        let line = format!("OpenGL format {format:?}: {features:?}\n");
         println!("{line}");
         report.push_str(&line);
     }
