@@ -2087,7 +2087,7 @@ impl GpuBaker {
             "cs_pack",
             &[
                 (0, Uniform),
-                (1, Tex),
+                (1, TexUint),
                 (13, Tex),
                 (14, Tex),
                 (18, Tex),
@@ -2103,7 +2103,7 @@ impl GpuBaker {
             "cs_custom",
             &[
                 (0, Uniform),
-                (1, Tex),
+                (1, TexUint),
                 (4, Storage(false)),
                 (5, Storage(false)),
                 (6, Storage(false)),
@@ -2562,7 +2562,10 @@ impl GpuBaker {
 
         // Every occlusion tile is queued: curvature, edge distance and packing.
         let res = run.res;
-        let usage = LAYER_USAGE | wgpu::TextureUsages::STORAGE_BINDING;
+        let usage = wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::STORAGE_BINDING;
         let curv = Tex::new_without_srgb_view(device, "curvature", res, res, F::Rgba16Float, usage);
         let jfa = [
             Tex::new_without_srgb_view(device, "jfa a", res, res, F::Rgba32Float, usage),
