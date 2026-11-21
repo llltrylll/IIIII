@@ -2665,11 +2665,16 @@ impl Engine {
         let composite = if gl_depth_color {
             // This shared core pipeline may be selected by the full seven-slot
             // accumulation pass. Keep all attachment slots in the pipeline
-            // signature, while disabling the three outputs owned by the extra
+            // signature, while retaining the actual formats but disabling writes to the three outputs owned by the extra
             // OpenGL pass. The dedicated per-layer core pipelines below still
             // use four slots because their render passes have four attachments.
-            let targets = (0..ACCUM).map(|channel| {
-                if channel < 4 { gpu::target(ACCUM_FORMATS[channel]) } else { None }
+            let targets = ACCUM_FORMATS.iter().enumerate().map(|(channel, &format)| {
+                gpu::target(format).map(|mut target| {
+                    if channel >= 4 {
+                        target.write_mask = wgpu::ColorWrites::empty();
+                    }
+                    target
+                })
             }).collect::<Vec<_>>();
             gpu::fullscreen_pipeline(
                 device, "OpenGL composite core", &composite_module, "fs_layer_gl_core",
