@@ -5167,8 +5167,8 @@ impl Engine {
                 variation_noise_hits += 1;
                 continue;
             }
-            let color = color_enabled.then(|| Tex::new(&self.device, "fill color FBM cache", self.res, self.res, F::R16Float, LAYER_USAGE));
-            let roughness = roughness_enabled.then(|| Tex::new(&self.device, "fill roughness FBM cache", self.res, self.res, F::R16Float, LAYER_USAGE));
+            let color = color_enabled.then(|| Tex::new(&self.device, "fill color FBM cache", self.res, self.res, F::R32Float, LAYER_USAGE));
+            let roughness = roughness_enabled.then(|| Tex::new(&self.device, "fill roughness FBM cache", self.res, self.res, F::R32Float, LAYER_USAGE));
             self.fill_variation_noise.insert(layer.id, FillVariationNoiseCache { key, color, roughness });
             if color_enabled {
                 variation_noise_misses.push((slot, layer.id, false));
