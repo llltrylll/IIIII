@@ -51,6 +51,12 @@ jobs:
       - name: Restore Rust build cache
         uses: Swatinem/rust-cache@v2
 
+      - name: OpenGL diagnostic - adapter texture format capabilities
+        run: "xvfb-run -a cargo test --locked --bin material_painter preview_test::gl_bake_pipeline_compiles -- --ignored --exact --nocapture --test-threads 1"
+        env:
+          WGPU_BACKEND: gl
+          LIBGL_ALWAYS_SOFTWARE: "1"
+
       # Keep the correctness gates focused on brush/mask GPU parity.
       # The broader preview suite also contains unrelated interactive UI tests.
       - name: GPU parity - stacked UV screen paint
@@ -58,11 +64,6 @@ jobs:
 
       - name: OpenGL smoke - multisampled packed-depth screen painting
         run: "xvfb-run -a cargo test --locked --bin material_painter preview_test::screen_projection_paints_visible_face_of_overlapped_uvs -- --ignored --exact --nocapture --test-threads 1"
-        env:
-          WGPU_BACKEND: gl
-          LIBGL_ALWAYS_SOFTWARE: "1"
-      - name: OpenGL smoke - GPU bake storage layouts
-        run: "xvfb-run -a cargo test --locked --bin material_painter preview_test::gl_bake_pipeline_compiles -- --ignored --exact --nocapture --test-threads 1"
         env:
           WGPU_BACKEND: gl
           LIBGL_ALWAYS_SOFTWARE: "1"
