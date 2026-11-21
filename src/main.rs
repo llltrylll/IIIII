@@ -68,11 +68,33 @@ fn main() -> eframe::Result {
             ..Default::default()
         });
     }
-    eframe::run_native(
+    let result = eframe::run_native(
         "Material Painter",
         options,
         Box::new(|cc| Ok(Box::new(app::PainterApp::new(cc)?))),
-    )
+    );
+    if let Err(error) = &result {
+        write_startup_failure(error);
+    }
+    result
+}
+
+/// Persist failures returned by eframe before the native window reaches PainterApp.
+/// Release builds have no console, so otherwise adapter/device initialization errors
+/// can disappear when the launcher process exits.
+fn write_startup_failure(error: &eframe::Error) {
+    let Some(dir) = crash::data_dir() else { return };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let backend = std::env::var("WGPU_BACKEND").unwrap_or_else(|_| "(unset)".into());
+    let report = format!(
+        "Material Painter {} startup failed\\n\\nWGPU_BACKEND={backend}\\nOS: {} {}\\n\\nError:\\n{error:#?}\\n",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    );
+    let _ = std::fs::write(dir.join("startup-error.log"), report);
 }
 
 /// The window and taskbar icon (the copper material ball).
