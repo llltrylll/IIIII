@@ -2149,7 +2149,7 @@ impl Engine {
         let sampler = gpu::linear_sampler(&device, wgpu::AddressMode::ClampToEdge);
         let gpu_profiler = device.features().contains(wgpu::Features::TIMESTAMP_QUERY).then(|| GpuStrokeProfiler::new(&device));
 
-        let dummy = Tex::new(&device, "dummy", 1, 1, F::Rgba8Unorm, LAYER_USAGE);
+        let dummy = Tex::new_without_srgb_view(&device, "dummy", 1, 1, F::Rgba8Unorm, LAYER_USAGE);
         queue.write_texture(dummy.copy_info(), &[0, 0, 0, 0], Default::default(), dummy.extent());
         let maps = Self::default_maps(&device, &queue);
 
