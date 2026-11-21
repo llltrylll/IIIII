@@ -65,6 +65,12 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: OpenGL smoke - low-poly bake end to end
+        run: "xvfb-run -a cargo test --locked --bin material_painter bake::tests::gl_adapter_low_poly_bake_roundtrip -- --ignored --exact --nocapture --test-threads 1"
+        env:
+          WGPU_BACKEND: gl
+          LIBGL_ALWAYS_SOFTWARE: "1"
+
       # Keep the correctness gates focused on brush/mask GPU parity.
       # The broader preview suite also contains unrelated interactive UI tests.
       - name: GPU parity - stacked UV screen paint
