@@ -6783,7 +6783,7 @@ mod composite_pass_tests {
         assert_eq!(textures.len(), ACCUM, "test must bind every accumulation channel");
         let views = textures.iter().map(|texture| texture.create_view(&Default::default())).collect::<Vec<_>>();
         let attachments = views.iter().map(|view| {
-            Some(gpu::color_attachment(view, wgpu::LoadOp::Clear(wgpu::Color::BLACK)))
+            gpu::color_attachment(view, wgpu::LoadOp::Clear(wgpu::Color::BLACK))
         }).collect::<Vec<_>>();
 
         let mut encoder = device.create_command_encoder(&Default::default());
