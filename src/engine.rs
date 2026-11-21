@@ -6768,7 +6768,7 @@ mod composite_pass_tests {
         );
 
         let pipelines = Engine::create_pipelines(&device, true);
-        let textures = ACCUM_FORMATS.iter().enumerate().map(|(index, &format)| {
+        let textures = ACCUM_FORMATS.iter().map(|&format| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("OpenGL composite compatibility target"),
                 size: wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
