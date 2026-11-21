@@ -13,7 +13,7 @@ use crate::mesh::Mesh;
 use crate::presets;
 use crate::viewport::{OrbitCam, ViewMode, ViewRenderer, ViewSettings};
 use eframe::{egui, egui_wgpu, wgpu};
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -1288,6 +1288,155 @@ fn smart_mask_generator_cache_matches_uncached_result_and_invalidates_on_change(
     let expected = read_texture(&rs.device, &rs.queue, reference.final_tex(0));
     assert_eq!(actual, expected, "cached generator output must match a fresh uncached evaluation");
 
+    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+}
+
+/// Low-poly Vertex ID masks must select every disconnected object carrying the
+/// same vertex color, even when all objects share one Texture Set.
+#[test]
+#[ignore]
+fn vertex_id_mask_selects_same_color_across_disconnected_objects_in_one_texture_set() {
+    use crate::bake::IdSource;
+    use crate::engine::{FillParams, GenKind, MatValues};
+    use crate::undo::UndoStack;
+
+    const RES: u32 = 256;
+    let id_color = [40u8, 176, 232];
+    let other_color = [232u8, 56, 32];
+    let uv_rects = [
+        [0.05f32, 0.20, 0.28, 0.80],
+        [0.385f32, 0.20, 0.615, 0.80],
+        [0.72f32, 0.20, 0.95, 0.80],
+    ];
+
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut uvs = Vec::new();
+    let mut indices = Vec::new();
+    let mut tri_object = Vec::new();
+    let mut tri_color = Vec::new();
+    let mut tri_vertex_color = Vec::new();
+    for (object, rect) in uv_rects.iter().enumerate() {
+        let x = object as f32 * 2.0;
+        let base = positions.len() as u32;
+        positions.extend([
+            Vec3::new(x, 0.0, 0.0),
+            Vec3::new(x + 1.0, 0.0, 0.0),
+            Vec3::new(x + 1.0, 1.0, 0.0),
+            Vec3::new(x, 1.0, 0.0),
+        ]);
+        normals.extend([Vec3::Z; 4]);
+        uvs.extend([
+            Vec2::new(rect[0], rect[1]),
+            Vec2::new(rect[2], rect[1]),
+            Vec2::new(rect[2], rect[3]),
+            Vec2::new(rect[0], rect[3]),
+        ]);
+        indices.extend([
+            base, base + 1, base + 2,
+            base, base + 2, base + 3,
+        ]);
+        tri_object.extend([object as u32; 2]);
+        let color = if object < 2 { id_color } else { other_color };
+        tri_color.extend([color; 2]);
+        tri_vertex_color.extend([[[color; 3]; 3]; 2]);
+    }
+
+    let mut mesh = Mesh::from_parts(
+        "Vertex ID mask regression".into(),
+        positions.clone(),
+        Some(normals),
+        uvs,
+        indices,
+    );
+    mesh.objects = vec!["Same ID A".into(), "Same ID B".into(), "Different ID control".into()];
+    mesh.tri_object = tri_object;
+    mesh.tri_color = Some(tri_color);
+    mesh.tri_vertex_color = Some(tri_vertex_color);
+    mesh.set_ranges(vec![("Shared Texture Set".into(), 0..6)]);
+
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let settings = BakeSettings { id_source: IdSource::VertexColors, aa: 1, ..Default::default() };
+    let (baked, report, _) = run_bake(&rs.device, &rs.queue, &mesh, &gpu_mesh, &settings, RES);
+    let id_map = read_texture(&rs.device, &rs.queue, &baked.maps[4]);
+    assert_eq!(id_map.len(), (RES * RES * 4) as usize, "ID map must be RGBA8");
+
+    fn count_region(
+        pixels: &[u8],
+        res: u32,
+        rect: [f32; 4],
+        matches: impl Fn([u8; 4]) -> bool,
+    ) -> usize {
+        let x0 = (rect[0] * res as f32).ceil() as u32;
+        let y0 = (rect[1] * res as f32).ceil() as u32;
+        let x1 = (rect[2] * res as f32).floor() as u32;
+        let y1 = (rect[3] * res as f32).floor() as u32;
+        let mut count = 0;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let i = ((y * res + x) * 4) as usize;
+                if matches([pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]) {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    let id_matches = |expected: [u8; 3]| {
+        count_region(&id_map, RES, uv_rects[0], |p| {
+            p[0].abs_diff(expected[0]) <= 2
+                && p[1].abs_diff(expected[1]) <= 2
+                && p[2].abs_diff(expected[2]) <= 2
+                && p[3] > 240
+        })
+    };
+    let first_id_pixels = id_matches(id_color);
+    let second_id_pixels = count_region(&id_map, RES, uv_rects[1], |p| {
+        p[0].abs_diff(id_color[0]) <= 2
+            && p[1].abs_diff(id_color[1]) <= 2
+            && p[2].abs_diff(id_color[2]) <= 2
+            && p[3] > 240
+    });
+    let control_id_pixels = count_region(&id_map, RES, uv_rects[2], |p| {
+        p[0].abs_diff(other_color[0]) <= 2
+            && p[1].abs_diff(other_color[1]) <= 2
+            && p[2].abs_diff(other_color[2]) <= 2
+            && p[3] > 240
+    });
+    assert!(first_id_pixels > 500, "first same-ID object has no baked ID coverage: {first_id_pixels}");
+    assert!(second_id_pixels > 500, "second same-ID object lost its baked ID: {second_id_pixels}");
+    assert!(control_id_pixels > 500, "different-color control has no baked ID coverage: {control_id_pixels}");
+
+    let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), RES);
+    engine.set_maps(baked, report);
+    let mut undo = UndoStack::default();
+    let fill = FillParams {
+        mat: MatValues {
+            enabled: [true, false, false, false, false, false, false, false],
+            color: [0.9, 0.02, 0.01],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let layer = engine.add_fill_layer(0, None, "Same ID coverage".into(), fill, &mut undo);
+    let mut generator = GenKind::IdMask.default_generator();
+    generator.id_color = id_color.map(|c| f32::from(c) / 255.0);
+    generator.id_tolerance = 0.01;
+    generator.level = 0.5;
+    generator.contrast = 0.05;
+    generator.noise = 0.0;
+    engine.add_mask(layer, true, Some(generator), &mut undo);
+    engine.composite();
+    let final_color = read_texture(&rs.device, &rs.queue, engine.final_tex(0));
+    let is_fill = |p: [u8; 4]| p[0] > 150 && p[1] < 80 && p[2] < 80;
+    let first_filled = count_region(&final_color, RES, uv_rects[0], is_fill);
+    let second_filled = count_region(&final_color, RES, uv_rects[1], is_fill);
+    let control_filled = count_region(&final_color, RES, uv_rects[2], is_fill);
+    assert!(first_filled > 500, "first same-ID object was not revealed by the mask: {first_filled}");
+    assert!(second_filled > 500, "second same-ID object was not revealed by the mask: {second_filled}");
+    assert!(control_filled < 20, "different-ID control leaked through the mask: {control_filled}");
     rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 }
 
