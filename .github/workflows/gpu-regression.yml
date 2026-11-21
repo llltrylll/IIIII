@@ -7,6 +7,7 @@ on:
       - gpt/stacked-uv-visible-pass
       - gpt/integrated-three-fronts
       - feat/composite-uv-diagnostics-20261118
+      - perf/postfx-bind-group-cache-20261120
   workflow_dispatch:
 
 permissions:
