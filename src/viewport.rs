@@ -1653,7 +1653,12 @@ impl ViewRenderer {
                     vec![Some(wgpu::RenderPassColorAttachment {
                         view: &color.view,
                         depth_slice: None,
-                        resolve_target: t.paint_depth_color_resolve.as_ref().map(|resolved| &resolved.view),
+                        resolve_target: {
+                            #[cfg(test)]
+                            { t.paint_depth_color_resolve.as_ref().map(|resolved| &resolved.view) }
+                            #[cfg(not(test))]
+                            { None }
+                        },
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
                             store: wgpu::StoreOp::Store,
