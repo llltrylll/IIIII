@@ -13,6 +13,7 @@ pub const FAR: f32 = 100.0;
 const DEFAULT_VIEW_MSAA: u32 = 4;
 const SCREEN_PAINT_DEPTH_MSAA: u32 = 4;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+const SCREEN_PAINT_DEPTH_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 /// Select the 3D viewport's multisampling at startup. The 4x default preserves
@@ -476,8 +477,10 @@ struct Targets {
     color: Tex,
     resolve: Option<Tex>,
     depth: Option<Tex>,
-    /// Cached depth for screen painting; only front-facing imported normals occlude.
+    /// Sampled screen-paint depth: native depth on Vulkan, bit-packed RGBA8 on OpenGL.
     paint_depth: Option<Tex>,
+    /// OpenGL still depth-tests against a real depth attachment; it is not sampled.
+    paint_depth_test: Option<Tex>,
     display: Option<Tex>,
 }
 
@@ -486,14 +489,16 @@ pub struct ViewTarget {
     resolve: Option<Tex>,
     depth: Option<Tex>,
     paint_depth: Option<Tex>,
+    paint_depth_test: Option<Tex>,
     display: Option<Tex>,
     samples: u32,
+    gl_depth_as_color: bool,
     pub egui_id: egui::TextureId,
     pub size: [u32; 2],
 }
 
 impl ViewTarget {
-    fn create(device: &wgpu::Device, size: [u32; 2], hdr: bool, samples: u32) -> Targets {
+    fn create(device: &wgpu::Device, size: [u32; 2], hdr: bool, samples: u32, gl_depth_as_color: bool) -> Targets {
         let [w, h] = size;
         // COPY_SRC lets tests and MCP read rendered images back.
         let display = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC;
@@ -511,20 +516,47 @@ impl ViewTarget {
                     Some(Tex::new(device, "view depth", w, h, DEPTH_FORMAT, display)),
                 )
             };
+            let (paint_depth, paint_depth_test) = if gl_depth_as_color {
+                (
+                    Some(Tex::new_ms(
+                        device, "screen paint depth (encoded RGBA8)", w, h,
+                        SCREEN_PAINT_DEPTH_COLOR_FORMAT,
+                        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                        SCREEN_PAINT_DEPTH_MSAA,
+                    )),
+                    Some(Tex::new_ms(
+                        device, "screen paint depth test", w, h, DEPTH_FORMAT,
+                        wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        SCREEN_PAINT_DEPTH_MSAA,
+                    )),
+                )
+            } else {
+                (
+                    Some(Tex::new_ms(
+                        device, "screen paint depth", w, h, DEPTH_FORMAT,
+                        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                        SCREEN_PAINT_DEPTH_MSAA,
+                    )),
+                    None,
+                )
+            };
             Targets {
                 color,
                 resolve,
                 depth,
-                // Screen-paint occlusion has a separate 4x contract with stamp.wgsl.
-                paint_depth: Some(Tex::new_ms(
-                    device, "screen paint depth", w, h, DEPTH_FORMAT,
-                    wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-                    SCREEN_PAINT_DEPTH_MSAA,
-                )),
+                paint_depth,
+                paint_depth_test,
                 display: Some(Tex::new(device, "view", w, h, COLOR_FORMAT, display)),
             }
         } else {
-            Targets { color: Tex::new(device, "view 2d", w, h, COLOR_FORMAT, display), resolve: None, depth: None, paint_depth: None, display: None }
+            Targets {
+                color: Tex::new(device, "view 2d", w, h, COLOR_FORMAT, display),
+                resolve: None,
+                depth: None,
+                paint_depth: None,
+                paint_depth_test: None,
+                display: None,
+            }
         }
     }
 
@@ -532,12 +564,23 @@ impl ViewTarget {
         t.display.as_ref().unwrap_or(&t.color)
     }
 
-    fn new(rs: &egui_wgpu::RenderState, hdr: bool, samples: u32) -> ViewTarget {
+    fn new(rs: &egui_wgpu::RenderState, hdr: bool, samples: u32, gl_depth_as_color: bool) -> ViewTarget {
         let size = [64, 64];
         let samples = if hdr { samples } else { 1 };
-        let t = Self::create(&rs.device, size, hdr, samples);
+        let t = Self::create(&rs.device, size, hdr, samples, gl_depth_as_color);
         let egui_id = rs.renderer.write().register_native_texture(&rs.device, &Self::shown(&t).view, wgpu::FilterMode::Linear);
-        ViewTarget { color: t.color, resolve: t.resolve, depth: t.depth, paint_depth: t.paint_depth, display: t.display, samples, egui_id, size }
+        ViewTarget {
+            color: t.color,
+            resolve: t.resolve,
+            depth: t.depth,
+            paint_depth: t.paint_depth,
+            paint_depth_test: t.paint_depth_test,
+            display: t.display,
+            samples,
+            gl_depth_as_color,
+            egui_id,
+            size,
+        }
     }
 
     fn ensure_size(&mut self, rs: &egui_wgpu::RenderState, size: [u32; 2]) -> bool {
@@ -545,7 +588,7 @@ impl ViewTarget {
         if size == self.size {
             return false;
         }
-        let t = Self::create(&rs.device, size, self.display.is_some(), self.samples);
+        let t = Self::create(&rs.device, size, self.display.is_some(), self.samples, self.gl_depth_as_color);
         rs.renderer.write().update_egui_texture_from_wgpu_texture(
             &rs.device,
             &Self::shown(&t).view,
@@ -556,6 +599,7 @@ impl ViewTarget {
         self.resolve = t.resolve;
         self.depth = t.depth;
         self.paint_depth = t.paint_depth;
+        self.paint_depth_test = t.paint_depth_test;
         self.display = t.display;
         self.size = size;
         true
@@ -570,9 +614,18 @@ impl ViewTarget {
         &self.depth.as_ref().expect("3D view has depth").view
     }
 
-    /// The MSAA depth buffer used by screen painting (front-facing normals only).
+    /// The MSAA depth data sampled by screen painting (front-facing normals only).
+    /// Vulkan binds a depth texture; OpenGL binds the losslessly packed RGBA8 variant.
     pub fn paint_depth_view(&self) -> &wgpu::TextureView {
         &self.paint_depth.as_ref().expect("3D view has screen paint depth").view
+    }
+
+    /// Actual depth attachment used for hardware depth testing in the screen-paint pass.
+    pub fn paint_depth_attachment_view(&self) -> &wgpu::TextureView {
+        &self.paint_depth_test.as_ref()
+            .or(self.paint_depth.as_ref())
+            .expect("3D view has screen paint depth attachment")
+            .view
     }
 }
 
@@ -835,8 +888,10 @@ pub struct ViewRenderer {
     env_sampler: wgpu::Sampler,
     sky: wgpu::RenderPipeline,
     mesh: wgpu::RenderPipeline,
-    /// Depth-only pass that lets correctly oriented surfaces occlude screen paint.
+    /// Native depth-only path used on Vulkan.
     paint_depth: wgpu::RenderPipeline,
+    /// OpenGL path writes each sample's depth bits into the RGBA8 paint-depth texture.
+    paint_depth_gl: Option<wgpu::RenderPipeline>,
     /// The mesh's see-through texels, blended after the opaque ones.
     mesh_t: wgpu::RenderPipeline,
     quad: wgpu::RenderPipeline,
@@ -891,6 +946,7 @@ impl ViewRenderer {
     pub fn new(rs: &egui_wgpu::RenderState) -> ViewRenderer {
         let device = &rs.device;
         let msaa_samples = viewport_msaa_samples(&rs.adapter);
+        let gl_depth_as_color = rs.adapter.get_info().backend == wgpu::Backend::Gl;
         let module = gpu::shader(device, "view", include_str!("shaders/view.wgsl"));
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("view"),
@@ -1021,6 +1077,36 @@ impl ViewRenderer {
             multiview_mask: None,
             cache: None,
         });
+        let paint_depth_gl = if gl_depth_as_color {
+            let target = Some(wgpu::ColorTargetState {
+                format: SCREEN_PAINT_DEPTH_COLOR_FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            });
+            Some(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("screen paint depth (OpenGL RGBA8 encoded)"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_mesh"),
+                    compilation_options: Default::default(),
+                    buffers: &vb,
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: depth(true, wgpu::CompareFunction::Less),
+                multisample: ms(SCREEN_PAINT_DEPTH_MSAA),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_paint_depth_gl"),
+                    compilation_options: Default::default(),
+                    targets: std::slice::from_ref(&target),
+                }),
+                multiview_mask: None,
+                cache: None,
+            }))
+        } else {
+            None
+        };
         let hdr_over = Some(wgpu::ColorTargetState {
             format: HDR_FORMAT,
             blend: Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -1113,6 +1199,7 @@ impl ViewRenderer {
             sky,
             mesh,
             paint_depth,
+            paint_depth_gl,
             mesh_t,
             quad,
             wire,
@@ -1144,8 +1231,8 @@ impl ViewRenderer {
             view2d_cache_hits: 0,
             shown_sets: Vec::new(),
             sampler: gpu::linear_sampler(device, wgpu::AddressMode::ClampToEdge),
-            view3d: ViewTarget::new(rs, true, msaa_samples),
-            view2d: ViewTarget::new(rs, false, 1),
+            view3d: ViewTarget::new(rs, true, msaa_samples, gl_depth_as_color),
+            view2d: ViewTarget::new(rs, false, 1, gl_depth_as_color),
             msaa_samples,
         }
     }
@@ -1551,11 +1638,36 @@ impl ViewRenderer {
             self.paint_depth_key_scratch.extend(hidden_objects.iter().map(|hidden| if *hidden { 1 } else { 0 }));
             if self.paint_depth_key.as_ref() != Some(&self.paint_depth_key_scratch) {
                 self.paint_depth_key.get_or_insert_with(Vec::new).clone_from(&self.paint_depth_key_scratch);
+                let gl_color_attachments = [Some(wgpu::RenderPassColorAttachment {
+                    view: t.paint_depth_view(),
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        // 1.0f32 as big-endian RGBA bytes: 0x3f, 0x80, 0x00, 0x00.
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 63.0 / 255.0,
+                            g: 128.0 / 255.0,
+                            b: 0.0,
+                            a: 0.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })];
+                let color_attachments = if t.gl_depth_as_color {
+                    &gl_color_attachments[..]
+                } else {
+                    &[]
+                };
+                let paint_depth_pipeline = if t.gl_depth_as_color {
+                    self.paint_depth_gl.as_ref().expect("OpenGL paint-depth pipeline")
+                } else {
+                    &self.paint_depth
+                };
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("screen paint depth"),
-                    color_attachments: &[],
+                    color_attachments,
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: t.paint_depth_view(),
+                        view: t.paint_depth_attachment_view(),
                         depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
                         stencil_ops: None,
                     }),
@@ -1563,7 +1675,7 @@ impl ViewRenderer {
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
-                pass.set_pipeline(&self.paint_depth);
+                pass.set_pipeline(paint_depth_pipeline);
                 pass.set_vertex_buffer(0, mesh.vertices.slice(..));
                 if let Some(draw) = self.object_draw.as_ref() {
                     pass.set_index_buffer(draw.triangles.slice(..), wgpu::IndexFormat::Uint32);

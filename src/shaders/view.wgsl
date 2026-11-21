@@ -419,6 +419,27 @@ fn fs_paint_depth(in: MeshOut) {
     }
 }
 
+// OpenGL cannot sample depth textures through Naga's GLSL backend. Encode the
+// exact f32 fragment depth as four normalized bytes in an MSAA color target.
+fn encode_depth_rgba8(depth: f32) -> vec4<f32> {
+    let bits = bitcast<u32>(depth);
+    let bytes = vec4<f32>(
+        f32((bits >> 24u) & 255u),
+        f32((bits >> 16u) & 255u),
+        f32((bits >> 8u) & 255u),
+        f32(bits & 255u),
+    );
+    return bytes / 255.0;
+}
+
+@fragment
+fn fs_paint_depth_gl(in: MeshOut) -> @location(0) vec4<f32> {
+    if (dot(in.n, in.n) <= 1e-12 || dot(in.n, g.cam_pos.xyz - in.wpos) <= 0.0) {
+        discard;
+    }
+    return encode_depth_rgba8(in.clip.z);
+}
+
 
 // Everything a shader sees at one point of the mesh; custom preview shaders
 // (shading graphs) read their inputs from it.

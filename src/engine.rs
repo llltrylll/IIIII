@@ -1217,6 +1217,30 @@ struct ActiveStroke {
     before: Option<Snapshot>,
 }
 
+fn opengl_stamp_shader_source() -> String {
+    let source = include_str!("shaders/stamp.wgsl")
+        .replace("texture_depth_multisampled_2d", "texture_multisampled_2d<f32>")
+        .replace(
+            "textureLoad(depth_map, sp, 0)",
+            "unpack_depth(textureLoad(depth_map, sp, 0))",
+        )
+        .replace(
+            "textureLoad(depth_map, sp, i32(sample))",
+            "unpack_depth(textureLoad(depth_map, sp, i32(sample)))",
+        );
+    format!(
+        "{source}\n{}",
+        r#"
+// OpenGL compatibility: reconstruct the original f32 depth bits from RGBA8.
+fn unpack_depth(encoded: vec4<f32>) -> f32 {
+    let bytes = vec4<u32>(round(encoded * 255.0));
+    let bits = (bytes.x << 24u) | (bytes.y << 16u) | (bytes.z << 8u) | bytes.w;
+    return bitcast<f32>(bits);
+}
+"#
+    )
+}
+
 struct Pipelines {
     uvbake: wgpu::RenderPipeline,
     dilate: wgpu::RenderPipeline,
@@ -1766,7 +1790,8 @@ impl Engine {
     pub fn new(rs: &egui_wgpu::RenderState, mesh: &GpuMesh, bounds: (Vec3, Vec3), res: u32) -> Engine {
         let p = {
             let _s = crate::startup_trace::span("Engine::create_pipelines");
-            Arc::new(Self::create_pipelines(&rs.device))
+            let gl_depth_as_color = rs.adapter.get_info().backend == wgpu::Backend::Gl;
+            Arc::new(Self::create_pipelines(&rs.device, gl_depth_as_color))
         };
         Self::with_pipelines(
             rs,
@@ -2151,7 +2176,7 @@ impl Engine {
         engine
     }
 
-    fn create_pipelines(device: &wgpu::Device) -> Pipelines {
+    fn create_pipelines(device: &wgpu::Device, gl_depth_as_color: bool) -> Pipelines {
         // UV-space position/normal bake.
         let uv_module = gpu::shader(device, "uvbake", include_str!("shaders/uvbake.wgsl"));
         let empty_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -2196,8 +2221,15 @@ impl Engine {
             &[gpu::target(POS_FORMAT), gpu::target(NRM_FORMAT), gpu::target(TAN_FORMAT)],
         );
 
-        // Brush stamping into the stroke mask.
-        let stamp_module = gpu::shader(device, "stamp", include_str!("shaders/stamp.wgsl"));
+        // Brush stamping into the stroke mask. OpenGL's GLSL translator cannot
+        // load depth textures, so that backend reads an MSAA color texture with
+        // the exact depth bits encoded into RGBA8. Vulkan keeps the native path.
+        let stamp_module = if gl_depth_as_color {
+            let source = opengl_stamp_shader_source();
+            gpu::shader(device, "stamp (OpenGL depth-as-color)", &source)
+        } else {
+            gpu::shader(device, "stamp", include_str!("shaders/stamp.wgsl"))
+        };
         let stamp_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("stamp"),
             entries: &[
@@ -2220,7 +2252,11 @@ impl Engine {
                     binding: 4,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
+                        sample_type: if gl_depth_as_color {
+                            wgpu::TextureSampleType::Float { filterable: false }
+                        } else {
+                            wgpu::TextureSampleType::Depth
+                        },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: true,
                     },
@@ -6424,6 +6460,20 @@ mod mask_cache_invalidation_tests {
         let mut structure = before.clone();
         structure.layers[0].0 = 8;
         assert_eq!(Engine::mask_cache_changes(&before, &structure), (true, Vec::new()));
+    }
+}
+
+#[cfg(test)]
+mod opengl_stamp_shader_tests {
+    use super::opengl_stamp_shader_source;
+
+    #[test]
+    fn gl_variant_uses_color_multisampling_and_unpacks_both_depth_reads() {
+        let source = opengl_stamp_shader_source();
+        assert!(source.contains("texture_multisampled_2d<f32>"));
+        assert!(!source.contains("texture_depth_multisampled_2d"));
+        assert_eq!(source.matches("unpack_depth(textureLoad(depth_map").count(), 2);
+        assert!(source.contains("fn unpack_depth(encoded: vec4<f32>) -> f32"));
     }
 }
 
