@@ -61,6 +61,11 @@ jobs:
         env:
           WGPU_BACKEND: gl
           LIBGL_ALWAYS_SOFTWARE: "1"
+      - name: OpenGL smoke - GPU bake storage layouts
+        run: "xvfb-run -a cargo test --locked --bin material_painter preview_test::gl_bake_pipeline_compiles -- --ignored --exact --nocapture --test-threads 1"
+        env:
+          WGPU_BACKEND: gl
+          LIBGL_ALWAYS_SOFTWARE: "1"
 
       - name: GPU parity - visible UV chart selection
         run: "cargo test --locked --bin material_painter preview_test::screen_projection_paints_only_visible_face_uv_region -- --ignored --exact --nocapture --test-threads 1"
