@@ -464,21 +464,7 @@ fn view_shader_source(gl_depth_color: bool, manual_srgb_decode: bool) -> String 
     // Only adapters without alternate view-format support need shader-side
     // sRGB decoding; GL drivers that do support the views keep hardware decode.
     if manual_srgb_decode {
-        const PI_DECL: &str = "const PI: f32 = 3.14159265;\n";
-        assert_eq!(source.matches(PI_DECL).count(), 1, "viewport PI declaration must remain unique");
-        source = source.replacen(
-            PI_DECL,
-            concat!(
-                "const PI: f32 = 3.14159265;\n",
-                "fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {\n",
-                "    let low = c / 12.92;\n",
-                "    let high = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));\n",
-                "    return select(low, high, c > vec3<f32>(0.04045));\n",
-                "}\n",
-            ),
-            1,
-        );
-        const ALBEDO_ASSIGN: &str = "        s.albedo = col.rgb;\n";
+        // `gpu::shader` prepends common.wgsl, which already defines srgb_to_linear.\n        const ALBEDO_ASSIGN: &str = "        s.albedo = col.rgb;\n";
         const EMISSION_ASSIGN: &str = "        s.emission = textureSampleLevel(t_emission, samp, uv, 0.0).rgb;\n";
         assert_eq!(source.matches(ALBEDO_ASSIGN).count(), 1, "viewport albedo sample must remain unique");
         assert_eq!(source.matches(EMISSION_ASSIGN).count(), 1, "viewport emission sample must remain unique");
