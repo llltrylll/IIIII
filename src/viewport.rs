@@ -944,6 +944,7 @@ pub struct ViewRenderer {
     /// Reused visibility scratch storage; avoids a fresh Vec on every viewport frame.
     shown_sets: Vec<usize>,
     sampler: wgpu::Sampler,
+    manual_srgb_decode: bool,
     pub view3d: ViewTarget,
     pub view2d: ViewTarget,
 }
@@ -953,7 +954,11 @@ impl ViewRenderer {
         let device = &rs.device;
         let gl_depth_color = rs.adapter.get_info().backend == wgpu::Backend::Gl;
         let manual_srgb_decode = gl_depth_color
-            && !device.downlevel_properties().flags.contains(wgpu::DownlevelFlags::VIEW_FORMATS);
+            && !rs
+                .adapter
+                .get_downlevel_capabilities()
+                .flags
+                .contains(wgpu::DownlevelFlags::VIEW_FORMATS);
         let view_source = view_shader_source(gl_depth_color, manual_srgb_decode);
         let module = gpu::shader(device, "view", &view_source);
         let mut view_entries = vec![
@@ -1222,6 +1227,7 @@ impl ViewRenderer {
             view2d_cache_hits: 0,
             shown_sets: Vec::new(),
             sampler: gpu::linear_sampler(device, wgpu::AddressMode::ClampToEdge),
+            manual_srgb_decode,
             view3d: ViewTarget::new(rs, true, gl_depth_color),
             view2d: ViewTarget::new(rs, false, gl_depth_color),
         }
@@ -1240,8 +1246,7 @@ impl ViewRenderer {
             "{}\n{code}\n@fragment\nfn fs_mesh_custom(in: MeshOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {{\n    // Custom preview is cut out at 50% opacity; reject those fragments before\n    // building the full Surface input set or evaluating custom lighting.\n    if (textureSampleLevel(t_color, samp, in.uv, 0.0).a < 0.5) {{ discard; }}\n    let c = mesh_shade_inputs(in, front);\n    if (view_alpha(c.s) < 0.5) {{\n        discard;\n    }}\n    return vec4<f32>(highlighted(max(custom_shade(c), vec3<f32>(0.0))), 1.0);\n}}\n",
             view_shader_source(
                 self.view3d.gl_depth_color,
-                self.view3d.gl_depth_color
-                    && !device.downlevel_properties().flags.contains(wgpu::DownlevelFlags::VIEW_FORMATS),
+                self.manual_srgb_decode,
             )
         );
         let (pipeline, err) = crate::graph::runtime::validation_scope(device, || {
