@@ -641,6 +641,11 @@ impl ViewTarget {
         self.paint_depth_color_resolve.as_ref()
     }
 
+    #[cfg(test)]
+    pub(crate) fn paint_depth_color_texture(&self) -> Option<&Tex> {
+        self.paint_depth_color.as_ref()
+    }
+
     /// Actual depth attachment used while rasterizing the visibility pass.
     fn paint_depth_attachment_view(&self) -> &wgpu::TextureView {
         &self.paint_depth.as_ref().expect("3D view has screen paint depth").view
