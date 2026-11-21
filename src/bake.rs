@@ -1733,6 +1733,9 @@ impl SceneUploads {
 }
 
 pub struct GpuBaker {
+    /// Storage format for the per-texel curvature/triangle-size pair. GL
+    /// does not expose write-only rg32float storage images on all drivers.
+    surface_curv_format: F,
     uv: wgpu::RenderPipeline,
     dilate: wgpu::RenderPipeline,
     dilate_bgl: wgpu::BindGroupLayout,
@@ -1791,7 +1794,25 @@ impl BakeRun {
 }
 
 impl GpuBaker {
+    /// Default/Vulkan path retains the compact two-channel 32-bit texture.
     pub fn new(device: &wgpu::Device) -> GpuBaker {
+        Self::new_with_surface_curv_format(device, F::Rg32Float)
+    }
+
+    /// Selects storage formats that are valid for the adapter's actual backend.
+    pub fn new_for_backend(device: &wgpu::Device, backend: wgpu::Backend) -> GpuBaker {
+        let surface_curv_format = if backend == wgpu::Backend::Gl {
+            // The GL backend rejects write-only rg32float storage images.
+            // rgba32float is already used by this pipeline and keeps both
+            // scalar values at full f32 precision.
+            F::Rgba32Float
+        } else {
+            F::Rg32Float
+        };
+        Self::new_with_surface_curv_format(device, surface_curv_format)
+    }
+
+    fn new_with_surface_curv_format(device: &wgpu::Device, surface_curv_format: F) -> GpuBaker {
         let uv_module = gpu::shader(device, "bake uv", include_str!("shaders/bake_uv.wgsl"));
         // Tangent is f32: its w carries a triangle slot (see `low_corners`).
         let surface_formats = [F::Rgba32Float, F::Rgba16Float, F::Rgba32Float];
@@ -1834,7 +1855,15 @@ impl GpuBaker {
             &surface_formats.map(gpu::target),
         );
 
-        let module = gpu::shader(device, "bake", include_str!("shaders/bake.wgsl"));
+        let bake_source = if surface_curv_format == F::Rgba32Float {
+            include_str!("shaders/bake.wgsl").replace(
+                "texture_storage_2d<rg32float, write>",
+                "texture_storage_2d<rgba32float, write>",
+            )
+        } else {
+            include_str!("shaders/bake.wgsl").to_owned()
+        };
+        let module = gpu::shader(device, "bake", &bake_source);
         let compute = |entry: &str, bindings: &[(u32, Entry)]| {
             let entries: Vec<wgpu::BindGroupLayoutEntry> = bindings
                 .iter()
@@ -1898,7 +1927,7 @@ impl GpuBaker {
                 (12, StorageTex(F::Rgba8Unorm)),
                 (26, Storage(true)),
                 (27, StorageTex(F::Rgba32Float)),
-                (34, StorageTex(F::Rg32Float)),
+                (34, StorageTex(surface_curv_format)),
                 (33, Tex),
                 (38, Tex),
             ],
@@ -1992,6 +2021,7 @@ impl GpuBaker {
         );
         let cust_smooth = compute("cs_cust_smooth", &smooth_inputs(&[(37, Tex), (36, StorageTex(F::Rgba16Float))]));
         GpuBaker {
+            surface_curv_format,
             uv,
             dilate,
             dilate_bgl,
@@ -2232,7 +2262,7 @@ impl GpuBaker {
         let surf_pos = t("surface pos", F::Rgba32Float);
         let surf_nrm = t("surface nrm", F::Rgba16Float);
         let surf_geo = t("surface geo", F::Rgba32Float);
-        let surf_curv = t("surface curvature", F::Rg32Float);
+        let surf_curv = t("surface curvature", self.surface_curv_format);
         let maps = [
             t("map A", MAP_FORMATS[0]),
             t("map B", MAP_FORMATS[1]),
