@@ -7,6 +7,7 @@ on:
       - gpt/stacked-uv-visible-pass
       - gpt/integrated-three-fronts
       - feat/composite-uv-diagnostics-20261118
+      - perf/vulkan-fill-color-fbm-cache-20261120
   workflow_dispatch:
 
 permissions:
@@ -28,6 +29,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libvulkan1 mesa-vulkan-drivers vulkan-tools \
+            libegl1 libgl1-mesa-dri \
             pkg-config libxkbcommon-dev libwayland-dev \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libgtk-3-dev
@@ -49,8 +51,18 @@ jobs:
       - name: Restore Rust build cache
         uses: Swatinem/rust-cache@v2
 
+      - name: OpenGL - MSAA screen-paint depth compatibility
+        run: "cargo test --locked --bin material_painter preview_test::screen_projection_weights_partial_msaa_occlusion -- --ignored --exact --nocapture --test-threads 1"
+        env:
+          WGPU_BACKEND: gl
+          EGL_PLATFORM: surfaceless
+          LIBGL_ALWAYS_SOFTWARE: "1"
+
       # Keep the correctness gates focused on brush/mask GPU parity.
       # The broader preview suite also contains unrelated interactive UI tests.
+      - name: GPU viewport - 1x MSAA direct HDR post path
+        run: "cargo test --locked --bin material_painter preview_test::viewport_msaa_one_sample_renders_without_resolve -- --ignored --exact --nocapture --test-threads 1"
+
       - name: GPU parity - stacked UV screen paint
         run: "cargo test --locked --bin material_painter preview_test::screen_projection_paints_visible_face_of_overlapped_uvs -- --ignored --exact --nocapture --test-threads 1"
 
@@ -89,8 +101,8 @@ jobs:
       - name: GPU composite - smart mask generator cache
         run: "cargo test --locked --bin material_painter preview_test::smart_mask_generator_cache_matches_uncached_result_and_invalidates_on_change -- --ignored --exact --nocapture --test-threads 1"
 
-      - name: GPU composite - roughness FBM cache fidelity
-        run: "cargo test --locked --bin material_painter preview_test::fill_roughness_noise_cache_matches_inline_and_invalidates_on_change -- --ignored --exact --nocapture --test-threads 1"
+      - name: GPU composite - color + roughness FBM cache fidelity
+        run: "cargo test --locked --bin material_painter preview_test::fill_variation_noise_cache_matches_inline_and_invalidates_on_change -- --ignored --exact --nocapture --test-threads 1"
 
       - name: GPU viewport - cached image invalidation
         run: "cargo test --locked --bin material_painter preview_test::viewport_cache_reuses_unchanged_images_and_invalidates_changes -- --ignored --exact --nocapture --test-threads 1"
@@ -130,6 +142,9 @@ jobs:
       - name: GPU regression - lazy Undo before-snapshot roundtrip
         run: "cargo test --locked --bin material_painter preview_test::first_paint_pass_lazily_captures_undo_before_snapshot -- --ignored --exact --nocapture --test-threads 1"
 
+      - name: GPU bake - same Vertex ID selects disconnected low-poly objects
+        run: "cargo test --locked --bin material_painter preview_test::vertex_id_mask_selects_same_color_across_disconnected_objects_in_one_texture_set -- --ignored --exact --nocapture --test-threads 1"
+
       - name: GPU parity - nested folders and masks
         run: "cargo test --locked --bin material_painter preview_test::multi_scissor_nested_folder_matches_full -- --ignored --exact --nocapture --test-threads 1"
 
@@ -147,6 +162,9 @@ jobs:
 
       - name: GPU regression - mask strokes refresh only their own thumbnail
         run: "cargo test --locked --bin material_painter preview_test::mask_stroke_redoes_only_the_mask_thumbnail -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU viewport - parked surface maps release and restore
+        run: "cargo test --locked --bin material_painter preview_test::parked_engines_release_and_restore_surface_maps -- --ignored --exact --nocapture --test-threads 1"
 
       - name: Upload GPU regression images
         if: always()

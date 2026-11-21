@@ -7,7 +7,7 @@ use super::{PainterApp, icons, theme};
 use crate::bvh::Bvh;
 use crate::engine::Engine;
 use crate::undo::{StrokeTarget, UndoStack};
-use crate::viewport::{OverlaySlot, SetLook};
+use crate::viewport::{OverlaySlot, SetLook, ViewMode};
 use eframe::egui;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -61,6 +61,29 @@ impl PainterApp {
         engines(&self.engine, &self.sets, self.mesh.sets.len())
     }
 
+    /// The 3D shader samples world-space maps only in these preview modes.
+    pub(super) fn needs_surface_maps_for_view(&self) -> bool {
+        matches!(self.view.mode, ViewMode::WorldNormal | ViewMode::Position)
+            || (self.view.mode == ViewMode::Material && self.views.has_custom_shader())
+    }
+
+    /// Keeps world-space maps only for visible parked sets whose current view uses them.
+    pub(super) fn update_parked_surface_maps_for_view(&mut self) {
+        let needed = self.needs_surface_maps_for_view();
+        let gpu_mesh = &self.gpu_mesh;
+        let views = &mut self.views;
+        for (index, parked) in self.sets.parked.iter_mut().enumerate() {
+            let Some(parked) = parked else { continue };
+            let visible = !views.set_looks.get(index).is_some_and(|look| look.hidden);
+            if needed && visible {
+                parked.engine.restore_surface_maps(gpu_mesh);
+            } else if parked.engine.release_surface_maps() {
+                // Hidden sets skip bind-group refresh, so invalidate their cached views explicitly.
+                views.invalidate_texture_set_binding(index);
+            }
+        }
+    }
+
     /// Set `k`'s engine, active or parked.
     pub(super) fn set_engine_mut(&mut self, k: usize) -> Option<&mut Engine> {
         if k == self.sets.active {
@@ -78,9 +101,12 @@ impl PainterApp {
         // A bake preview shows on the set being edited; the full bake comes back first.
         self.end_preview(true);
         self.engine.commit_props(&mut self.undo);
+        let previous_active = self.sets.active;
         std::mem::swap(&mut self.engine, &mut p.engine);
-        self.engine.restore_active_working_set();
-        p.engine.release_inactive_working_set();
+        self.engine.restore_active_working_set(&self.gpu_mesh);
+        if p.engine.release_inactive_working_set() {
+            self.views.invalidate_texture_set_binding(previous_active);
+        }
         self.engine_epoch = self.engine_epoch.wrapping_add(1);
         std::mem::swap(&mut self.selected, &mut p.selected);
         std::mem::swap(&mut self.target, &mut p.target);
@@ -109,19 +135,35 @@ impl PainterApp {
 
     /// Composites every parked set when a synchronous operation needs final maps (export).
     pub(super) fn composite_parked(&mut self) {
-        for p in self.sets.parked.iter_mut().flatten() {
-            if p.engine.dirty {
-                p.engine.composite();
-                p.engine.release_inactive_working_set();
+        let gpu_mesh = &self.gpu_mesh;
+        let views = &mut self.views;
+        for (index, parked) in self.sets.parked.iter_mut().enumerate() {
+            let Some(parked) = parked else { continue };
+            if parked.engine.dirty {
+                parked.engine.restore_surface_maps(gpu_mesh);
+                parked.engine.composite();
+                if parked.engine.release_inactive_working_set() {
+                    views.invalidate_texture_set_binding(index);
+                }
             }
         }
     }
 
     /// Spreads parked-set recomposition across frames during interactive use.
     pub(super) fn composite_parked_one(&mut self, ctx: &egui::Context) {
-        if let Some(p) = self.sets.parked.iter_mut().flatten().find(|p| p.engine.dirty) {
+        let gpu_mesh = &self.gpu_mesh;
+        let keep_surface_maps = self.needs_surface_maps_for_view();
+        let views = &mut self.views;
+        if let Some((index, p)) = self.sets.parked.iter_mut().enumerate().find_map(|(i, p)| {
+            p.as_mut().filter(|p| p.engine.dirty).map(|p| (i, p))
+        }) {
+            p.engine.restore_surface_maps(gpu_mesh);
             p.engine.composite();
-            p.engine.release_inactive_working_set();
+            p.engine.release_inactive_working_set_keep_surface_maps();
+            let visible = !views.set_looks.get(index).is_some_and(|look| look.hidden);
+            if !(keep_surface_maps && visible) && p.engine.release_surface_maps() {
+                views.invalidate_texture_set_binding(index);
+            }
             ctx.request_repaint();
         }
     }
@@ -156,8 +198,8 @@ impl PainterApp {
         // Made at their final size: making every set at the default size and
         // resizing it after costs several sets' worth of GPU memory at once.
         let size = |k: usize| sizes.get(k).copied().unwrap_or(self.prefs.default_resolution);
-        let fresh = |engine: &Engine, range: std::ops::Range<u32>, mesh: &crate::gpu::GpuMesh, res: u32| {
-            let mut e = engine.sibling(mesh, range, res);
+        let fresh = |engine: &Engine, range: std::ops::Range<u32>, mesh: &crate::gpu::GpuMesh, res: u32, parked: bool| {
+            let mut e = if parked { engine.sibling_parked(mesh, range, res) } else { engine.sibling(mesh, range, res) };
             e.add_paint_layer(0, None, None, &mut UndoStack::default());
             Parked { engine: e, selected: 0, target: StrokeTarget::Content }
         };
@@ -170,14 +212,14 @@ impl PainterApp {
             let kept = assign[i].filter(|&j| j != old_active).and_then(|j| old[j].take());
             let p = match kept {
                 Some(p) => p,
-                None => fresh(&self.engine, range.clone(), &self.gpu_mesh, size(i)),
+                None => fresh(&self.engine, range.clone(), &self.gpu_mesh, size(i), true),
             };
             parked.push(Some(p));
         }
         if assign[active] != Some(old_active) {
             let p = match assign[active].and_then(|j| old[j].take()) {
                 Some(p) => p,
-                None => fresh(&self.engine, new[active].1.clone(), &self.gpu_mesh, size(active)),
+                None => fresh(&self.engine, new[active].1.clone(), &self.gpu_mesh, size(active), false),
             };
             self.engine = p.engine;
             self.selected = p.selected;
@@ -204,7 +246,11 @@ impl PainterApp {
                 None => &mut self.engine,
             };
             e.set_bounds(bounds);
-            e.set_triangles(range, gpu_mesh);
+            if k == self.sets.active {
+                e.set_triangles(range, gpu_mesh);
+            } else if e.set_triangles_parked(range, gpu_mesh) {
+                self.views.invalidate_texture_set_binding(k);
+            }
         }
         for d in &mut self.graphs.docs {
             d.dirty = true;

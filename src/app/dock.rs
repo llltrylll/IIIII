@@ -209,6 +209,22 @@ impl Behavior<Pane> for DockBehavior<'_> {
     fn pane_ui(&mut self, ui: &mut egui::Ui, _tile: TileId, pane: &mut Pane) -> UiResponse {
         let rect = ui.max_rect();
         ui.painter().rect_filled(rect, 0.0, if pane.padded() { theme::PANEL } else { theme::PANEL_DARK });
+        let _pane_span = crate::startup_trace::span(match *pane {
+            Pane::View3d | Pane::DesignView => "dock pane: 3D view",
+            Pane::View2d => "dock pane: 2D view",
+            Pane::Layers => "dock pane: layers",
+            Pane::Properties => "dock pane: properties",
+            Pane::ProjectSettings => "dock pane: project settings",
+            Pane::MeshMaps => "dock pane: mesh maps",
+            Pane::TextureSet => "dock pane: texture set",
+            Pane::Preview => "dock pane: preview",
+            Pane::Shelf => "dock pane: shelf",
+            Pane::Graph => "dock pane: graph",
+            Pane::NodeSettings => "dock pane: node settings",
+            Pane::ShaderList => "dock pane: shader list",
+            Pane::ShaderCode => "dock pane: shader code",
+            Pane::ShaderPreview => "dock pane: shader preview",
+        });
         let app = &mut *self.app;
         let draw = |ui: &mut egui::Ui, app: &mut PainterApp| match *pane {
             Pane::View3d | Pane::DesignView => app.view_pane(ui, ViewKind::V3d),

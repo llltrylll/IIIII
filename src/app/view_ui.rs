@@ -462,12 +462,16 @@ impl PainterApp {
         match kind {
             ViewKind::V3d => {
                 self.views.set_looks = self.set_looks(ui.ctx());
+                self.update_parked_surface_maps_for_view();
                 let engines = texture_sets::engines(&self.engine, &self.sets, self.mesh.sets.len());
-                self.views.render_3d_with_object_visibility_and_paint_depth(
-                    &self.rs, size, &engines, &self.env, &self.gpu_mesh, self.mesh.as_ref(),
-                    &self.cam, &self.view, Some(&self.overlays), &self.hidden_objects,
-                    !self.walk_navigation,
-                );
+                {
+                    let _s = crate::startup_trace::span("app viewport: 3D render call");
+                    self.views.render_3d_with_object_visibility_and_paint_depth(
+                        &self.rs, size, &engines, &self.env, &self.gpu_mesh, self.mesh.as_ref(),
+                        &self.cam, &self.view, Some(&self.overlays), &self.hidden_objects,
+                        !self.walk_navigation,
+                    );
+                }
                 self.drew_3d = true;
                 // Path tracing replaces the 3D view while it's idle. Painting and
                 // the map display modes use the raster view, which reacts instantly.
@@ -491,7 +495,10 @@ impl PainterApp {
                     self.cam2d.zoom = size[0].min(size[1]) as f32 * 0.9;
                     self.cam2d.pan = Vec2::ZERO;
                 }
-                self.views.render_2d(&self.rs, size, &self.engine, &self.env, &self.gpu_mesh, self.sets.active, &self.cam2d, &self.view);
+                {
+                    let _s = crate::startup_trace::span("app viewport: 2D render call");
+                    self.views.render_2d(&self.rs, size, &self.engine, &self.env, &self.gpu_mesh, self.sets.active, &self.cam2d, &self.view);
+                }
             }
         }
 
@@ -693,12 +700,16 @@ impl PainterApp {
         self.update_poly_highlight();
         if !self.drew_3d {
             let size = self.views.view3d.size;
+            self.update_parked_surface_maps_for_view();
             let engines = texture_sets::engines(&self.engine, &self.sets, self.mesh.sets.len());
-            self.views.render_3d_with_object_visibility_and_paint_depth(
+            {
+                let _s = crate::startup_trace::span("app viewport: fallback 3D render call");
+                self.views.render_3d_with_object_visibility_and_paint_depth(
                     &self.rs, size, &engines, &self.env, &self.gpu_mesh, self.mesh.as_ref(),
                     &self.cam, &self.view, Some(&self.overlays), &self.hidden_objects,
                     !self.walk_navigation,
                 );
+            }
         }
         // Parked Texture Sets can need a full-resolution composite after a
         // switch or property edit. Do not let that background work compete

@@ -547,9 +547,9 @@ impl StrokeMeter {
         mask_cache_hits: u32,
         mask_cache_misses: u32,
         mask_gpu_passes: u32,
-        roughness_cache_hits: u32,
-        roughness_cache_misses: u32,
-        roughness_cache_gpu_passes: u32,
+        variation_cache_hits: u32,
+        variation_cache_misses: u32,
+        variation_cache_gpu_passes: u32,
     ) -> String {
         let (full, thumbs) = self.counters_base.map_or((0, 0), |b| (self.counters.0.saturating_sub(b.0), self.counters.1.saturating_sub(b.1)));
         let texture_pixels = u64::from(res) * u64::from(res);
@@ -557,7 +557,7 @@ impl StrokeMeter {
         let patch_percent = if texture_pixels == 0 { 0.0 } else { scissor_pixels as f64 * 100.0 / texture_pixels as f64 };
         let bbox_percent = if texture_pixels == 0 { 0.0 } else { bbox_pixels as f64 * 100.0 / texture_pixels as f64 };
         format!(
-            "F6 CPU avg/peak ms: steps/frame {}, brush stamps {}, spacing {:.1}/{:.1}px, spacing cap {}, resolve {}, region {}, stamp {}, begin {}, recomp {}, end {}, engine end {}, undo push {}, end cleanup {}, target {}, snapshot {}, submit {}, thumbs {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {}, clear {}, pass body {}, slowest pass {} {} | screen tris {}/{} | paint {:.1}%/{} scissors | composite {:.1}% (bbox {:.1}%, {} scissors) | stack {}L/{}F | masks {}h/{}m/{}p | rough FBM {}h/{}m/{}p | since F6: full recomps {full}, thumbnails {thumbs}",
+            "F6 CPU avg/peak ms: steps/frame {}, brush stamps {}, spacing {:.1}/{:.1}px, spacing cap {}, resolve {}, region {}, stamp {}, begin {}, recomp {}, end {}, engine end {}, undo push {}, end cleanup {}, target {}, snapshot {}, submit {}, thumbs {}, recomp after release {} | GPU avg/peak ms: stamp {}, apply {}, composite layer {}, composite total {}, clear {}, pass body {}, slowest pass {} {} | screen tris {}/{} | paint {:.1}%/{} scissors | composite {:.1}% (bbox {:.1}%, {} scissors) | stack {}L/{}F | masks {}h/{}m/{}p | fill FBM {}h/{}m/{}p | since F6: full recomps {full}, thumbnails {thumbs}",
             self.steps_per_frame.text(),
             self.brush_stamps_per_segment.text(),
             if self.brush_spacing_requested_px.n == 0 { 0.0 } else { self.brush_spacing_requested_px.sum / f64::from(self.brush_spacing_requested_px.n) },
@@ -597,9 +597,9 @@ impl StrokeMeter {
             mask_cache_hits,
             mask_cache_misses,
             mask_gpu_passes,
-            roughness_cache_hits,
-            roughness_cache_misses,
-            roughness_cache_gpu_passes
+            variation_cache_hits,
+            variation_cache_misses,
+            variation_cache_gpu_passes
         )
     }
 }
@@ -5925,7 +5925,10 @@ impl eframe::App for PainterApp {
         let ctx = ui.ctx().clone();
         self.frame_interval_ms = ctx.input(|i| i.stable_dt.max(0.0) * 1000.0);
         self.ppp = ctx.pixels_per_point();
-        let _ = self.rs.device.poll(wgpu::PollType::Poll);
+        {
+            let _s = crate::startup_trace::span("frame: device.poll");
+            let _ = self.rs.device.poll(wgpu::PollType::Poll);
+        }
         {
             let _s = crate::startup_trace::span("frame: async job polling");
             self.undo.update();
@@ -5973,30 +5976,42 @@ impl eframe::App for PainterApp {
 
         {
             let _s = crate::startup_trace::span("frame: menu and top/bottom toolbars");
-            egui::Panel::top("menu").frame(theme::bar().inner_margin(egui::Margin::symmetric(10, 5))).show(ui, |ui| self.menu_bar(ui));
+            {
+                let _s = crate::startup_trace::span("toolbar: menu bar");
+                egui::Panel::top("menu").frame(theme::bar().inner_margin(egui::Margin::symmetric(10, 5))).show(ui, |ui| self.menu_bar(ui));
+            }
         let paint = self.workspace == Workspace::Paint;
         if paint {
+            let _s = crate::startup_trace::span("toolbar: context toolbar");
             egui::Panel::top("toolbar")
                 .exact_size(46.0)
                 .frame(theme::card(theme::PANEL).inner_margin(egui::Margin::symmetric(12, 4)))
                 .show(ui, |ui| self.context_toolbar(ui));
         }
-        egui::Panel::bottom("status")
-            .exact_size(if paint { 76.0 } else { 24.0 })
-            .frame(theme::bar())
-            .show(ui, |ui| self.status_bar(ui));
+        {
+            let _s = crate::startup_trace::span("toolbar: status bar");
+            egui::Panel::bottom("status")
+                .exact_size(if paint { 76.0 } else { 24.0 })
+                .frame(theme::bar())
+                .show(ui, |ui| self.status_bar(ui));
+        }
         if paint {
-            egui::Panel::left("tools")
-                .exact_size(56.0)
-                .frame(theme::card(theme::PANEL).inner_margin(egui::Margin::symmetric(7, 10)))
-                .show(ui, |ui| self.tool_strip(ui));
+            {
+                let _s = crate::startup_trace::span("toolbar: tool strip");
+                egui::Panel::left("tools")
+                    .exact_size(56.0)
+                    .frame(theme::card(theme::PANEL).inner_margin(egui::Margin::symmetric(7, 10)))
+                    .show(ui, |ui| self.tool_strip(ui));
+            }
             if self.technical_ui.open {
+                let _s = crate::startup_trace::span("toolbar: technical info panel");
                 egui::Panel::left("technical_info")
                     .exact_size(340.0)
                     .frame(theme::card(theme::PANEL).inner_margin(egui::Margin::same(10)))
                     .show(ui, |ui| self.technical_info_panel(ui));
             }
             if self.project_panel_open {
+                let _s = crate::startup_trace::span("toolbar: project settings panel");
                 egui::Panel::left("project_settings")
                     .exact_size(320.0)
                     .frame(theme::card(theme::PANEL).inner_margin(egui::Margin::same(10)))
@@ -6062,6 +6077,7 @@ impl eframe::App for PainterApp {
         // button held (slider drags) and no text field focused (typing).
         let idle = !ctx.input(|i| i.pointer.any_down()) && ctx.memory(|m| m.focused().is_none());
         if idle && self.stroke.is_none() {
+            let _s = crate::startup_trace::span("frame: commit idle properties");
             self.engine.commit_props(&mut self.undo);
         }
         let ms = start.elapsed().as_secs_f32() * 1000.0;

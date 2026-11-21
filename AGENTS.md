@@ -1,6 +1,6 @@
 # Guide for AI coding agents
 
-Read [PROJECT_SCOPE.md](PROJECT_SCOPE.md) first. It is the source of truth for the production objective, defined production workload ceiling, mandatory phase order, engineering latitude, shared GPT/Claude coordination, and repository boundaries. All instructions here are subordinate to that scope. Humans: see [CONTRIBUTING.md](CONTRIBUTING.md) too.
+Read LOCAL_CONTEXT.md if it exists in the working copy. It is machine-local, ignored by Git, and contains the owner's private project scope and hardware details. Never create, commit, upload, or quote its contents into tracked files, PRs, issues, logs, or external services. If absent, ask the owner for missing private context rather than guessing. This file is the shared operating guide for GPT, Claude, Kimi, and any other coding agent. Humans: see CONTRIBUTING.md too.
 
 ## Current priority — establish the production foundation
 
@@ -24,13 +24,13 @@ Projects around 100 items are a very distant possibility, not a current target. 
 
 The owner explicitly permits major, risky, or breaking internal refactors when they materially improve production reliability and performance. Do not avoid a needed rewrite just to keep a diff small. Protect user data, add tests, preserve project compatibility deliberately, inspect rendered results, and be explicit about unvalidated runtime behavior.
 
-## Shared work with GPT and Claude
+## Shared work across GPT, Claude, and Kimi
 
-Both agents work in the same repository and must read [PROJECT_SCOPE.md](PROJECT_SCOPE.md) and this file. Claude must also read [CLAUDE.md](CLAUDE.md).
+GPT, Claude, Kimi, and any other coding agent share this repository and must read this file. Claude must also read CLAUDE.md. Read the ignored LOCAL_CONTEXT.md only from the owner's local working copy; never push it.
 
 At the start of each task, inspect current branch, HEAD SHA, open PRs, changed files/diff, CI, and the other agent's recent commits/comments. Re-fetch files and current SHAs before writing. Never assume previous chat context equals current repository state.
 
-Do not concurrently modify the same files/subsystem. Establish task ownership in the active PR or a concise handoff comment. Never overwrite the other agent's work. Commit coherent units and leave a handoff stating changes, invariants, tests, gaps, and next steps. Keep code understandable for the other agent; no agent-specific abstractions.
+Do not concurrently modify the same files/subsystem. Establish task ownership in the active PR or a concise handoff comment. Never overwrite the other agent's work. Do not create agent-specific branches; all production code work stays on the active branch and all diagnostic evidence uses the three designated evidence branches. Commit coherent units and leave a handoff stating changes, invariants, tests, gaps, and next steps. Keep code understandable for the other agent; no agent-specific abstractions.
 
 ## What this is
 
@@ -100,3 +100,56 @@ offscreen with egui_kittest into `target/bake_test/ui/`.
 4. Run the app when possible; state clearly when owner-machine testing is still required.
 5. Report measurements, test status, and unresolved risk. Never claim unperformed tests.
 6. Ensure the diff contains only task-related changes.
+
+
+## Ten-branch policy — hard limit
+
+The remote repository must contain **exactly ten long-lived branches**. All agents (GPT, Claude, Kimi, Copilot or others) must respect this fixed layout. Never create an eleventh branch, personal agent branch, ad-hoc feature branch, build branch or temporary test branch.
+
+### Four code/recovery branches
+
+1. Active development: `perf/vulkan-fill-color-fbm-cache-20261120`. Main integration branch. The only branch for production-ready source changes.
+2. Backup: `perf/vulkan-cache-claude-ui-20261119`. Last-known recovery point immediately before the active line.
+3. Backup-2: `feat/composite-uv-diagnostics-20261118`. Older stable recovery point, one generation behind Backup.
+4. Original/fork baseline: `master`. Preserve as the reference baseline; do not use it for feature development.
+
+### Three diagnostics/report branches
+
+5. Owner's real-machine tests: `diagnostics/user-benchmarks`. Store sanitized snapshots and reports from the owner's actual tests: F5/F6 readings, FPS/frame time, layer and texture-set counts, texture resolutions, undo/readback observations, bake results, workload description, app version, GPU/backend/driver and comparable before/after runs.
+6. Application diagnostics: `diagnostics/app-runtime`. Store application-generated diagnostics and reproducible technical evidence: profiler stage timings, GPU pass counts, cache hits/misses, resource-allocation estimates, crash/trace excerpts, regression reproductions and diagnostic-system findings. Clearly distinguish app estimates from physical GPU/VRAM telemetry.
+7. Engineering reports: `reports/engineering`. Store consolidated audits, analysis, conclusions, validation matrices, regression summaries, agent handoffs and decisions. Link reports to commits/PRs and diagnostic snapshots.
+
+### Three test/recovery branches
+
+8. Test lane A: `test/agent-lab-a`. Isolated experiments and regression validation by one assigned agent.
+9. Test lane B: `test/agent-lab-b`. A second independent test lane for another agent or a separate experiment. Assign one owner per lane; do not have two agents edit the same lane simultaneously.
+10. Test backup: `backup/test-lab`. Preserve the last known-good test-lane state before a risky experiment, reset or replacement. It is a recovery snapshot, not a second active implementation lane.
+
+### Diagnostics and test branch rules
+
+- Branches 5–7 are evidence/report-only. No production source-code implementation there.
+- Branches 8–9 may contain experimental code, prototypes and regression tests. They are not automatically production-approved. A successful result must be reviewed and ported/integrated into branch 1 with relevant tests.
+- Branch 10 stores a recovery snapshot of useful test work. Update it only before replacing/resetting a test lane or when the owner explicitly requests a checkpoint.
+- Test lanes must not become permanent agent-owned feature branches. Use them for bounded experiments and then port, discard, or archive the result within the ten-branch limit.
+- No new branches for individual agents, PRs, temporary builds or diagnostics.
+
+### Privacy and evidence quality
+
+- Sanitize every diagnostic report before pushing. The fork is public: exclude local file paths, personal identifiers, credentials, project file contents, private assets and other machine-local information.
+- Keep full unredacted history, local paths and personal project details only in the owner's ignored `LOCAL_CONTEXT.md` or local files.
+- Use dated filenames and identify app version, test scenario, workload, capture mode and units.
+- Mark evidence as CI, software Vulkan, other hardware, or owner's Vega 8 runtime. CI compilation is not real-GPU validation.
+- Comparisons must disclose differences in layer count, resolution, texture sets, viewport mode, F6 state and other workload factors. Do not claim causation from non-equivalent runs.
+- Treat application allocation estimates separately from measured physical VRAM.
+
+### Branch maintenance and agent workflow
+
+- All production-ready implementation goes to branch 1. Test-only implementation goes to branch 8 or 9, according to explicit task ownership.
+- GPT, Claude and Kimi may use the two test lanes, but only one agent owns each lane/subsystem at a time.
+- Backups, diagnostics/report branches and `master` are read-only except for their defined checkpoint/report purpose.
+- Never delete, reset, force-push or rewrite any branch. Only the owner performs branch cleanup.
+- Before deleting surplus branches, preserve useful unique commits or explicitly classify them as disposable. After owner cleanup, verify exactly the ten canonical branch names remain.
+
+## Owner-local data boundary
+
+LOCAL_CONTEXT.md is intentionally ignored by Git. It is the only place for personal project details, exact computer specifications, local paths, project files, and machine-specific performance baselines. Keep confirmed and unknown hardware fields distinct. Never invent CPU, RAM, GPU memory, storage, or driver details. Do not put personal project names, private workflow notes, local paths, or machine specifications in tracked documentation. The repository is public; all tracked content, commits, PRs, and CI logs must be treated as public.

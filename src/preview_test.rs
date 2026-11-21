@@ -13,7 +13,7 @@ use crate::mesh::Mesh;
 use crate::presets;
 use crate::viewport::{OrbitCam, ViewMode, ViewRenderer, ViewSettings};
 use eframe::{egui, egui_wgpu, wgpu};
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -34,6 +34,91 @@ fn render_state() -> egui_wgpu::RenderState {
 
 fn map_mode(name: &str) -> ViewMode {
     ViewMode::Map(MAPS.iter().position(|m| m.name == name).unwrap_or_else(|| panic!("no map {name}")))
+}
+
+/// Parked world-space UV targets can be evicted without changing the multi-set
+/// Material viewport, then regenerated exactly for Position/World Normal views.
+#[test]
+#[ignore]
+fn parked_engines_release_and_restore_surface_maps() {
+    use crate::mesh::set_tests::split_plane;
+    use crate::viewport::SetLook;
+
+    let mesh = split_plane();
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let bounds = (mesh.bounds_min, mesh.bounds_max);
+    let first = mesh.sets[0].index_range();
+    let second = mesh.sets[1].index_range();
+
+    let mut engine_a = Engine::new(&rs, &gpu_mesh, bounds, 128);
+    engine_a.set_triangles(first, &gpu_mesh);
+    engine_a.composite();
+    let mut engine_b = engine_a.sibling_parked(&gpu_mesh, second, 128);
+    engine_b.restore_surface_maps(&gpu_mesh);
+    engine_b.composite();
+
+    let pos_before = engine_b.read_tex(&engine_b.surface_maps().0);
+    let nrm_before = engine_b.read_tex(&engine_b.surface_maps().1);
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+    let mut views = ViewRenderer::new(&rs);
+    let size = [320, 240];
+    let cam = OrbitCam::default();
+    let mut settings = ViewSettings::default();
+
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    let material_before = read_texture(&rs.device, &rs.queue, views.view3d.image());
+
+    settings.mode = ViewMode::Position;
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    let position_before = read_texture(&rs.device, &rs.queue, views.view3d.image());
+
+    // Match the real set-switch path: release edit-only scratch, then evict the world-space maps.
+    engine_b.release_inactive_working_set_keep_surface_maps();
+    let bytes_before = engine_b.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "surface maps").map(|(_, bytes)| *bytes).unwrap();
+    assert!(engine_b.release_surface_maps());
+    let bytes_after = engine_b.gpu_resource_breakdown().iter()
+        .find(|(name, _)| *name == "surface maps").map(|(_, bytes)| *bytes).unwrap();
+    assert!(bytes_after < bytes_before, "parked surface maps must release GPU memory");
+    assert_eq!(engine_b.surface_maps().0.width, 1);
+    assert_eq!(engine_b.surface_maps().1.width, 1);
+
+    // A parked set remains in the viewport, and its Material output is byte-identical.
+    settings.mode = ViewMode::Material;
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    let material_after = read_texture(&rs.device, &rs.queue, views.view3d.image());
+    assert_eq!(material_after, material_before);
+
+    // Restoring an unchanged UV bake must not dirty the valid material composite.
+    engine_b.restore_active_working_set(&gpu_mesh);
+    assert!(!engine_b.dirty, "rebuilding unchanged UV targets must not invalidate the material composite");
+    assert_eq!(engine_b.surface_maps().0.width, 128);
+    assert_eq!(engine_b.surface_maps().1.width, 128);
+    assert_eq!(engine_b.read_tex(&engine_b.surface_maps().0), pos_before);
+    assert_eq!(engine_b.read_tex(&engine_b.surface_maps().1), nrm_before);
+
+    settings.mode = ViewMode::Position;
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    let position_after = read_texture(&rs.device, &rs.queue, views.view3d.image());
+    assert_eq!(position_after, position_before);
+
+    settings.mode = ViewMode::WorldNormal;
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+
+    // A hidden set is skipped by the render loop, so its old bind group would otherwise retain the texture views.
+    views.set_looks = vec![SetLook::default(), SetLook::default()];
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    assert!(views.has_texture_set_binding(1));
+    views.set_looks[1].hidden = true;
+    views.render_3d(&rs, size, &[&engine_a, &engine_b], &env, &gpu_mesh, &cam, &settings, None);
+    assert!(views.has_texture_set_binding(1), "the hidden path deliberately skips binding refresh");
+    assert!(engine_b.release_surface_maps());
+    views.invalidate_texture_set_binding(1);
+    assert!(!views.has_texture_set_binding(1), "eviction must release hidden cached texture views");
+
+    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 }
 
 #[test]
@@ -1206,12 +1291,216 @@ fn smart_mask_generator_cache_matches_uncached_result_and_invalidates_on_change(
     rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 }
 
-/// Stable roughness FBM is evaluated once, reused on a later composite,
-/// and invalidated when the fill seed changes. The final roughness bytes must
-/// match a fresh engine that evaluates the original inline shader path.
+/// Low-poly Vertex ID masks must select every disconnected object carrying the
+/// same vertex color, even when all objects share one Texture Set.
 #[test]
 #[ignore]
-fn fill_roughness_noise_cache_matches_inline_and_invalidates_on_change() {
+fn vertex_id_mask_selects_same_color_across_disconnected_objects_in_one_texture_set() {
+    use crate::bake::IdSource;
+    use crate::engine::{FillParams, GenKind, MatValues};
+    use crate::undo::UndoStack;
+
+    const RES: u32 = 256;
+    let id_color = [40u8, 176, 232];
+    let other_color = [232u8, 56, 32];
+    let uv_rects = [
+        [0.05f32, 0.20, 0.28, 0.80],
+        [0.385f32, 0.20, 0.615, 0.80],
+        [0.72f32, 0.20, 0.95, 0.80],
+    ];
+
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut uvs = Vec::new();
+    let mut indices = Vec::new();
+    let mut tri_object = Vec::new();
+    let mut tri_color = Vec::new();
+    let mut tri_vertex_color = Vec::new();
+    for (object, rect) in uv_rects.iter().enumerate() {
+        let x = object as f32 * 2.0;
+        let base = positions.len() as u32;
+        positions.extend([
+            Vec3::new(x, 0.0, 0.0),
+            Vec3::new(x + 1.0, 0.0, 0.0),
+            Vec3::new(x + 1.0, 1.0, 0.0),
+            Vec3::new(x, 1.0, 0.0),
+        ]);
+        normals.extend([Vec3::Z; 4]);
+        uvs.extend([
+            Vec2::new(rect[0], rect[1]),
+            Vec2::new(rect[2], rect[1]),
+            Vec2::new(rect[2], rect[3]),
+            Vec2::new(rect[0], rect[3]),
+        ]);
+        indices.extend([
+            base, base + 1, base + 2,
+            base, base + 2, base + 3,
+        ]);
+        tri_object.extend([object as u32; 2]);
+        let color = if object < 2 { id_color } else { other_color };
+        tri_color.extend([color; 2]);
+        tri_vertex_color.extend([[color; 3]; 2]);
+    }
+
+    let mut mesh = Mesh::from_parts(
+        "Vertex ID mask regression".into(),
+        positions.clone(),
+        Some(normals),
+        uvs,
+        indices,
+    );
+    mesh.objects = vec!["Same ID A".into(), "Same ID B".into(), "Different ID control".into()];
+    mesh.tri_object = tri_object;
+    mesh.tri_color = Some(tri_color);
+    mesh.tri_vertex_color = Some(tri_vertex_color);
+    mesh.set_ranges(vec![("Shared Texture Set".into(), 0..6)]);
+
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let settings = BakeSettings { id_source: IdSource::VertexColors, aa: 1, ..Default::default() };
+    let (baked, report, _) = run_bake(&rs.device, &rs.queue, &mesh, &gpu_mesh, &settings, RES);
+    let id_map = read_texture(&rs.device, &rs.queue, &baked.maps[4]);
+    assert_eq!(id_map.len(), (RES * RES * 4) as usize, "ID map must be RGBA8");
+
+    fn count_region(
+        pixels: &[u8],
+        res: u32,
+        rect: [f32; 4],
+        matches: impl Fn([u8; 4]) -> bool,
+    ) -> usize {
+        let x0 = (rect[0] * res as f32).ceil() as u32;
+        let y0 = (rect[1] * res as f32).ceil() as u32;
+        let x1 = (rect[2] * res as f32).floor() as u32;
+        let y1 = (rect[3] * res as f32).floor() as u32;
+        let mut count = 0;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let i = ((y * res + x) * 4) as usize;
+                if matches([pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]) {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    let id_matches = |expected: [u8; 3]| {
+        count_region(&id_map, RES, uv_rects[0], |p| {
+            p[0].abs_diff(expected[0]) <= 2
+                && p[1].abs_diff(expected[1]) <= 2
+                && p[2].abs_diff(expected[2]) <= 2
+                && p[3] > 240
+        })
+    };
+    let first_id_pixels = id_matches(id_color);
+    let second_id_pixels = count_region(&id_map, RES, uv_rects[1], |p| {
+        p[0].abs_diff(id_color[0]) <= 2
+            && p[1].abs_diff(id_color[1]) <= 2
+            && p[2].abs_diff(id_color[2]) <= 2
+            && p[3] > 240
+    });
+    let control_id_pixels = count_region(&id_map, RES, uv_rects[2], |p| {
+        p[0].abs_diff(other_color[0]) <= 2
+            && p[1].abs_diff(other_color[1]) <= 2
+            && p[2].abs_diff(other_color[2]) <= 2
+            && p[3] > 240
+    });
+    assert!(first_id_pixels > 500, "first same-ID object has no baked ID coverage: {first_id_pixels}");
+    assert!(second_id_pixels > 500, "second same-ID object lost its baked ID: {second_id_pixels}");
+    assert!(control_id_pixels > 500, "different-color control has no baked ID coverage: {control_id_pixels}");
+
+    let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), RES);
+    engine.set_maps(baked, report);
+    let mut undo = UndoStack::default();
+    let fill = FillParams {
+        mat: MatValues {
+            enabled: [true, false, false, false, false, false, false, false],
+            color: [0.9, 0.02, 0.01],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let layer = engine.add_fill_layer(0, None, "Same ID coverage".into(), fill, &mut undo);
+    let mut generator = GenKind::IdMask.default_generator();
+    generator.id_color = id_color.map(|c| f32::from(c) / 255.0);
+    generator.id_tolerance = 0.01;
+    generator.level = 0.5;
+    generator.contrast = 0.05;
+    generator.noise = 0.0;
+    engine.add_mask(layer, true, Some(generator), &mut undo);
+    engine.composite();
+    let final_color = read_texture(&rs.device, &rs.queue, engine.final_tex(0));
+    let is_fill = |p: [u8; 4]| p[0] > 150 && p[1] < 80 && p[2] < 80;
+    let first_filled = count_region(&final_color, RES, uv_rects[0], is_fill);
+    let second_filled = count_region(&final_color, RES, uv_rects[1], is_fill);
+    let control_filled = count_region(&final_color, RES, uv_rects[2], is_fill);
+    assert!(first_filled > 500, "first same-ID object was not revealed by the mask: {first_filled}");
+    assert!(second_filled > 500, "second same-ID object was not revealed by the mask: {second_filled}");
+    assert!(control_filled < 20, "different-ID control leaked through the mask: {control_filled}");
+    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+}
+
+/// The single-sample 3D viewport writes HDR directly and must not require a
+/// multisample resolve target. Exercise the full raster + post path on Vulkan.
+#[test]
+#[ignore]
+fn viewport_msaa_one_sample_renders_without_resolve() {
+    use crate::environment::{EnvBaker, EnvSource, decode};
+    use crate::mesh::Primitive;
+    use crate::gpu::{GpuMesh, read_texture};
+    use crate::engine::Engine;
+    use crate::viewport::{OrbitCam, ViewRenderer, ViewSettings};
+
+    struct RestoreMsaa(Option<std::ffi::OsString>);
+    impl Drop for RestoreMsaa {
+        fn drop(&mut self) {
+            unsafe {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("MP_VIEWPORT_MSAA", value),
+                    None => std::env::remove_var("MP_VIEWPORT_MSAA"),
+                }
+            }
+        }
+    }
+
+    let previous = std::env::var_os("MP_VIEWPORT_MSAA");
+    let _restore = RestoreMsaa(previous);
+    unsafe { std::env::set_var("MP_VIEWPORT_MSAA", "1"); }
+
+    let mesh = Primitive::RoundedCube.build();
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 128);
+    engine.composite();
+
+    let env = EnvBaker::new(&rs.device)
+        .upload(&rs, &decode(&EnvSource::Builtin(0)).unwrap());
+    let mut views = ViewRenderer::new(&rs);
+    assert_eq!(views.msaa_samples, 1, "the requested single-sample viewport must be selected");
+
+    let size = [320, 240];
+    views.render_3d(
+        &rs,
+        size,
+        &[&engine],
+        &env,
+        &gpu_mesh,
+        &OrbitCam::default(),
+        &ViewSettings::default(),
+        None,
+    );
+    let image = views.view3d.image();
+    let pixels = read_texture(&rs.device, &rs.queue, image);
+    assert_eq!(pixels.len(), (size[0] * size[1] * 4) as usize, "direct HDR post path must produce the expected display image");
+    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+}
+
+/// Stable color and roughness FBM fields are evaluated together, reused on a
+/// later composite, and invalidated when the fill seed changes. Both final
+/// channels must match an engine forced through the original inline shader path.
+#[test]
+#[ignore]
+fn fill_variation_noise_cache_matches_inline_and_invalidates_on_change() {
     use crate::engine::{Content, FillParams, MatValues};
     use crate::undo::UndoStack;
 
@@ -1221,10 +1510,12 @@ fn fill_roughness_noise_cache_matches_inline_and_invalidates_on_change() {
     let res = 128;
     let fill = FillParams {
         mat: MatValues {
-            enabled: [false, true, false, false, false, false, false, false],
+            enabled: [true, true, false, false, false, false, false, false],
+            color: [0.68, 0.52, 0.34],
             rough: 0.42,
             ..Default::default()
         },
+        color_var: 0.63,
         rough_var: 0.78,
         var_scale: 2.35,
         seed: 17.0,
@@ -1237,17 +1528,19 @@ fn fill_roughness_noise_cache_matches_inline_and_invalidates_on_change() {
     let layer = cached.add_fill_layer(0, None, "Micro Roughness".into(), fill, &mut undo);
 
     cached.composite();
-    assert_eq!(cached.last_fill_roughness_cache_misses, 1, "the first composite must generate the roughness field");
-    assert_eq!(cached.last_fill_roughness_cache_gpu_passes, 1);
-    assert_eq!(cached.last_fill_roughness_cache_hits, 0);
-    let first = read_texture(&rs.device, &rs.queue, cached.final_tex(1));
+    assert_eq!(cached.last_fill_variation_cache_misses, 1, "the first composite must generate both FBM channels");
+    assert_eq!(cached.last_fill_variation_cache_gpu_passes, 2, "each enabled channel is generated by one single-FBM pass");
+    assert_eq!(cached.last_fill_variation_cache_hits, 0);
+    let first_color = read_texture(&rs.device, &rs.queue, cached.final_tex(0));
+    let first_roughness = read_texture(&rs.device, &rs.queue, cached.final_tex(1));
 
     cached.mark_dirty();
     cached.composite();
-    assert_eq!(cached.last_fill_roughness_cache_hits, 1, "the unchanged layer should reuse its FBM field");
-    assert_eq!(cached.last_fill_roughness_cache_misses, 0);
-    assert_eq!(cached.last_fill_roughness_cache_gpu_passes, 0, "a cache hit must not submit another FBM pass");
-    assert_eq!(first, read_texture(&rs.device, &rs.queue, cached.final_tex(1)));
+    assert_eq!(cached.last_fill_variation_cache_hits, 1, "the unchanged layer should reuse both FBM fields");
+    assert_eq!(cached.last_fill_variation_cache_misses, 0);
+    assert_eq!(cached.last_fill_variation_cache_gpu_passes, 0, "a cache hit must not submit another FBM pass");
+    assert_eq!(first_color, read_texture(&rs.device, &rs.queue, cached.final_tex(0)));
+    assert_eq!(first_roughness, read_texture(&rs.device, &rs.queue, cached.final_tex(1)));
 
     let changed = match &mut cached.layers[layer].content {
         Content::Fill(params) => {
@@ -1258,16 +1551,20 @@ fn fill_roughness_noise_cache_matches_inline_and_invalidates_on_change() {
     };
     cached.mark_dirty();
     cached.composite();
-    assert_eq!(cached.last_fill_roughness_cache_misses, 1, "changing the seed must invalidate the cached field");
-    assert_eq!(cached.last_fill_roughness_cache_gpu_passes, 1);
+    assert_eq!(cached.last_fill_variation_cache_misses, 1, "changing the seed must invalidate the cached field");
+    assert_eq!(cached.last_fill_variation_cache_gpu_passes, 2);
 
     let mut reference = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), res);
+    reference.force_inline_fill_variation = true;
     let mut reference_undo = UndoStack::default();
-    reference.add_fill_layer(0, None, "Micro Roughness".into(), changed, &mut reference_undo);
+    reference.add_fill_layer(0, None, "Silver".into(), changed, &mut reference_undo);
     reference.composite();
-    let actual = read_texture(&rs.device, &rs.queue, cached.final_tex(1));
-    let expected = read_texture(&rs.device, &rs.queue, reference.final_tex(1));
-    assert_eq!(actual, expected, "cached roughness FBM must match the inline evaluation exactly");
+    let actual_color = read_texture(&rs.device, &rs.queue, cached.final_tex(0));
+    let expected_color = read_texture(&rs.device, &rs.queue, reference.final_tex(0));
+    let actual_roughness = read_texture(&rs.device, &rs.queue, cached.final_tex(1));
+    let expected_roughness = read_texture(&rs.device, &rs.queue, reference.final_tex(1));
+    assert_eq!(actual_color, expected_color, "cached color FBM must match the inline evaluation exactly");
+    assert_eq!(actual_roughness, expected_roughness, "cached roughness FBM must match the inline evaluation exactly");
 
     rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 }

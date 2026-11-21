@@ -1160,7 +1160,7 @@ struct LayerUniform {
     ns: [f32; 4],
     /// The ID mask's further colors (rgb) with a 1 in w when in use.
     gids: [[f32; 4]; MAX_ID_COLORS - 1],
-    /// Cached procedural roughness FBM is bound at composite texture slot 27.
+    /// Cached procedural color/roughness FBM is bound at composite texture slot 27.
     varc: [f32; 4],
 }
 
@@ -1217,6 +1217,30 @@ struct ActiveStroke {
     before: Option<Snapshot>,
 }
 
+fn opengl_stamp_shader_source() -> String {
+    let source = include_str!("shaders/stamp.wgsl")
+        .replace("texture_depth_multisampled_2d", "texture_multisampled_2d<f32>")
+        .replace(
+            "textureLoad(depth_map, sp, 0)",
+            "unpack_depth(textureLoad(depth_map, sp, 0))",
+        )
+        .replace(
+            "textureLoad(depth_map, sp, i32(sample))",
+            "unpack_depth(textureLoad(depth_map, sp, i32(sample)))",
+        );
+    format!(
+        "{source}\n{}",
+        r#"
+// OpenGL compatibility: reconstruct the original f32 depth bits from RGBA8.
+fn unpack_depth(encoded: vec4<f32>) -> f32 {
+    let bytes = vec4<u32>(round(encoded * 255.0));
+    let bits = (bytes.x << 24u) | (bytes.y << 16u) | (bytes.z << 8u) | bytes.w;
+    return bitcast<f32>(bits);
+}
+"#
+    )
+}
+
 struct Pipelines {
     uvbake: wgpu::RenderPipeline,
     dilate: wgpu::RenderPipeline,
@@ -1240,8 +1264,10 @@ struct Pipelines {
     composite: wgpu::RenderPipeline,
     folder_merge: wgpu::RenderPipeline,
     composite_bgl: wgpu::BindGroupLayout,
-    fill_roughness_noise: wgpu::RenderPipeline,
-    fill_roughness_noise_bgl: wgpu::BindGroupLayout,
+    /// Built only when a Fill layer actually uses color or roughness variation.
+    composite_module: wgpu::ShaderModule,
+    fill_variation_noise: std::sync::OnceLock<wgpu::RenderPipeline>,
+    fill_variation_noise_bgl: wgpu::BindGroupLayout,
     mask_source: wgpu::RenderPipeline,
     mask_filter: wgpu::RenderPipeline,
     mask_filter_bgl: wgpu::BindGroupLayout,
@@ -1490,10 +1516,13 @@ pub struct Engine {
     pub last_mask_cache_hits: u32,
     pub last_mask_cache_misses: u32,
     pub last_mask_gpu_passes: u32,
-    /// Procedural fill roughness FBM cache activity from the most recent composite.
-    pub last_fill_roughness_cache_hits: u32,
-    pub last_fill_roughness_cache_misses: u32,
-    pub last_fill_roughness_cache_gpu_passes: u32,
+    /// Procedural fill color/roughness FBM cache activity from the most recent composite.
+    pub last_fill_variation_cache_hits: u32,
+    pub last_fill_variation_cache_misses: u32,
+    pub last_fill_variation_cache_gpu_passes: u32,
+    /// Test-only switch to compare the cache against the original inline shader path.
+    #[cfg(test)]
+    pub(crate) force_inline_fill_variation: bool,
     /// IDs whose final filtered mask texture currently holds valid contents.
     mask_final: HashSet<u64>,
     pub bake_report: Option<Arc<BakeReport>>,
@@ -1540,7 +1569,7 @@ pub struct Engine {
     /// One persistent result texture per filtered mask.
     mask_out: HashMap<u64, Tex>,
     /// Full-resolution, one-channel FBM fields for stable fill roughness variations.
-    fill_roughness_noise: HashMap<u64, FillRoughnessNoiseCache>,
+    fill_variation_noise: HashMap<u64, FillVariationNoiseCache>,
     /// Three scratch textures shared by every filtered mask in this engine:
     /// two ping-pong buffers and one temporary mask-layer source.
     mask_scratch: Option<[Tex; 3]>,
@@ -1570,19 +1599,22 @@ impl UvBakeKey {
     }
 }
 
-/// Inputs that actually change the roughness FBM field. The variation amount
-/// is intentionally excluded: it scales the cached noise cheaply in fs_layer.
+/// Inputs that change the color/roughness FBM fields. Variation amounts are
+/// excluded because they scale the cached noise cheaply in fs_layer.
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct FillRoughnessNoiseKey {
+struct FillVariationNoiseKey {
     res: u32,
     uv_version: u64,
     scale_bits: u32,
     seed_bits: u32,
+    color_enabled: bool,
+    roughness_enabled: bool,
 }
 
-struct FillRoughnessNoiseCache {
-    key: FillRoughnessNoiseKey,
-    texture: Tex,
+struct FillVariationNoiseCache {
+    key: FillVariationNoiseKey,
+    color: Option<Tex>,
+    roughness: Option<Tex>,
 }
 
 fn accum_set(device: &wgpu::Device, res: u32, label: &str) -> [Tex; ACCUM] {
@@ -1758,7 +1790,8 @@ impl Engine {
     pub fn new(rs: &egui_wgpu::RenderState, mesh: &GpuMesh, bounds: (Vec3, Vec3), res: u32) -> Engine {
         let p = {
             let _s = crate::startup_trace::span("Engine::create_pipelines");
-            Arc::new(Self::create_pipelines(&rs.device))
+            let gl_depth_as_color = rs.adapter.get_info().backend == wgpu::Backend::Gl;
+            Arc::new(Self::create_pipelines(&rs.device, gl_depth_as_color))
         };
         Self::with_pipelines(
             rs,
@@ -1768,6 +1801,7 @@ impl Engine {
             bounds,
             res,
             Arc::new(crate::undo::SnapshotBufferPool::default()),
+            true,
         )
     }
 
@@ -1775,10 +1809,33 @@ impl Engine {
     /// mesh's index buffer. Shares this engine's pipelines and document bounds.
     pub fn sibling(&self, mesh: &GpuMesh, tris: std::ops::Range<u32>, res: u32) -> Engine {
         let mut sibling = Self::with_pipelines(
-            &self.rs, self.p.clone(), mesh, tris, self.bounds, res, self.snapshot_buffer_pool.clone(),
+            &self.rs, self.p.clone(), mesh, tris, self.bounds, res, self.snapshot_buffer_pool.clone(), true,
         );
         sibling.image_cache = self.image_cache.clone();
         sibling
+    }
+
+    /// Another Texture Set that starts parked: allocate only neutral 1x1
+    /// surface maps and defer its UV bake until it is edited or previewed.
+    pub(crate) fn sibling_parked(&self, mesh: &GpuMesh, tris: std::ops::Range<u32>, res: u32) -> Engine {
+        let mut sibling = Self::with_pipelines(
+            &self.rs, self.p.clone(), mesh, tris, self.bounds, res, self.snapshot_buffer_pool.clone(), false,
+        );
+        sibling.image_cache = self.image_cache.clone();
+        sibling
+    }
+
+    /// Small, valid bindings for a parked Engine. They are never used to
+    /// paint or composite; full maps are restored before those operations.
+    fn surface_map_placeholders(device: &wgpu::Device, queue: &wgpu::Queue) -> (Tex, Tex, Tex) {
+        let pos = Tex::new(device, "parked position map", 1, 1, POS_FORMAT, LAYER_USAGE);
+        let nrm = Tex::new(device, "parked normal map", 1, 1, NRM_FORMAT, LAYER_USAGE);
+        let tan = Tex::new(device, "parked tangent map", 1, 1, TAN_FORMAT, LAYER_USAGE);
+        let zero_pos = [0u16; 4];
+        queue.write_texture(pos.copy_info(), bytemuck::cast_slice(&zero_pos), Default::default(), pos.extent());
+        queue.write_texture(nrm.copy_info(), &[128, 128, 255, 255], Default::default(), nrm.extent());
+        queue.write_texture(tan.copy_info(), &[255, 128, 128, 255], Default::default(), tan.extent());
+        (pos, nrm, tan)
     }
 
     /// Remove expired weak entries from the document-shared Fill image cache.
@@ -1792,12 +1849,66 @@ impl Engine {
         }
     }
 
+    /// Whether the full-resolution position, normal and tangent maps are resident.
+    pub(crate) fn surface_maps_resident(&self) -> bool {
+        self.pos.width == self.res && self.pos.height == self.res
+            && self.nrm.width == self.res && self.nrm.height == self.res
+            && self.tan.width == self.res && self.tan.height == self.res
+    }
+
+    /// Replaces full-resolution surface maps with tiny neutral bindings.
+    /// The UV bake key is retained so restoring the same mesh/range does not
+    /// invalidate the already-correct material composite.
+    pub(crate) fn release_surface_maps(&mut self) -> bool {
+        if self.pos.width == 1 && self.nrm.width == 1 && self.tan.width == 1 {
+            return false;
+        }
+        let (pos, nrm, tan) = Self::surface_map_placeholders(&self.device, &self.queue);
+        self.pos = pos;
+        self.nrm = nrm;
+        self.tan = tan;
+        self.uv_version = self.uv_version.wrapping_add(1);
+        self.apply_bg = None;
+        self.stamp_bg = [None, None];
+        true
+    }
+
+    /// Recreates world-space maps when they are needed. If the mesh, range and
+    /// resolution are unchanged, this only changes the viewport binding identity.
+    pub(crate) fn restore_surface_maps(&mut self, mesh: &GpuMesh) -> bool {
+        let resident = self.surface_maps_resident();
+        let same_bake = UvBakeKey::is_current(self.uv_baked.as_ref(), mesh.mesh_id, &self.tris, self.res);
+        if !resident {
+            self.bake_uv_internal(mesh, !same_bake);
+            true
+        } else if !same_bake {
+            self.bake_uv(mesh);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Drops GPU resources used only while this Texture Set is being edited.
     /// The final composited result stays resident for the viewport. The next
     /// composite/paint recreates the released workspace lazily.
-    pub(crate) fn release_inactive_working_set(&mut self) {
-        if self.active.is_some() || self.generation == 0 {
-            return;
+    pub(crate) fn release_inactive_working_set(&mut self) -> bool {
+        self.release_inactive_working_set_inner(false)
+    }
+
+    /// Same as release_inactive_working_set, but keeps surface maps while
+    /// a view mode needs them for parked Texture Sets.
+    pub(crate) fn release_inactive_working_set_keep_surface_maps(&mut self) -> bool {
+        self.release_inactive_working_set_inner(true)
+    }
+
+    fn release_inactive_working_set_inner(&mut self, keep_surface_maps: bool) -> bool {
+        if self.active.is_some() {
+            return false;
+        }
+        let released_surface_maps = !keep_surface_maps && self.release_surface_maps();
+        if self.generation == 0 {
+            return released_surface_maps;
         }
         // Drop expired path/Weak bookkeeping from the document-wide cache on
         // set switches, not on every frame or image lookup.
@@ -1819,7 +1930,7 @@ impl Engine {
         self.prefix_cache = None;
         self.mask_scratch = None;
         self.mask_out.clear();
-        self.fill_roughness_noise.clear();
+        self.fill_variation_noise.clear();
         self.mask_final.clear();
         self.apply_bg = None;
         // Cached stamp bind groups retain views such as the last viewport depth target.
@@ -1853,6 +1964,7 @@ impl Engine {
         // Keep the already-rendered UI thumbnails, but drop the 512²
         // render targets and reduced surface maps used only to regenerate them.
         self.thumbs.release_scratch();
+        released_surface_maps
     }
 
     fn ensure_composite_working_set(&mut self) {
@@ -1873,7 +1985,8 @@ impl Engine {
         }
     }
 
-    pub(crate) fn restore_active_working_set(&mut self) {
+    pub(crate) fn restore_active_working_set(&mut self, mesh: &GpuMesh) {
+        self.restore_surface_maps(mesh);
         self.ensure_composite_working_set();
         self.ensure_stroke_target();
     }
@@ -1888,7 +2001,7 @@ impl Engine {
         res: u32,
     ) -> Engine {
         let mut sibling = Self::with_pipelines(
-            &self.rs, self.p.clone(), mesh, tris, bounds, res, self.snapshot_buffer_pool.clone(),
+            &self.rs, self.p.clone(), mesh, tris, bounds, res, self.snapshot_buffer_pool.clone(), true,
         );
         sibling.image_cache = self.image_cache.clone();
         sibling
@@ -1902,6 +2015,7 @@ impl Engine {
         bounds: (Vec3, Vec3),
         res: u32,
         snapshot_buffer_pool: Arc<crate::undo::SnapshotBufferPool>,
+        bake_surface_maps: bool,
     ) -> Engine {
         static NEXT_ENGINE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let id = NEXT_ENGINE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1936,6 +2050,15 @@ impl Engine {
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let (pos, nrm, tan) = if bake_surface_maps {
+            (
+                Tex::new(&device, "position map", res, res, POS_FORMAT, LAYER_USAGE),
+                Tex::new(&device, "normal map", res, res, NRM_FORMAT, LAYER_USAGE),
+                Tex::new(&device, "tangent map", res, res, TAN_FORMAT, LAYER_USAGE),
+            )
+        } else {
+            Self::surface_map_placeholders(&device, &queue)
+        };
         let mut engine = {
             let _textures = crate::startup_trace::span("Engine::with_pipelines texture/buffer allocation");
             Engine {
@@ -1946,9 +2069,9 @@ impl Engine {
             composite_profile_requested: false,
             forced_composite_profile: false,
             last_end_stages_ms: [0.0; 5],
-            pos: Tex::new(&device, "position map", res, res, POS_FORMAT, LAYER_USAGE),
-            nrm: Tex::new(&device, "normal map", res, res, NRM_FORMAT, LAYER_USAGE),
-            tan: Tex::new(&device, "tangent map", res, res, TAN_FORMAT, LAYER_USAGE),
+            pos,
+            nrm,
+            tan,
             accum: [accum_set(&device, res, "accum A"), accum_set(&device, res, "accum B")],
             final_idx: 0,
             stroke: Tex::new(&device, "stroke mask", res, res, STROKE_FORMAT, LAYER_USAGE),
@@ -1978,9 +2101,11 @@ impl Engine {
             last_mask_cache_hits: 0,
             last_mask_cache_misses: 0,
             last_mask_gpu_passes: 0,
-            last_fill_roughness_cache_hits: 0,
-            last_fill_roughness_cache_misses: 0,
-            last_fill_roughness_cache_gpu_passes: 0,
+            last_fill_variation_cache_hits: 0,
+            last_fill_variation_cache_misses: 0,
+            last_fill_variation_cache_gpu_passes: 0,
+            #[cfg(test)]
+            force_inline_fill_variation: false,
             mask_final: HashSet::new(),
             bake_report: None,
             edge_max: 0.2,
@@ -2019,7 +2144,7 @@ impl Engine {
             prefix: None,
             prefix_cache: None,
             mask_out: HashMap::new(),
-            fill_roughness_noise: HashMap::new(),
+            fill_variation_noise: HashMap::new(),
             mask_scratch: None,
             mask_filter_ubuf: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("mask filter uniforms"),
@@ -2043,7 +2168,7 @@ impl Engine {
             queue,
             }
         };
-        {
+        if bake_surface_maps {
             let _s = crate::startup_trace::span("Engine::bake_uv");
             engine.bake_uv(mesh);
         }
@@ -2051,7 +2176,7 @@ impl Engine {
         engine
     }
 
-    fn create_pipelines(device: &wgpu::Device) -> Pipelines {
+    fn create_pipelines(device: &wgpu::Device, gl_depth_as_color: bool) -> Pipelines {
         // UV-space position/normal bake.
         let uv_module = gpu::shader(device, "uvbake", include_str!("shaders/uvbake.wgsl"));
         let empty_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -2096,8 +2221,15 @@ impl Engine {
             &[gpu::target(POS_FORMAT), gpu::target(NRM_FORMAT), gpu::target(TAN_FORMAT)],
         );
 
-        // Brush stamping into the stroke mask.
-        let stamp_module = gpu::shader(device, "stamp", include_str!("shaders/stamp.wgsl"));
+        // Brush stamping into the stroke mask. OpenGL's GLSL translator cannot
+        // load depth textures, so that backend reads an MSAA color texture with
+        // the exact depth bits encoded into RGBA8. Vulkan keeps the native path.
+        let stamp_module = if gl_depth_as_color {
+            let source = opengl_stamp_shader_source();
+            gpu::shader(device, "stamp (OpenGL depth-as-color)", &source)
+        } else {
+            gpu::shader(device, "stamp", include_str!("shaders/stamp.wgsl"))
+        };
         let stamp_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("stamp"),
             entries: &[
@@ -2120,7 +2252,11 @@ impl Engine {
                     binding: 4,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
+                        sample_type: if gl_depth_as_color {
+                            wgpu::TextureSampleType::Float { filterable: false }
+                        } else {
+                            wgpu::TextureSampleType::Depth
+                        },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: true,
                     },
@@ -2295,25 +2431,22 @@ impl Engine {
         entries.push(gpu::tex_entry(25, true));
         // The tangent frame, for normal images projected in world space.
         entries.push(gpu::tex_entry(26, false));
-        // Cached roughness variation is read with textureLoad, not a sampler.
+        // Cached color/roughness variation is read with textureLoad, not a sampler.
         entries.push(gpu::tex_entry(27, false));
+        entries.push(gpu::tex_entry(28, false));
         let composite_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("composite"),
             entries: &entries,
         });
-        // The roughness prepass needs only the layer uniform and the position map.
-        let fill_roughness_noise_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("fill roughness noise"),
+        // The color/roughness FBM prepass needs only the layer uniform and position map.
+        let fill_variation_noise_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("fill variation noise"),
             entries: &[gpu::uniform_entry(0, true), gpu::tex_entry(10, false)],
         });
-        let fill_roughness_noise = gpu::fullscreen_pipeline(
-            device,
-            "fill roughness noise",
-            &composite_module,
-            "fs_fill_roughness_noise",
-            &gpu::layout(device, &fill_roughness_noise_bgl),
-            &[gpu::target(MASK_FILTER_FORMAT)],
-        );
+        // The variation prepass pipeline is intentionally lazy. Paint-only
+        // layers and projects without Fill variation should not compile an
+        // expensive FBM shader during Engine construction.
+        let fill_variation_noise = std::sync::OnceLock::new();
         let composite = gpu::fullscreen_pipeline(
             device,
             "composite",
@@ -2423,8 +2556,9 @@ impl Engine {
             composite,
             folder_merge,
             composite_bgl,
-            fill_roughness_noise,
-            fill_roughness_noise_bgl,
+            composite_module,
+            fill_variation_noise,
+            fill_variation_noise_bgl,
             mask_source,
             mask_filter,
             mask_filter_bgl,
@@ -2440,7 +2574,18 @@ impl Engine {
     /// Rasterizes position and normal maps for the current mesh at the
     /// current resolution, with dilation past UV island borders.
     pub fn bake_uv(&mut self, mesh: &GpuMesh) {
+        self.bake_uv_internal(mesh, true);
+    }
+
+    fn bake_uv_internal(&mut self, mesh: &GpuMesh, invalidate_composite: bool) {
         self.apply_bg = None;
+        // Parked Texture Sets keep 1x1 placeholders. Recreate their full-size
+        // targets only when editing, compositing or a world-space view needs them.
+        if !self.surface_maps_resident() {
+            self.pos = Tex::new(&self.device, "position map", self.res, self.res, POS_FORMAT, LAYER_USAGE);
+            self.nrm = Tex::new(&self.device, "normal map", self.res, self.res, NRM_FORMAT, LAYER_USAGE);
+            self.tan = Tex::new(&self.device, "tangent map", self.res, self.res, TAN_FORMAT, LAYER_USAGE);
+        }
         // A mesh change can leave the range past the end; the app sets the
         // new range right after, and this draws nothing meanwhile.
         let tris = self.tris.start.min(mesh.index_count)..self.tris.end.min(mesh.index_count);
@@ -2497,10 +2642,12 @@ impl Engine {
         }
         // DILATE_PASSES is even, so the result ends up back in pos/nrm.
         self.queue.submit([encoder.finish()]);
-        self.uv_version += 1;
+        self.uv_version = self.uv_version.wrapping_add(1);
         self.uv_baked = Some(UvBakeKey { mesh_id: mesh.mesh_id, tris: self.tris.clone(), res: self.res });
-        self.mask_final.clear();
-        self.mark_dirty();
+        if invalidate_composite {
+            self.mask_final.clear();
+            self.mark_dirty();
+        }
     }
 
     pub fn bounds(&self) -> (Vec3, Vec3) {
@@ -2516,6 +2663,16 @@ impl Engine {
     /// its position and normal maps. The bake is skipped when the maps were
     /// already baked from this same GPU mesh, range and size.
     pub fn set_triangles(&mut self, tris: std::ops::Range<u32>, mesh: &GpuMesh) {
+        let _ = self.set_triangles_inner(tris, mesh, true);
+    }
+
+    /// Updates a parked Engine range without allocating or baking its maps.
+    /// Returns true when full-resolution maps were released.
+    pub(crate) fn set_triangles_parked(&mut self, tris: std::ops::Range<u32>, mesh: &GpuMesh) -> bool {
+        self.set_triangles_inner(tris, mesh, false)
+    }
+
+    fn set_triangles_inner(&mut self, tris: std::ops::Range<u32>, mesh: &GpuMesh, bake_surface_maps: bool) -> bool {
         let needed = (tris.end - tris.start).max(3);
         if needed > self.screen_index_capacity {
             self.screen_index_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -2528,8 +2685,21 @@ impl Engine {
         }
         let repeat = UvBakeKey::is_current(self.uv_baked.as_ref(), mesh.mesh_id, &tris, self.res);
         self.tris = tris;
-        if !repeat {
-            self.bake_uv(mesh);
+        if bake_surface_maps {
+            if !repeat {
+                self.bake_uv(mesh);
+            }
+            false
+        } else {
+            if !repeat {
+                self.mask_final.clear();
+                self.mark_dirty();
+            }
+            let released = self.release_surface_maps();
+            if !released && !repeat {
+                self.uv_version = self.uv_version.wrapping_add(1);
+            }
+            released
         }
     }
 
@@ -4995,44 +5165,62 @@ impl Engine {
             self.folder_below.push(set);
         }
 
-        // Cache the expensive roughness FBM for stable fill layers. The FBM
-        // depends only on the position map, scale and seed; rough_var remains a
-        // cheap multiplier in the main layer pass and can change without a rebake.
-        let mut roughness_noise_needed = HashSet::new();
-        let mut roughness_noise_misses: Vec<(usize, u64)> = Vec::new();
-        let mut roughness_noise_hits = 0u32;
+        // Cache color and roughness FBM together. Both depend only on the
+        // position map, variation scale and seed; channel amounts and per-part
+        // variation remain cheap controls in the main layer pass.
+        let mut variation_noise_needed = HashSet::new();
+        let mut variation_noise_misses: Vec<(usize, u64, bool)> = Vec::new();
+        let mut variation_noise_hits = 0u32;
         for (slot, pass) in passes.iter().enumerate() {
             let Pass::Layer(li) = *pass else { continue };
             let layer = &self.layers[li];
             let Content::Fill(fill) = &layer.content else { continue };
-            if fill.rough_var == 0.0 || !fill.mat.enabled[1] || layer.disabled_channels[1] {
+            #[cfg(test)]
+            if self.force_inline_fill_variation {
                 continue;
             }
-            let key = FillRoughnessNoiseKey {
+            let color_enabled = fill.color_var != 0.0 && fill.mat.enabled[0] && !layer.disabled_channels[0];
+            let roughness_enabled = fill.rough_var != 0.0 && fill.mat.enabled[1] && !layer.disabled_channels[1];
+            if !color_enabled && !roughness_enabled {
+                continue;
+            }
+            let key = FillVariationNoiseKey {
                 res: self.res,
                 uv_version: self.uv_version,
                 scale_bits: fill.var_scale.to_bits(),
                 seed_bits: fill.seed.to_bits(),
+                color_enabled,
+                roughness_enabled,
             };
-            roughness_noise_needed.insert(layer.id);
-            let current = self.fill_roughness_noise.get(&layer.id)
-                .is_some_and(|cache| cache.key == key && cache.texture.width == self.res);
+            variation_noise_needed.insert(layer.id);
+            let current = self.fill_variation_noise.get(&layer.id)
+                .is_some_and(|cache| {
+                    cache.key == key
+                        && cache.color.as_ref().is_some_and(|texture| texture.width == self.res) == color_enabled
+                        && cache.roughness.as_ref().is_some_and(|texture| texture.width == self.res) == roughness_enabled
+                });
             if current {
-                roughness_noise_hits += 1;
+                variation_noise_hits += 1;
                 continue;
             }
-            self.fill_roughness_noise.insert(layer.id, FillRoughnessNoiseCache {
-                key,
-                texture: Tex::new(&self.device, "fill roughness FBM cache", self.res, self.res, MASK_FILTER_FORMAT, LAYER_USAGE),
-            });
-            roughness_noise_misses.push((slot, layer.id));
+            let color = color_enabled.then(|| Tex::new(&self.device, "fill color FBM cache", self.res, self.res, F::R32Float, LAYER_USAGE));
+            let roughness = roughness_enabled.then(|| Tex::new(&self.device, "fill roughness FBM cache", self.res, self.res, F::R32Float, LAYER_USAGE));
+            self.fill_variation_noise.insert(layer.id, FillVariationNoiseCache { key, color, roughness });
+            if color_enabled {
+                variation_noise_misses.push((slot, layer.id, false));
+            }
+            if roughness_enabled {
+                variation_noise_misses.push((slot, layer.id, true));
+            }
         }
-        self.fill_roughness_noise.retain(|id, cache| {
-            roughness_noise_needed.contains(id) && cache.texture.width == self.res
+        self.fill_variation_noise.retain(|id, cache| {
+            variation_noise_needed.contains(id)
+                && cache.color.as_ref().is_none_or(|texture| texture.width == self.res)
+                && cache.roughness.as_ref().is_none_or(|texture| texture.width == self.res)
         });
-        self.last_fill_roughness_cache_hits = roughness_noise_hits;
-        self.last_fill_roughness_cache_misses = roughness_noise_misses.len() as u32;
-        self.last_fill_roughness_cache_gpu_passes = roughness_noise_misses.len() as u32;
+        self.last_fill_variation_cache_hits = variation_noise_hits;
+        self.last_fill_variation_cache_misses = variation_noise_needed.len() as u32 - variation_noise_hits;
+        self.last_fill_variation_cache_gpu_passes = variation_noise_misses.len() as u32;
 
         // Cached mask sources get an extra uniform slot after the layer passes.
         // Filtered masks run their filter stack after the source; generator-only
@@ -5053,6 +5241,15 @@ impl Engine {
             item_slots.insert(li, (next_slot..next_slot + n).collect());
             next_slot += n;
         }
+        // Each single-channel FBM prepass gets its own dynamic uniform slot.
+        let variation_noise_slots: Vec<(usize, u64, bool)> = variation_noise_misses
+            .iter()
+            .map(|&(_layer_slot, layer_id, roughness)| {
+                let prepass_slot = next_slot;
+                next_slot += 1;
+                (prepass_slot, layer_id, roughness)
+            })
+            .collect();
         let slots = next_slot;
         let required_layer_slots = layer_uniform_buffer_capacity(self.layer_ubuf_slots, slots);
         if required_layer_slots != self.layer_ubuf_slots {
@@ -5068,8 +5265,9 @@ impl Engine {
         for (k, pass) in passes.iter().enumerate() {
             let (Pass::Layer(li) | Pass::End(li)) = *pass else { continue };
             let mut u = self.layer_uniform(&self.layers[li]);
-            if self.fill_roughness_noise.contains_key(&self.layers[li].id) {
-                u.varc[0] = 1.0;
+            if let Some(cache) = self.fill_variation_noise.get(&self.layers[li].id) {
+                u.varc[0] = if cache.roughness.is_some() { 1.0 } else { 0.0 };
+                u.varc[1] = if cache.color.is_some() { 1.0 } else { 0.0 };
             }
             if let Some(&slot) = source_slot.get(&li) {
                 let off = slot * UNIFORM_STRIDE as usize;
@@ -5100,6 +5298,13 @@ impl Engine {
                     data[off..off + size_of::<LayerUniform>()].copy_from_slice(bytemuck::bytes_of(&iu));
                 }
             }
+        }
+        for &(slot, layer_id, roughness) in &variation_noise_slots {
+            let mut u = self.layer_uniform(&self.layers[*self.layers.iter().position(|layer| layer.id == layer_id)
+                .as_ref().expect("cached fill variation layer remains in stack")]);
+            u.varc[2] = if roughness { 1.0 } else { 0.0 };
+            let offset = slot * UNIFORM_STRIDE as usize;
+            data[offset..offset + size_of::<LayerUniform>()].copy_from_slice(bytemuck::bytes_of(&u));
         }
         self.queue.write_buffer(&self.layer_ubuf, 0, &data);
         // One persistent result per cached mask. Only masks with actual filter
@@ -5207,15 +5412,35 @@ impl Engine {
             && let Some(p) = &self.active_gpu_profile {
                 encoder.write_timestamp(&p.query_set, 6);
             }
-        // The cached noise field is independent of the accumulation below.
-        // Generate only on a key miss; future composites reuse the same texture.
-        for &(slot, layer_id) in &roughness_noise_misses {
+        // Compile the FBM prepass only when a cache miss actually needs it.
+        let variation_pipeline = if variation_noise_slots.is_empty() {
+            None
+        } else {
+            Some(self.p.fill_variation_noise.get_or_init(|| {
+                gpu::fullscreen_pipeline(
+                    &self.device,
+                    "fill variation noise",
+                    &self.p.composite_module,
+                    "fs_fill_variation_noise",
+                    &gpu::layout(&self.device, &self.p.fill_variation_noise_bgl),
+                    &[gpu::target(F::R32Float)],
+                )
+            }))
+        };
+        // The cached variation field is independent of the accumulation below.
+        // Generate one FBM channel per pass on a key miss; later composites reuse it.
+        for &(slot, layer_id, roughness) in &variation_noise_slots {
             let layer = &self.layers[*self.layers.iter().position(|layer| layer.id == layer_id)
-                .as_ref().expect("cached roughness layer remains in stack")];
-            let cache = &self.fill_roughness_noise[&layer_id];
+                .as_ref().expect("cached fill variation layer remains in stack")];
+            let cache = &self.fill_variation_noise[&layer_id];
+            let target = if roughness {
+                cache.roughness.as_ref().expect("roughness cache texture")
+            } else {
+                cache.color.as_ref().expect("color cache texture")
+            };
             let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("fill roughness noise"),
-                layout: &self.p.fill_roughness_noise_bgl,
+                label: Some("fill variation noise"),
+                layout: &self.p.fill_variation_noise_bgl,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -5236,10 +5461,10 @@ impl Engine {
             );
             let mut pass = gpu::pass(
                 &mut encoder,
-                "fill roughness noise cache",
-                &[gpu::color_attachment(&cache.texture.view, wgpu::LoadOp::Clear(wgpu::Color::BLACK))],
+                "fill variation noise cache",
+                &[gpu::color_attachment(&target.view, wgpu::LoadOp::Clear(wgpu::Color::BLACK))],
             );
-            pass.set_pipeline(&self.p.fill_roughness_noise);
+            pass.set_pipeline(variation_pipeline.expect("variation pipeline created for cache misses"));
             pass.set_bind_group(0, &bg, &[(slot as u64 * UNIFORM_STRIDE) as u32]);
             pass.draw(0..3, 0..1);
             drop(pass);
@@ -5247,7 +5472,7 @@ impl Engine {
                 &mut encoder,
                 profile_query.as_deref(),
                 profile_slot,
-                format!("Roughness FBM cache · {}", layer.name),
+                format!("Fill {} FBM cache · {}", if roughness { "roughness" } else { "color" }, layer.name),
                 &mut profile_labels,
             );
         }
@@ -5408,7 +5633,9 @@ impl Engine {
             };
             let mask = layer.mask.as_ref().and_then(|m| m.paint.as_ref());
             let prev = if from_cache { self.prefix_cache.as_ref().expect("prefix cache") } else { &self.accum[src] };
-            let roughness_noise = self.fill_roughness_noise.get(&layer.id).map(|cache| &cache.texture);
+            let variation_cache = self.fill_variation_noise.get(&layer.id);
+            let color_noise = variation_cache.and_then(|cache| cache.color.as_ref());
+            let roughness_noise = variation_cache.and_then(|cache| cache.roughness.as_ref());
             let make_bg = |mask: Option<&Tex>| self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("composite"),
                 layout: &self.p.composite_bgl,
@@ -5448,7 +5675,8 @@ impl Engine {
                     wgpu::BindGroupEntry { binding: 24, resource: view(Some(&prev[FINAL_SPECULAR])) },
                     wgpu::BindGroupEntry { binding: 25, resource: view(chans[SPECULAR]) },
                     wgpu::BindGroupEntry { binding: 26, resource: view(Some(&self.tan)) },
-                    wgpu::BindGroupEntry { binding: 27, resource: view(roughness_noise) },
+                    wgpu::BindGroupEntry { binding: 27, resource: view(color_noise) },
+                    wgpu::BindGroupEntry { binding: 28, resource: view(roughness_noise) },
                 ],
             });
             // A filtered mask depends on its own paint/generator/filter data,
@@ -5823,7 +6051,10 @@ impl Engine {
             ("prefix cache", self.prefix_cache.as_ref().map_or(0, |set| set.iter().map(|t| t.bytes()).sum())),
             ("filtered masks", self.mask_out.values().map(|t| t.bytes()).sum::<u64>()
                 + self.mask_scratch.as_ref().map_or(0, |set| set.iter().map(|t| t.bytes()).sum::<u64>())),
-            ("procedural variation caches", self.fill_roughness_noise.values().map(|cache| cache.texture.bytes()).sum()),
+            ("procedural variation caches", self.fill_variation_noise.values()
+                .map(|cache| cache.color.as_ref().map_or(0, |texture| texture.bytes())
+                    + cache.roughness.as_ref().map_or(0, |texture| texture.bytes()))
+                .sum()),
             ("paint layers and masks", self.layers.iter().map(|l| l.vram_bytes()).sum::<u64>()),
             ("fill images", self.fill_image_bytes()),
             ("thumbnails", self.thumbs.vram_bytes()),
@@ -6229,6 +6460,20 @@ mod mask_cache_invalidation_tests {
         let mut structure = before.clone();
         structure.layers[0].0 = 8;
         assert_eq!(Engine::mask_cache_changes(&before, &structure), (true, Vec::new()));
+    }
+}
+
+#[cfg(test)]
+mod opengl_stamp_shader_tests {
+    use super::opengl_stamp_shader_source;
+
+    #[test]
+    fn gl_variant_uses_color_multisampling_and_unpacks_both_depth_reads() {
+        let source = opengl_stamp_shader_source();
+        assert!(source.contains("texture_multisampled_2d<f32>"));
+        assert!(!source.contains("texture_depth_multisampled_2d"));
+        assert_eq!(source.matches("unpack_depth(textureLoad(depth_map").count(), 2);
+        assert!(source.contains("fn unpack_depth(encoded: vec4<f32>) -> f32"));
     }
 }
 
