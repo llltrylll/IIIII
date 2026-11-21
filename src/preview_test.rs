@@ -2761,6 +2761,14 @@ fn screen_projection_paints_visible_face_of_overlapped_uvs() {
             let non_clear_white = bytes.chunks_exact(4).filter(|pixel| pixel[..3] != [255, 255, 255]).count();
             println!("  OpenGL packed-depth sample {sample}: center {:?}; {non_zero} non-zero, {non_clear_white} non-white / {}", center_pixel, size[0] * size[1]);
         }
+        if let Some(resolved) = views.view3d.paint_depth_color_resolve_texture() {
+            let bytes = read_texture(&rs.device, &rs.queue, resolved);
+            let center = ((size[1] / 2 * size[0] + size[0] / 2) * 4) as usize;
+            let center_pixel = &bytes[center..center + 4];
+            let non_black = bytes.chunks_exact(4).filter(|pixel| pixel[..3] != [0, 0, 0]).count();
+            let non_white = bytes.chunks_exact(4).filter(|pixel| pixel[..3] != [255, 255, 255]).count();
+            println!("  OpenGL packed-depth hardware resolve: center {:?}; {non_black} non-black, {non_white} non-white / {}", center_pixel, size[0] * size[1]);
+        }
     }
     assert!(legacy.begin_stroke(0, StrokeTarget::Content, paint.mat.enabled, false));
     let legacy_region = stroke_region(&mesh, &bvh, legacy.triangles(), &cam, fsize, BrushProjection::Screen, 0, radius, &stamps);
