@@ -43,11 +43,7 @@ impl Tex {
         usage: wgpu::TextureUsages,
         samples: u32,
     ) -> Tex {
-        // Alternate sRGB views require the downlevel VIEW_FORMATS capability.
-        // GL adapters that do not expose it still use the linear view; the GL
-        // viewport performs the sRGB decode explicitly for color channels.
-        let allow_srgb_view = device.downlevel_properties().flags.contains(wgpu::DownlevelFlags::VIEW_FORMATS);
-        Self::new_ms_with_srgb_view(device, label, width, height, format, usage, samples, allow_srgb_view)
+        Self::new_ms_with_srgb_view(device, label, width, height, format, usage, samples, true)
     }
 
     /// Creates a single-sampled texture without requesting alternate sRGB views.
