@@ -42,11 +42,12 @@ fn gl_bake_pipeline_compiles() {
     let backend = rs.adapter.get_info().backend;
     assert_eq!(backend, wgpu::Backend::Gl, "OpenGL smoke test did not obtain a GL adapter");
     let adapter_features = rs.adapter.features();
-    println!("OpenGL adapter features: {adapter_features:?}");
-    println!(
-        "TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES supported: {}",
-        adapter_features.contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+    let mut report = format!(
+        "adapter: {:?}\\nfeatures: {adapter_features:?}\\nTEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES supported: {}\\n",
+        rs.adapter.get_info(),
+        adapter_features.contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES),
     );
+    println!("{report}");
     for format in [
         wgpu::TextureFormat::Rgba32Float,
         wgpu::TextureFormat::Rg32Float,
@@ -59,9 +60,13 @@ fn gl_bake_pipeline_compiles() {
         wgpu::TextureFormat::R32Uint,
     ] {
         let features = rs.adapter.get_texture_format_features(format);
-        println!("OpenGL format {format:?}: {features:?}");
+        let line = format!("OpenGL format {format:?}: {features:?}\\n");
+        println!("{line}");
+        report.push_str(&line);
     }
-    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let report_dir = std::path::Path::new("target/bake_test");
+    std::fs::create_dir_all(report_dir).unwrap();
+    std::fs::write(report_dir.join("gl-format-capabilities.txt"), report).unwrap();
 }
 
 
