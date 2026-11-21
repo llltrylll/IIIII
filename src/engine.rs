@@ -1248,6 +1248,74 @@ struct ActiveStroke {
     before: Option<Snapshot>,
 }
 
+
+/// OpenGL cannot lower textureLoad on a depth texture through Naga's GLSL backend.
+/// For GL only, sample the same per-sample depth encoded into an RGBA8 MSAA target.
+fn stamp_shader_source(gl_depth_color: bool) -> String {
+    let mut source = include_str!("shaders/stamp.wgsl").to_owned();
+    if !gl_depth_color {
+        return source;
+    }
+
+    const DEPTH_BINDING: &str = "@group(0) @binding(4) var depth_map: texture_depth_multisampled_2d;";
+    const COLOR_BINDING: &str = "@group(0) @binding(4) var depth_map: texture_multisampled_2d<f32>;";
+    const UNPACK: &str = r#"
+fn unpack_depth24(packed: vec4<f32>) -> f32 {
+    let bytes = vec3<u32>(round(clamp(packed.rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0));
+    let value = (bytes.x << 16u) | (bytes.y << 8u) | bytes.z;
+    return f32(value) / 16777215.0;
+}
+"#;
+    assert_eq!(source.matches(DEPTH_BINDING).count(), 1, "stamp depth binding must remain unique");
+    source = source.replacen(DEPTH_BINDING, COLOR_BINDING, 1);
+
+    const LINEAR_DEPTH: &str = "fn lin_depth(z: f32) -> f32 {";
+    assert_eq!(source.matches(LINEAR_DEPTH).count(), 1, "stamp linear-depth helper must remain unique");
+    source = source.replacen(LINEAR_DEPTH, &format!("{UNPACK}\n{LINEAR_DEPTH}"), 1);
+
+    const POSITION_LOAD: &str = r#"let scene = textureLoad(depth_map, sp, 0);
+        if (lin_depth(ndc.z) > lin_depth(scene) * 1.01 + 0.005) {"#;
+    const POSITION_LOAD_GL: &str = r#"let scene = unpack_depth24(textureLoad(depth_map, sp, 0)) * u.clip.y;
+        if (lin_depth(ndc.z) > scene * 1.01 + 0.005) {"#;
+    assert_eq!(source.matches(POSITION_LOAD).count(), 1, "stamp position depth load must remain unique");
+    source = source.replacen(POSITION_LOAD, POSITION_LOAD_GL, 1);
+
+    const UV_LOAD: &str = "let sample_depth = lin_depth(textureLoad(depth_map, sp, i32(sample)));";
+    const UV_LOAD_GL: &str = "let sample_depth = unpack_depth24(textureLoad(depth_map, sp, i32(sample))) * u.clip.y;";
+    assert_eq!(source.matches(UV_LOAD).count(), 1, "stamp UV depth load must remain unique");
+    source = source.replacen(UV_LOAD, UV_LOAD_GL, 1);
+    source
+}
+
+#[cfg(test)]
+mod stamp_shader_variant_tests {
+    use super::stamp_shader_source;
+    use eframe::wgpu;
+
+    #[test]
+    fn gl_stamp_variant_uses_multisampled_color_depth_and_valid_wgsl() {
+        let source = stamp_shader_source(true);
+        assert!(source.contains("texture_multisampled_2d<f32>"));
+        assert!(!source.contains("texture_depth_multisampled_2d"));
+        assert_eq!(source.matches("unpack_depth24(textureLoad(").count(), 2);
+
+        let full = format!("{}\n{}", include_str!("shaders/common.wgsl"), source);
+        let module = wgpu::naga::front::wgsl::parse_str(&full)
+            .unwrap_or_else(|error| panic!("{}", error.emit_to_string(&full)));
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|error| panic!("{error:?}"));
+    }
+
+    #[test]
+    fn vulkan_stamp_shader_remains_byte_identical() {
+        assert_eq!(stamp_shader_source(false), include_str!("shaders/stamp.wgsl"));
+    }
+}
+
 struct Pipelines {
     uvbake: wgpu::RenderPipeline,
     dilate: wgpu::RenderPipeline,
@@ -1824,9 +1892,10 @@ impl Engine {
 
     /// A document of one texture set covering the whole mesh.
     pub fn new(rs: &egui_wgpu::RenderState, mesh: &GpuMesh, bounds: (Vec3, Vec3), res: u32) -> Engine {
+        let gl_depth_color = rs.adapter.get_info().backend == wgpu::Backend::Gl;
         let p = {
             let _s = crate::startup_trace::span("Engine::create_pipelines");
-            Arc::new(Self::create_pipelines(&rs.device))
+            Arc::new(Self::create_pipelines(&rs.device, gl_depth_color))
         };
         Self::with_pipelines(
             rs,
@@ -2182,7 +2251,7 @@ impl Engine {
         engine
     }
 
-    fn create_pipelines(device: &wgpu::Device) -> Pipelines {
+    fn create_pipelines(device: &wgpu::Device, gl_depth_color: bool) -> Pipelines {
         // UV-space position/normal bake.
         let uv_module = gpu::shader(device, "uvbake", include_str!("shaders/uvbake.wgsl"));
         let empty_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -2228,7 +2297,8 @@ impl Engine {
         );
 
         // Brush stamping into the stroke mask.
-        let stamp_module = gpu::shader(device, "stamp", include_str!("shaders/stamp.wgsl"));
+        let stamp_source = stamp_shader_source(gl_depth_color);
+        let stamp_module = gpu::shader(device, "stamp", &stamp_source);
         let stamp_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("stamp"),
             entries: &[
@@ -2251,7 +2321,7 @@ impl Engine {
                     binding: 4,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
+                        sample_type: if gl_depth_color { wgpu::TextureSampleType::Float { filterable: false } } else { wgpu::TextureSampleType::Depth },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: true,
                     },

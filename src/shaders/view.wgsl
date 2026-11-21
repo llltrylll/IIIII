@@ -18,6 +18,7 @@ struct Globals {
     light_vp: mat4x4<f32>, // key light shadow projection
     sun: vec4<f32>,      // direction toward the key light, intensity
     sun_c: vec4<f32>,    // key light color (linear), on (1) / off (0)
+    clip: vec4<f32>,     // camera near/far planes
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -417,6 +418,35 @@ fn fs_paint_depth(in: MeshOut) {
     if (dot(in.n, in.n) <= 1e-12 || dot(in.n, g.cam_pos.xyz - in.wpos) <= 0.0) {
         discard;
     }
+}
+
+fn pack_depth24(depth: f32) -> vec3<f32> {
+    let packed = u32(round(clamp(depth, 0.0, 1.0) * 16777215.0));
+    let r = (packed >> 16u) & 255u;
+    let g8 = (packed >> 8u) & 255u;
+    let b8 = packed & 255u;
+    return vec3<f32>(f32(r), f32(g8), f32(b8)) / 255.0;
+}
+
+// GL reads depth from a multisampled color target, while this same pass still
+// uses the native depth attachment for hardware occlusion.
+@fragment
+fn fs_paint_depth_gl(
+    in: MeshOut,
+    @builtin(sample_index) sample_index: u32,
+) -> @location(0) vec4<f32> {
+    if (dot(in.n, in.n) <= 1e-12 || dot(in.n, g.cam_pos.xyz - in.wpos) <= 0.0) {
+        discard;
+    }
+    let near = g.clip.x;
+    let far = g.clip.y;
+    let denom = max(far - in.clip.z * (far - near), 1e-20);
+    let linear_depth = near * far / denom;
+    let packed = pack_depth24(linear_depth / far);
+    // A sample-varying output forces per-sample fragment evaluation, retaining
+    // the subpixel depth slope of slanted surfaces.
+    let sample_tag = f32(sample_index + 1u) / 255.0;
+    return vec4<f32>(packed, sample_tag);
 }
 
 

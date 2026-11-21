@@ -2578,6 +2578,9 @@ fn screen_projection_paints_visible_face_of_overlapped_uvs() {
     let mesh = Arc::new(Mesh::from_parts("Stacked UV visibility fixture".into(), positions, normals, uvs, indices));
     let bvh = crate::bvh::Bvh::from_mesh(&mesh);
     let rs = render_state();
+    if std::env::var("WGPU_BACKEND").is_ok_and(|backend| backend.eq_ignore_ascii_case("gl")) {
+        assert_eq!(rs.adapter.get_info().backend, wgpu::Backend::Gl, "OpenGL smoke test did not obtain a GL adapter");
+    }
     let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
     let res = 256;
     let cam = OrbitCam { yaw: 0.0, pitch: 0.0, dist: 4.0, target: Vec3::ZERO, fov_y: 38f32.to_radians() };
