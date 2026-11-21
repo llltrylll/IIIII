@@ -42,7 +42,7 @@ fn gl_format_capabilities() {
     assert_eq!(backend, wgpu::Backend::Gl, "OpenGL smoke test did not obtain a GL adapter");
     let adapter_features = rs.adapter.features();
     let mut report = format!(
-        "adapter: {:?}\\nfeatures: {adapter_features:?}\\nTEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES supported: {}\\n",
+        "adapter: {:?}\nfeatures: {adapter_features:?}\nTEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES supported: {}\n",
         rs.adapter.get_info(),
         adapter_features.contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES),
     );
@@ -52,7 +52,7 @@ fn gl_format_capabilities() {
     std::fs::write(&report_path, &report).unwrap();
     println!("{report}");
     let _baker = GpuBaker::new_for_backend(&rs.device, backend);
-    report.push_str("GpuBaker pipeline constructor: success\\n");
+    report.push_str("GpuBaker pipeline constructor: success\n");
     std::fs::write(report_path, report).unwrap();
 }
 
