@@ -2001,13 +2001,17 @@ impl GpuBaker {
             (pipeline, bgl)
         };
         use Entry::*;
+        // Position/tangent UV targets are f32 on adapters with float render
+        // support and bitcast u32 on adapters that need integer render targets.
+        // Every sampled view of those maps must use the matching sample type.
+        let uv_tex = if integer_uv_textures { TexUint } else { Tex };
         let surface = compute(
             "cs_surface",
             &[
                 (0, Uniform),
-                (1, TexUint),
+                (1, uv_tex),
                 (2, Tex),
-                (3, TexUint),
+                (3, uv_tex),
                 (4, Storage(false)),
                 (5, Storage(false)),
                 (6, Storage(false)),
@@ -2021,15 +2025,15 @@ impl GpuBaker {
                 (26, Storage(true)),
                 (27, StorageTex(F::Rgba32Float)),
                 (34, StorageTex(surface_curv_format)),
-                (33, TexUint),
-                (38, TexUint),
+                (33, uv_tex),
+                (38, uv_tex),
             ],
         );
         let occlusion = compute(
             "cs_occlusion",
             &[
                 (0, Uniform),
-                (1, TexUint),
+                (1, uv_tex),
                 (4, Storage(false)),
                 (5, Storage(false)),
                 (6, Storage(false)),
