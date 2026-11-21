@@ -19,6 +19,11 @@ Copy-Item target/release/material_painter.exe (Join-Path $stage "MaterialPainter
 Copy-Item -Recurse assets (Join-Path $stage "assets")
 Copy-Item LICENSE, THIRD_PARTY_NOTICES.html, README.md $stage
 
+# The backend is selected before wgpu creates its instance. Ship explicit
+# launchers so users do not accidentally start the default Vulkan backend
+# when they intend to test the OpenGL viewport.
+Copy-Item scripts/Start-OpenGL-4x.bat, scripts/Start-Vulkan-4x.bat, scripts/OPENGL-VIEWPORT-TEST.txt $stage
+
 $zip = Join-Path $root "dist/MaterialPainter-$version-windows-x64.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }
 Compress-Archive -Path $stage -DestinationPath $zip
