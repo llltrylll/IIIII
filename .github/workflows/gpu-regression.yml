@@ -56,6 +56,13 @@ jobs:
         env:
           WGPU_BACKEND: gl
           LIBGL_ALWAYS_SOFTWARE: "1"
+      - name: Upload OpenGL format capability report
+        uses: actions/upload-artifact@v4
+        with:
+          name: gl-format-capabilities
+          path: target/bake_test/gl-format-capabilities.txt
+          if-no-files-found: error
+          retention-days: 14
 
       # Keep the correctness gates focused on brush/mask GPU parity.
       # The broader preview suite also contains unrelated interactive UI tests.
