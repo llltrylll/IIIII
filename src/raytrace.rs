@@ -283,7 +283,9 @@ impl RayTracer {
                         dimension: wgpu::TextureDimension::D2,
                         format,
                         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
-                        view_formats: if format == wgpu::TextureFormat::Rgba8Unorm { &[wgpu::TextureFormat::Rgba8UnormSrgb] } else { &[] },
+                        // The array-layer views below use the base format (UNORM);
+                        // no alternate sRGB view is sampled by the path tracer.
+                        view_formats: &[],
                     })
                 })
                 .collect();
