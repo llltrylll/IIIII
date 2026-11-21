@@ -1794,7 +1794,8 @@ impl BakeRun {
 }
 
 impl GpuBaker {
-    /// Default/Vulkan path retains the compact two-channel 32-bit texture.
+    /// Test helper for the default compact format used by Vulkan.
+    #[cfg(test)]
     pub fn new(device: &wgpu::Device) -> GpuBaker {
         Self::new_with_surface_curv_format(device, F::Rg32Float)
     }
