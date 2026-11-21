@@ -1166,6 +1166,17 @@ fn ui_screenshots() {
     harness.render().expect("renders").save(dir.join("mask_custom.png")).unwrap();
 }
 
+/// Vertex IDs are categorical labels, not a continuous color field. Sampling
+/// with the linear sampler blends neighboring IDs at UV borders and causes
+/// otherwise matching regions to fall outside the mask's tolerance.
+#[test]
+fn vertex_id_mask_uses_exact_texels_without_bilinear_filtering() {
+    let shader = include_str!("shaders/composite.wgsl");
+    assert!(shader.contains("let id = textureLoad(map_e, c, 0).rgb;"));
+    assert!(shader.contains("if (need_e) { s.e = textureLoad(map_e, c, 0); }"));
+    assert!(!shader.contains("textureSampleLevel(map_e, samp, uv"));
+}
+
 /// Smart-mask generators are cached separately from material compositing.
 /// Repeated composites reuse the exact mask; editing the generator invalidates it.
 #[test]
