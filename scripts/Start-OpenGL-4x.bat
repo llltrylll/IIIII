@@ -23,8 +23,8 @@ if not "%APP_EXIT%"=="0" (
   echo Material Painter failed to start. Exit code: %APP_EXIT%
   echo Diagnostic files:
   echo   %~dp0OpenGL-launch.log
-  echo   %APPDATA%\\MaterialPainter\\startup-error.log
-  echo   %APPDATA%\\MaterialPainter\\crash.log
+  echo   %APPDATA%\MaterialPainter\startup-error.log
+  echo   %APPDATA%\MaterialPainter\crash.log
   echo.
   pause
 )
