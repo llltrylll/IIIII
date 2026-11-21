@@ -5941,6 +5941,114 @@ impl Engine {
                     wgpu::BindGroupEntry { binding: 28, resource: view(roughness_noise) },
                 ],
             });
+            let make_mask_bg = |mask: Option<&Tex>| self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("composite mask source"),
+                layout: &self.p.gl_mask_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &self.layer_ubuf,
+                            offset: 0,
+                            size: NonZeroU64::new(size_of::<LayerUniform>() as u64),
+                        }),
+                    },
+                    wgpu::BindGroupEntry { binding: 9, resource: or_dummy(mask, dummy) },
+                    wgpu::BindGroupEntry { binding: 10, resource: view(Some(&self.pos)) },
+                    wgpu::BindGroupEntry { binding: 11, resource: view(Some(&self.nrm)) },
+                    wgpu::BindGroupEntry { binding: 12, resource: view(Some(self.map_tex(0))) },
+                    wgpu::BindGroupEntry { binding: 13, resource: view(Some(self.map_tex(1))) },
+                    wgpu::BindGroupEntry { binding: 14, resource: view(Some(self.map_tex(2))) },
+                    wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(&self.custom_array.1) },
+                    wgpu::BindGroupEntry { binding: 16, resource: view(Some(self.map_tex(4))) },
+                    wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                ],
+            });
+            let make_gl_core_bg = |mask: Option<&Tex>| self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("OpenGL composite core"),
+                layout: &self.p.composite_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &self.layer_ubuf,
+                            offset: 0,
+                            size: NonZeroU64::new(size_of::<LayerUniform>() as u64),
+                        }),
+                    },
+                    wgpu::BindGroupEntry { binding: 1, resource: view(Some(prev[0])) },
+                    wgpu::BindGroupEntry { binding: 2, resource: view(Some(prev[1])) },
+                    wgpu::BindGroupEntry { binding: 3, resource: view(Some(prev[2])) },
+                    wgpu::BindGroupEntry { binding: 4, resource: view(Some(prev[3])) },
+                    wgpu::BindGroupEntry { binding: 5, resource: view(chans[0]) },
+                    wgpu::BindGroupEntry { binding: 6, resource: view(chans[1]) },
+                    wgpu::BindGroupEntry { binding: 7, resource: view(chans[2]) },
+                    wgpu::BindGroupEntry { binding: 8, resource: view(chans[3]) },
+                    wgpu::BindGroupEntry { binding: 9, resource: or_dummy(mask, dummy) },
+                    wgpu::BindGroupEntry { binding: 10, resource: view(Some(&self.pos)) },
+                    wgpu::BindGroupEntry { binding: 11, resource: view(Some(&self.nrm)) },
+                    wgpu::BindGroupEntry { binding: 13, resource: view(Some(self.map_tex(1))) },
+                    wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                    wgpu::BindGroupEntry { binding: 18, resource: wgpu::BindingResource::Sampler(&self.repeat_sampler) },
+                    wgpu::BindGroupEntry { binding: 19, resource: view(chans[OPACITY]) },
+                    wgpu::BindGroupEntry { binding: 27, resource: view(color_noise) },
+                    wgpu::BindGroupEntry { binding: 28, resource: view(roughness_noise) },
+                ],
+            });
+            let make_gl_extra_bg = |mask: Option<&Tex>| self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("OpenGL composite extra"),
+                layout: &self.p.gl_extra_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &self.layer_ubuf,
+                            offset: 0,
+                            size: NonZeroU64::new(size_of::<LayerUniform>() as u64),
+                        }),
+                    },
+                    wgpu::BindGroupEntry { binding: 9, resource: or_dummy(mask, dummy) },
+                    wgpu::BindGroupEntry { binding: 10, resource: view(Some(&self.pos)) },
+                    wgpu::BindGroupEntry { binding: 11, resource: view(Some(&self.nrm)) },
+                    wgpu::BindGroupEntry { binding: 18, resource: wgpu::BindingResource::Sampler(&self.repeat_sampler) },
+                    wgpu::BindGroupEntry { binding: 20, resource: view(Some(prev[FINAL_EMISSION])) },
+                    wgpu::BindGroupEntry { binding: 21, resource: view(chans[EMISSION]) },
+                    wgpu::BindGroupEntry { binding: 22, resource: view(Some(prev[FINAL_NORMAL])) },
+                    wgpu::BindGroupEntry { binding: 23, resource: view(chans[NORMAL]) },
+                    wgpu::BindGroupEntry { binding: 24, resource: view(Some(prev[FINAL_SPECULAR])) },
+                    wgpu::BindGroupEntry { binding: 25, resource: view(chans[SPECULAR]) },
+                    wgpu::BindGroupEntry { binding: 26, resource: view(Some(&self.tan)) },
+                ],
+            });
+            let make_gl_folder_bg = |mask: Option<&Tex>| self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("OpenGL folder merge"),
+                layout: &self.p.gl_folder_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &self.layer_ubuf,
+                            offset: 0,
+                            size: NonZeroU64::new(size_of::<LayerUniform>() as u64),
+                        }),
+                    },
+                    wgpu::BindGroupEntry { binding: 1, resource: view(Some(prev[0])) },
+                    wgpu::BindGroupEntry { binding: 2, resource: view(Some(prev[1])) },
+                    wgpu::BindGroupEntry { binding: 3, resource: view(Some(prev[2])) },
+                    wgpu::BindGroupEntry { binding: 4, resource: view(Some(prev[3])) },
+                    wgpu::BindGroupEntry { binding: 5, resource: view(chans[0]) },
+                    wgpu::BindGroupEntry { binding: 6, resource: view(chans[1]) },
+                    wgpu::BindGroupEntry { binding: 7, resource: view(chans[2]) },
+                    wgpu::BindGroupEntry { binding: 8, resource: view(chans[3]) },
+                    wgpu::BindGroupEntry { binding: 9, resource: or_dummy(mask, dummy) },
+                    wgpu::BindGroupEntry { binding: 20, resource: view(Some(prev[FINAL_EMISSION])) },
+                    wgpu::BindGroupEntry { binding: 21, resource: view(chans[EMISSION]) },
+                    wgpu::BindGroupEntry { binding: 22, resource: view(Some(prev[FINAL_NORMAL])) },
+                    wgpu::BindGroupEntry { binding: 23, resource: view(chans[NORMAL]) },
+                    wgpu::BindGroupEntry { binding: 24, resource: view(Some(prev[FINAL_SPECULAR])) },
+                    wgpu::BindGroupEntry { binding: 25, resource: view(chans[SPECULAR]) },
+                ],
+            });
             // A filtered mask depends on its own paint/generator/filter data,
             // not on the accumulated layers below it. Reuse the previous result
             // until that mask is edited; a mask-paint stroke invalidates only
@@ -5952,7 +6060,7 @@ impl Engine {
                         Some(&self.mask_out[&layer.id])
                     } else {
                         mask_cache_misses += 1;
-                        let source_bg = make_bg(mask);
+                        let source_bg = make_mask_bg(mask);
                         if self.has_mask_filters(li) {
                             let ops = layer_ops.get(&li).map_or(&[][..], |o| &o[..]);
                             mask_gpu_passes += 1 + ops.iter().map(|op| match op {
