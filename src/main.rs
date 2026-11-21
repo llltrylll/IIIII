@@ -54,6 +54,11 @@ fn main() -> eframe::Result {
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
+    // Disable presentation synchronization; the application applies its own
+    // 80 FPS cap so the GPU does not render hundreds of frames per second.
+    options.wgpu_options.surface.present_mode = wgpu::PresentMode::AutoNoVsync;
+    options.wgpu_options.surface.desired_maximum_frame_latency = Some(1);
+
     // Request the adapter's full limits: high-poly bake sources need large
     // storage buffers, and the compositor binds many textures per pass.
     if let egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
