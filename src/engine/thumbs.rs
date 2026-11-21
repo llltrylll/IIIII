@@ -322,14 +322,31 @@ impl Engine {
 
     /// A display texture for a thumbnail, registered with egui once.
     fn shown_tex(&mut self, layer_id: u64, mask: bool) -> &Tex {
-        let entry = self.thumbs.entries.entry(layer_id).or_insert(Entry { key: 0, mask_stale: false, content: None, mask: None });
+        // Allocate before borrowing the entry mutably: the allocation helper
+        // reads the adapter policy from Engine and cannot overlap that borrow.
+        let needs_texture = self.thumbs.entries.get(&layer_id).is_none_or(|entry| {
+            if mask { entry.mask.is_none() } else { entry.content.is_none() }
+        });
+        let mut created = needs_texture.then(|| {
+            let tex = self.new_tex("layer thumbnail", THUMB, THUMB, F::Rgba8Unorm, LAYER_USAGE);
+            let id = self.rs.renderer.write().register_native_texture(
+                &self.device,
+                tex.srgb(),
+                wgpu::FilterMode::Linear,
+            );
+            Shown { tex, id }
+        });
+        let entry = self.thumbs.entries.entry(layer_id).or_insert(Entry {
+            key: 0,
+            mask_stale: false,
+            content: None,
+            mask: None,
+        });
         let slot = if mask { &mut entry.mask } else { &mut entry.content };
         if slot.is_none() {
-            let tex = self.new_tex("layer thumbnail", THUMB, THUMB, F::Rgba8Unorm, LAYER_USAGE);
-            let id = self.rs.renderer.write().register_native_texture(&self.device, tex.srgb(), wgpu::FilterMode::Linear);
-            *slot = Some(Shown { tex, id });
+            *slot = created.take();
         }
-        &slot.as_ref().expect("just made").tex
+        &slot.as_ref().expect("thumbnail texture was allocated").tex
     }
 
     /// `mask_only`: the content thumbnail is current, redo just the mask's.
