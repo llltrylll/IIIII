@@ -1800,17 +1800,10 @@ impl GpuBaker {
         Self::new_with_surface_curv_format(device, F::Rg32Float)
     }
 
-    /// Selects storage formats that are valid for the adapter's actual backend.
-    pub fn new_for_backend(device: &wgpu::Device, backend: wgpu::Backend) -> GpuBaker {
-        let surface_curv_format = if backend == wgpu::Backend::Gl {
-            // The GL backend rejects write-only rg32float storage images.
-            // rgba32float is already used by this pipeline and keeps both
-            // scalar values at full f32 precision.
-            F::Rgba32Float
-        } else {
-            F::Rg32Float
-        };
-        Self::new_with_surface_curv_format(device, surface_curv_format)
+    /// All backends use the compact two-channel full-precision format. The
+    /// app requests adapter-specific texture format features where supported.
+    pub fn new_for_backend(device: &wgpu::Device, _backend: wgpu::Backend) -> GpuBaker {
+        Self::new_with_surface_curv_format(device, F::Rg32Float)
     }
 
     fn new_with_surface_curv_format(device: &wgpu::Device, surface_curv_format: F) -> GpuBaker {
@@ -2901,9 +2894,11 @@ pub(crate) mod tests {
             ..Default::default()
         }))
         .expect("a GPU adapter");
-        let (device, queue) =
-            ready(adapter.request_device(&wgpu::DeviceDescriptor { required_limits: adapter.limits(), ..Default::default() }))
-                .expect("a GPU device");
+        let (device, queue) = ready(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: adapter.features() & wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
+            required_limits: adapter.limits(),
+            ..Default::default()
+        })).expect("a GPU device");
         (instance, adapter, device, queue)
     }
 
