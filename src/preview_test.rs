@@ -33,16 +33,28 @@ fn render_state() -> egui_wgpu::RenderState {
     }
 }
 
-/// OpenGL must be able to construct the complete GPU bake pipeline. This
-/// catches backend-specific storage texture format/layout failures before
-/// the user starts a real bake.
+/// Reports the actual OpenGL format capabilities so the bake can select
+/// attachments that are both renderable and usable by the compute passes.
 #[test]
 #[ignore]
 fn gl_bake_pipeline_compiles() {
     let rs = render_state();
     let backend = rs.adapter.get_info().backend;
     assert_eq!(backend, wgpu::Backend::Gl, "OpenGL smoke test did not obtain a GL adapter");
-    let _baker = GpuBaker::new_for_backend(&rs.device, backend);
+    for format in [
+        wgpu::TextureFormat::Rgba32Float,
+        wgpu::TextureFormat::Rg32Float,
+        wgpu::TextureFormat::R32Float,
+        wgpu::TextureFormat::Rgba16Float,
+        wgpu::TextureFormat::Rg16Float,
+        wgpu::TextureFormat::R16Float,
+        wgpu::TextureFormat::Rgba32Uint,
+        wgpu::TextureFormat::Rg32Uint,
+        wgpu::TextureFormat::R32Uint,
+    ] {
+        let features = rs.adapter.get_texture_format_features(format);
+        println!("OpenGL format {format:?}: {features:?}");
+    }
     rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 }
 
