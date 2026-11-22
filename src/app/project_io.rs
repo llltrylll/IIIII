@@ -1174,6 +1174,7 @@ impl PainterApp {
 
     pub(super) fn start_open_project(&mut self, path: &Path, ctx: &egui::Context) {
         crate::startup_trace::event("project open: request queued");
+        crate::startup_trace::checkpoint();
         self.project_open.take();
         let path = path.to_path_buf();
         let worker_path = path.clone();
