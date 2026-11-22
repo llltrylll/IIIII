@@ -326,6 +326,12 @@ pub fn shelf_done() {
     write_report();
 }
 
+/// Writes the trace accumulated so far to the configured destination.
+/// Used at project-load milestones so a partial report survives a long or stalled load.
+pub fn checkpoint() {
+    write_report();
+}
+
 fn write_report() {
     let Some(text) = with(|t| render(t)) else { return };
     match target() {
