@@ -203,12 +203,19 @@ impl PainterApp {
         // Made at their final size: making every set at the default size and
         // resizing it after costs several sets' worth of GPU memory at once.
         let size = |k: usize| sizes.get(k).copied().unwrap_or(self.prefs.default_resolution);
+        // Opening a saved project immediately replaces every set's layer
+        // stack with its serialized layers in project_io. Do not allocate a
+        // throwaway starter paint layer for those Engines; imported meshes
+        // (sizes empty) still need the usual initial layer.
+        let restore_saved_layers = sizes.len() == self.mesh.sets.len();
         let fresh = |engine: &Engine, range: std::ops::Range<u32>, mesh: &crate::gpu::GpuMesh, res: u32, index: usize, name: &str| {
             let detail = format!("index={index} name={name} resolution={res} triangles={}", range.end.saturating_sub(range.start));
             let parked = {
                 let _create = crate::startup_trace::span_d("project open: allocate sibling Engine", detail);
                 let mut e = engine.sibling(mesh, range, res);
-                e.add_paint_layer(0, None, None, &mut UndoStack::default());
+                if !restore_saved_layers {
+                    e.add_paint_layer(0, None, None, &mut UndoStack::default());
+                }
                 Parked { engine: e, selected: 0, target: StrokeTarget::Content }
             };
             crate::startup_trace::count("project open: sibling Engines created", 1);
