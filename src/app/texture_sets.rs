@@ -174,6 +174,7 @@ impl PainterApp {
     /// given (a project or import about to fill them), else the default
     /// size. The edited set stays edited when it survives.
     pub(super) fn rebuild_sets(&mut self, old_names: &[String], sizes: &[u32]) {
+        let _rebuild = crate::startup_trace::span("project open: rebuild texture-set engine slots");
         let new: Vec<(String, std::ops::Range<u32>)> =
             self.mesh.sets.iter().map(|s| (s.name.clone(), s.index_range())).collect();
         let mut used = vec![false; old_names.len()];
@@ -198,10 +199,17 @@ impl PainterApp {
         // Made at their final size: making every set at the default size and
         // resizing it after costs several sets' worth of GPU memory at once.
         let size = |k: usize| sizes.get(k).copied().unwrap_or(self.prefs.default_resolution);
-        let fresh = |engine: &Engine, range: std::ops::Range<u32>, mesh: &crate::gpu::GpuMesh, res: u32| {
-            let mut e = engine.sibling(mesh, range, res);
-            e.add_paint_layer(0, None, None, &mut UndoStack::default());
-            Parked { engine: e, selected: 0, target: StrokeTarget::Content }
+        let fresh = |engine: &Engine, range: std::ops::Range<u32>, mesh: &crate::gpu::GpuMesh, res: u32, index: usize, name: &str| {
+            let detail = format!("index={index} name={name} resolution={res} triangles={}", range.end.saturating_sub(range.start));
+            let parked = {
+                let _create = crate::startup_trace::span_d("project open: allocate sibling Engine", detail);
+                let mut e = engine.sibling(mesh, range, res);
+                e.add_paint_layer(0, None, None, &mut UndoStack::default());
+                Parked { engine: e, selected: 0, target: StrokeTarget::Content }
+            };
+            crate::startup_trace::count("project open: sibling Engines created", 1);
+            crate::startup_trace::checkpoint();
+            parked
         };
         let mut parked = Vec::with_capacity(new.len());
         for (i, (_, range)) in new.iter().enumerate() {
@@ -212,14 +220,14 @@ impl PainterApp {
             let kept = assign[i].filter(|&j| j != old_active).and_then(|j| old[j].take());
             let p = match kept {
                 Some(p) => p,
-                None => fresh(&self.engine, range.clone(), &self.gpu_mesh, size(i)),
+                None => fresh(&self.engine, range.clone(), &self.gpu_mesh, size(i), i, &new[i].0),
             };
             parked.push(Some(p));
         }
         if assign[active] != Some(old_active) {
             let p = match assign[active].and_then(|j| old[j].take()) {
                 Some(p) => p,
-                None => fresh(&self.engine, new[active].1.clone(), &self.gpu_mesh, size(active)),
+                None => fresh(&self.engine, new[active].1.clone(), &self.gpu_mesh, size(active), active, &new[active].0),
             };
             self.engine = p.engine;
             self.selected = p.selected;
@@ -245,8 +253,14 @@ impl PainterApp {
                 Some(p) => &mut p.engine,
                 None => &mut self.engine,
             };
+            let _set_mesh = crate::startup_trace::span_d(
+                "project open: bind texture-set triangles to Engine",
+                format!("index={k}"),
+            );
             e.set_bounds(bounds);
             e.set_triangles(range, gpu_mesh);
+            drop(_set_mesh);
+            crate::startup_trace::checkpoint();
         }
         for d in &mut self.graphs.docs {
             d.dirty = true;
