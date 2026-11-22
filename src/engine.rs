@@ -2329,7 +2329,7 @@ impl Engine {
             queue,
             }
         };
-        {
+        if surface_maps_resident {
             let _s = crate::startup_trace::span("Engine::bake_uv");
             engine.bake_uv(mesh);
         }
