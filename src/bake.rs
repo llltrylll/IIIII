@@ -2502,63 +2502,86 @@ impl GpuBaker {
         queue: &wgpu::Queue,
         ctx: &egui::Context,
     ) -> Option<BakedMaps> {
-        while run.next_tile < run.tiles.len() && run.in_flight.load(Ordering::Acquire) < MAX_IN_FLIGHT {
-            let [x, y, pass] = run.tiles[run.next_tile];
-            run.next_tile += 1;
-            let mut u = run.uniform;
-            u.e = [x as f32, y as f32, 0.0, run.next_tile as f32];
-            let ubuf = Self::uniform_buffer(device, &u);
+        // Submit up to the in-flight limit as one command buffer. Every tile
+        // keeps the same bounded 256² dispatch; batching only reduces queue
+        // submissions, command-buffer setup and completion-poll threads.
+        let available = MAX_IN_FLIGHT.saturating_sub(run.in_flight.load(Ordering::Acquire));
+        let mut submitted = 0usize;
+        if available > 0 && run.next_tile < run.tiles.len() {
             let mut encoder = device.create_command_encoder(&Default::default());
-            if pass == 0 {
-                let group = Self::group(
-                    device,
-                    &self.occlusion.1,
-                    vec![
-                        (0, ubuf.as_entire_binding()),
-                        (1, v(&run.low[0])),
-                        (4, run.nodes.as_entire_binding()),
-                        (5, run.bake_vertices.as_entire_binding()),
-                        (6, run.bake_triangles.as_entire_binding()),
-                        (13, v(&run.surf_pos)),
-                        (14, v(&run.surf_nrm)),
-                        (15, v(&run.occ)),
-                        (16, v(&run.bent)),
-                        (28, v(&run.surf_geo)),
-                        (35, v(&run.surf_curv)),
-                    ],
-                );
-                Self::dispatch(&mut encoder, &self.occlusion.0, &group, TILE.min(run.res - x), TILE.min(run.res - y));
-            } else {
-                let (target, settings) = &run.custom[pass as usize - 1];
-                u.cust = *settings;
+            while run.next_tile < run.tiles.len() && submitted < available {
+                let [x, y, pass] = run.tiles[run.next_tile];
+                run.next_tile += 1;
+                let mut u = run.uniform;
+                u.e = [x as f32, y as f32, 0.0, run.next_tile as f32];
+                if pass != 0 {
+                    u.cust = run.custom[pass as usize - 1].1;
+                }
                 let ubuf = Self::uniform_buffer(device, &u);
-                let group = Self::group(
-                    device,
-                    &self.custom.1,
-                    vec![
-                        (0, ubuf.as_entire_binding()),
-                        (1, v(&run.low[0])),
-                        (4, run.nodes.as_entire_binding()),
-                        (5, run.bake_vertices.as_entire_binding()),
-                        (6, run.bake_triangles.as_entire_binding()),
-                        (13, v(&run.surf_pos)),
-                        (14, v(&run.surf_nrm)),
-                        (28, v(&run.surf_geo)),
-                        (35, v(&run.surf_curv)),
-                        (36, v(target)),
-                    ],
-                );
-                Self::dispatch(&mut encoder, &self.custom.0, &group, CUSTOM_TILE.min(run.res - x), CUSTOM_TILE.min(run.res - y));
+                if pass == 0 {
+                    let group = Self::group(
+                        device,
+                        &self.occlusion.1,
+                        vec![
+                            (0, ubuf.as_entire_binding()),
+                            (1, v(&run.low[0])),
+                            (4, run.nodes.as_entire_binding()),
+                            (5, run.bake_vertices.as_entire_binding()),
+                            (6, run.bake_triangles.as_entire_binding()),
+                            (13, v(&run.surf_pos)),
+                            (14, v(&run.surf_nrm)),
+                            (15, v(&run.occ)),
+                            (16, v(&run.bent)),
+                            (28, v(&run.surf_geo)),
+                            (35, v(&run.surf_curv)),
+                        ],
+                    );
+                    Self::dispatch(
+                        &mut encoder,
+                        &self.occlusion.0,
+                        &group,
+                        TILE.min(run.res - x),
+                        TILE.min(run.res - y),
+                    );
+                } else {
+                    let target = &run.custom[pass as usize - 1].0;
+                    let group = Self::group(
+                        device,
+                        &self.custom.1,
+                        vec![
+                            (0, ubuf.as_entire_binding()),
+                            (1, v(&run.low[0])),
+                            (4, run.nodes.as_entire_binding()),
+                            (5, run.bake_vertices.as_entire_binding()),
+                            (6, run.bake_triangles.as_entire_binding()),
+                            (13, v(&run.surf_pos)),
+                            (14, v(&run.surf_nrm)),
+                            (28, v(&run.surf_geo)),
+                            (35, v(&run.surf_curv)),
+                            (36, v(target)),
+                        ],
+                    );
+                    Self::dispatch(
+                        &mut encoder,
+                        &self.custom.0,
+                        &group,
+                        CUSTOM_TILE.min(run.res - x),
+                        CUSTOM_TILE.min(run.res - y),
+                    );
+                }
+                submitted += 1;
             }
-            run.in_flight.fetch_add(1, Ordering::AcqRel);
-            queue.submit([encoder.finish()]);
-            let (in_flight, done, ctx) = (run.in_flight.clone(), run.done_tiles.clone(), ctx.clone());
-            queue.on_submitted_work_done(move || {
-                in_flight.fetch_sub(1, Ordering::AcqRel);
-                done.fetch_add(1, Ordering::AcqRel);
-                ctx.request_repaint();
-            });
-            Self::poll_until_done(device);
+            if submitted > 0 {
+                run.in_flight.fetch_add(submitted, Ordering::AcqRel);
+                queue.submit([encoder.finish()]);
+                let (in_flight, done, ctx) = (run.in_flight.clone(), run.done_tiles.clone(), ctx.clone());
+                queue.on_submitted_work_done(move || {
+                    in_flight.fetch_sub(submitted, Ordering::AcqRel);
+                    done.fetch_add(submitted, Ordering::AcqRel);
+                    ctx.request_repaint();
+                });
+                Self::poll_until_done(device);
+            }
         }
         if run.next_tile < run.tiles.len() || run.maps.is_none() {
             return None;
