@@ -2169,7 +2169,7 @@ impl Engine {
         tris: std::ops::Range<u32>,
         bounds: (Vec3, Vec3),
         res: u32,
-        surface_maps_resident: bool,
+        working_set_resident: bool,
         snapshot_buffer_pool: Arc<crate::undo::SnapshotBufferPool>,
     ) -> Engine {
         static NEXT_ENGINE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -2210,7 +2210,8 @@ impl Engine {
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let surface_res = if surface_maps_resident { res } else { 1 };
+        let surface_res = if working_set_resident { res } else { 1 };
+        let scratch_res = surface_res;
         let mut engine = {
             let _textures = crate::startup_trace::span("Engine::with_pipelines texture/buffer allocation");
             Engine {
@@ -2227,10 +2228,10 @@ impl Engine {
             tan: Tex::new_without_srgb_view(&device, "tangent map", surface_res, surface_res, TAN_FORMAT, LAYER_USAGE),
             accum: [
                 accum_set(&device, res, "accum A", srgb_views_supported),
-                accum_set(&device, res, "accum B", srgb_views_supported),
+                accum_set(&device, scratch_res, "accum B", srgb_views_supported),
             ],
             final_indices: [0; ACCUM],
-            stroke: Tex::new_without_srgb_view(&device, "stroke mask", res, res, STROKE_FORMAT, LAYER_USAGE),
+            stroke: Tex::new_without_srgb_view(&device, "stroke mask", scratch_res, scratch_res, STROKE_FORMAT, LAYER_USAGE),
             snap: Default::default(),
             snap_mask: None,
             maps,
@@ -2329,7 +2330,7 @@ impl Engine {
             queue,
             }
         };
-        if surface_maps_resident {
+        if working_set_resident {
             let _s = crate::startup_trace::span("Engine::bake_uv");
             engine.bake_uv(mesh);
         }
