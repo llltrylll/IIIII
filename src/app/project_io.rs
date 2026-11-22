@@ -1364,7 +1364,7 @@ impl PainterApp {
             let set_detail = format!("index={k} name={set_name} resolution={set_resolution} layers={set_layer_count}");
             let _set_total = crate::startup_trace::span_d("project open: apply texture set", set_detail.clone());
             crate::startup_trace::event("project open: beginning texture set apply");
-            self.switch_set(k);
+            self.switch_set_for_project_load(k);
             // Replacing a document must drop old layer textures, not retain them in Undo.
             {
                 let _clear = crate::startup_trace::span_d("project open: clear new Engine layer stack", set_detail.clone());
@@ -1489,7 +1489,14 @@ impl PainterApp {
             crate::startup_trace::event("project open: texture set apply completed");
             crate::startup_trace::checkpoint();
         }
-        self.switch_set(manifest["active_set"].as_u64().map_or(0, |x| x as usize).min(set_count - 1));
+        let final_active_set = manifest["active_set"].as_u64().map_or(0, |x| x as usize).min(set_count - 1);
+        self.switch_set(final_active_set);
+        // Project restoration swapped through sets without allocating each
+        // temporary active working set. Only the final active Engine needs
+        // full-resolution accumulation, stroke and world-space surface maps.
+        if self.engine.restore_active_working_set(&self.gpu_mesh) {
+            self.views.invalidate_texture_set_binding(self.sets.active);
+        }
         self.repush_graphs();
 
         let v = &manifest["view"];
