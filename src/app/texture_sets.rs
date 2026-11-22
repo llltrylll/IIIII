@@ -93,13 +93,24 @@ impl PainterApp {
 
     /// Makes set `k` the one being edited.
     pub(super) fn switch_set(&mut self, k: usize) {
+        self.switch_set_inner(k, true);
+    }
+
+    /// Swaps Engines while restoring only the editor state needed to load a
+    /// saved layer stack. Project loading activates every set in turn, but
+    /// only the final selected set needs full-resolution GPU working maps.
+    pub(super) fn switch_set_for_project_load(&mut self, k: usize) {
+        self.switch_set_inner(k, false);
+    }
+
+    fn switch_set_inner(&mut self, k: usize, restore_working_set: bool) {
         if k == self.sets.active || self.stroke.is_some() {
             return;
         }
         let Some(mut p) = self.sets.parked.get_mut(k).and_then(Option::take) else { return };
         let _switch = crate::startup_trace::span_d(
             "project open: switch active texture-set Engine",
-            format!("from={} to={k}", self.sets.active),
+            format!("from={} to={k} restore_working_set={restore_working_set}"),
         );
         let previous_active = self.sets.active;
         let keep_previous_active_surface_maps = super::graph_ui::engine_uses_surface_graph(
@@ -109,7 +120,7 @@ impl PainterApp {
         self.end_preview(true);
         self.engine.commit_props(&mut self.undo);
         std::mem::swap(&mut self.engine, &mut p.engine);
-        if self.engine.restore_active_working_set(&self.gpu_mesh) {
+        if restore_working_set && self.engine.restore_active_working_set(&self.gpu_mesh) {
             self.views.invalidate_texture_set_binding(k);
         }
         p.engine.release_inactive_working_set();
@@ -269,7 +280,11 @@ impl PainterApp {
                 format!("index={k}"),
             );
             e.set_bounds(bounds);
-            e.set_triangles(range, gpu_mesh);
+            if self.sets.parked[k].is_some() {
+                e.set_triangles_deferred(range);
+            } else {
+                e.set_triangles(range, gpu_mesh);
+            }
             drop(_set_mesh);
             crate::startup_trace::checkpoint();
         }
