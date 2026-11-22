@@ -271,16 +271,17 @@ impl PainterApp {
         let bounds = (self.mesh.bounds_min, self.mesh.bounds_max);
         for (k, (_, range)) in new.into_iter().enumerate() {
             let gpu_mesh = &self.gpu_mesh;
+            let is_parked = self.sets.parked[k].is_some();
             let e = match self.sets.parked[k].as_mut() {
                 Some(p) => &mut p.engine,
                 None => &mut self.engine,
             };
             let _set_mesh = crate::startup_trace::span_d(
                 "project open: bind texture-set triangles to Engine",
-                format!("index={k}"),
+                format!("index={k} parked={is_parked}"),
             );
             e.set_bounds(bounds);
-            if self.sets.parked[k].is_some() {
+            if is_parked {
                 e.set_triangles_deferred(range);
             } else {
                 e.set_triangles(range, gpu_mesh);
