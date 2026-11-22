@@ -110,7 +110,7 @@ impl PainterApp {
         let Some(mut p) = self.sets.parked.get_mut(k).and_then(Option::take) else { return };
         let _switch = crate::startup_trace::span_d(
             "project open: switch active texture-set Engine",
-            format!("from={} to={k} restore_working_set={restore_working_set}"),
+            format!("from={} to={k} restore_working_set={restore_working_set}", self.sets.active),
         );
         let previous_active = self.sets.active;
         let keep_previous_active_surface_maps = super::graph_ui::engine_uses_surface_graph(
