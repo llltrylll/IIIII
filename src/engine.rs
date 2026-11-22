@@ -1965,6 +1965,7 @@ impl Engine {
             0..mesh.index_count,
             bounds,
             res,
+            true,
             Arc::new(crate::undo::SnapshotBufferPool::default()),
         )
     }
@@ -1973,7 +1974,7 @@ impl Engine {
     /// mesh's index buffer. Shares this engine's pipelines and document bounds.
     pub fn sibling(&self, mesh: &GpuMesh, tris: std::ops::Range<u32>, res: u32) -> Engine {
         let mut sibling = Self::with_pipelines(
-            &self.rs, self.p.clone(), mesh, tris, self.bounds, res, self.snapshot_buffer_pool.clone(),
+            &self.rs, self.p.clone(), mesh, tris, self.bounds, res, false, self.snapshot_buffer_pool.clone(),
         );
         sibling.image_cache = self.image_cache.clone();
         sibling
@@ -2155,7 +2156,7 @@ impl Engine {
         res: u32,
     ) -> Engine {
         let mut sibling = Self::with_pipelines(
-            &self.rs, self.p.clone(), mesh, tris, bounds, res, self.snapshot_buffer_pool.clone(),
+            &self.rs, self.p.clone(), mesh, tris, bounds, res, true, self.snapshot_buffer_pool.clone(),
         );
         sibling.image_cache = self.image_cache.clone();
         sibling
@@ -2168,6 +2169,7 @@ impl Engine {
         tris: std::ops::Range<u32>,
         bounds: (Vec3, Vec3),
         res: u32,
+        surface_maps_resident: bool,
         snapshot_buffer_pool: Arc<crate::undo::SnapshotBufferPool>,
     ) -> Engine {
         static NEXT_ENGINE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -2208,6 +2210,7 @@ impl Engine {
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let surface_res = if surface_maps_resident { res } else { 1 };
         let mut engine = {
             let _textures = crate::startup_trace::span("Engine::with_pipelines texture/buffer allocation");
             Engine {
@@ -2219,9 +2222,9 @@ impl Engine {
             composite_profile_requested: false,
             forced_composite_profile: false,
             last_end_stages_ms: [0.0; 5],
-            pos: Tex::new_without_srgb_view(&device, "position map", res, res, POS_FORMAT, LAYER_USAGE),
-            nrm: Tex::new_without_srgb_view(&device, "normal map", res, res, NRM_FORMAT, LAYER_USAGE),
-            tan: Tex::new_without_srgb_view(&device, "tangent map", res, res, TAN_FORMAT, LAYER_USAGE),
+            pos: Tex::new_without_srgb_view(&device, "position map", surface_res, surface_res, POS_FORMAT, LAYER_USAGE),
+            nrm: Tex::new_without_srgb_view(&device, "normal map", surface_res, surface_res, NRM_FORMAT, LAYER_USAGE),
+            tan: Tex::new_without_srgb_view(&device, "tangent map", surface_res, surface_res, TAN_FORMAT, LAYER_USAGE),
             accum: [
                 accum_set(&device, res, "accum A", srgb_views_supported),
                 accum_set(&device, res, "accum B", srgb_views_supported),
@@ -2893,6 +2896,29 @@ impl Engine {
     /// The texture set's range in the mesh's index buffer.
     pub fn triangles(&self) -> std::ops::Range<u32> {
         self.tris.clone()
+    }
+
+    /// Updates a parked set's mesh range without allocating or baking its
+    /// world-space maps. Switching it into the active editor (or a graph that
+    /// reads Surface) restores those maps lazily.
+    pub(crate) fn set_triangles_deferred(&mut self, tris: std::ops::Range<u32>) {
+        let needed = (tris.end - tris.start).max(3);
+        if needed > self.screen_index_capacity {
+            self.screen_index_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("screen stroke candidate indices"),
+                size: u64::from(needed) * std::mem::size_of::<u32>() as u64,
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.screen_index_capacity = needed;
+        }
+        self.tris = tris;
+        self.uv_baked = None;
+        if !self.release_surface_maps() {
+            self.uv_version = self.uv_version.wrapping_add(1);
+        }
+        self.mask_final.clear();
+        self.mark_dirty();
     }
 
     /// Moves the texture set to another range of the (new) mesh and remakes
