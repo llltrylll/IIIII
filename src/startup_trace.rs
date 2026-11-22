@@ -62,6 +62,7 @@ static ON: OnceLock<Option<String>> = OnceLock::new();
 static TRACE: Mutex<Option<Trace>> = Mutex::new(None);
 static RUNTIME_CAPTURE: AtomicBool = AtomicBool::new(false);
 static CAPTURE_DONE: AtomicBool = AtomicBool::new(false);
+static AUTO_REPORT_DONE: AtomicBool = AtomicBool::new(false);
 static RUNTIME_FRAME_LIMIT: AtomicUsize = AtomicUsize::new(1200);
 
 thread_local! {
@@ -154,6 +155,7 @@ pub fn now_ms() -> f64 {
 
 /// Starts the clock; call first thing in `main`.
 pub fn init() {
+    AUTO_REPORT_DONE.store(false, Ordering::Release);
     with(|_| ());
 }
 
@@ -313,7 +315,8 @@ impl Drop for FrameGuard {
             if runtime {
                 RUNTIME_CAPTURE.store(false, Ordering::Release);
                 CAPTURE_DONE.store(true, Ordering::Release);
-            } else {
+            } else if !AUTO_REPORT_DONE.swap(true, Ordering::AcqRel) {
+                // The environment trace is bounded; don't rewrite the report on every later frame.
                 write_report();
             }
         }
