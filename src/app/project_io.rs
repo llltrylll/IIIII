@@ -248,6 +248,11 @@ fn prepare_project_file(
     path: &Path,
     cancelled: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<PreparedProject, String> {
+    let _project_total = crate::startup_trace::span_d(
+        "project open CPU: prepare file",
+        path.display().to_string(),
+    );
+    crate::startup_trace::event("project open: CPU preparation started");
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT_SPOOL: AtomicU64 = AtomicU64::new(1);
     static OPEN_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -258,6 +263,8 @@ fn prepare_project_file(
     }
     let mut file = std::fs::File::open(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
     let file_len = file.metadata().map_err(|e| e.to_string())?.len();
+    crate::startup_trace::count("project open: source file bytes", file_len);
+    let _header_manifest = crate::startup_trace::span("project open CPU: read manifest and blob table");
     let bad = || format!("{} isn't a Material Painter project (or is damaged)", path.display());
     if file_len < 24 {
         return Err(bad());
@@ -291,6 +298,9 @@ fn prepare_project_file(
         packed_ranges.push((offset, usize::try_from(packed_len).map_err(|_| bad())?));
         file.seek(SeekFrom::Start(end)).map_err(|_| bad())?;
     }
+    drop(_header_manifest);
+    crate::startup_trace::count("project open: compressed blob entries", count as u64);
+    crate::startup_trace::count("project open: manifest bytes", manifest_len);
 
     if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
         return Err("Project loading cancelled.".into());
@@ -309,6 +319,7 @@ fn prepare_project_file(
     let mut spool = std::io::BufWriter::new(spool_file);
     let mut raw_ranges = Vec::with_capacity(count);
     let mut raw_offset = 0u64;
+    let _decompress = crate::startup_trace::span("project open CPU: decompress blobs and spool to disk");
     for (index, (offset, packed_len)) in packed_ranges.into_iter().enumerate() {
         if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
             return Err("Project loading cancelled.".into());
@@ -324,6 +335,8 @@ fn prepare_project_file(
         raw_offset = raw_offset.checked_add(len as u64).ok_or("project load spool size overflow")?;
     }
     spool.flush().map_err(|e| format!("can't flush project load spool: {e}"))?;
+    drop(_decompress);
+    crate::startup_trace::count("project open: decompressed payload bytes", raw_offset);
     drop(spool);
     drop(file);
 
@@ -335,11 +348,16 @@ fn prepare_project_file(
         cleanup_path: cleanup.0.take(),
         shared_blobs: std::sync::Mutex::new(std::collections::HashMap::new()),
     }; 
-    validate_project_payloads(&manifest, &reader, cancelled)?;
+    {
+        let _validate = crate::startup_trace::span("project open CPU: validate texture and layer payloads");
+        validate_project_payloads(&manifest, &reader, cancelled)?;
+    }
+    crate::startup_trace::event("project open: payload validation complete");
 
     // Prepare the mesh, derived UV edges and picking BVH here rather than
     // rebuilding them synchronously after the UI has discarded its old mesh.
     let m = &manifest["mesh"];
+    let _mesh_payloads = crate::startup_trace::span("project open CPU: read mesh and vertex-color payloads");
     let vertices: Vec<Vertex> = reader.blob_pod_vec(&m["vertices"])?;
     let indices: Vec<u32> = reader.blob_pod_vec(&m["indices"])?;
     if indices.iter().any(|&i| i as usize >= vertices.len()) {
@@ -367,6 +385,8 @@ fn prepare_project_file(
     if !m["tri_vertex_color"].is_null() {
         mesh.tri_vertex_color = reader.blob_pod_vec_exact::<[[u8; 3]; 3]>(&m["tri_vertex_color"], tris)?;
     }
+    drop(_mesh_payloads);
+    let _set_ranges = crate::startup_trace::span("project open CPU: build mesh and texture-set ranges");
     let set_values: Vec<&Value> = match manifest["texture_sets"].as_array() {
         Some(values) if !values.is_empty() => values.iter().collect(),
         _ => vec![&manifest],
@@ -379,6 +399,14 @@ fn prepare_project_file(
     if ranges.len() == set_values.len() {
         mesh.set_ranges(ranges);
     }
+    crate::startup_trace::count("project open: texture sets", set_values.len() as u64);
+    let layer_total: u64 = set_values.iter()
+        .map(|set| set["layers_bottom_to_top"].as_array().map_or(0, |layers| layers.len() as u64))
+        .sum();
+    crate::startup_trace::count("project open: layers across all texture sets", layer_total);
+    crate::startup_trace::count("project open: mesh vertices", mesh.vertices.len() as u64);
+    crate::startup_trace::count("project open: mesh triangles", mesh.triangle_count() as u64);
+    drop(_set_ranges);
     let hidden_objects: Vec<bool> = m["hidden_objects"].as_array()
         .map(|values| values.iter().map(|v| v.as_bool().unwrap_or(false)).take(mesh.objects.len()).collect())
         .unwrap_or_else(|| vec![false; mesh.objects.len()]);
@@ -386,6 +414,7 @@ fn prepare_project_file(
     if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
         return Err("Project loading cancelled.".into());
     }
+    let _bvh_build = crate::startup_trace::span("project open CPU: build picking BVH");
     let bvh = std::sync::Arc::new(if any_hidden {
         crate::bvh::Bvh::from_mesh_where(&mesh, |tri| {
             let object = mesh.tri_object.get(tri).copied().unwrap_or(u32::MAX) as usize;
@@ -394,6 +423,8 @@ fn prepare_project_file(
     } else {
         crate::bvh::Bvh::from_mesh(&mesh)
     });
+    drop(_bvh_build);
+    crate::startup_trace::event("project open: CPU mesh and BVH ready");
     Ok(PreparedProject { manifest, reader, mesh, bvh })
 }
 
@@ -900,12 +931,20 @@ impl PainterApp {
         let name = s(v, "format").ok_or("texture without a format")?;
         let format = FORMATS.into_iter().find(|x| format!("{x:?}") == name).ok_or(format!("unknown texture format '{name}'"))?;
         let (w, h) = (v["width"].as_u64().unwrap_or(0) as u32, v["height"].as_u64().unwrap_or(0) as u32);
-        let bytes = r.blob(&v["blob"])?;
+        let detail = format!("role={label} blob={} size={}x{} format={format:?}", v["blob"].as_u64().unwrap_or(u64::MAX), w, h);
+        let bytes = {
+            let _read = crate::startup_trace::span_d("project open: read/decompress texture blob", detail.clone());
+            r.blob(&v["blob"])?
+        };
         let expected = (w * h * crate::gpu::bytes_per_texel(format)) as usize;
         if w == 0 || bytes.len() != expected {
             return Err(format!("{label} texture has the wrong size"));
         }
-        Ok(self.engine.texture_from_bytes(label, format, w, h, &bytes))
+        let texture = {
+            let _upload = crate::startup_trace::span_d("project open: create/upload GPU texture", detail);
+            self.engine.texture_from_bytes(label, format, w, h, &bytes)
+        };
+        Ok(texture)
     }
 
     /// One texture set's part of a project.
@@ -1134,6 +1173,7 @@ impl PainterApp {
     }
 
     pub(super) fn start_open_project(&mut self, path: &Path, ctx: &egui::Context) {
+        crate::startup_trace::event("project open: request queued");
         self.project_open.take();
         let path = path.to_path_buf();
         let worker_path = path.clone();
@@ -1142,7 +1182,16 @@ impl PainterApp {
         let worker_cancelled = cancelled.clone();
         let worker_ctx = ctx.clone();
         let spawn = std::thread::Builder::new().name("project-open-cpu".into()).spawn(move || {
-            let result = prepare_project_file(&worker_path, Some(&worker_cancelled));
+            let result = {
+                let _worker = crate::startup_trace::span_d("project open: CPU worker total", worker_path.display().to_string());
+                prepare_project_file(&worker_path, Some(&worker_cancelled))
+            };
+            if result.is_ok() {
+                crate::startup_trace::event("project open: CPU worker finished successfully");
+            } else {
+                crate::startup_trace::event("project open: CPU worker failed");
+            }
+            crate::startup_trace::checkpoint();
             let _ = tx.send(result);
             worker_ctx.request_repaint();
         });
@@ -1172,19 +1221,36 @@ impl PainterApp {
             || self.project_settings_serial != job.settings_serial
             || self.stroke.is_some()
         {
+            crate::startup_trace::event("project open: cancelled before apply");
+            crate::startup_trace::checkpoint();
             self.status = "Project loading cancelled because the current document changed.".into();
             return;
         }
+        crate::startup_trace::event("project open: CPU result received on UI thread");
         match result {
             Ok(prepared) => {
                 let path = job.path.clone();
-                match self.open_project_prepared(&path, prepared, ctx) {
-                    Ok(()) => self.target = crate::undo::StrokeTarget::Content,
-                    Err(error) => self.status = error,
+                let apply_result = {
+                    let _apply = crate::startup_trace::span_d("project open: UI/GPU apply total", path.display().to_string());
+                    self.open_project_prepared(&path, prepared, ctx)
+                };
+                match apply_result {
+                    Ok(()) => {
+                        self.target = crate::undo::StrokeTarget::Content;
+                        crate::startup_trace::event("project open: UI/GPU apply completed");
+                    }
+                    Err(error) => {
+                        crate::startup_trace::event("project open: UI/GPU apply failed");
+                        self.status = error;
+                    }
                 }
             }
-            Err(error) => self.status = error,
+            Err(error) => {
+                crate::startup_trace::event("project open: CPU preparation failed");
+                self.status = error;
+            }
         }
+        crate::startup_trace::checkpoint();
     }
 
     pub(super) fn open_project(&mut self, path: &Path, ctx: &egui::Context) -> Result<(), String> {
@@ -1198,6 +1264,8 @@ impl PainterApp {
         prepared: PreparedProject,
         ctx: &egui::Context,
     ) -> Result<(), String> {
+        let _apply_total = crate::startup_trace::span_d("project open: apply prepared project", path.display().to_string());
+        crate::startup_trace::event("project open: apply prepared state started");
         let PreparedProject { manifest, reader: r, mesh, bvh } = prepared;
         let bad = || format!("{} isn't a Material Painter project (or is damaged)", path.display());
         self.active_channels = std::array::from_fn(|i| {
@@ -1263,13 +1331,20 @@ impl PainterApp {
         let sizes: Vec<u32> = set_values.iter().map(|sv| sv["resolution"].as_u64().unwrap_or(2048) as u32).collect();
         // Release the previous document's snapshots before allocating the new one.
         self.undo.clear();
-        self.load_mesh_sized_with_bvh(mesh, bvh, ctx, &sizes, false);
+        {
+            let _mesh = crate::startup_trace::span_d("project open: create GPU mesh and texture-set engines", format!("sets={} sizes={sizes:?}", set_count));
+            self.load_mesh_sized_with_bvh(mesh, bvh, ctx, &sizes, false);
+        }
+        crate::startup_trace::event("project open: GPU mesh and texture-set engines ready");
+        crate::startup_trace::checkpoint();
         self.hidden_objects = manifest["mesh"]["hidden_objects"]
             .as_array()
             .map(|hidden| hidden.iter().map(|value| value.as_bool().unwrap_or(false)).take(self.mesh.objects.len()).collect())
             .unwrap_or_else(|| vec![false; self.mesh.objects.len()]);
         self.hidden_objects.resize(self.mesh.objects.len(), false);
         self.graphs.clear(&self.rs);
+        let graph_count = manifest["graphs"].as_array().map_or(0, |graphs| graphs.len());
+        let _graphs = crate::startup_trace::span_d("project open: restore material graphs", format!("graphs={graph_count}"));
         for gv in manifest["graphs"].as_array().into_iter().flatten() {
             let Some(id) = gv["id"].as_u64() else { continue };
             match crate::graph::Graph::from_json(&gv["graph"], &self.graphs.lib) {
@@ -1279,17 +1354,33 @@ impl PainterApp {
                 Err(e) => self.status = format!("A material graph didn't load: {e}"),
             }
         }
+        drop(_graphs);
+        crate::startup_trace::checkpoint();
         for (k, sv) in set_values.iter().enumerate().take(set_count) {
+            let set_name = s(sv, "name").unwrap_or("Material").to_string();
+            let set_resolution = sv["resolution"].as_u64().unwrap_or(2048) as u32;
+            let set_layer_count = sv["layers_bottom_to_top"].as_array().map_or(0, |layers| layers.len());
+            let set_detail = format!("index={k} name={set_name} resolution={set_resolution} layers={set_layer_count}");
+            let _set_total = crate::startup_trace::span_d("project open: apply texture set", set_detail.clone());
+            crate::startup_trace::event("project open: beginning texture set apply");
             self.switch_set(k);
             // Replacing a document must drop old layer textures, not retain them in Undo.
-            self.engine.restore_layers(Vec::new());
+            {
+                let _clear = crate::startup_trace::span_d("project open: clear new Engine layer stack", set_detail.clone());
+                self.engine.restore_layers(Vec::new());
+            }
+            crate::startup_trace::checkpoint();
             let res = sv["resolution"].as_u64().unwrap_or(2048) as u32;
             if res != self.engine.res {
                 self.engine.set_resolution(res, &self.gpu_mesh, &mut self.undo);
             }
             let mut layers = Vec::new();
-            for lv in sv["layers_bottom_to_top"].as_array().ok_or_else(bad)? {
+            for (layer_index, lv) in sv["layers_bottom_to_top"].as_array().ok_or_else(bad)?.iter().enumerate() {
                 let name = s(lv, "name").unwrap_or("Layer").to_string();
+                let _layer = crate::startup_trace::span_d(
+                    "project open: rebuild layer data",
+                    format!("set={set_name} layer={layer_index} name={name}"),
+                );
                 let c = &lv["content"];
                 let content = match s(c, "kind") {
                     Some("paint") => {
@@ -1326,8 +1417,13 @@ impl PainterApp {
                 let mut images: [Option<crate::engine::FillImage>; crate::engine::CHANNELS] = Default::default();
                 for (k, iv) in lv["images"].as_array().into_iter().flatten().enumerate().take(crate::engine::CHANNELS) {
                     if !iv.is_null() {
+                        let image_name = s(iv, "name").unwrap_or("image").to_string();
+                        let _image = crate::startup_trace::span_d(
+                            "project open: decode fill channel image",
+                            format!("set={set_name} layer={name} channel={k} image={image_name}"),
+                        );
                         let data = r.blob_arc(&iv["data"])?;
-                        images[k] = Some(self.engine.decode_channel_image(k, s(iv, "name").unwrap_or("image").to_string(), data)?);
+                        images[k] = Some(self.engine.decode_channel_image(k, image_name, data)?);
                     }
                 }
                 let blend_name = s(lv, "blend").unwrap_or("Normal");
@@ -1362,7 +1458,13 @@ impl PainterApp {
                     thumb: None,
                 });
             }
-            self.engine.restore_layers(layers);
+            {
+                let _restore = crate::startup_trace::span_d("project open: restore GPU layer stack", format!("set={set_name} layers={set_layer_count}"));
+                self.engine.restore_layers(layers);
+            }
+            crate::startup_trace::event("project open: texture-set layers restored");
+            crate::startup_trace::checkpoint();
+            let _map_fixes = crate::startup_trace::span_d("project open: restore map fixes and levels", format!("set={set_name}"));
             self.engine.map_fix = Default::default();
             for fv in sv["map_fixes"].as_array().into_iter().flatten() {
                 let map = fv["map"].as_u64().unwrap_or(u64::MAX) as usize;
@@ -1381,6 +1483,10 @@ impl PainterApp {
             }
             self.engine.map_levels_changed();
             self.selected = sv["selected"].as_u64().map_or(0, |x| x as usize).min(self.engine.layers.len().saturating_sub(1));
+            drop(_map_fixes);
+            drop(_set_total);
+            crate::startup_trace::event("project open: texture set apply completed");
+            crate::startup_trace::checkpoint();
         }
         self.switch_set(manifest["active_set"].as_u64().map_or(0, |x| x as usize).min(set_count - 1));
         self.repush_graphs();
@@ -1442,6 +1548,7 @@ impl PainterApp {
             _ => None,
         };
         if let Some(src) = source.filter(|src| *src != self.env.source) {
+            let _environment = crate::startup_trace::span("project open: load saved environment");
             self.load_env(src, ctx);
         }
 
@@ -1462,8 +1569,10 @@ impl PainterApp {
             self.status = format!("Opened {}.", path.display());
         }
         if self.prefs.bake_on_load {
+            let _bake = crate::startup_trace::span("project open: queue automatic bake");
             self.start_bake_all(ctx);
         }
+        crate::startup_trace::event("project open: apply prepared project complete");
         Ok(())
     }
 
