@@ -2629,10 +2629,19 @@ impl PainterApp {
         // A bake of the old mesh can't land on the new one.
         self.bake_job = None;
         self.end_preview(false);
-        self.gpu_mesh = GpuMesh::new(&self.rs.device, &mesh);
+        self.gpu_mesh = {
+            let _upload = crate::startup_trace::span_d(
+                "project open: upload GPU mesh buffers",
+                format!("vertices={} triangles={} texture_sets={}", mesh.vertices.len(), mesh.triangle_count(), mesh.sets.len()),
+            );
+            GpuMesh::new(&self.rs.device, &mesh)
+        };
+        crate::startup_trace::event("project open: GPU mesh buffers ready");
+        crate::startup_trace::checkpoint();
         self.views.invalidate_shadow();
         self.bvh = bvh;
         if let Some(raytracer) = self.raytracer.as_mut() {
+            let _ray_mesh = crate::startup_trace::span("project open: update ray-tracing mesh");
             raytracer.set_mesh(&self.rs.device, &mesh, &self.bvh);
         }
         self.export.mesh_name = mesh.name.replace(' ', "");
@@ -2644,7 +2653,15 @@ impl PainterApp {
         self.mesh = Arc::new(mesh);
         self.hidden_objects = vec![false; self.mesh.objects.len()];
         self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
-        self.rebuild_sets(&old_names, sizes);
+        {
+            let _sets = crate::startup_trace::span_d(
+                "project open: initialize texture-set Engines",
+                format!("sets={} resolutions={sizes:?}", self.mesh.sets.len()),
+            );
+            self.rebuild_sets(&old_names, sizes);
+        }
+        crate::startup_trace::event("project open: texture-set Engines initialized");
+        crate::startup_trace::checkpoint();
         // Mesh-dependent helpers rebuild for the new mesh on demand.
         self.poly.topo = None;
         self.poly.shown = None;
