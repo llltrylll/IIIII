@@ -22,7 +22,7 @@ Copy-Item LICENSE, THIRD_PARTY_NOTICES.html, README.md $stage
 # The backend is selected before wgpu creates its instance. Ship explicit
 # launchers so users do not accidentally start the default Vulkan backend
 # when they intend to test the OpenGL viewport.
-Copy-Item scripts/Start-OpenGL-4x.bat, scripts/Start-Vulkan-4x.bat, scripts/OPENGL-VIEWPORT-TEST.txt $stage
+Copy-Item scripts/Start-OpenGL-4x.bat, scripts/Start-Vulkan-4x.bat, scripts/Start-Diagnostics.bat, scripts/OPENGL-VIEWPORT-TEST.txt $stage
 
 $zip = Join-Path $root "dist/MaterialPainter-$version-windows-x64.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }
