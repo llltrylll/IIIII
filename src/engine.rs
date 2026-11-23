@@ -902,6 +902,19 @@ fn composite_output_mask(u: &LayerUniform) -> u8 {
     // Keep that exact channel path until a separately validated identity fast path exists.
     mask |= 1 << 5;
     if u.ns[3] > 0.5 { mask |= 1 << 6; }
+
+    // A layer with no normal input is an identity for the normal channel.
+    // Do not read, normalize/re-encode, or ping-pong that full-resolution
+    // target on every otherwise unrelated layer.
+    let has_normal_input = if u.p0[2] > 0.5 {
+        // Fill layers contribute normals only when a normal image is assigned
+        // and enabled; strength zero produces the flat normal.
+        (u.var1[3] as u32 & (1 << 7)) != 0 && u.ns[0] != 0.0
+    } else {
+        // Paint layers use ns.y as the flag for an allocated normal channel.
+        u.ns[1] > 0.5
+    };
+    if has_normal_input { mask |= 1 << 5; }
     mask
 }
 
@@ -6680,6 +6693,32 @@ mod composite_pass_tests {
 
     fn folder() -> Content {
         Content::Folder(Folder { open: true, graph: None })
+    }
+
+    #[test]
+    fn identity_layers_do_not_rewrite_the_normal_accumulation_target() {
+        let mut u: LayerUniform = bytemuck::Zeroable::zeroed();
+        u.ch[0] = 1.0;
+        assert_eq!(composite_output_mask(&u) & (1 << 5), 0);
+
+        // A paint layer with an allocated normal channel still participates.
+        u.ns[1] = 1.0;
+        assert_ne!(composite_output_mask(&u) & (1 << 5), 0);
+
+        // A fill layer without a normal image is an identity, even when the
+        // material's normal channel toggle is on.
+        u.p0[2] = 1.0;
+        u.var1[3] = 0.0;
+        u.ns[0] = 1.0;
+        assert_eq!(composite_output_mask(&u) & (1 << 5), 0);
+
+        // An enabled normal image with non-zero strength uses the full path.
+        u.var1[3] = 128.0;
+        assert_ne!(composite_output_mask(&u) & (1 << 5), 0);
+
+        // Zero strength has a flat-normal result and can also be skipped.
+        u.ns[0] = 0.0;
+        assert_eq!(composite_output_mask(&u) & (1 << 5), 0);
     }
 
     fn legacy_passes(layers: &[Layer]) -> (Vec<Pass>, usize) {
