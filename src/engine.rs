@@ -897,10 +897,6 @@ fn composite_output_mask(u: &LayerUniform) -> u8 {
     if u.ch[2] > 0.5 { mask |= 1 << 2; }
     if u.ch[3] > 0.5 { mask |= 1 << 3; }
     if u.emis[3] > 0.5 { mask |= 1 << 4; }
-    // The original full-output shader normalized and re-encoded the previous
-    // normal on every layer, even when the layer had no normal contribution.
-    // Keep that exact channel path until a separately validated identity fast path exists.
-    mask |= 1 << 5;
     if u.ns[3] > 0.5 { mask |= 1 << 6; }
 
     // A layer with no normal input is an identity for the normal channel.
@@ -6699,7 +6695,10 @@ mod composite_pass_tests {
     fn identity_layers_do_not_rewrite_the_normal_accumulation_target() {
         let mut u: LayerUniform = bytemuck::Zeroable::zeroed();
         u.ch[0] = 1.0;
-        assert_eq!(composite_output_mask(&u) & (1 << 5), 0);
+        let mask_without_normal = composite_output_mask(&u);
+        assert_eq!(mask_without_normal & (1 << 5), 0);
+        let initial_indices = [0; ACCUM];
+        assert_eq!(toggle_accum_indices(initial_indices, mask_without_normal)[5], 0);
 
         // A paint layer with an allocated normal channel still participates.
         u.ns[1] = 1.0;
