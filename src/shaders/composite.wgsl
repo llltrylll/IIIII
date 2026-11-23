@@ -342,16 +342,25 @@ fn fs_layer(in: FsOut) -> AccumOut {
     let po = pc4.a;
 
     let bits = u32(u.var1.w);
+    let projection = i32(u.var1.z + 0.5);
     var p = vec3<f32>(0.0);
     var n = vec3<f32>(0.0, 0.0, 1.0);
-    // Only fill images/projections and uncached procedural channels need
-    // surface position/normal in the main layer pass. Cached color/roughness
-    // FBM already sampled position in its prepass.
+    // UV projection derives its coordinates and mip level from the UV image
+    // itself. It does not need world position, a surface normal, or the
+    // neighboring POS texel used by texel_size(). Keep those reads for
+    // projections that actually operate in world space.
     let needs_inline_color = u.ch.x > 0.5 && u.var0.x != 0.0 && u.varc.y < 0.5;
     let needs_inline_roughness = u.ch.y > 0.5 && u.var0.z != 0.0 && u.varc.x < 0.5;
     let needs_height_variation = u.ch.w > 0.5 && u.var0.w != 0.0;
-    if (u.p0.z > 0.5 && (bits != 0u || needs_inline_color || needs_inline_roughness || needs_height_variation)) {
+    let needs_projected_position = bits != 0u && projection != 0;
+    let needs_projected_normal = (projection == 1 && bits != 0u)
+        || (projection >= 2 && projection <= 4 && (bits & 128u) != 0u);
+    let needs_surface_position = needs_projected_position
+        || needs_inline_color || needs_inline_roughness || needs_height_variation;
+    if (u.p0.z > 0.5 && needs_surface_position) {
         p = textureLoad(pos_map, c, 0).xyz;
+    }
+    if (u.p0.z > 0.5 && needs_projected_normal) {
         n = normalize(textureLoad(nrm_map, c, 0).xyz * 2.0 - 1.0);
     }
 
@@ -419,7 +428,10 @@ fn fs_layer(in: FsOut) -> AccumOut {
         // Fill layer: images replace their channels' values, then procedural
         // and per-part variation apply on top.
         if (bits != 0u) {
-            let texel_world = texel_size(c, p);
+            var texel_world = 0.0;
+            if (projection != 0) {
+                texel_world = texel_size(c, p);
+            }
             if ((bits & 1u) != 0u) {
                 let img = fill_image(l_color, uv, p, n, texel_world);
                 sc = select(img.rgb, img.rrr, (bits & 16u) != 0u);
@@ -595,13 +607,20 @@ fn fs_layer_gl_core(in: FsOut) -> GlCoreOut {
     let po = pc4.a;
 
     let bits = u32(u.var1.w);
+    let projection = i32(u.var1.z + 0.5);
     var p = vec3<f32>(0.0);
     var n = vec3<f32>(0.0, 0.0, 1.0);
     let needs_inline_color = u.ch.x > 0.5 && u.var0.x != 0.0 && u.varc.y < 0.5;
     let needs_inline_roughness = u.ch.y > 0.5 && u.var0.z != 0.0 && u.varc.x < 0.5;
     let needs_height_variation = u.ch.w > 0.5 && u.var0.w != 0.0;
-    if (u.p0.z > 0.5 && ((bits & 63u) != 0u || needs_inline_color || needs_inline_roughness || needs_height_variation)) {
+    let needs_projected_position = (bits & 63u) != 0u && projection != 0;
+    let needs_projected_normal = projection == 1 && (bits & 63u) != 0u;
+    let needs_surface_position = needs_projected_position
+        || needs_inline_color || needs_inline_roughness || needs_height_variation;
+    if (u.p0.z > 0.5 && needs_surface_position) {
         p = textureLoad(pos_map, c, 0).xyz;
+    }
+    if (u.p0.z > 0.5 && needs_projected_normal) {
         n = normalize(textureLoad(nrm_map, c, 0).xyz * 2.0 - 1.0);
     }
 
@@ -644,7 +663,10 @@ fn fs_layer_gl_core(in: FsOut) -> GlCoreOut {
         }
     } else {
         if ((bits & 63u) != 0u) {
-            let texel_world = texel_size(c, p);
+            var texel_world = 0.0;
+            if (projection != 0) {
+                texel_world = texel_size(c, p);
+            }
             if ((bits & 1u) != 0u) {
                 let img = fill_image(l_color, uv, p, n, texel_world);
                 sc = select(img.rgb, img.rrr, (bits & 16u) != 0u);
@@ -728,12 +750,21 @@ fn fs_layer_gl_extra(in: FsOut) -> GlExtraOut {
     if ((outputs & 64u) != 0u) { ps = textureLoad(prev_spec, c, 0).r; }
 
     let bits = u32(u.var1.w);
+    let projection = i32(u.var1.z + 0.5);
+    let image_bits = bits & 448u;
     var p = vec3<f32>(0.0);
     var n = vec3<f32>(0.0, 0.0, 1.0);
     var texel_world = 0.0;
-    if (u.p0.z > 0.5 && (bits & 448u) != 0u) {
+    let needs_projected_position = image_bits != 0u && projection != 0;
+    let needs_projected_normal = (projection == 1 && image_bits != 0u)
+        || (projection >= 2 && projection <= 4 && (image_bits & 128u) != 0u);
+    if (u.p0.z > 0.5 && needs_projected_position) {
         p = textureLoad(pos_map, c, 0).xyz;
+    }
+    if (u.p0.z > 0.5 && needs_projected_normal) {
         n = normalize(textureLoad(nrm_map, c, 0).xyz * 2.0 - 1.0);
+    }
+    if (u.p0.z > 0.5 && needs_projected_position) {
         texel_world = texel_size(c, p);
     }
 
