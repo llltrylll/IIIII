@@ -909,7 +909,7 @@ fn composite_output_mask(u: &LayerUniform) -> u8 {
     let has_normal_input = if u.p0[2] > 0.5 {
         // Fill layers contribute normals only when a normal image is assigned
         // and enabled; strength zero produces the flat normal.
-        (u.var1[3] as u32 & (1 << 7)) != 0 && u.ns[0] != 0.0
+        (u.var1[3] as u32 & (1 << 7)) != 0 && u.ns[1] > 0.5 && u.ns[0] != 0.0
     } else {
         // Paint layers use ns.y as the flag for an allocated normal channel.
         u.ns[1] > 0.5
@@ -5315,22 +5315,22 @@ impl Engine {
                 u.fill_rmh = [m.rough, m.metal, m.height, 0.0];
                 u.var0 = [f.color_var, f.var_scale, f.rough_var, f.height_var];
                 let mut bits = (0..4)
-                    .filter(|&i| enabled(i) && layer.images[i].is_some())
+                    .filter(|&i| m.enabled[i] && enabled(i) && layer.images[i].is_some())
                     .fold(0u32, |b, i| b | 1 << i);
                 // A grayscale color image is single-channel: the shader spreads it to rgb.
-                if enabled(0) && layer.images[0].as_ref().is_some_and(|im| im.tex.format == F::R8Unorm) {
+                if m.enabled[0] && enabled(0) && layer.images[0].as_ref().is_some_and(|im| im.tex.format == F::R8Unorm) {
                     bits |= 16;
                 }
-                if enabled(OPACITY) && layer.images[OPACITY].is_some() {
+                if m.enabled[OPACITY] && enabled(OPACITY) && layer.images[OPACITY].is_some() {
                     bits |= 32;
                 }
-                if enabled(EMISSION) && layer.images[EMISSION].is_some() {
+                if m.enabled[EMISSION] && enabled(EMISSION) && layer.images[EMISSION].is_some() {
                     bits |= 64;
                 }
-                if enabled(NORMAL) && layer.images[NORMAL].is_some() {
+                if m.enabled[NORMAL] && enabled(NORMAL) && layer.images[NORMAL].is_some() {
                     bits |= 128;
                 }
-                if enabled(SPECULAR) && layer.images[SPECULAR].is_some() {
+                if m.enabled[SPECULAR] && enabled(SPECULAR) && layer.images[SPECULAR].is_some() {
                     bits |= 256;
                 }
                 u.emis = [m.emission[0], m.emission[1], m.emission[2], 0.0];
@@ -6714,7 +6714,13 @@ mod composite_pass_tests {
 
         // An enabled normal image with non-zero strength uses the full path.
         u.var1[3] = 128.0;
+        u.ns[1] = 1.0;
         assert_ne!(composite_output_mask(&u) & (1 << 5), 0);
+
+        // A disabled normal channel does not contribute, even when its image
+        // remains assigned to the Fill layer.
+        u.ns[1] = 0.0;
+        assert_eq!(composite_output_mask(&u) & (1 << 5), 0);
 
         // Zero strength has a flat-normal result and can also be skipped.
         u.ns[0] = 0.0;
