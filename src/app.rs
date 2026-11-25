@@ -921,6 +921,7 @@ pub struct PainterApp {
     selected_point_light: usize,
     show_point_light_markers: bool,
     move_point_light: bool,
+    point_light_pointer_capture: bool,
     support_popup_open: bool,
     /// Blender-style first-person navigation, active only over the 3D viewport.
     walk_navigation: bool,
@@ -2507,6 +2508,7 @@ impl PainterApp {
             selected_point_light: 0,
             show_point_light_markers: true,
             move_point_light: false,
+            point_light_pointer_capture: false,
             support_popup_open: false,
             walk_navigation: false,
             walk_skip_mouse_delta: false,
