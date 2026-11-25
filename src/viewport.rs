@@ -1805,7 +1805,9 @@ impl ViewRenderer {
                     resolve_target: t.resolve.as_ref().map(|r| &r.view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(if transparent { wgpu::Color::TRANSPARENT } else { wgpu::Color::BLACK }),
-                        store: wgpu::StoreOp::Discard,
+                        // MSAA output is resolved into a separate texture, so its source may be discarded.
+                        // On OpenGL the HDR target is single-sample and is read directly by post; it must be stored.
+                        store: if t.resolve.is_some() { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store },
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
