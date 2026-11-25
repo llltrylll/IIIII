@@ -413,6 +413,15 @@ impl PainterApp {
             || (self.view.mode == ViewMode::Material && self.views.has_custom_shader())
     }
 
+    /// The auxiliary depth pass exists for screen-projected 3D brush strokes.
+    /// Rebuilding it during ordinary camera orbit was rendering the entire mesh
+    /// a second time on every navigation frame, despite no brush using the result.
+    fn screen_paint_depth_needed(&self) -> bool {
+        self.stroke.as_ref().is_some_and(|stroke| stroke.view == ViewKind::V3d)
+            && self.brush.projection == BrushProjection::Screen
+            && !self.walk_navigation
+    }
+
     /// Reframes both viewports on the normalized mesh bounds. The camera is
     /// fitted to the narrower dock axis so a portrait 3D pane does not crop it.
     pub(super) fn frame_mesh_views(&mut self) {
@@ -504,7 +513,7 @@ impl PainterApp {
                     self.views.render_3d_with_object_visibility_and_paint_depth(
                         &self.rs, size, &engines, &self.env, &self.gpu_mesh, self.mesh.as_ref(),
                         &self.cam, &self.view, Some(&self.overlays), &self.hidden_objects,
-                        !self.walk_navigation,
+                        self.screen_paint_depth_needed(),
                     );
                 }
                 self.drew_3d = true;
@@ -744,7 +753,7 @@ impl PainterApp {
                 self.views.render_3d_with_object_visibility_and_paint_depth(
                     &self.rs, size, &engines, &self.env, &self.gpu_mesh, self.mesh.as_ref(),
                     &self.cam, &self.view, Some(&self.overlays), &self.hidden_objects,
-                    !self.walk_navigation,
+                    self.screen_paint_depth_needed(),
                 );
             }
         }
