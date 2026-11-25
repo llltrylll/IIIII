@@ -19,6 +19,7 @@ pub(super) enum Pane {
     TextureSet,
     Preview,
     Shelf,
+    Lighting,
     /// Material Designer: the material on the mesh.
     DesignView,
     /// Material Designer: the node canvas (or the start page).
@@ -44,6 +45,7 @@ impl Pane {
             Pane::TextureSet => (i::GRID_FOUR, "Texture Set"),
             Pane::Preview => (i::APERTURE, "Preview"),
             Pane::Shelf => (i::IMAGES, "Shelf"),
+            Pane::Lighting => (i::LIGHTBULB, "Lighting"),
             Pane::DesignView => (i::CUBE, "3D View"),
             Pane::Graph => (i::SPARKLE, "Graph"),
             Pane::NodeSettings => (i::GEAR, "Node"),
@@ -72,6 +74,7 @@ fn panes(ws: Workspace) -> &'static [Pane] {
             Pane::TextureSet,
             Pane::Preview,
             Pane::Shelf,
+            Pane::Lighting,
         ],
         Workspace::Designer => &[Pane::DesignView, Pane::Graph, Pane::NodeSettings],
         Workspace::ShaderMaker => &[Pane::ShaderList, Pane::ShaderCode, Pane::ShaderPreview],
@@ -95,7 +98,8 @@ fn default_tree(ws: Workspace) -> Tree<Pane> {
             let v2 = t.insert_tab_tile(vec![v2]);
             let views = t.insert_horizontal_tile(vec![v3, v2]);
             let shelf = t.insert_pane(Pane::Shelf);
-            let shelf = t.insert_tab_tile(vec![shelf]);
+            let lighting = t.insert_pane(Pane::Lighting);
+            let shelf = t.insert_tab_tile(vec![shelf, lighting]);
             let left = t.insert_vertical_tile(vec![views, shelf]);
             share(&mut t, left, views, 4.0);
             share(&mut t, left, shelf, 1.0);
@@ -219,6 +223,7 @@ impl Behavior<Pane> for DockBehavior<'_> {
             Pane::TextureSet => "dock pane: texture set",
             Pane::Preview => "dock pane: preview",
             Pane::Shelf => "dock pane: shelf",
+            Pane::Lighting => "dock pane: lighting",
             Pane::Graph => "dock pane: graph",
             Pane::NodeSettings => "dock pane: node settings",
             Pane::ShaderList => "dock pane: shader list",
@@ -236,6 +241,7 @@ impl Behavior<Pane> for DockBehavior<'_> {
             Pane::TextureSet => app.texture_set_panel(ui),
             Pane::Preview => app.preview_panel(ui),
             Pane::Shelf => app.shelf_panel(ui),
+            Pane::Lighting => app.lighting_panel(ui),
             Pane::Graph => app.designer_graph_pane(ui),
             Pane::NodeSettings => app.designer_settings_pane(ui),
             Pane::ShaderList => app.shader_list(ui),
