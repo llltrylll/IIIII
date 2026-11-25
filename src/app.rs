@@ -4138,7 +4138,7 @@ impl PainterApp {
                         (resp.rect.right() - 270.0).max(ui.min_rect().left() + 8.0),
                         resp.rect.bottom() + 6.0,
                     );
-                    egui::Area::new(egui::Id::new("support_fov_popup"))
+                    egui::Area::new(egui::Id::unique("support_fov_popup"))
                         .order(egui::Order::Foreground)
                         .fixed_pos(popup_pos)
                         .show(ui.ctx(), |ui| {
