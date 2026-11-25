@@ -98,12 +98,12 @@ impl PainterApp {
                 labeled(ui, "Enabled", |ui| ui.checkbox(&mut light.on, ""));
                 labeled(ui, "Color", |ui| color_edit(ui, &mut light.color));
                 slider(ui, "Intensity", &mut light.intensity, 0.0..=200.0);
-                slider(ui, "Range", &mut light.range, 0.1..=20.0);
+                slider(ui, "Range", &mut light.range, 0.1..=1_000.0);
 
                 section(ui, "Position");
-                slider(ui, "X", &mut light.position.x, -20.0..=20.0);
-                slider(ui, "Y", &mut light.position.y, -20.0..=20.0);
-                slider(ui, "Z", &mut light.position.z, -20.0..=20.0);
+                ui.add(egui::DragValue::new(&mut light.position.x).speed(0.1).range(-1_000_000.0..=1_000_000.0).prefix("X "));
+                ui.add(egui::DragValue::new(&mut light.position.y).speed(0.1).range(-1_000_000.0..=1_000_000.0).prefix("Y "));
+                ui.add(egui::DragValue::new(&mut light.position.z).speed(0.1).range(-1_000_000.0..=1_000_000.0).prefix("Z "));
                 if ui.small_button("Move in front of camera").clicked() {
                     light.position = camera_light_position(&self.cam, 1.5, 1.5);
                 }
