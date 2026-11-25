@@ -62,9 +62,17 @@ fn main() -> eframe::Result {
     // Request the adapter's full limits: high-poly bake sources need large
     // storage buffers, and the compositor binds many textures per pass.
     if let egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
-        // Apply WGPU_BACKEND to the instance descriptor. Without this, wgpu's
-        // default descriptor ignores the launcher environment and may choose Vulkan.
-        setup.instance_descriptor.backends = setup.instance_descriptor.backends.with_env();
+        // OpenGL is the default backend on Windows. The Vulkan launcher sets
+        // WGPU_BACKEND=vulkan before this instance is created; an explicit
+        // environment selection always takes precedence.
+        if std::env::var_os("WGPU_BACKEND").is_some() {
+            setup.instance_descriptor.backends = setup.instance_descriptor.backends.with_env();
+        } else {
+            #[cfg(target_os = "windows")]
+            {
+                setup.instance_descriptor.backends = wgpu::Backends::GL;
+            }
+        }
         setup.power_preference = app::prefs::Preferences::power_preference();
         setup.device_descriptor = Arc::new(|adapter| wgpu::DeviceDescriptor {
             label: Some("material painter device"),
