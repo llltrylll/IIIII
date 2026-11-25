@@ -90,7 +90,7 @@ impl PainterApp {
         }
         if let Some(hit) = self.bvh.raycast(eye, forward) {
             let distance = eye.distance(hit.pos);
-            if distance.is_finite() && (0.05..=40.0).contains(&distance) {
+            if distance.is_finite() && distance >= crate::viewport::CAMERA_MIN_DISTANCE {
                 self.cam.focus_on(hit.pos);
             }
         }
@@ -251,13 +251,13 @@ impl PainterApp {
                     self.cam.target += (-right * delta.x + up * delta.y) * k;
                 }
                 if resp.dragged_by(B::Secondary) && mods.alt && !adjust_brush {
-                    self.cam.dist = (self.cam.dist * (delta.y * 0.01).exp()).clamp(0.3, 40.0);
+                    self.cam.set_distance(self.cam.dist * (delta.y * 0.01).exp());
                 }
                 if resp.dragged_by(B::Secondary) && mods.shift && !adjust_brush {
                     self.view.env_rotation += delta.x * 0.01;
                 }
                 if resp.hovered() && scroll != 0.0 {
-                    self.cam.dist = (self.cam.dist * (-scroll * self.zoom_rate()).exp()).clamp(0.3, 40.0);
+                    self.cam.set_distance(self.cam.dist * (-scroll * self.zoom_rate()).exp());
                 }
                 if resp.double_clicked() && mods.alt
                     && let Some(p) = hover {
