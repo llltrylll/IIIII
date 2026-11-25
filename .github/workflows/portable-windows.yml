@@ -31,8 +31,8 @@ jobs:
       - name: Restore Rust build cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Run unit tests
-        run: cargo test --locked
+      # Unit tests are run by the CI workflow for this source commit.
+      # Keep this workflow focused on the optimized Windows package and its audit.
 
       - name: Build optimized Windows executable
         run: cargo build --release --locked
