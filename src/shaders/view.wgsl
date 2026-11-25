@@ -299,13 +299,17 @@ fn point_lighting(s: Surface, n: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
         let source = g.point_lights[i * 2u];
         let color_range = g.point_lights[i * 2u + 1u];
         let to_light = source.xyz - s.wpos;
-        let distance_squared = max(dot(to_light, to_light), 1e-4);
-        let distance = sqrt(distance_squared);
+        let distance_squared = dot(to_light, to_light);
         let range = color_range.w;
-        if (source.w > 0.0 && range > 0.0 && distance < range) {
-            let edge = max(1.0 - pow(distance / range, 4.0), 0.0);
-            let attenuation = edge * edge / distance_squared;
-            total += direct_light(s, n, v, to_light, color_range.rgb, source.w * attenuation, 1.0);
+        // Avoid normalizing a zero-length direction when a light sits directly
+        // on a surface, and keep the inverse-square term finite at close range.
+        if (source.w > 0.0 && range > 0.0 && distance_squared > 1e-4) {
+            let distance = sqrt(distance_squared);
+            if (distance < range) {
+                let edge = max(1.0 - pow(distance / range, 4.0), 0.0);
+                let attenuation = edge * edge / distance_squared;
+                total += direct_light(s, n, v, to_light, color_range.rgb, source.w * attenuation, 1.0);
+            }
         }
     }
     return total;
