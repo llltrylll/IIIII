@@ -4,6 +4,7 @@ on:
   push:
     branches-ignore:
       - 'fix/**'
+      - 'cleanup/**'
   pull_request:
 jobs:
   test:
