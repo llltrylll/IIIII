@@ -139,6 +139,15 @@ impl PainterApp {
         let local = |p: egui::Pos2| Vec2::new((p.x - rect.min.x) * ppp, (p.y - rect.min.y) * ppp);
         use egui::PointerButton as B;
 
+        // Consume the press, hold and release that selected or repositioned a
+        // light, so the tail of that click can never leak into brush painting.
+        if kind == ViewKind::V3d && self.point_light_pointer_capture {
+            if !down {
+                self.point_light_pointer_capture = false;
+            }
+            return;
+        }
+
         // Moving a light is a one-click placement mode, not a paint gesture.
         // Use the mesh hit when possible; otherwise place it on the camera's
         // focal plane so lights can also be moved into empty space.
@@ -167,6 +176,7 @@ impl PainterApp {
                 let count = self.view.point_light_count.min(crate::viewport::MAX_POINT_LIGHTS);
                 if count > 0 && self.selected_point_light < count && let Some(position) = position.filter(|p| p.is_finite()) {
                     self.view.point_lights[self.selected_point_light].position = position;
+                    self.point_light_pointer_capture = true;
                     self.move_point_light = false;
                     self.status = format!(
                         "Point {} moved to X {:.2}, Y {:.2}, Z {:.2}.",
@@ -190,6 +200,7 @@ impl PainterApp {
                     .is_some_and(|marker| marker.distance(pointer) <= 12.0)
                 {
                     self.selected_point_light = index;
+                    self.point_light_pointer_capture = true;
                     self.status = format!("Point light {} selected.", index + 1);
                     ui.ctx().request_repaint();
                     return;
