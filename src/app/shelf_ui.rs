@@ -42,6 +42,21 @@ impl ShelfRow {
     }
 }
 
+/// Case-insensitive shelf search without allocating a lowercase copy for
+/// every material name on every UI frame. Catalog names are overwhelmingly
+/// ASCII; non-ASCII names keep Unicode lowercase matching as a fallback.
+fn shelf_name_matches(name: &str, search: &str) -> bool {
+    if search.is_empty() {
+        return true;
+    }
+    if name.is_ascii() && search.is_ascii() {
+        let name = name.as_bytes();
+        let search = search.as_bytes();
+        return name.windows(search.len()).any(|part| part.eq_ignore_ascii_case(search));
+    }
+    name.to_lowercase().contains(&search.to_lowercase())
+}
+
 fn flush_shelf_row(rows: &mut Vec<ShelfRow>, current: &mut Vec<ShelfTile>) {
     if !current.is_empty() {
         rows.push(ShelfRow::Items(std::mem::take(current)));
@@ -181,8 +196,8 @@ impl PainterApp {
                     }
                 }
                 let icon = self.shelf.icon_size;
-                let search = self.shelf.search.to_lowercase();
-                let matches_search = |name: &str| search.is_empty() || name.to_lowercase().contains(&search);
+                let search = self.shelf.search.as_str();
+                let matches_search = |name: &str| shelf_name_matches(name, search);
                 let kind = self.shelf.kind;
                 let cat = self.shelf.cat;
                 let wanted = |k: presets::MaterialType| kind.is_none_or(|filter| filter == k);
@@ -561,5 +576,24 @@ impl PainterApp {
             ui.add(egui::Image::new((tex, vec2(size * 2.0, size * 2.0))));
             ui.label(name);
         })
+    }
+}
+
+
+#[cfg(test)]
+mod shelf_search_tests {
+    use super::shelf_name_matches;
+
+    #[test]
+    fn shelf_search_is_ascii_case_insensitive_without_requiring_lowercase_input() {
+        assert!(shelf_name_matches("Painted Steel Worn", "STEEL"));
+        assert!(shelf_name_matches("Painted Steel Worn", "paint"));
+        assert!(!shelf_name_matches("Painted Steel Worn", "wood"));
+    }
+
+    #[test]
+    fn shelf_search_handles_empty_and_unicode_strings() {
+        assert!(shelf_name_matches("Painted Steel", ""));
+        assert!(shelf_name_matches("Ébano", "ébano"));
     }
 }
