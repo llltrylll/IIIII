@@ -77,6 +77,18 @@ jobs:
           WGPU_BACKEND: gl
           LIBGL_ALWAYS_SOFTWARE: "1"
 
+
+      # Run these new viewport checks before the existing packed-depth GL test,
+      # which may fail independently and otherwise prevent them from executing.
+      - name: GPU viewport - editable point-light contribution
+        run: "cargo test --locked --bin material_painter preview_test::point_lights_affect_the_material_viewport -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: OpenGL viewport - editable point-light contribution
+        run: "xvfb-run -a cargo test --locked --bin material_painter preview_test::point_lights_affect_the_material_viewport -- --ignored --exact --nocapture --test-threads 1"
+        env:
+          WGPU_BACKEND: gl
+          LIBGL_ALWAYS_SOFTWARE: "1"
+
       # Keep the correctness gates focused on brush/mask GPU parity.
       # The broader preview suite also contains unrelated interactive UI tests.
       - name: GPU parity - stacked UV screen paint
@@ -119,15 +131,6 @@ jobs:
 
       - name: GPU viewport - built-in material and map views
         run: "cargo test --locked --bin material_painter preview_test::preview_mesh -- --ignored --exact --nocapture --test-threads 1"
-
-      - name: GPU viewport - editable point-light contribution
-        run: "cargo test --locked --bin material_painter preview_test::point_lights_affect_the_material_viewport -- --ignored --exact --nocapture --test-threads 1"
-
-      - name: OpenGL viewport - editable point-light contribution
-        run: "xvfb-run -a cargo test --locked --bin material_painter preview_test::point_lights_affect_the_material_viewport -- --ignored --exact --nocapture --test-threads 1"
-        env:
-          WGPU_BACKEND: gl
-          LIBGL_ALWAYS_SOFTWARE: "1"
 
       - name: GPU composite - smart mask generator cache
         run: "cargo test --locked --bin material_painter preview_test::smart_mask_generator_cache_matches_uncached_result_and_invalidates_on_change -- --ignored --exact --nocapture --test-threads 1"
