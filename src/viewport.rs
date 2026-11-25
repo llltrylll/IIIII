@@ -12,6 +12,10 @@ pub const NEAR: f32 = 0.02;
 pub const FAR: f32 = 100.0;
 const MSAA: u32 = 4;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+/// Camera orbit distance is no longer tied to a small fixed 40-unit ceiling.
+pub const CAMERA_MIN_DISTANCE: f32 = 0.001;
+pub const CAMERA_MAX_DISTANCE: f32 = 1_000_000.0;
+pub const MAX_POINT_LIGHTS: usize = 8;
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 /// What the viewports display. Discriminants match `shade()` in view.wgsl;
@@ -141,7 +145,24 @@ impl OrbitCam {
         self.target + Vec3::new(cp * sy, sp, cp * cy) * self.dist
     }
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
-        perspective_rh(self.fov_y, aspect.max(1e-3), NEAR, FAR) * look_at_rh(self.eye(), self.target, Vec3::Y)
+        let (near, far) = self.clip_planes();
+        let fov = self.fov_y.clamp(10.0_f32.to_radians(), 120.0_f32.to_radians());
+        perspective_rh(fov, aspect.max(1e-3), near, far) * look_at_rh(self.eye(), self.target, Vec3::Y)
+    }
+
+    /// Keeps clipping precision useful both for close surface inspection and
+    /// for orbiting far beyond the old 40-unit ceiling.
+    pub fn clip_planes(&self) -> (f32, f32) {
+        let distance = if self.dist.is_finite() { self.dist.max(CAMERA_MIN_DISTANCE) } else { 5.2 };
+        let near = (distance * 0.0005).clamp(0.00001, NEAR);
+        let far = (distance * 4.0 + FAR).clamp(FAR, CAMERA_MAX_DISTANCE * 4.0 + FAR);
+        (near, far.max(near + 1.0))
+    }
+
+    pub fn set_distance(&mut self, distance: f32) {
+        if distance.is_finite() {
+            self.dist = distance.clamp(CAMERA_MIN_DISTANCE, CAMERA_MAX_DISTANCE);
+        }
     }
 
     /// Aim at the actual normalized mesh bounds and fit the entire bounding
@@ -155,7 +176,7 @@ impl OrbitCam {
         let hi = bounds_min.max(bounds_max);
         let center = (lo + hi) * 0.5;
         let radius = ((hi - lo) * 0.5).length().max(0.05);
-        let fov = self.fov_y.clamp(15.0_f32.to_radians(), 90.0_f32.to_radians());
+        let fov = self.fov_y.clamp(10.0_f32.to_radians(), 120.0_f32.to_radians());
         let half_vertical = fov * 0.5;
         let half_horizontal = (half_vertical.tan() * aspect.max(0.1)).atan();
         let half_fov = half_vertical.min(half_horizontal).max(0.05);
@@ -165,7 +186,7 @@ impl OrbitCam {
         }
         self.target = center;
         self.fov_y = fov;
-        self.dist = distance.clamp(0.3, 40.0);
+        self.set_distance(distance);
     }
 
     pub fn basis(&self) -> (Vec3, Vec3) {
@@ -185,7 +206,7 @@ impl OrbitCam {
         let eye = self.eye();
         let reference_fov = 38.0_f32.to_radians();
         let fov = if self.fov_y.is_finite() {
-            self.fov_y.clamp(10.0_f32.to_radians(), 90.0_f32.to_radians())
+            self.fov_y.clamp(10.0_f32.to_radians(), 120.0_f32.to_radians())
         } else {
             reference_fov
         };
@@ -218,7 +239,7 @@ impl OrbitCam {
         let eye = self.eye();
         let offset = eye - focus;
         let distance = offset.length();
-        if !distance.is_finite() || !(0.05..=40.0).contains(&distance) {
+        if !distance.is_finite() || distance < CAMERA_MIN_DISTANCE {
             return;
         }
 
@@ -227,7 +248,7 @@ impl OrbitCam {
         self.pitch = direction.y.clamp(-1.0, 1.0).asin().clamp(-1.55, 1.55);
         // Keep the exact eye-to-focus distance. Clamping here would teleport
         // the camera whenever a picked focus lies outside the orbit range.
-        self.dist = distance;
+        self.set_distance(distance);
         self.target = focus;
     }
 
@@ -289,6 +310,29 @@ impl Background {
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
+pub struct PointLight {
+    pub on: bool,
+    pub position: Vec3,
+    pub color: [f32; 3],
+    /// Radiant intensity scale for the physically attenuated point source.
+    pub intensity: f32,
+    /// The light fades smoothly to zero at this world-space radius.
+    pub range: f32,
+}
+
+impl PointLight {
+    pub fn new(position: Vec3) -> Self {
+        Self { on: true, position, color: [1.0, 0.94, 0.86], intensity: 28.0, range: 6.0 }
+    }
+}
+
+impl Default for PointLight {
+    fn default() -> Self {
+        Self::new(Vec3::new(2.0, 2.0, 2.0))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct ViewSettings {
     /// Display mode for the 3D material viewport.
     pub mode: ViewMode,
@@ -323,6 +367,10 @@ pub struct ViewSettings {
     pub emission: f32,
     pub post: PostSettings,
     pub key: KeyLight,
+    /// Additional local point sources; a fixed-size array keeps viewport
+    /// settings cheap to copy and straightforward to cache.
+    pub point_lights: [PointLight; MAX_POINT_LIGHTS],
+    pub point_light_count: usize,
 }
 
 /// A directional key light with shadows, on top of the environment. Its
@@ -376,6 +424,8 @@ impl Default for ViewSettings {
             emission: 2.0,
             post: PostSettings::default(),
             key: KeyLight::default(),
+            point_lights: [PointLight::default(); MAX_POINT_LIGHTS],
+            point_light_count: 0,
         }
     }
 }
@@ -468,6 +518,8 @@ struct Globals {
     sun: [f32; 4],
     sun_c: [f32; 4],
     clip: [f32; 4],
+    /// Two vec4 slots per point light: position/intensity and color/range.
+    point_lights: [[f32; 4]; MAX_POINT_LIGHTS * 2],
 }
 
 /// OpenGL adapters commonly expose only 16 sampled fragment textures.
@@ -1448,7 +1500,17 @@ impl ViewRenderer {
             light_vp: Self::light_view_proj(engine, s).to_cols_array_2d(),
             sun: s.key.direction(s.env_rotation).extend(s.key.intensity).to_array(),
             sun_c: [s.key.color[0], s.key.color[1], s.key.color[2], if s.key.on { 1.0 } else { 0.0 }],
-            clip: [NEAR, FAR, 0.0, 0.0],
+            clip: [NEAR, FAR, s.point_light_count.min(MAX_POINT_LIGHTS) as f32, 0.0],
+            point_lights: std::array::from_fn(|slot| {
+                let index = slot / 2;
+                let light = s.point_lights[index];
+                if slot % 2 == 0 {
+                    let intensity = if index < s.point_light_count.min(MAX_POINT_LIGHTS) && light.on { light.intensity.max(0.0) } else { 0.0 };
+                    [light.position.x, light.position.y, light.position.z, intensity]
+                } else {
+                    [light.color[0], light.color[1], light.color[2], light.range.max(0.0)]
+                }
+            }),
         }
     }
 
@@ -1674,6 +1736,9 @@ impl ViewRenderer {
             g.view_proj = vp.to_cols_array_2d();
             g.inv_view_proj = vp.inverse().to_cols_array_2d();
             g.cam_pos = cam.eye().extend(1.0).to_array();
+            let (camera_near, camera_far) = cam.clip_planes();
+            g.clip[0] = camera_near;
+            g.clip[1] = camera_far;
             rs.queue.write_buffer(&self.globals[k + 1], 0, bytemuck::bytes_of(&g));
 
             let key = ViewBindGroupKey {
