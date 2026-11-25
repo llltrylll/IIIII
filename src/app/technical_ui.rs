@@ -61,8 +61,8 @@ impl TechnicalMetric {
 
     fn description(self) -> &'static str {
         match self {
-            Self::Fps => "Estimated throughput from the larger of UI frame work time and egui's frame interval.",
-            Self::FrameInterval => "Time between UI frames; useful for detecting stutter.",
+            Self::Fps => "Measured from monotonic time between successive UI callback starts; includes stalls outside the UI function.",
+            Self::FrameInterval => "Monotonic time between application UI callbacks, including time spent outside the UI function.",
             Self::CpuFrame => "Time spent in the application's UI frame, with recent peak.",
             Self::Bake => "Shows live bake progress, then the latest GPU and CPU preparation times.",
             Self::GpuMemoryEstimate => "Application-side estimate of active and parked Engine textures and known buffers; shared Fill images may appear in more than one per-Engine subtotal. Shared Undo staging memory is shown separately.",
@@ -82,14 +82,14 @@ impl TechnicalMetric {
         let mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
         match self {
             Self::Fps => {
-                let interval = app.frame_interval_ms.max(app.frame_ms);
+                let interval = app.frame_wall_interval_ms;
                 if interval > 0.01 {
                     format!("{:.0} FPS", 1000.0 / interval)
                 } else {
                     "FPS —".into()
                 }
             }
-            Self::FrameInterval => format!("{:.2} ms/frame", app.frame_interval_ms),
+            Self::FrameInterval => format!("{:.2} ms/frame", app.frame_wall_interval_ms),
             Self::CpuFrame => format!("CPU {:.1} ms (peak {:.0})", app.frame_ms, app.frame_peak_ms),
             Self::Bake => {
                 if let Some((progress, phase)) = app.bake_progress() {
@@ -322,14 +322,15 @@ impl PainterApp {
             egui::CollapsingHeader::new("Viewport performance")
                 .default_open(true)
                 .show(ui, |ui| {
-                    ui.label(format!("Viewport FPS (frame interval): {}", TechnicalMetric::Fps.short_value(self)));
-                    ui.label(format!("Frame interval: {:.3} ms", self.frame_interval_ms));
+                    ui.label(format!("Viewport FPS (measured): {}", TechnicalMetric::Fps.short_value(self)));
+                    ui.label(format!("Frame interval (wall): {:.3} ms", self.frame_wall_interval_ms));
+                    ui.label(format!("egui stable dt (may be predicted): {:.3} ms", self.frame_interval_ms));
                     ui.label(format!("Application CPU frame: {:.2} ms average · {:.2} ms recent peak", self.frame_ms, self.frame_peak_ms));
                     ui.label(format!("3D viewport: {:?} px", self.views.view3d.size));
                     ui.label(format!("UV viewport: {:?} px", self.views.view2d.size));
                     ui.label(format!("Pixels per point: {:.3}", self.ppp));
                     ui.label(format!("Ray-traced preview: {}", if self.rt.enabled { "enabled" } else { "disabled" }));
-                    ui.label(RichText::new("FPS is the measured UI/viewport update interval, not a dedicated GPU timestamp query.")
+                    ui.label(RichText::new("FPS uses monotonic time between UI callback starts. CPU frame work excludes time outside the callback; this is not a GPU-only measurement.")
                         .small().color(theme::TEXT_DIM));
                 });
             
@@ -689,10 +690,11 @@ impl PainterApp {
         };
 
         format!(
-            "{}\n\nAPPLICATION / FRAME\nframe_interval_ms={:.6}\nviewport_fps_estimate={:.3}\nui_frame_cpu_ema_ms={:.6}\nui_frame_recent_peak_ms={:.6}\nstatus={}\n\nVIEWPORT / BACKGROUND RECOMPOSITION\ncustom_preview_shader_compiled={}\nparked_texture_sets_dirty={}/{}\n{}\n\nGPU ADAPTER\n{:#?}\n\nGPU DEVICE LIMITS\n{:#?}\ngpu_resource_allocation_estimate_bytes={}\ndocument_shared_undo_readback_cache_bytes={}\nundo_memory_bytes={}\nundo_memory_limit_bytes={}\nundo_steps={}\n\nBAKE REPORT\n{}\nCURRENT BAKE SETTINGS\n{:#?}\n\nF6 PAINT PROFILER\n{}\n\nMESH / UV / NORMAL / TANGENT DIAGNOSTICS\n{}",
+            "{}\n\nAPPLICATION / FRAME\nframe_callback_interval_ms={:.6}\nmeasured_viewport_fps={:.3}\negui_stable_dt_ms={:.6}\nui_frame_cpu_ema_ms={:.6}\nui_frame_recent_peak_ms={:.6}\nstatus={}\n\nVIEWPORT / BACKGROUND RECOMPOSITION\ncustom_preview_shader_compiled={}\nparked_texture_sets_dirty={}/{}\n{}\n\nGPU ADAPTER\n{:#?}\n\nGPU DEVICE LIMITS\n{:#?}\ngpu_resource_allocation_estimate_bytes={}\ndocument_shared_undo_readback_cache_bytes={}\nundo_memory_bytes={}\nundo_memory_limit_bytes={}\nundo_steps={}\n\nBAKE REPORT\n{}\nCURRENT BAKE SETTINGS\n{:#?}\n\nF6 PAINT PROFILER\n{}\n\nMESH / UV / NORMAL / TANGENT DIAGNOSTICS\n{}",
             self.diagnostic_context_report("technical panel copy"),
+            self.frame_wall_interval_ms,
+            if self.frame_wall_interval_ms > 0.01 { 1000.0 / self.frame_wall_interval_ms } else { 0.0 },
             self.frame_interval_ms,
-            if self.frame_interval_ms > 0.01 { 1000.0 / self.frame_interval_ms } else { 0.0 },
             self.frame_ms,
             self.frame_peak_ms,
             self.status.replace('\n', " | "),
