@@ -4611,12 +4611,6 @@ impl PainterApp {
 
     fn preview_panel(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            section(ui, "Camera");
-            let mut fov = self.cam.fov_y.to_degrees();
-            if slider(ui, "Field of view", &mut fov, 10.0..=90.0) {
-                self.cam.fov_y = fov.to_radians();
-            }
-
             section(ui, "Shader");
             self.preview_shader_section(ui);
             let v = &mut self.view;
@@ -4699,27 +4693,12 @@ impl PainterApp {
                     ui.close();
                 }
             });
-            let mut deg = v.env_rotation.to_degrees();
-            if slider(ui, "Rotation", &mut deg, -180.0..=180.0) {
-                v.env_rotation = deg.to_radians();
-            }
-            slider(ui, "Intensity", &mut v.env_intensity, 0.0..=4.0);
             labeled(ui, "Ambient occlusion", |ui| {
                 ui.add(egui::Slider::new(&mut v.ao_strength, 0.0..=1.0).custom_formatter(|x, _| format!("{:.0}%", x * 100.0)))
             })
             .on_hover_text("How much the baked ambient occlusion darkens crevices in the 3D view. Only the view: bakes and exports keep the full map.");
             labeled(ui, "Emission", |ui| ui.add(egui::Slider::new(&mut v.emission, 0.0..=20.0).logarithmic(true).max_decimals(2)))
                 .on_hover_text("How bright emissive parts glow in the 3D view and the ray tracer. Only the view: exports keep the emission color as painted.");
-
-            section(ui, "Key light");
-            ui.checkbox(&mut v.key.on, theme::with_icon(icons::SUN, "Directional light with shadows"))
-                .on_hover_text("A sun-like light on top of the environment: crisp highlights and contact shadows. It turns with the environment rotation (Shift+right-drag).");
-            if v.key.on {
-                slider(ui, "Intensity", &mut v.key.intensity, 0.0..=8.0);
-                slider(ui, "Direction", &mut v.key.azimuth, -180.0..=180.0);
-                slider(ui, "Height", &mut v.key.elevation, 5.0..=90.0);
-                labeled(ui, "Color", |ui| color_edit(ui, &mut v.key.color));
-            }
 
             section(ui, "Background");
             labeled(ui, "Show", |ui| {
