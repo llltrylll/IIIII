@@ -77,7 +77,7 @@ fn fill_image(t: texture_2d<f32>, uv: vec2<f32>, p: vec3<f32>, n: vec3<f32>, tex
     let mode = i32(u.var1.z + 0.5);
     if (mode == 0) {
         let q = rot2(uv - 0.5, u.img.y) * tiling + 0.5 + u.img.zw;
-        let lod = log2(max(tiling * size / f32(textureDimensions(prev_color).x), 1.0));
+        let lod = log2(max(tiling * size / max(u.gx.y, 1.0), 1.0));
         return textureSampleLevel(t, rsamp, q, lod);
     }
     if (mode >= 2) {

@@ -5327,7 +5327,7 @@ impl Engine {
         let (lo, hi) = self.bounds;
         u.bmin = [lo.x, lo.y, lo.z, 0.0];
         u.bsize = [hi.x - lo.x, hi.y - lo.y, hi.z - lo.z, 0.0];
-        u.gx = [self.edge_max, 0.0, 0.0, 0.0];
+        u.gx = [self.edge_max, self.res as f32, 0.0, 0.0];
         u
     }
 
