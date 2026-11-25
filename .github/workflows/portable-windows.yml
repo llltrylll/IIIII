@@ -1,7 +1,7 @@
 name: Portable Windows RAR
 
 on:
-  # Changes to this workflow intentionally trigger a fresh portable package build.
+  # Changes to packaging or launcher code intentionally trigger a fresh portable build.
   push:
     paths:
       - ".github/workflows/portable-windows.yml"
@@ -11,6 +11,7 @@ on:
       - "Cargo.lock"
       - "build.rs"
       - "scripts/package.ps1"
+      - "scripts/windows-launcher.cs"
   workflow_dispatch:
 
 permissions:
@@ -40,6 +41,28 @@ jobs:
         id: package
         shell: pwsh
         run: ./scripts/package.ps1 -NoBuild
+
+      - name: Audit portable folder
+        shell: pwsh
+        run: |
+          $stage = Join-Path $PWD "dist/Material Painter"
+          $expected = @("Material Painter.exe", "Material Painter (Vulkan).exe")
+          $executables = @(Get-ChildItem -Path $stage -Recurse -Filter "*.exe" -File | ForEach-Object { $_.Name })
+          $unexpected = @($executables | Where-Object { $_ -notin $expected })
+          $missing = @($expected | Where-Object { $_ -notin $executables })
+          if ($executables.Count -ne 2 -or $unexpected.Count -gt 0 -or $missing.Count -gt 0) {
+            throw "Portable EXE audit failed. Found: $($executables -join ', '); missing: $($missing -join ', '); unexpected: $($unexpected -join ', ')"
+          }
+          $strayLaunchers = @(Get-ChildItem -Path $stage -Recurse -File | Where-Object {
+            $_.Extension -in @(".bat", ".cmd", ".lnk") -or $_.Name -eq "OPENGL-VIEWPORT-TEST.txt"
+          })
+          if ($strayLaunchers.Count -gt 0) {
+            throw "Portable package contains development-only launchers or test notes: $($strayLaunchers.FullName -join ', ')"
+          }
+          "### Portable folder audit" | Out-File -Append -Encoding utf8 -FilePath $env:GITHUB_STEP_SUMMARY
+          "- Executables: $($executables -join ', ')" | Out-File -Append -Encoding utf8 -FilePath $env:GITHUB_STEP_SUMMARY
+          "- No batch files, shortcut files, or viewport test notes." | Out-File -Append -Encoding utf8 -FilePath $env:GITHUB_STEP_SUMMARY
+          Get-ChildItem -Path $stage -Recurse -File | Select-Object FullName, Length
 
       - name: Install WinRAR command-line utility
         shell: pwsh
