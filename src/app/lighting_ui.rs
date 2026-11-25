@@ -1,6 +1,15 @@
 //! Camera lens and editable viewport lighting controls.
 use super::*;
-use crate::viewport::{PointLight, MAX_POINT_LIGHTS};
+use crate::viewport::{OrbitCam, PointLight, MAX_POINT_LIGHTS};
+use glam::Vec3;
+
+/// Keep auto-created lights near the model focus even when the camera is zoomed far out.
+fn camera_light_position(cam: &OrbitCam, horizontal_offset: f32, vertical_offset: f32) -> Vec3 {
+    let (right, up) = cam.basis();
+    let forward = (cam.target - cam.eye()).normalize_or_zero();
+    let in_front_distance = (cam.dist * 0.4).min(3.0);
+    cam.target - forward * in_front_distance + right * horizontal_offset + up * vertical_offset
+}
 
 impl PainterApp {
     pub(super) fn lighting_panel(&mut self, ui: &mut egui::Ui) {
@@ -53,11 +62,8 @@ impl PainterApp {
             let existing = self.view.point_light_count.min(MAX_POINT_LIGHTS);
             ui.horizontal(|ui| {
                 if ui.button("＋ Add point light").clicked() && existing < MAX_POINT_LIGHTS {
-                    let (right, up) = self.cam.basis();
-                    let forward = (self.cam.target - self.cam.eye()).normalize_or_zero();
                     let offset = existing as f32 * 0.65;
-                    let position = self.cam.eye() + forward * (self.cam.dist * 0.6)
-                        + right * offset + up * 1.5;
+                    let position = camera_light_position(&self.cam, offset, 1.5);
                     self.view.point_lights[existing] = PointLight::new(position);
                     self.view.point_light_count = existing + 1;
                     self.selected_point_light = existing;
@@ -99,10 +105,7 @@ impl PainterApp {
                 slider(ui, "Y", &mut light.position.y, -20.0..=20.0);
                 slider(ui, "Z", &mut light.position.z, -20.0..=20.0);
                 if ui.small_button("Move in front of camera").clicked() {
-                    let (right, up) = self.cam.basis();
-                    let forward = (self.cam.target - self.cam.eye()).normalize_or_zero();
-                    light.position = self.cam.eye() + forward * (self.cam.dist * 0.6)
-                        + right * 1.5 + up * 1.5;
+                    light.position = camera_light_position(&self.cam, 1.5, 1.5);
                 }
             }
 
@@ -113,5 +116,27 @@ impl PainterApp {
                     .color(theme::TEXT_DIM),
             );
         });
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::camera_light_position;
+    use crate::viewport::OrbitCam;
+
+    #[test]
+    fn auto_placed_light_stays_near_focus_when_camera_is_far_away() {
+        let mut cam = OrbitCam::default();
+        cam.set_distance(500.0);
+        let position = camera_light_position(&cam, 0.0, 0.0);
+        assert!((position.distance(cam.target) - 3.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn auto_placed_light_tracks_normal_camera_distance() {
+        let cam = OrbitCam::default();
+        let position = camera_light_position(&cam, 0.0, 0.0);
+        assert!((position.distance(cam.target) - cam.dist * 0.4).abs() < 1e-4);
     }
 }
