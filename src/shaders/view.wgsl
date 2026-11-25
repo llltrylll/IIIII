@@ -490,6 +490,7 @@ struct Shade {
 fn mesh_shade_inputs(in: MeshOut, front: bool) -> Shade {
     var c: Shade;
     c.s = sample_surface(in.uv);
+    c.s.wpos = in.wpos;
 
     // Raw channel/map views do not use lighting or a shading frame. Avoid
     // derivative reconstruction and the 3x3 shadow PCF on these unlit modes.
