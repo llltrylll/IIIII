@@ -413,12 +413,40 @@ impl PainterApp {
             || (self.view.mode == ViewMode::Material && self.views.has_custom_shader())
     }
 
+    /// Reframes both viewports on the normalized mesh bounds. The camera is
+    /// fitted to the narrower dock axis so a portrait 3D pane does not crop it.
+    pub(super) fn frame_mesh_views(&mut self) {
+        let size = self.views.view3d.size;
+        let aspect = if size[1] > 0 { size[0] as f32 / size[1] as f32 } else { 1.0 };
+        self.frame_mesh_views_with_aspect(aspect);
+    }
+
+    fn frame_mesh_views_with_aspect(&mut self, aspect: f32) {
+        if self.mesh.vertices.is_empty() {
+            return;
+        }
+        self.cam.frame_bounds(self.mesh.bounds_min, self.mesh.bounds_max, aspect);
+        self.cam2d.pan = Vec2::ZERO;
+        self.cam2d.zoom = 0.0;
+        self.view_framed_mesh_id = Some(self.gpu_mesh.mesh_id);
+        self.views.invalidate_view_cache();
+        self.status = "3D and UV views framed to the mesh.".into();
+    }
+
     /// One viewport (a dock tab): input, the GPU render at the tab's size,
     /// overlays and the brush cursor.
     pub(super) fn view_pane(&mut self, ui: &mut egui::Ui, kind: ViewKind) {
         let rect = ui.available_rect_before_wrap();
         if rect.width() < 4.0 || rect.height() < 4.0 {
             return;
+        }
+        // Camera and UV pan can outlive a project reload. Fit the first frame
+        // of each new GPU mesh to its actual bounds rather than showing empty space.
+        if kind == ViewKind::V3d
+            && !self.mesh.vertices.is_empty()
+            && self.view_framed_mesh_id != Some(self.gpu_mesh.mesh_id)
+        {
+            self.frame_mesh_views_with_aspect(rect.width() / rect.height().max(1.0));
         }
         let resp = ui.allocate_rect(rect, Sense::click_and_drag());
         self.view_input(ui, kind, rect, &resp);
