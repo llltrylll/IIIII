@@ -12,34 +12,31 @@ fn camera_light_position(cam: &OrbitCam, horizontal_offset: f32, vertical_offset
 }
 
 impl PainterApp {
+    pub(super) fn toggle_point_light_move(&mut self) {
+        let count = self.view.point_light_count.min(MAX_POINT_LIGHTS);
+        if count == 0 {
+            self.move_point_light = false;
+            self.status = "Add a point light before moving it.".into();
+            return;
+        }
+        self.selected_point_light = self.selected_point_light.min(count - 1);
+        self.move_point_light = !self.move_point_light;
+        self.status = if self.move_point_light {
+            format!("Move Point {}: click a surface in the 3D view. Press Esc to cancel.", self.selected_point_light + 1)
+        } else {
+            "Point-light move mode cancelled.".into()
+        };
+    }
+
     pub(super) fn lighting_panel(&mut self, ui: &mut egui::Ui) {
-        ui.label(egui::RichText::new("Camera and scene lighting").strong().color(Color32::WHITE));
+        ui.label(egui::RichText::new("Scene lighting controls").strong().color(Color32::WHITE));
         ui.label(
-            egui::RichText::new("Adjust the viewport camera and the lights used by Material preview.")
+            egui::RichText::new("Position and tune viewport light sources. Camera FOV is available from the Support menu.")
                 .small()
                 .color(theme::TEXT_DIM),
         );
 
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            section(ui, "Camera");
-            let mut fov_degrees = self.cam.fov_y.to_degrees();
-            if slider(ui, "Field of view", &mut fov_degrees, 10.0..=120.0) {
-                self.cam.fov_y = fov_degrees.to_radians();
-            }
-            ui.horizontal(|ui| {
-                if ui.small_button("Reset FOV").clicked() {
-                    self.cam.fov_y = self.prefs.fov_deg.clamp(10.0, 120.0).to_radians();
-                }
-                if ui.small_button("Frame model").clicked() {
-                    self.frame_mesh_views();
-                }
-            });
-            ui.label(
-                egui::RichText::new("Higher values show more of the scene; lower values give a tighter, flatter view.")
-                    .small()
-                    .color(theme::TEXT_DIM),
-            );
-
             section(ui, "Environment");
             slider(ui, "Intensity", &mut self.view.env_intensity, 0.0..=5.0);
             let mut rotation = self.view.env_rotation.to_degrees();
@@ -59,6 +56,7 @@ impl PainterApp {
             labeled(ui, "Color", |ui| color_edit(ui, &mut self.view.key.color));
 
             section(ui, "Point lights");
+            ui.checkbox(&mut self.show_point_light_markers, "Show light markers in 3D view");
             let existing = self.view.point_light_count.min(MAX_POINT_LIGHTS);
             ui.horizontal(|ui| {
                 if ui.button("＋ Add point light").clicked() && existing < MAX_POINT_LIGHTS {
@@ -68,7 +66,11 @@ impl PainterApp {
                     self.view.point_light_count = existing + 1;
                     self.selected_point_light = existing;
                 }
-                if ui.button("Remove").clicked() && existing > 0 {
+                let move_label = if self.move_point_light { "Cancel move" } else { "Move selected" };
+                if ui.add_enabled(existing > 0, egui::Button::new(move_label)).clicked() {
+                    self.toggle_point_light_move();
+                }
+                if ui.add_enabled(existing > 0, egui::Button::new("Remove")).clicked() {
                     let selected = self.selected_point_light.min(existing - 1);
                     for index in selected..(existing - 1) {
                         self.view.point_lights[index] = self.view.point_lights[index + 1];
@@ -76,6 +78,7 @@ impl PainterApp {
                     self.view.point_lights[existing - 1] = PointLight::default();
                     self.view.point_light_count = existing - 1;
                     self.selected_point_light = selected.min(existing.saturating_sub(2));
+                    self.move_point_light = false;
                 }
             });
             let count = self.view.point_light_count.min(MAX_POINT_LIGHTS);
@@ -104,14 +107,18 @@ impl PainterApp {
                 ui.add(egui::DragValue::new(&mut light.position.x).speed(0.1).range(-1_000_000.0..=1_000_000.0).prefix("X "));
                 ui.add(egui::DragValue::new(&mut light.position.y).speed(0.1).range(-1_000_000.0..=1_000_000.0).prefix("Y "));
                 ui.add(egui::DragValue::new(&mut light.position.z).speed(0.1).range(-1_000_000.0..=1_000_000.0).prefix("Z "));
-                if ui.small_button("Move in front of camera").clicked() {
-                    light.position = camera_light_position(&self.cam, 1.5, 1.5);
-                }
             }
 
             ui.add_space(8.0);
+            if self.move_point_light {
+                ui.label(
+                    egui::RichText::new(format!("Move mode active: click the model in the 3D view to place Point {}. Esc cancels.", self.selected_point_light + 1))
+                        .small()
+                        .color(theme::ACCENT),
+                );
+            }
             ui.label(
-                egui::RichText::new(format!("{} / {} point lights. Local point lights currently do not cast shadows.", count, MAX_POINT_LIGHTS))
+                egui::RichText::new(format!("{} / {} point lights. Local point lights do not cast shadows.", count, MAX_POINT_LIGHTS))
                     .small()
                     .color(theme::TEXT_DIM),
             );
