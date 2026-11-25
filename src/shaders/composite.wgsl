@@ -352,7 +352,8 @@ fn fs_layer(in: FsOut) -> AccumOut {
     let needs_inline_color = u.ch.x > 0.5 && u.var0.x != 0.0 && u.varc.y < 0.5;
     let needs_inline_roughness = u.ch.y > 0.5 && u.var0.z != 0.0 && u.varc.x < 0.5;
     let needs_height_variation = u.ch.w > 0.5 && u.var0.w != 0.0;
-    if (u.p0.z > 0.5 && (bits != 0u || needs_inline_color || needs_inline_roughness || needs_height_variation)) {
+    let needs_projected_images = bits != 0u && u.var1.z > 0.5;
+    if (u.p0.z > 0.5 && (needs_projected_images || needs_inline_color || needs_inline_roughness || needs_height_variation)) {
         p = textureLoad(pos_map, c, 0).xyz;
         n = normalize(textureLoad(nrm_map, c, 0).xyz * 2.0 - 1.0);
     }
@@ -421,7 +422,10 @@ fn fs_layer(in: FsOut) -> AccumOut {
         // Fill layer: images replace their channels' values, then procedural
         // and per-part variation apply on top.
         if (bits != 0u) {
-            let texel_world = texel_size(c, p);
+            var texel_world = 0.0;
+            if (u.var1.z > 0.5) {
+                texel_world = texel_size(c, p);
+            }
             if ((bits & 1u) != 0u) {
                 let img = fill_image(l_color, uv, p, n, texel_world);
                 sc = select(img.rgb, img.rrr, (bits & 16u) != 0u);

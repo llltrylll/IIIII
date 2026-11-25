@@ -97,11 +97,10 @@ fn engine_needs_surface_maps_for_composite(
                     || (fill.rough_var != 0.0
                         && fill.mat.enabled[1]
                         && !layer.disabled_channels[1]);
-                let projected_height_variation = fill.projection != Projection::Uv
-                    && fill.height_var != 0.0
+                let height_variation = fill.height_var != 0.0
                     && fill.mat.enabled[3]
                     && !layer.disabled_channels[3];
-                projected_image || cached_variation || projected_height_variation
+                projected_image || cached_variation || height_variation
             }
             _ => false,
         };
