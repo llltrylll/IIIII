@@ -51,6 +51,17 @@ jobs:
       - name: Restore Rust build cache
         uses: Swatinem/rust-cache@v2
 
+      # Run the new lighting regressions before legacy OpenGL smoke tests;
+      # a failure in those older checks must not skip point-light validation.
+      - name: GPU viewport - editable point-light contribution
+        run: "cargo test --locked --bin material_painter preview_test::point_lights_affect_the_material_viewport -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: OpenGL viewport - editable point-light contribution
+        run: "xvfb-run -a cargo test --locked --bin material_painter preview_test::point_lights_affect_the_material_viewport -- --ignored --exact --nocapture --test-threads 1"
+        env:
+          WGPU_BACKEND: gl
+          LIBGL_ALWAYS_SOFTWARE: "1"
+
       - name: OpenGL smoke - GPU bake pipeline with adapter format features
         run: "xvfb-run -a cargo test --locked --bin material_painter preview_test::gl_format_capabilities -- --ignored --exact --nocapture --test-threads 1"
         env:
@@ -77,17 +88,6 @@ jobs:
           WGPU_BACKEND: gl
           LIBGL_ALWAYS_SOFTWARE: "1"
 
-
-      # Run these new viewport checks before the existing packed-depth GL test,
-      # which may fail independently and otherwise prevent them from executing.
-      - name: GPU viewport - editable point-light contribution
-        run: "cargo test --locked --bin material_painter preview_test::point_lights_affect_the_material_viewport -- --ignored --exact --nocapture --test-threads 1"
-
-      - name: OpenGL viewport - editable point-light contribution
-        run: "xvfb-run -a cargo test --locked --bin material_painter preview_test::point_lights_affect_the_material_viewport -- --ignored --exact --nocapture --test-threads 1"
-        env:
-          WGPU_BACKEND: gl
-          LIBGL_ALWAYS_SOFTWARE: "1"
 
       # Keep the correctness gates focused on brush/mask GPU parity.
       # The broader preview suite also contains unrelated interactive UI tests.
