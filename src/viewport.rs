@@ -2344,7 +2344,7 @@ mod custom_param_cache_tests {
 
 #[cfg(test)]
 mod camera_frame_tests {
-    use super::OrbitCam;
+    use super::{OrbitCam, CAMERA_MIN_DISTANCE};
     use glam::Vec3;
 
     #[test]
