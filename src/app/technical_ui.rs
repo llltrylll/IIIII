@@ -405,7 +405,7 @@ impl PainterApp {
                 });
 
             egui::CollapsingHeader::new("Bake information")
-                .default_open(true)
+                .default_open(false)
                 .show(ui, |ui| {
                     if let Some((progress, phase)) = self.bake_progress() {
                         ui.add(egui::ProgressBar::new(progress).desired_width(ui.available_width())
@@ -438,7 +438,7 @@ impl PainterApp {
                 });
 
             egui::CollapsingHeader::new("Memory and undo")
-                .default_open(true)
+                .default_open(false)
                 .show(ui, |ui| {
                     let mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
                     let entries = self.gpu_memory_entries();
@@ -476,7 +476,7 @@ impl PainterApp {
                 });
 
             egui::CollapsingHeader::new("Mesh and texture sets")
-                .default_open(true)
+                .default_open(false)
                 .show(ui, |ui| {
                     ui.label(format!("Mesh: {}", self.mesh.name));
                     ui.label(format!("Vertices after tangent split: {}", self.mesh.vertices.len()));
