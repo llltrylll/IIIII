@@ -98,19 +98,18 @@ $commonCompilerArgs = @(
     "/platform:x64",
     "/optimize+",
     "/reference:System.Windows.Forms.dll",
-    "/win32icon:$iconPath",
-    $launcherSource
+    "/win32icon:$iconPath"
 )
 
 $openGlLauncher = Join-Path $stage "Material Painter.exe"
-$openGlArgs = $commonCompilerArgs + @("/out:$openGlLauncher")
+$openGlArgs = @("/out:$openGlLauncher") + $commonCompilerArgs + @($launcherSource)
 & $csc @openGlArgs
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path $openGlLauncher)) {
     throw "Failed to compile the default OpenGL launcher"
 }
 
 $vulkanLauncher = Join-Path $stage "Material Painter (Vulkan).exe"
-$vulkanArgs = $commonCompilerArgs + @("/out:$vulkanLauncher", "/define:VULKAN")
+$vulkanArgs = @("/out:$vulkanLauncher", "/define:VULKAN") + $commonCompilerArgs + @($launcherSource)
 & $csc @vulkanArgs
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path $vulkanLauncher)) {
     throw "Failed to compile the Vulkan launcher"
