@@ -50,8 +50,10 @@ impl PainterApp {
             ui.horizontal(|ui| {
                 if ui.button("＋ Add point light").clicked() && existing < MAX_POINT_LIGHTS {
                     let (right, up) = self.cam.basis();
+                    let forward = (self.cam.target - self.cam.eye()).normalize_or_zero();
                     let offset = existing as f32 * 0.65;
-                    let position = self.cam.target + right * (1.5 + offset) + up * 1.5;
+                    let position = self.cam.eye() + forward * (self.cam.dist * 0.6)
+                        + right * offset + up * 1.5;
                     self.view.point_lights[existing] = PointLight::new(position);
                     self.view.point_light_count = existing + 1;
                     self.selected_point_light = existing;
@@ -94,7 +96,9 @@ impl PainterApp {
                 slider(ui, "Z", &mut light.position.z, -20.0..=20.0);
                 if ui.small_button("Move in front of camera").clicked() {
                     let (right, up) = self.cam.basis();
-                    light.position = self.cam.target + right * 1.5 + up * 1.5;
+                    let forward = (self.cam.target - self.cam.eye()).normalize_or_zero();
+                    light.position = self.cam.eye() + forward * (self.cam.dist * 0.6)
+                        + right * 1.5 + up * 1.5;
                 }
             }
 
