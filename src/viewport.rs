@@ -143,6 +143,31 @@ impl OrbitCam {
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
         perspective_rh(self.fov_y, aspect.max(1e-3), NEAR, FAR) * look_at_rh(self.eye(), self.target, Vec3::Y)
     }
+
+    /// Aim at the actual normalized mesh bounds and fit the entire bounding
+    /// sphere inside the narrower viewport axis. This replaces the old fixed
+    /// origin reset, which could leave imported projects looking into empty space.
+    pub fn frame_bounds(&mut self, bounds_min: Vec3, bounds_max: Vec3, aspect: f32) {
+        if !bounds_min.is_finite() || !bounds_max.is_finite() || !aspect.is_finite() {
+            return;
+        }
+        let lo = bounds_min.min(bounds_max);
+        let hi = bounds_min.max(bounds_max);
+        let center = (lo + hi) * 0.5;
+        let radius = ((hi - lo) * 0.5).length().max(0.05);
+        let fov = self.fov_y.clamp(15.0_f32.to_radians(), 90.0_f32.to_radians());
+        let half_vertical = fov * 0.5;
+        let half_horizontal = (half_vertical.tan() * aspect.max(0.1)).atan();
+        let half_fov = half_vertical.min(half_horizontal).max(0.05);
+        let distance = radius * 1.14 / half_fov.sin();
+        if !center.is_finite() || !distance.is_finite() {
+            return;
+        }
+        self.target = center;
+        self.fov_y = fov;
+        self.dist = distance.clamp(0.3, 40.0);
+    }
+
     pub fn basis(&self) -> (Vec3, Vec3) {
         let fwd = (self.target - self.eye()).normalize();
         let right = fwd.cross(Vec3::Y).normalize();
@@ -529,11 +554,24 @@ impl ViewTarget {
             } else {
                 wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING
             };
-            let paint_depth_samples = if gl_depth_color { 1 } else { MSAA };
+            let samples = if gl_depth_color { 1 } else { MSAA };
+            let paint_depth_samples = samples;
+            let color = if samples == 1 {
+                // Single-sample HDR is both the render target and the post input.
+                Tex::new(device, "view hdr single sample", w, h, HDR_FORMAT, display)
+            } else {
+                Tex::new_ms(device, "view msaa", w, h, HDR_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT, samples)
+            };
+            let resolve = (samples > 1).then(|| Tex::new(device, "view hdr resolve", w, h, HDR_FORMAT, display));
+            let depth = if samples == 1 {
+                Tex::new(device, "view depth single sample", w, h, DEPTH_FORMAT, display)
+            } else {
+                Tex::new_ms(device, "view depth", w, h, DEPTH_FORMAT, display, samples)
+            };
             Targets {
-                color: Tex::new_ms(device, "view msaa", w, h, HDR_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT, MSAA),
-                resolve: Some(Tex::new(device, "view hdr", w, h, HDR_FORMAT, display)),
-                depth: Some(Tex::new_ms(device, "view depth", w, h, DEPTH_FORMAT, display, MSAA)),
+                color,
+                resolve,
+                depth: Some(depth),
                 // Vulkan samples this depth texture directly. GL uses it only as a
                 // depth attachment and samples the parallel RGBA8 target below.
                 paint_depth: Some(Tex::new_ms(
@@ -918,6 +956,8 @@ pub struct ViewRenderer {
     shadow_bgl: wgpu::BindGroupLayout,
     shadow_map: Tex,
     shadow_sampler: wgpu::Sampler,
+    /// GL uses a single-sample 3D target on integrated GPUs; Vulkan keeps 4x MSAA.
+    view_samples: u32,
     /// Key-light shadows depend on the mesh, visible texture sets and light transform,
     /// not on the camera or material textures. Reuse the map until one of those changes.
     shadow_key: Option<Vec<u32>>,
@@ -958,6 +998,7 @@ impl ViewRenderer {
     pub fn new(rs: &egui_wgpu::RenderState) -> ViewRenderer {
         let device = &rs.device;
         let gl_depth_color = rs.adapter.get_info().backend == wgpu::Backend::Gl;
+        let view_samples = if gl_depth_color { 1 } else { MSAA };
         let manual_srgb_decode = gl_depth_color
             && !rs
                 .adapter
@@ -1076,8 +1117,8 @@ impl ViewRenderer {
         };
         let tri = wgpu::PrimitiveTopology::TriangleList;
         let vb = [Some(gpu::vertex_layout())];
-        let sky = pipeline("sky", "vs_fullscreen", "fs_sky", &[], tri, depth(false, wgpu::CompareFunction::Always), MSAA, &hdr);
-        let mesh = pipeline("mesh", "vs_mesh", "fs_mesh", &vb, tri, depth(true, wgpu::CompareFunction::Less), MSAA, &hdr);
+        let sky = pipeline("sky", "vs_fullscreen", "fs_sky", &[], tri, depth(false, wgpu::CompareFunction::Always), view_samples, &hdr);
+        let mesh = pipeline("mesh", "vs_mesh", "fs_mesh", &vb, tri, depth(true, wgpu::CompareFunction::Less), view_samples, &hdr);
         let paint_depth_target = if gl_depth_color {
             vec![Some(wgpu::ColorTargetState {
                 format: wgpu::TextureFormat::Rgba8Unorm,
@@ -1114,7 +1155,7 @@ impl ViewRenderer {
             blend: Some(wgpu::BlendState::ALPHA_BLENDING),
             write_mask: wgpu::ColorWrites::ALL,
         });
-        let mesh_t = pipeline("mesh (see-through)", "vs_mesh", "fs_mesh_t", &vb, tri, depth(true, wgpu::CompareFunction::Less), MSAA, &hdr_over);
+        let mesh_t = pipeline("mesh (see-through)", "vs_mesh", "fs_mesh_t", &vb, tri, depth(true, wgpu::CompareFunction::Less), view_samples, &hdr_over);
         let quad = pipeline("quad", "vs_quad", "fs_quad", &[], tri, None, 1, &color);
         let wire = pipeline("wire", "vs_wire", "fs_wire", &vb, wgpu::PrimitiveTopology::LineList, None, 1, &blended);
         // Overlays test against the mesh depth but never write it.
@@ -1125,17 +1166,17 @@ impl ViewRenderer {
         });
         let over = || depth(false, wgpu::CompareFunction::LessEqual);
         let line = wgpu::PrimitiveTopology::LineList;
-        let wire3d = pipeline("wire 3d", "vs_wire3d", "fs_overlay", &vb, line, over(), MSAA, &hdr_blended);
+        let wire3d = pipeline("wire 3d", "vs_wire3d", "fs_overlay", &vb, line, over(), view_samples, &hdr_blended);
         let seam2d = pipeline("seams 2d", "vs_wire", "fs_seam", &vb, line, None, 1, &blended);
-        let seam3d = pipeline("seams 3d", "vs_seam3d", "fs_overlay", &vb, line, over(), MSAA, &hdr_blended);
+        let seam3d = pipeline("seams 3d", "vs_seam3d", "fs_overlay", &vb, line, over(), view_samples, &hdr_blended);
         const OVERLAY_ATTRS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4];
         let ob = [Some(wgpu::VertexBufferLayout {
             array_stride: size_of::<OverlayVertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &OVERLAY_ATTRS,
         })];
-        let overlay_tris = pipeline("overlay tris", "vs_overlay", "fs_overlay", &ob, tri, over(), MSAA, &hdr_blended);
-        let overlay_lines = pipeline("overlay lines", "vs_overlay", "fs_overlay", &ob, line, over(), MSAA, &hdr_blended);
+        let overlay_tris = pipeline("overlay tris", "vs_overlay", "fs_overlay", &ob, tri, over(), view_samples, &hdr_blended);
+        let overlay_lines = pipeline("overlay lines", "vs_overlay", "fs_overlay", &ob, line, over(), view_samples, &hdr_blended);
         // Key light shadow map: depth only, both faces (meshes may be open),
         // with slope-scaled bias against acne. Its own layout holds just the
         // globals: the view's bind group samples the shadow map it writes.
@@ -1214,6 +1255,7 @@ impl ViewRenderer {
             shadow_bgl,
             shadow_map,
             shadow_sampler,
+            view_samples,
             shadow_key: None,
             shadow_key_scratch: Vec::new(),
             paint_depth_key: None,
@@ -1274,7 +1316,7 @@ impl ViewRenderer {
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
-                multisample: wgpu::MultisampleState { count: MSAA, ..Default::default() },
+                multisample: wgpu::MultisampleState { count: self.view_samples, ..Default::default() },
                 fragment: Some(wgpu::FragmentState {
                     module: &module,
                     entry_point: Some("fs_mesh_custom"),
@@ -1307,6 +1349,14 @@ impl ViewRenderer {
 
     pub fn has_custom_shader(&self) -> bool {
         self.custom_mesh.is_some()
+    }
+
+    /// Forces both viewport textures to be regenerated after a camera reset or
+    /// an explicit recovery action.
+    pub(crate) fn invalidate_view_cache(&mut self) {
+        self.view3d_cache_key = None;
+        self.view2d_cache_key = None;
+        self.paint_depth_key = None;
     }
 
     /// Releases stale bind groups immediately when a parked Engine drops its
@@ -1866,7 +1916,8 @@ impl ViewRenderer {
             }
         }
         let t = &self.view3d;
-        let (hdr, display) = (t.resolve.as_ref().expect("3D view is HDR"), t.display.as_ref().expect("3D view has a display image"));
+        let hdr = t.resolve.as_ref().unwrap_or(&t.color);
+        let display = t.display.as_ref().expect("3D view has a display image");
         let raw = settings.mode != ViewMode::Material;
         self.post.record(rs, &mut encoder, hdr, &display.view, &settings.post, settings.exposure, raw);
         rs.queue.submit([encoder.finish()]);
@@ -2218,3 +2269,37 @@ mod custom_param_cache_tests {
         assert_eq!(bits.len(), CUSTOM_PARAMS);
     }
 }
+
+#[cfg(test)]
+mod camera_frame_tests {
+    use super::OrbitCam;
+    use glam::Vec3;
+
+    #[test]
+    fn frame_bounds_centers_the_camera_on_the_mesh() {
+        let mut cam = OrbitCam::default();
+        cam.frame_bounds(Vec3::new(-1.0, -0.5, -0.25), Vec3::new(1.0, 0.5, 0.25), 1.0);
+        assert!((cam.target - Vec3::ZERO).length() < 1e-6);
+        assert!(cam.dist > 2.0 && cam.dist < 10.0);
+    }
+
+    #[test]
+    fn frame_bounds_accounts_for_narrow_docked_viewports() {
+        let bounds_min = Vec3::splat(-1.0);
+        let bounds_max = Vec3::splat(1.0);
+        let mut portrait = OrbitCam::default();
+        let mut landscape = OrbitCam::default();
+        portrait.frame_bounds(bounds_min, bounds_max, 0.7);
+        landscape.frame_bounds(bounds_min, bounds_max, 1.6);
+        assert!(portrait.dist > landscape.dist);
+    }
+
+    #[test]
+    fn frame_bounds_ignores_non_finite_inputs() {
+        let mut cam = OrbitCam::default();
+        let original = cam;
+        cam.frame_bounds(Vec3::splat(f32::NAN), Vec3::ONE, 1.0);
+        assert_eq!(cam, original);
+    }
+}
+
