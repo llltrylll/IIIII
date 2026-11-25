@@ -919,6 +919,9 @@ pub struct PainterApp {
     bake_id_only: bool,
     cam: OrbitCam,
     selected_point_light: usize,
+    show_point_light_markers: bool,
+    move_point_light: bool,
+    support_popup_open: bool,
     /// Blender-style first-person navigation, active only over the 3D viewport.
     walk_navigation: bool,
     /// Discard the stale/warp motion that can arrive immediately after cursor lock.
@@ -2502,6 +2505,9 @@ impl PainterApp {
             bake_id_only: false,
             cam: OrbitCam::default(),
             selected_point_light: 0,
+            show_point_light_markers: true,
+            move_point_light: false,
+            support_popup_open: false,
             walk_navigation: false,
             walk_skip_mouse_delta: false,
             walk_speed: 1.5,
@@ -4120,9 +4126,37 @@ impl PainterApp {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let resp = theme::donate_button(ui, "Support", vec2(0.0, 22.0));
-                if resp.on_hover_text("Material Painter is free; donations on Ko-fi keep it going").clicked() {
-                    ui.ctx().open_url(egui::OpenUrl::new_tab(welcome::DONATE_URL));
+                let resp = theme::donate_button(ui, "Support", vec2(0.0, 22.0))
+                    .on_hover_text("Camera field of view and project support");
+                if resp.clicked() {
+                    self.support_popup_open = !self.support_popup_open;
+                }
+                if self.support_popup_open {
+                    let popup_pos = pos2(
+                        (resp.rect.right() - 270.0).max(ui.min_rect().left() + 8.0),
+                        resp.rect.bottom() + 6.0,
+                    );
+                    egui::Area::new(egui::Id::new("support_fov_popup"))
+                        .order(egui::Order::Foreground)
+                        .fixed_pos(popup_pos)
+                        .show(ui.ctx(), |ui| {
+                            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                ui.set_min_width(250.0);
+                                ui.label(egui::RichText::new("Camera field of view").strong());
+                                let mut fov_degrees = self.cam.fov_y.to_degrees();
+                                if ui.add(egui::Slider::new(&mut fov_degrees, 10.0..=120.0).suffix("°")).changed() {
+                                    self.cam.fov_y = fov_degrees.to_radians();
+                                }
+                                if ui.small_button("Reset FOV").clicked() {
+                                    self.cam.fov_y = self.prefs.fov_deg.clamp(10.0, 120.0).to_radians();
+                                }
+                                ui.separator();
+                                if ui.button(theme::with_icon(icons::HEART, "Support development on Ko-fi")).clicked() {
+                                    ui.ctx().open_url(egui::OpenUrl::new_tab(welcome::DONATE_URL));
+                                    self.support_popup_open = false;
+                                }
+                            });
+                        });
                 }
             });
         });
@@ -4439,6 +4473,20 @@ impl PainterApp {
         ui.add_space(4.0);
         ui.separator();
         ui.add_space(4.0);
+        if theme::icon_button(ui, icons::CROSSHAIR, self.move_point_light, 34.0)
+            .on_hover_text("Move the selected point light: click a surface in the 3D view")
+            .clicked()
+        {
+            self.toggle_point_light_move();
+        }
+        let marker_icon = if self.show_point_light_markers { icons::EYE } else { icons::EYE_SLASH };
+        if theme::icon_button(ui, marker_icon, self.show_point_light_markers, 34.0)
+            .on_hover_text("Show or hide point-light markers in the 3D view")
+            .clicked()
+        {
+            self.show_point_light_markers = !self.show_point_light_markers;
+        }
+        ui.separator();
         if theme::icon_button(ui, icons::CUBE_TRANSPARENT, self.view.show_wire_3d, 34.0).on_hover_text("Wireframe in the 3D view (W)").clicked() {
             self.view.show_wire_3d = !self.view.show_wire_3d;
         }
