@@ -2184,15 +2184,17 @@ mod walk_navigation_tests {
     }
 
     #[test]
-    fn focus_on_rejects_far_focus_without_moving_camera() {
+    fn focus_on_accepts_far_focus_and_preserves_camera_position() {
         let mut cam = OrbitCam::default();
         let eye_before = cam.eye();
-        let target_before = cam.target;
+        let focus = eye_before + Vec3::Z * 100.0;
 
-        cam.focus_on(eye_before + Vec3::Z * 100.0);
+        cam.focus_on(focus);
 
         assert!(cam.eye().distance(eye_before) < 1e-5);
-        assert_eq!(cam.target, target_before);
+        assert_eq!(cam.target, focus);
+        assert!((cam.dist - 100.0).abs() < 1e-4);
+        assert!(cam.clip_planes().1 > cam.dist);
     }
 
     #[test]
