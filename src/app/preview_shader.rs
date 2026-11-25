@@ -6,37 +6,42 @@
 use super::{PainterApp, Workspace, theme};
 use crate::graph::{self, shading};
 use crate::icons;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use eframe::egui;
 
-/// Inputs that change the generated WGSL. Node positions and parameter values
-/// are deliberately excluded: they affect the editor layout or uniforms, not code.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct PreviewCompileKey {
-    nodes: Vec<(u64, String, Vec<(String, u64)>)>,
-    definitions: Vec<(String, Option<String>)>,
-}
+/// Signature of the inputs that change generated WGSL. Hashing avoids
+/// cloning graph strings or node source files on every viewport frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PreviewCompileKey(u64);
 
 impl PreviewCompileKey {
     fn new(graph: &graph::Graph, lib: &graph::Library) -> Self {
-        let nodes = graph.nodes.iter().map(|node| {
-            let mut links: Vec<(String, u64)> = node.links.iter()
-                .map(|(input, source)| (input.clone(), *source))
+        let mut hasher = DefaultHasher::new();
+        graph.nodes.len().hash(&mut hasher);
+
+        for node in &graph.nodes {
+            node.id.hash(&mut hasher);
+            node.def.hash(&mut hasher);
+
+            // HashMap iteration order is randomized; sort borrowed keys so the
+            // signature remains stable without allocating copies of the names.
+            let mut links: Vec<(&str, u64)> = node.links.iter()
+                .map(|(input, source)| (input.as_str(), *source))
                 .collect();
             links.sort_unstable();
-            (node.id, node.def.clone(), links)
-        }).collect();
+            links.hash(&mut hasher);
+        }
 
-        let mut definition_ids: Vec<String> =
-            graph.nodes.iter().map(|node| node.def.clone()).collect();
+        let mut definition_ids: Vec<&str> =
+            graph.nodes.iter().map(|node| node.def.as_str()).collect();
         definition_ids.sort_unstable();
         definition_ids.dedup();
+        for id in definition_ids {
+            id.hash(&mut hasher);
+            lib.find(id).map(|definition| definition.source.as_str()).hash(&mut hasher);
+        }
 
-        let definitions = definition_ids.into_iter().map(|id| {
-            let source = lib.find(&id).map(|definition| definition.source.clone());
-            (id, source)
-        }).collect();
-
-        Self { nodes, definitions }
+        Self(hasher.finish())
     }
 }
 
