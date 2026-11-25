@@ -154,7 +154,10 @@ impl OrbitCam {
     /// for orbiting far beyond the old 40-unit ceiling.
     pub fn clip_planes(&self) -> (f32, f32) {
         let distance = if self.dist.is_finite() { self.dist.max(CAMERA_MIN_DISTANCE) } else { 5.2 };
-        let near = (distance * 0.0005).clamp(0.00001, CAMERA_MAX_DISTANCE * 0.0005);
+        // Avoid shrinking the near plane too aggressively at ordinary
+        // working distances: that wastes depth precision and encourages
+        // z-fighting. Keep a smaller floor for close-up inspection.
+        let near = (distance * 0.005).clamp(0.0001, CAMERA_MAX_DISTANCE * 0.0005);
         let far = (distance * 4.0 + FAR).clamp(FAR, CAMERA_MAX_DISTANCE * 4.0 + FAR);
         (near, far.max(near + 1.0))
     }
@@ -2404,6 +2407,24 @@ mod camera_frame_tests {
         assert!(far_near > close_near);
         assert!(far_far > close_far);
         assert!(far_far / far_near < 20_000.0);
+    }
+
+    #[test]
+    fn default_camera_keeps_depth_precision_close_to_original() {
+        let cam = OrbitCam::default();
+        let (near, far) = cam.clip_planes();
+        assert!(near >= 0.02);
+        assert!(far / near < 10_000.0, "depth ratio unexpectedly wide: {}", far / near);
+    }
+
+    #[test]
+    fn close_camera_keeps_a_small_but_safe_near_plane() {
+        let mut cam = OrbitCam::default();
+        cam.set_distance(CAMERA_MIN_DISTANCE);
+        let (near, far) = cam.clip_planes();
+        assert!(near >= 0.0001);
+        assert!(far > near);
+        assert!(far / near <= 1_000_000.0, "depth ratio unexpectedly wide: {}", far / near);
     }
 
     #[test]
