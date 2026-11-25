@@ -2368,5 +2368,34 @@ mod camera_frame_tests {
         cam.frame_bounds(Vec3::splat(f32::NAN), Vec3::ONE, 1.0);
         assert!(cam == original);
     }
+
+    #[test]
+    fn orbit_distance_can_move_beyond_the_old_40_unit_limit() {
+        let mut cam = OrbitCam::default();
+        cam.set_distance(250.0);
+        assert_eq!(cam.dist, 250.0);
+        let (near, far) = cam.clip_planes();
+        assert!(near > 0.0 && far > 250.0);
+
+        cam.set_distance(0.0);
+        assert_eq!(cam.dist, super::CAMERA_MIN_DISTANCE);
+    }
+
+    #[test]
+    fn focus_on_keeps_a_far_orbit_distance() {
+        let mut cam = OrbitCam::default();
+        let focus = cam.eye() + Vec3::new(0.0, 0.0, 500.0);
+        cam.focus_on(focus);
+        assert!((cam.target - focus).length() < 1e-5);
+        assert!(cam.dist > 400.0);
+        assert!(cam.clip_planes().1 > cam.dist);
+    }
+
+    #[test]
+    fn frame_bounds_preserves_wide_field_of_view() {
+        let mut cam = OrbitCam { fov_y: 110.0_f32.to_radians(), ..OrbitCam::default() };
+        cam.frame_bounds(Vec3::splat(-1.0), Vec3::splat(1.0), 1.0);
+        assert!((cam.fov_y.to_degrees() - 110.0).abs() < 1e-4);
+    }
 }
 
