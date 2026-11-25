@@ -5147,7 +5147,15 @@ impl PainterApp {
     fn stamp_uniform(&self, kind: ViewKind) -> StampUniform {
         let ppp_radius = self.brush.size * 0.5 * self.ppp;
         let brush = [ppp_radius.max(0.5), self.brush.hardness.min(0.99), self.brush.flow, self.brush.symmetry as f32];
-        let clip = [NEAR, FAR, if self.brush.tip.is_some() { 1.0 } else { 0.0 }, 0.0];
+        // Screen painting linearizes the viewport depth buffer with this
+        // same near/far pair. Keep it in lockstep with the camera projection,
+        // especially now that orbit distance can exceed the old fixed range.
+        let mut clip = [NEAR, FAR, if self.brush.tip.is_some() { 1.0 } else { 0.0 }, 0.0];
+        if kind == ViewKind::V3d {
+            let (near, far) = self.cam.clip_planes();
+            clip[0] = near;
+            clip[1] = far;
+        }
         let proj = [
             match self.brush.projection {
                 BrushProjection::Screen => 0.0,
