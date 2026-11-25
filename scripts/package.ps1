@@ -1,4 +1,4 @@
-# Builds a release, stages it in dist/, and creates icon-bearing Windows launchers.
+# Build a clean portable application folder and the Windows release ZIP.
 #   pwsh scripts/package.ps1            # build, stage, zip
 #   pwsh scripts/package.ps1 -NoBuild   # stage and zip an existing build
 param([switch]$NoBuild)
@@ -15,15 +15,15 @@ if (-not $NoBuild) {
 $stage = Join-Path $root "dist/Material Painter"
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force $stage | Out-Null
-Copy-Item target/release/material_painter.exe (Join-Path $stage "MaterialPainter.exe")
+
+# The native Rust executable is the default OpenGL application. main.rs
+# selects GL on Windows when WGPU_BACKEND is not set, and build.rs embeds its icon.
+Copy-Item target/release/material_painter.exe (Join-Path $stage "Material Painter.exe")
 Copy-Item -Recurse assets (Join-Path $stage "assets")
 Copy-Item LICENSE, THIRD_PARTY_NOTICES.html, README.md $stage
 
-# Keep the explicit batch launchers for diagnostics and advanced use.
-# The user-facing EXE launchers below have embedded icons and are relocatable.
-Copy-Item scripts/Start-OpenGL-4x.bat, scripts/Start-Vulkan-4x.bat, scripts/OPENGL-VIEWPORT-TEST.txt $stage
-
-# Convert the existing application icon to ICO for the launcher PE resources.
+# Keep only one optional backend launcher. It reuses the native executable
+# and sets WGPU_BACKEND=vulkan; a separate OpenGL wrapper is redundant.
 Add-Type -AssemblyName System.Drawing
 if (-not ("NativeIconMethods" -as [type])) {
     Add-Type -TypeDefinition @'
@@ -90,37 +90,44 @@ if (-not $csc) {
     $compiler = Get-Command csc.exe -ErrorAction SilentlyContinue
     if ($compiler) { $csc = $compiler.Source }
 }
-if (-not $csc) { throw "C# compiler (csc.exe) was not found; cannot build icon-bearing launchers" }
+if (-not $csc) { throw "C# compiler (csc.exe) was not found; cannot build the Vulkan launcher" }
 
-$commonCompilerArgs = @(
+$vulkanLauncher = Join-Path $stage "Material Painter (Vulkan).exe"
+$compilerArgs = @(
     "/nologo",
     "/target:winexe",
     "/platform:x64",
     "/optimize+",
     "/reference:System.Windows.Forms.dll",
-    "/win32icon:$iconPath"
+    "/win32icon:$iconPath",
+    "/out:$vulkanLauncher",
+    $launcherSource
 )
-
-$openGlLauncher = Join-Path $stage "Material Painter.exe"
-$openGlArgs = @("/out:$openGlLauncher") + $commonCompilerArgs + @($launcherSource)
-& $csc @openGlArgs
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path $openGlLauncher)) {
-    throw "Failed to compile the default OpenGL launcher"
-}
-
-$vulkanLauncher = Join-Path $stage "Material Painter (Vulkan).exe"
-$vulkanArgs = @("/out:$vulkanLauncher", "/define:VULKAN") + $commonCompilerArgs + @($launcherSource)
-& $csc @vulkanArgs
+& $csc @compilerArgs
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path $vulkanLauncher)) {
     throw "Failed to compile the Vulkan launcher"
 }
 
-# The icon is embedded in each launcher; no external icon path is needed.
+# The launcher icon is embedded; the temporary .ico is not shipped.
 Remove-Item -Force $iconPath
+
+# Hard fail if the portable folder contains an old or unexpected executable.
+$expectedExecutables = @("Material Painter.exe", "Material Painter (Vulkan).exe")
+$actualExecutables = @(Get-ChildItem -Path $stage -Filter "*.exe" -File | ForEach-Object { $_.Name })
+$expectedSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($name in $expectedExecutables) { [void]$expectedSet.Add($name) }
+if ($actualExecutables.Count -ne $expectedSet.Count -or
+    @($actualExecutables | Where-Object { -not $expectedSet.Contains($_) }).Count -ne 0) {
+    throw "Portable folder must contain exactly these executables: $($expectedExecutables -join ', '). Found: $($actualExecutables -join ', ')"
+}
+if (-not (Test-Path (Join-Path $stage "Material Painter.exe"))) {
+    throw "Native OpenGL application is missing from the portable folder"
+}
 
 $zip = Join-Path $root "dist/MaterialPainter-$version-windows-x64.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }
 Compress-Archive -Path $stage -DestinationPath $zip
 Write-Host "Staged $stage"
+Write-Host "Portable executables: $($actualExecutables -join ', ')"
 Write-Host "Wrote $zip"
 if ($env:GITHUB_OUTPUT) { "version=$version" | Out-File -Append -Encoding utf8 -FilePath $env:GITHUB_OUTPUT }
