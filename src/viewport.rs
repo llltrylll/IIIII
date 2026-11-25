@@ -154,7 +154,7 @@ impl OrbitCam {
     /// for orbiting far beyond the old 40-unit ceiling.
     pub fn clip_planes(&self) -> (f32, f32) {
         let distance = if self.dist.is_finite() { self.dist.max(CAMERA_MIN_DISTANCE) } else { 5.2 };
-        let near = (distance * 0.0005).clamp(0.00001, NEAR);
+        let near = (distance * 0.0005).clamp(0.00001, CAMERA_MAX_DISTANCE * 0.0005);
         let far = (distance * 4.0 + FAR).clamp(FAR, CAMERA_MAX_DISTANCE * 4.0 + FAR);
         (near, far.max(near + 1.0))
     }
@@ -2389,6 +2389,19 @@ mod camera_frame_tests {
         assert!((cam.target - focus).length() < 1e-5);
         assert!(cam.dist > 400.0);
         assert!(cam.clip_planes().1 > cam.dist);
+    }
+
+    #[test]
+    fn near_clip_scales_with_camera_distance_for_depth_precision() {
+        let mut close = OrbitCam::default();
+        close.set_distance(10.0);
+        let mut far = OrbitCam::default();
+        far.set_distance(1_000.0);
+        let (close_near, close_far) = close.clip_planes();
+        let (far_near, far_far) = far.clip_planes();
+        assert!(far_near > close_near);
+        assert!(far_far > close_far);
+        assert!(far_far / far_near < 20_000.0);
     }
 
     #[test]
