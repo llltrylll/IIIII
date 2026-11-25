@@ -43,7 +43,33 @@ impl Tex {
         usage: wgpu::TextureUsages,
         samples: u32,
     ) -> Tex {
-        let srgb = format == wgpu::TextureFormat::Rgba8Unorm;
+        Self::new_ms_with_srgb_view(device, label, width, height, format, usage, samples, true)
+    }
+
+    /// Creates a single-sampled texture without requesting alternate sRGB views.
+    /// Use this for placeholder/data textures that are never sampled as color.
+    pub fn new_without_srgb_view(
+        device: &wgpu::Device,
+        label: &str,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+        usage: wgpu::TextureUsages,
+    ) -> Tex {
+        Self::new_ms_with_srgb_view(device, label, width, height, format, usage, 1, false)
+    }
+
+    fn new_ms_with_srgb_view(
+        device: &wgpu::Device,
+        label: &str,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+        usage: wgpu::TextureUsages,
+        samples: u32,
+        allow_srgb_view: bool,
+    ) -> Tex {
+        let srgb = allow_srgb_view && format == wgpu::TextureFormat::Rgba8Unorm;
         let view_formats: &[wgpu::TextureFormat] =
             if srgb { &[wgpu::TextureFormat::Rgba8UnormSrgb] } else { &[] };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -118,7 +144,9 @@ pub fn bytes_per_texel(format: wgpu::TextureFormat) -> u32 {
         F::Rg8Unorm | F::R16Float => 2,
         F::Rgba8Unorm | F::Rgba8UnormSrgb | F::Rg16Float | F::R32Float | F::Depth32Float => 4,
         F::Rgba16Float => 8,
-        F::Rgba32Float => 16,
+        F::Rgba32Float | F::Rgba32Uint => 16,
+        F::Rg32Uint => 8,
+        F::R32Uint => 4,
         _ => 4,
     }
 }
@@ -169,6 +197,19 @@ pub fn tex_entry(binding: u32, filterable: bool) -> wgpu::BindGroupLayoutEntry {
         visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
         ty: wgpu::BindingType::Texture {
             sample_type: wgpu::TextureSampleType::Float { filterable },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+pub fn uint_tex_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Uint,
             view_dimension: wgpu::TextureViewDimension::D2,
             multisampled: false,
         },

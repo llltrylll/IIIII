@@ -1,6 +1,80 @@
 //! The Shelf: materials, brushes, smart masks and textures to browse and drop in.
 use super::*;
 
+#[derive(Clone, Copy)]
+enum ShelfTile {
+    Graph(usize),
+    Library(usize),
+    UserSmart(usize),
+    Smart(usize),
+    Material(usize),
+    Brush(usize),
+    Texture(usize),
+    Generator(usize),
+}
+
+impl ShelfTile {
+    fn id_salt(self) -> (&'static str, usize) {
+        match self {
+            Self::Graph(i) => ("graph", i),
+            Self::Library(i) => ("library", i),
+            Self::UserSmart(i) => ("user-smart", i),
+            Self::Smart(i) => ("smart", i),
+            Self::Material(i) => ("material", i),
+            Self::Brush(i) => ("brush", i),
+            Self::Texture(i) => ("texture", i),
+            Self::Generator(i) => ("generator", i),
+        }
+    }
+}
+
+enum ShelfRow {
+    Heading { kind: presets::MaterialType, height: f32 },
+    Items(Vec<ShelfTile>),
+}
+
+impl ShelfRow {
+    fn height(&self, tile_height: f32) -> f32 {
+        match self {
+            Self::Heading { height, .. } => *height,
+            Self::Items(_) => tile_height,
+        }
+    }
+}
+
+fn flush_shelf_row(rows: &mut Vec<ShelfRow>, current: &mut Vec<ShelfTile>) {
+    if !current.is_empty() {
+        rows.push(ShelfRow::Items(std::mem::take(current)));
+    }
+}
+
+fn push_shelf_tile(
+    rows: &mut Vec<ShelfRow>,
+    current: &mut Vec<ShelfTile>,
+    tile: ShelfTile,
+    columns: usize,
+) {
+    current.push(tile);
+    if current.len() >= columns {
+        flush_shelf_row(rows, current);
+    }
+}
+
+fn push_shelf_group(
+    rows: &mut Vec<ShelfRow>,
+    current: &mut Vec<ShelfTile>,
+    last: &mut Option<presets::MaterialType>,
+    kind: presets::MaterialType,
+    enabled: bool,
+) {
+    if enabled && *last != Some(kind) {
+        flush_shelf_row(rows, current);
+        let height = if last.is_some() { 30.0 } else { 20.0 };
+        rows.push(ShelfRow::Heading { kind, height });
+        *last = Some(kind);
+    }
+}
+
 impl PainterApp {
     pub(super) fn shelf_panel(&mut self, ui: &mut egui::Ui) {
         // A narrow shelf keeps its room for thumbnails: categories as icons
@@ -108,268 +182,339 @@ impl PainterApp {
                 }
                 let icon = self.shelf.icon_size;
                 let search = self.shelf.search.to_lowercase();
-                // The common unfiltered shelf view should not allocate a lowercase
-                // copy for every asset on every frame.
                 let matches_search = |name: &str| search.is_empty() || name.to_lowercase().contains(&search);
                 let kind = self.shelf.kind;
-                let wanted = |k: presets::MaterialType| kind.is_none_or(|f| f == k);
-                // The type's name as a heading of its own when the type changes
-                // (all types shown). It takes the full width, so the wrapped
-                // layout puts it on a fresh row and starts the next items below it.
-                let group = |ui: &mut egui::Ui, last: &mut Option<presets::MaterialType>, k: presets::MaterialType| {
-                    if kind.is_none() && *last != Some(k) {
-                        let width = ui.max_rect().width();
-                        let h = if last.is_some() { 30.0 } else { 20.0 };
-                        let (r, _) = ui.allocate_exact_size(vec2(width, h), Sense::hover());
-                        *last = Some(k);
-                        // Off-screen group headings still take part in layout, but do not
-                        // need text shaping or paint commands until they enter the clip rect.
-                        if !ui.is_rect_visible(r) {
-                            return;
+                let cat = self.shelf.cat;
+                let wanted = |k: presets::MaterialType| kind.is_none_or(|filter| filter == k);
+
+                // Build a compact row index. The ScrollArea below virtualizes
+                // the rows, so off-screen entries never create widgets or IDs.
+                let spacing = 4.0;
+                let tile_width = icon + 12.0;
+                let named = icon >= NAMED_MIN;
+                let tile_height = icon + if named { 22.0 } else { 8.0 };
+                let columns = (((ui.available_width() + spacing) / (tile_width + spacing)).floor() as usize).max(1);
+                let mut rows = Vec::new();
+                let mut current = Vec::with_capacity(columns);
+                let mut last_group = None;
+
+                match cat {
+                    ShelfCat::Graphs => {
+                        for (i, graph) in self.graphs.shelf.iter().enumerate() {
+                            if matches_search(&graph.name) {
+                                push_shelf_tile(&mut rows, &mut current, ShelfTile::Graph(i), columns);
+                            }
                         }
-                        let base = r.left_bottom() + vec2(2.0, -5.0);
-                        let g = ui.painter().layout_no_wrap(k.name().to_uppercase(), egui::FontId::new(11.0, theme::heading_family()), theme::TEXT_DIM);
-                        let line_y = base.y - g.size().y * 0.5;
-                        let text_w = g.size().x;
-                        ui.painter().galley(pos2(base.x, base.y - g.size().y), g, theme::TEXT_DIM);
-                        ui.painter().line_segment(
-                            [pos2(base.x + text_w + 8.0, line_y), pos2(r.right() - 4.0, line_y)],
-                            Stroke::new(1.0, theme::OUTLINE),
-                        );
                     }
-                };
+                    ShelfCat::Downloaded => {
+                        self.library.ensure_local(ui.ctx());
+                        let kinds: Vec<presets::MaterialType> = self.library.local.iter()
+                            .map(|material| presets::MaterialType::of(&material.name, None))
+                            .collect();
+                        let mut order: Vec<usize> = (0..self.library.local.len())
+                            .filter(|&i| matches_search(&self.library.local[i].name) && wanted(kinds[i]))
+                            .collect();
+                        order.sort_by_key(|&i| kinds[i]);
+                        for i in order {
+                            push_shelf_group(&mut rows, &mut current, &mut last_group, kinds[i], kind.is_none());
+                            push_shelf_tile(&mut rows, &mut current, ShelfTile::Library(i), columns);
+                        }
+                    }
+                    ShelfCat::SmartMaterials => {
+                        // User materials stay before the built-in groups.
+                        for (i, smart) in self.user_smarts.iter().enumerate() {
+                            if matches_search(&smart.name) && wanted(presets::MaterialType::of(&smart.name, None)) {
+                                push_shelf_tile(&mut rows, &mut current, ShelfTile::UserSmart(i), columns);
+                            }
+                        }
+                        let mut order: Vec<usize> = (0..presets::SMART_MATERIALS.len())
+                            .filter(|&i| matches_search(presets::SMART_MATERIALS[i].name)
+                                && wanted(presets::SMART_MATERIALS[i].kind()))
+                            .collect();
+                        order.sort_by_key(|&i| presets::SMART_MATERIALS[i].kind());
+                        for i in order {
+                            let smart = &presets::SMART_MATERIALS[i];
+                            push_shelf_group(&mut rows, &mut current, &mut last_group, smart.kind(), kind.is_none());
+                            push_shelf_tile(&mut rows, &mut current, ShelfTile::Smart(i), columns);
+                        }
+                    }
+                    ShelfCat::Materials => {
+                        let mut order: Vec<usize> = (0..presets::MATERIALS.len())
+                            .filter(|&i| matches_search(presets::MATERIALS[i].name)
+                                && wanted(presets::MATERIALS[i].kind()))
+                            .collect();
+                        order.sort_by_key(|&i| presets::MATERIALS[i].kind());
+                        for i in order {
+                            let material = &presets::MATERIALS[i];
+                            push_shelf_group(&mut rows, &mut current, &mut last_group, material.kind(), kind.is_none());
+                            push_shelf_tile(&mut rows, &mut current, ShelfTile::Material(i), columns);
+                        }
+                    }
+                    ShelfCat::Brushes => {
+                        for (i, brush) in crate::brushes::BRUSH_ALPHAS.iter().enumerate() {
+                            if matches_search(brush.name) {
+                                push_shelf_tile(&mut rows, &mut current, ShelfTile::Brush(i), columns);
+                            }
+                        }
+                    }
+                    ShelfCat::Textures => {
+                        for (i, texture) in crate::textures::TEXTURES.iter().enumerate() {
+                            if matches_search(texture.name) || matches_search(texture.category) {
+                                push_shelf_tile(&mut rows, &mut current, ShelfTile::Texture(i), columns);
+                            }
+                        }
+                    }
+                    ShelfCat::Generators => {
+                        for (i, generator) in GenKind::ALL.iter().enumerate() {
+                            if matches_search(generator.name()) {
+                                push_shelf_tile(&mut rows, &mut current, ShelfTile::Generator(i), columns);
+                            }
+                        }
+                    }
+                }
+                flush_shelf_row(&mut rows, &mut current);
+
+                if cat == ShelfCat::Graphs && self.graphs.shelf.is_empty() {
+                    ui.label(egui::RichText::new("No saved graphs yet. In the Material Graph window (Ctrl+G), use Save to shelf.")
+                        .color(theme::TEXT_DIM));
+                } else if cat == ShelfCat::Downloaded && self.library.local.is_empty() {
+                    ui.label(egui::RichText::new("Nothing downloaded yet. Click Get more assets above for thousands of free materials.")
+                        .color(theme::TEXT_DIM));
+                }
+
+                let total_height = rows.iter().map(|row| row.height(tile_height) + spacing).sum::<f32>()
+                    - if rows.is_empty() { 0.0 } else { spacing };
+                let fallback_material = self.shelf.materials.first().map(|texture| texture.id());
+                let fallback_smart = self.shelf.smart.first().map(|texture| texture.id());
                 let mut share = None;
                 let mut share_smart = None;
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-                        match self.shelf.cat {
-                            ShelfCat::Graphs => {
-                                if self.graphs.shelf.is_empty() {
-                                    ui.label(
-                                        egui::RichText::new("No saved graphs yet. In the Material Graph window (Ctrl+G), use Save to shelf.")
-                                            .color(theme::TEXT_DIM),
-                                    );
-                                }
-                                let fallback = self.shelf.materials.first().map(|t| t.id());
-                                for (i, g) in self.graphs.shelf.iter().enumerate() {
-                                    if !matches_search(&g.name) {
-                                        continue;
+
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show_viewport(ui, |content_ui, viewport| {
+                    content_ui.set_height(total_height.max(0.0));
+                    let max_rect = content_ui.max_rect();
+                    let clip_rect = content_ui.clip_rect();
+                    let left = max_rect.left();
+                    let top = max_rect.top();
+                    let width = max_rect.width();
+                    let mut y = 0.0;
+
+                    for row in &rows {
+                        let row_height = row.height(tile_height);
+                        let relative = Rect::from_min_size(pos2(0.0, y), vec2(width, row_height));
+                        if viewport.intersects(relative) {
+                            match row {
+                                ShelfRow::Heading { kind, .. } => {
+                                    let rect = Rect::from_min_size(pos2(left, top + y), vec2(width, row_height));
+                                    if clip_rect.intersects(rect) {
+                                        let base = rect.left_bottom() + vec2(2.0, -5.0);
+                                        let galley = content_ui.painter().layout_no_wrap(
+                                            kind.name().to_uppercase(),
+                                            egui::FontId::new(11.0, theme::heading_family()),
+                                            theme::TEXT_DIM,
+                                        );
+                                        let line_y = base.y - galley.size().y * 0.5;
+                                        let text_width = galley.size().x;
+                                        content_ui.painter().galley(
+                                            pos2(base.x, base.y - galley.size().y),
+                                            galley,
+                                            theme::TEXT_DIM,
+                                        );
+                                        content_ui.painter().line_segment(
+                                            [pos2(base.x + text_width + 8.0, line_y), pos2(rect.right() - 4.0, line_y)],
+                                            Stroke::new(1.0, theme::OUTLINE),
+                                        );
                                     }
-                                    let Some(tex) = g.thumb.as_ref().map(|t| t.id()).or(fallback) else { continue };
-                                    let resp = Self::swatch(ui, tex, &g.name, icon);
-                                    if ui.clip_rect().intersects(resp.rect) {
-                                        resp.dnd_set_drag_payload(ShelfItem::Graph(i));
-                                        if resp.double_clicked() {
-                                            self.pending.push(Action::AddOnTop(ShelfItem::Graph(i)));
+                                }
+                                ShelfRow::Items(items) => {
+                                    for (column, tile) in items.iter().copied().enumerate() {
+                                        let rect = Rect::from_min_size(
+                                            pos2(left + column as f32 * (tile_width + spacing), top + y),
+                                            vec2(tile_width, tile_height),
+                                        );
+                                        if !clip_rect.intersects(rect) {
+                                            continue;
                                         }
-                                        resp.context_menu(|ui| {
-                                            if ui.button(theme::with_icon(icons::SHARE_NETWORK, "Share to community…")).clicked() {
-                                                share = Some(i);
-                                                ui.close();
+                                        let id = content_ui.scope_id().with(("shelf-swatch", tile.id_salt()));
+                                        match tile {
+                                            ShelfTile::Graph(i) => {
+                                                let graph = &self.graphs.shelf[i];
+                                                let Some(texture) = graph.thumb.as_ref().map(|thumb| thumb.id()).or(fallback_material) else { continue };
+                                                let response = Self::swatch_at(content_ui, id, rect, texture, &graph.name, icon);
+                                                if response.double_clicked() {
+                                                    self.pending.push(Action::AddOnTop(ShelfItem::Graph(i)));
+                                                }
+                                                response.context_menu(|ui| {
+                                                    if ui.button(theme::with_icon(icons::SHARE_NETWORK, "Share to community…")).clicked() {
+                                                        share = Some(i);
+                                                        ui.close();
+                                                    }
+                                                });
+                                                if clip_rect.intersects(response.rect) {
+                                                    response.dnd_set_drag_payload(ShelfItem::Graph(i));
+                                                }
                                             }
-                                        });
-                                    }
-                                }
-                            }
-                            ShelfCat::Downloaded => {
-                                self.library.ensure_local(ui.ctx());
-                                if self.library.local.is_empty() {
-                                    ui.label(
-                                        egui::RichText::new("Nothing downloaded yet. Click Get more assets above for thousands of free materials.")
-                                            .color(theme::TEXT_DIM),
-                                    );
-                                }
-                                let fallback = self.shelf.materials.first().map(|t| t.id());
-                                let kinds: Vec<presets::MaterialType> = self.library.local.iter().map(|m| presets::MaterialType::of(&m.name, None)).collect();
-                                let mut order: Vec<usize> = (0..self.library.local.len())
-                                    .filter(|&i| matches_search(&self.library.local[i].name) && wanted(kinds[i]))
-                                    .collect();
-                                order.sort_by_key(|&i| kinds[i]);
-                                let mut last = None;
-                                for i in order {
-                                    group(ui, &mut last, kinds[i]);
-                                    let m = &self.library.local[i];
-                                    let thumb = self.library.local_thumbs.get(i).and_then(|t| t.as_ref()).map(|t| t.id());
-                                    let Some(tex) = thumb.or(fallback) else { continue };
-                                    let resp = Self::swatch(ui, tex, &m.name, icon);
-                                    if ui.clip_rect().intersects(resp.rect) {
-                                        let resp = resp.on_hover_text(format!("{}, from {}", m.name, m.source));
-                                        resp.dnd_set_drag_payload(ShelfItem::Library(i));
-                                        if resp.double_clicked() {
-                                            self.pending.push(Action::AddOnTop(ShelfItem::Library(i)));
-                                        }
-                                        resp.context_menu(|ui| self.library_material_menu(ui, i));
-                                    }
-                                }
-                            }
-                            ShelfCat::SmartMaterials => {
-                                // Your own first, marked with a badge.
-                                let fallback = self.shelf.smart.first().map(|t| t.id());
-                                for i in 0..self.user_smarts.len() {
-                                    let s = &self.user_smarts[i];
-                                    if !matches_search(&s.name) || !wanted(presets::MaterialType::of(&s.name, None)) {
-                                        continue;
-                                    }
-                                    let Some(tex) = s.thumb.as_ref().map(|t| t.id()).or(fallback) else { continue };
-                                    let resp = Self::swatch(ui, tex, &s.name.clone(), icon);
-                                    if ui.is_rect_visible(resp.rect) {
-                                        let at = resp.rect.left_top() + vec2(8.0, 6.0);
-                                        let g = ui.painter().layout_no_wrap("MINE".into(), egui::FontId::proportional(8.5), Color32::WHITE);
-                                        let r = Rect::from_min_size(at, g.size() + vec2(6.0, 2.0));
-                                        ui.painter().rect_filled(r, 0.0, theme::DONATE.gamma_multiply(0.9));
-                                        ui.painter().galley(r.min + vec2(3.0, 1.0), g, Color32::WHITE);
-                                    }
-                                    if ui.clip_rect().intersects(resp.rect) {
-                                        resp.dnd_set_drag_payload(ShelfItem::UserSmart(i));
-                                        if resp.double_clicked() {
-                                            self.pending.push(Action::AddOnTop(ShelfItem::UserSmart(i)));
-                                        }
-                                        resp.context_menu(|ui| self.user_smart_menu(ui, i, &mut share_smart));
-                                    }
-                                }
-                                let mut order: Vec<usize> = (0..presets::SMART_MATERIALS.len())
-                                    .filter(|&i| matches_search(presets::SMART_MATERIALS[i].name) && wanted(presets::SMART_MATERIALS[i].kind()))
-                                    .collect();
-                                order.sort_by_key(|&i| presets::SMART_MATERIALS[i].kind());
-                                // Your own stay first, apart from the groups.
-                                let mut last = None;
-                                for (i, s) in order.into_iter().map(|i| (i, &presets::SMART_MATERIALS[i])) {
-                                    group(ui, &mut last, s.kind());
-                                    let tex = self.shelf.smart[i].id();
-                                    let resp = Self::swatch(ui, tex, s.name, icon);
-                                    if s.is_scanned() && ui.is_rect_visible(resp.rect) {
-                                        // Badge: built on a photo-scanned texture set.
-                                        let at = resp.rect.left_top() + vec2(8.0, 6.0);
-                                        let font = egui::FontId::proportional(8.5);
-                                        let g = ui.painter().layout_no_wrap("SCAN".into(), font, Color32::WHITE);
-                                        let r = Rect::from_min_size(at, g.size() + vec2(6.0, 2.0));
-                                        ui.painter().rect_filled(r, 0.0, theme::ACCENT.gamma_multiply(0.85));
-                                        ui.painter().galley(r.min + vec2(3.0, 1.0), g, Color32::WHITE);
-                                    }
-                                    if ui.is_rect_visible(resp.rect) {
-                                        Self::missing_badge(ui, &resp, s.needs_maps() & self.engine.missing_maps());
-                                    }
-                                    if ui.clip_rect().intersects(resp.rect) {
-                                        resp.dnd_set_drag_payload(ShelfItem::Smart(i));
-                                        if resp.double_clicked() {
-                                            self.pending.push(Action::AddOnTop(ShelfItem::Smart(i)));
-                                        }
-                                        resp.context_menu(|ui| {
-                                        if ui.button("Add as layer folder").on_hover_text("A folder of fill layers with smart masks; Ctrl+G shows them as a graph you can edit too").clicked() {
-                                            self.pending.push(Action::AddOnTop(ShelfItem::Smart(i)));
-                                            ui.close();
-                                        }
-                                        if ui.button("Add as one graph layer").on_hover_text("One layer driven by a graph; its settings as material parameters in the layer properties").clicked() {
-                                            self.pending.push(Action::AddOnTop(ShelfItem::SmartGraph(i)));
-                                            ui.close();
-                                        }
-                                        });
-                                    }
-                                }
-                            }
-                            ShelfCat::Materials => {
-                                let mut order: Vec<usize> =
-                                    (0..presets::MATERIALS.len()).filter(|&i| matches_search(presets::MATERIALS[i].name) && wanted(presets::MATERIALS[i].kind())).collect();
-                                order.sort_by_key(|&i| presets::MATERIALS[i].kind());
-                                let mut last = None;
-                                for (i, m) in order.into_iter().map(|i| (i, &presets::MATERIALS[i])) {
-                                    group(ui, &mut last, m.kind());
-                                    let tex = self.shelf.materials[i].id();
-                                    let resp = Self::swatch(ui, tex, m.name, icon);
-                                    if ui.clip_rect().intersects(resp.rect) {
-                                        resp.dnd_set_drag_payload(ShelfItem::Material(i));
-                                        if resp.double_clicked() {
-                                            self.pending.push(Action::AddOnTop(ShelfItem::Material(i)));
-                                        }
-                                        resp.context_menu(|ui| {
-                                        if ui.button("Add as fill layer").clicked() {
-                                            self.pending.push(Action::AddOnTop(ShelfItem::Material(i)));
-                                            ui.close();
-                                        }
-                                        if ui.button("Use as brush material").clicked() {
-                                            let f = m.fill();
-                                            let mut enabled = self.brush.mat.enabled;
-                                            enabled[..3].fill(true);
-                                            self.brush.mat = MatValues {
-                                                enabled,
-                                                height: self.brush.mat.height,
-                                                opacity: self.brush.mat.opacity,
-                                                emission: self.brush.mat.emission,
-                                                ..f.mat
-                                            };
-                                            self.set_tool(Tool::Paint);
-                                            ui.close();
-                                        }
-                                        });
-                                    }
-                                }
-                            }
-                            ShelfCat::Brushes => {
-                                for (i, b) in crate::brushes::BRUSH_ALPHAS.iter().enumerate() {
-                                    if !matches_search(b.name) {
-                                        continue;
-                                    }
-                                    let resp = Self::swatch(ui, self.shelf.brushes[i].id(), b.name, icon);
-                                    if self.brush.tip == Some(i) && ui.is_rect_visible(resp.rect) {
-                                        ui.painter().rect_stroke(resp.rect.shrink(2.0), theme::RADIUS, Stroke::new(1.5, theme::ACCENT), egui::StrokeKind::Inside);
-                                    }
-                                    if ui.clip_rect().intersects(resp.rect) {
-                                        resp.dnd_set_drag_payload(ShelfItem::Brush(i));
-                                        if resp.double_clicked() {
-                                            self.pending.push(Action::SetBrushTip(Some(i)));
-                                        }
-                                    }
-                                }
-                            }
-                            ShelfCat::Textures => {
-                                for (i, t) in crate::textures::TEXTURES.iter().enumerate() {
-                                    if !matches_search(t.name) && !matches_search(t.category) {
-                                        continue;
-                                    }
-                                    let resp = Self::swatch(ui, self.shelf.textures[i].id(), t.name, icon);
-                                    if ui.clip_rect().intersects(resp.rect) {
-                                        resp.dnd_set_drag_payload(ShelfItem::Texture(i));
-                                        if resp.double_clicked() {
-                                            self.pending.push(Action::AddOnTop(ShelfItem::Texture(i)));
-                                        }
-                                        resp.context_menu(|ui| {
-                                        if ui.button("Add as height fill layer").clicked() {
-                                            self.pending.push(Action::AddOnTop(ShelfItem::Texture(i)));
-                                            ui.close();
-                                        }
-                                        ui.separator();
-                                        for (ch, label) in [(3, "height"), (0, "color"), (1, "roughness"), (2, "metallic")] {
-                                            if ui.button(format!("Use as {label} on the selected fill layer")).clicked() {
-                                                self.pending.push(Action::TextureToChannel { texture: i, ch });
-                                                ui.close();
+                                            ShelfTile::Library(i) => {
+                                                let material = &self.library.local[i];
+                                                let texture = self.library.local_thumbs.get(i).and_then(|thumb| thumb.as_ref())
+                                                    .map(|thumb| thumb.id()).or(fallback_material);
+                                                let Some(texture) = texture else { continue };
+                                                let response = Self::swatch_at(content_ui, id, rect, texture, &material.name, icon);
+                                                if clip_rect.intersects(response.rect) {
+                                                    let response = response.on_hover_text(format!("{}, from {}", material.name, material.source));
+                                                    response.dnd_set_drag_payload(ShelfItem::Library(i));
+                                                    if response.double_clicked() {
+                                                        self.pending.push(Action::AddOnTop(ShelfItem::Library(i)));
+                                                    }
+                                                    response.context_menu(|ui| self.library_material_menu(ui, i));
+                                                }
                                             }
-                                        }
-                                        });
-                                    }
-                                }
-                            }
-                            ShelfCat::Generators => {
-                                for (i, g) in GenKind::ALL.iter().enumerate() {
-                                    if !matches_search(g.name()) {
-                                        continue;
-                                    }
-                                    let tex = self.shelf.generators[i].id();
-                                    let resp = Self::swatch(ui, tex, g.name(), icon);
-                                    if ui.is_rect_visible(resp.rect) {
-                                        Self::missing_badge(ui, &resp, g.default_generator().needs_maps() & self.engine.missing_maps());
-                                    }
-                                    if ui.clip_rect().intersects(resp.rect) {
-                                        resp.dnd_set_drag_payload(ShelfItem::Generator(*g));
-                                        if resp.double_clicked() {
-                                            self.pending.push(Action::AddGenerator(*g));
+                                            ShelfTile::UserSmart(i) => {
+                                                let smart = &self.user_smarts[i];
+                                                let texture = smart.thumb.as_ref().map(|thumb| thumb.id()).or(fallback_smart);
+                                                let Some(texture) = texture else { continue };
+                                                let response = Self::swatch_at(content_ui, id, rect, texture, &smart.name, icon);
+                                                if clip_rect.intersects(response.rect) {
+                                                    let badge = content_ui.painter().layout_no_wrap(
+                                                        "MINE".into(),
+                                                        egui::FontId::proportional(8.5),
+                                                        Color32::WHITE,
+                                                    );
+                                                    let at = response.rect.left_top() + vec2(8.0, 6.0);
+                                                    let badge_rect = Rect::from_min_size(at, badge.size() + vec2(6.0, 2.0));
+                                                    content_ui.painter().rect_filled(badge_rect, 0.0, theme::DONATE.gamma_multiply(0.9));
+                                                    content_ui.painter().galley(badge_rect.min + vec2(3.0, 1.0), badge, Color32::WHITE);
+                                                    response.dnd_set_drag_payload(ShelfItem::UserSmart(i));
+                                                    if response.double_clicked() {
+                                                        self.pending.push(Action::AddOnTop(ShelfItem::UserSmart(i)));
+                                                    }
+                                                    response.context_menu(|ui| self.user_smart_menu(ui, i, &mut share_smart));
+                                                }
+                                            }
+                                            ShelfTile::Smart(i) => {
+                                                let smart = &presets::SMART_MATERIALS[i];
+                                                let texture = self.shelf.smart[i].id();
+                                                let response = Self::swatch_at(content_ui, id, rect, texture, smart.name, icon);
+                                                if smart.is_scanned() {
+                                                    let badge = content_ui.painter().layout_no_wrap(
+                                                        "SCAN".into(),
+                                                        egui::FontId::proportional(8.5),
+                                                        Color32::WHITE,
+                                                    );
+                                                    let at = response.rect.left_top() + vec2(8.0, 6.0);
+                                                    let badge_rect = Rect::from_min_size(at, badge.size() + vec2(6.0, 2.0));
+                                                    content_ui.painter().rect_filled(badge_rect, 0.0, theme::ACCENT.gamma_multiply(0.85));
+                                                    content_ui.painter().galley(badge_rect.min + vec2(3.0, 1.0), badge, Color32::WHITE);
+                                                }
+                                                Self::missing_badge(content_ui, &response, smart.needs_maps() & self.engine.missing_maps());
+                                                if clip_rect.intersects(response.rect) {
+                                                    response.dnd_set_drag_payload(ShelfItem::Smart(i));
+                                                    if response.double_clicked() {
+                                                        self.pending.push(Action::AddOnTop(ShelfItem::Smart(i)));
+                                                    }
+                                                    response.context_menu(|ui| {
+                                                        if ui.button("Add as layer folder").on_hover_text("A folder of fill layers with smart masks; Ctrl+G shows them as a graph you can edit too").clicked() {
+                                                            self.pending.push(Action::AddOnTop(ShelfItem::Smart(i)));
+                                                            ui.close();
+                                                        }
+                                                        if ui.button("Add as one graph layer").on_hover_text("One layer driven by a graph; its settings as material parameters in the layer properties").clicked() {
+                                                            self.pending.push(Action::AddOnTop(ShelfItem::SmartGraph(i)));
+                                                            ui.close();
+                                                        }
+                                                    });
+                                                }
+                                            }
+                                            ShelfTile::Material(i) => {
+                                                let material = &presets::MATERIALS[i];
+                                                let texture = self.shelf.materials[i].id();
+                                                let response = Self::swatch_at(content_ui, id, rect, texture, material.name, icon);
+                                                if clip_rect.intersects(response.rect) {
+                                                    response.dnd_set_drag_payload(ShelfItem::Material(i));
+                                                    if response.double_clicked() {
+                                                        self.pending.push(Action::AddOnTop(ShelfItem::Material(i)));
+                                                    }
+                                                    response.context_menu(|ui| {
+                                                        if ui.button("Add as fill layer").clicked() {
+                                                            self.pending.push(Action::AddOnTop(ShelfItem::Material(i)));
+                                                            ui.close();
+                                                        }
+                                                        if ui.button("Use as brush material").clicked() {
+                                                            let fill = material.fill();
+                                                            let mut enabled = self.brush.mat.enabled;
+                                                            enabled[..3].fill(true);
+                                                            self.brush.mat = MatValues {
+                                                                enabled,
+                                                                height: self.brush.mat.height,
+                                                                opacity: self.brush.mat.opacity,
+                                                                emission: self.brush.mat.emission,
+                                                                ..fill.mat
+                                                            };
+                                                            self.set_tool(Tool::Paint);
+                                                            ui.close();
+                                                        }
+                                                    });
+                                                }
+                                            }
+                                            ShelfTile::Brush(i) => {
+                                                let brush = &crate::brushes::BRUSH_ALPHAS[i];
+                                                let response = Self::swatch_at(content_ui, id, rect, self.shelf.brushes[i].id(), brush.name, icon);
+                                                if self.brush.tip == Some(i) {
+                                                    content_ui.painter().rect_stroke(
+                                                        response.rect.shrink(2.0),
+                                                        theme::RADIUS,
+                                                        Stroke::new(1.5, theme::ACCENT),
+                                                        egui::StrokeKind::Inside,
+                                                    );
+                                                }
+                                                if clip_rect.intersects(response.rect) {
+                                                    response.dnd_set_drag_payload(ShelfItem::Brush(i));
+                                                    if response.double_clicked() {
+                                                        self.pending.push(Action::SetBrushTip(Some(i)));
+                                                    }
+                                                }
+                                            }
+                                            ShelfTile::Texture(i) => {
+                                                let texture_def = &crate::textures::TEXTURES[i];
+                                                let response = Self::swatch_at(content_ui, id, rect, self.shelf.textures[i].id(), texture_def.name, icon);
+                                                if clip_rect.intersects(response.rect) {
+                                                    response.dnd_set_drag_payload(ShelfItem::Texture(i));
+                                                    if response.double_clicked() {
+                                                        self.pending.push(Action::AddOnTop(ShelfItem::Texture(i)));
+                                                    }
+                                                    response.context_menu(|ui| {
+                                                        if ui.button("Add as height fill layer").clicked() {
+                                                            self.pending.push(Action::AddOnTop(ShelfItem::Texture(i)));
+                                                            ui.close();
+                                                        }
+                                                        ui.separator();
+                                                        for (channel, label) in [(3, "height"), (0, "color"), (1, "roughness"), (2, "metallic")] {
+                                                            if ui.button(format!("Use as {label} on the selected fill layer")).clicked() {
+                                                                self.pending.push(Action::TextureToChannel { texture: i, ch: channel });
+                                                                ui.close();
+                                                            }
+                                                        }
+                                                    });
+                                                }
+                                            }
+                                            ShelfTile::Generator(i) => {
+                                                let generator = GenKind::ALL[i];
+                                                let response = Self::swatch_at(content_ui, id, rect, self.shelf.generators[i].id(), generator.name(), icon);
+                                                Self::missing_badge(content_ui, &response, generator.default_generator().needs_maps() & self.engine.missing_maps());
+                                                if clip_rect.intersects(response.rect) {
+                                                    response.dnd_set_drag_payload(ShelfItem::Generator(generator));
+                                                    if response.double_clicked() {
+                                                        self.pending.push(Action::AddGenerator(generator));
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                    });
+                        y += row_height + spacing;
+                    }
                 });
+
                 if let Some(i) = share {
                     self.share_graph(ui.ctx(), i);
                 }
@@ -379,41 +524,40 @@ impl PainterApp {
             });
     }
 
-    /// A shelf thumbnail `size` points wide with its name below; hovering
-    /// shows it at twice the size.
-    pub(super) fn swatch(ui: &mut egui::Ui, tex: egui::TextureId, name: &str, size: f32) -> egui::Response {
+    fn swatch_at(
+        ui: &mut egui::Ui,
+        id: egui::Id,
+        rect: Rect,
+        tex: egui::TextureId,
+        name: &str,
+        size: f32,
+    ) -> egui::Response {
         let named = size >= NAMED_MIN;
-        let (id, rect) = ui.allocate_space(vec2(size + 12.0, size + if named { 22.0 } else { 8.0 }));
-        // ScrollArea lays out every item in a wrapped shelf. Off-screen items
-        // still reserve their exact layout space, but do not need interactive
-        // hit testing, text shaping, hover UI, or thumbnail paint commands.
         let visible = ui.is_rect_visible(rect);
-        let resp = ui.interact(rect, id, if visible { Sense::click_and_drag() } else { Sense::hover() });
+        let response = ui.interact(rect, id, if visible { Sense::click_and_drag() } else { Sense::hover() });
         if !visible {
-            return resp;
+            return response;
         }
-        let p = ui.painter();
-        if resp.hovered() {
-            p.rect_filled(rect, 0.0, theme::WIDGET_HOVER);
+        let painter = ui.painter();
+        if response.hovered() {
+            painter.rect_filled(rect, 0.0, theme::WIDGET_HOVER);
         }
-        let img = Rect::from_min_size(rect.min + vec2(6.0, 4.0), vec2(size, size));
-        p.image(tex, img, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-        // One line, cut with "…"; the hover shows the full name.
+        let image_rect = Rect::from_min_size(rect.min + vec2(6.0, 4.0), vec2(size, size));
+        painter.image(tex, image_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         if named {
-            let galley = theme::elided(p, name, egui::FontId::proportional(10.5), theme::TEXT, size + 8.0);
-            let pos = pos2(rect.center().x - galley.size().x * 0.5, img.max.y + 3.0);
-            p.galley(pos, galley, theme::TEXT);
+            let galley = theme::elided(painter, name, egui::FontId::proportional(10.5), theme::TEXT, size + 8.0);
+            let pos = pos2(rect.center().x - galley.size().x * 0.5, image_rect.max.y + 3.0);
+            painter.galley(pos, galley, theme::TEXT);
         }
-        if resp.dragged() {
-            // The thumbnail follows the pointer while it's dragged to a view.
-            if let Some(p) = resp.ctx.pointer_interact_pos() {
-                let ghost = Rect::from_center_size(p, vec2(size, size));
-                let painter = resp.ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, resp.id.with("drag ghost")));
-                painter.image(tex, ghost, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::from_white_alpha(220));
+        if response.dragged() {
+            if let Some(pointer) = response.ctx.pointer_interact_pos() {
+                let ghost = Rect::from_center_size(pointer, vec2(size, size));
+                let drag_painter = response.ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, response.id.with("drag ghost")));
+                drag_painter.image(tex, ghost, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::from_white_alpha(220));
             }
-            return resp;
+            return response;
         }
-        resp.on_hover_ui(|ui| {
+        response.on_hover_ui(|ui| {
             ui.add(egui::Image::new((tex, vec2(size * 2.0, size * 2.0))));
             ui.label(name);
         })

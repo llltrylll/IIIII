@@ -1258,7 +1258,7 @@ fn stamp_shader_source(gl_depth_color: bool) -> String {
     }
 
     const DEPTH_BINDING: &str = "@group(0) @binding(4) var depth_map: texture_depth_multisampled_2d;";
-    const COLOR_BINDING: &str = "@group(0) @binding(4) var depth_map: texture_multisampled_2d<f32>;";
+    const COLOR_BINDING: &str = "@group(0) @binding(4) var depth_map: texture_2d<f32>;";
     const UNPACK: &str = r#"
 fn unpack_depth24(packed: vec4<f32>) -> f32 {
     let bytes = vec3<u32>(round(clamp(packed.rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0));
@@ -1280,10 +1280,17 @@ fn unpack_depth24(packed: vec4<f32>) -> f32 {
     assert_eq!(source.matches(POSITION_LOAD).count(), 1, "stamp position depth load must remain unique");
     source = source.replacen(POSITION_LOAD, POSITION_LOAD_GL, 1);
 
-    const UV_LOAD: &str = "let sample_depth = lin_depth(textureLoad(depth_map, sp, i32(sample)));";
-    const UV_LOAD_GL: &str = "let sample_depth = unpack_depth24(textureLoad(depth_map, sp, i32(sample))) * u.clip.y;";
-    assert_eq!(source.matches(UV_LOAD).count(), 1, "stamp UV depth load must remain unique");
-    source = source.replacen(UV_LOAD, UV_LOAD_GL, 1);
+    const SAMPLE_START: &str = "        let sample_count = textureNumSamples(depth_map);";
+    const SAMPLE_END: &str = "        visibility = f32(visible_samples) / f32(sample_count);";
+    let start = source.find(SAMPLE_START).expect("stamp MSAA visibility loop must exist");
+    let tail = &source[start..];
+    let end = tail.find(SAMPLE_END).expect("stamp MSAA visibility loop terminator must exist") + SAMPLE_END.len();
+    const SINGLE_SAMPLE: &str = r#"        let sample_depth = unpack_depth24(textureLoad(depth_map, sp, 0)) * u.clip.y;
+        if (abs(surface_linear - sample_depth) > epsilon) {
+            return vec3<f32>(0.0);
+        }
+        visibility = 1.0;"#;
+    source.replace_range(start..start + end, SINGLE_SAMPLE);
     source
 }
 
@@ -1293,10 +1300,12 @@ mod stamp_shader_variant_tests {
     use eframe::wgpu;
 
     #[test]
-    fn gl_stamp_variant_uses_multisampled_color_depth_and_valid_wgsl() {
+    fn gl_stamp_variant_uses_single_sample_color_depth_and_valid_wgsl() {
         let source = stamp_shader_source(true);
-        assert!(source.contains("texture_multisampled_2d<f32>"));
+        assert!(source.contains("texture_2d<f32>"));
+        assert!(!source.contains("texture_multisampled_2d"));
         assert!(!source.contains("texture_depth_multisampled_2d"));
+        assert!(!source.contains("textureNumSamples(depth_map)"));
         assert_eq!(source.matches("unpack_depth24(textureLoad(").count(), 2);
 
         let full = format!("{}\n{}", include_str!("shaders/common.wgsl"), source);
@@ -1309,7 +1318,6 @@ mod stamp_shader_variant_tests {
         .validate(&module)
         .unwrap_or_else(|error| panic!("{error:?}"));
     }
-
     #[test]
     fn vulkan_stamp_shader_remains_byte_identical() {
         assert_eq!(stamp_shader_source(false), include_str!("shaders/stamp.wgsl"));
@@ -1341,6 +1349,13 @@ struct Pipelines {
     composite_layout: wgpu::PipelineLayout,
     composite_variants: std::sync::Mutex<HashMap<(bool, u8), wgpu::RenderPipeline>>,
     composite_bgl: wgpu::BindGroupLayout,
+    /// OpenGL uses separate core/extra passes and a narrow, precomputed-mask layout.
+    gl_composite: bool,
+    gl_extra_layout: wgpu::PipelineLayout,
+    gl_extra_bgl: wgpu::BindGroupLayout,
+    gl_folder_bgl: wgpu::BindGroupLayout,
+    gl_mask_bgl: wgpu::BindGroupLayout,
+    gl_composite_variants: std::sync::Mutex<HashMap<u8, (Option<wgpu::RenderPipeline>, Option<wgpu::RenderPipeline>)>>,
     /// Built only when a Fill layer actually uses color or roughness variation.
     composite_module: wgpu::ShaderModule,
     fill_variation_noise: std::sync::OnceLock<wgpu::RenderPipeline>,
@@ -1367,6 +1382,44 @@ impl Pipelines {
             }).collect::<Vec<_>>();
             let (label, entry) = if folder_merge { ("folder merge channels", "fs_folder_merge") } else { ("composite channels", "fs_layer") };
             gpu::fullscreen_pipeline(device, label, &self.composite_module, entry, &self.composite_layout, &targets)
+        }).clone()
+    }
+
+    /// OpenGL's 16-texture floor is met by splitting the seven accumulation
+    /// channels across two pipelines. Each pipeline binds only the resources
+    /// its entry point reads; the mask has already been resolved to l_mask.
+    fn gl_layer_pipelines(
+        &self,
+        device: &wgpu::Device,
+        output_mask: u8,
+    ) -> (Option<wgpu::RenderPipeline>, Option<wgpu::RenderPipeline>) {
+        let mut cache = self.gl_composite_variants.lock().unwrap_or_else(|e| e.into_inner());
+        cache.entry(output_mask).or_insert_with(|| {
+            let core_mask = output_mask & 0x0f;
+            let extra_mask = (output_mask >> 4) & 0x07;
+            let core = if core_mask != 0 {
+                let targets = (0..4).map(|channel| {
+                    if core_mask & (1 << channel) != 0 { gpu::target(ACCUM_FORMATS[channel]) } else { None }
+                }).collect::<Vec<_>>();
+                Some(gpu::fullscreen_pipeline(
+                    device, "OpenGL layer core", &self.composite_module, "fs_layer_gl_core",
+                    &self.composite_layout, &targets,
+                ))
+            } else {
+                None
+            };
+            let extra = if extra_mask != 0 {
+                let targets = (0..3).map(|channel| {
+                    if extra_mask & (1 << channel) != 0 { gpu::target(ACCUM_FORMATS[channel + 4]) } else { None }
+                }).collect::<Vec<_>>();
+                Some(gpu::fullscreen_pipeline(
+                    device, "OpenGL layer extra", &self.composite_module, "fs_layer_gl_extra",
+                    &self.gl_extra_layout, &targets,
+                ))
+            } else {
+                None
+            };
+            (core, extra)
         }).clone()
     }
 }
@@ -1530,6 +1583,8 @@ pub struct Engine {
     /// composited, one set per nesting level; only allocated while needed.
     folder_below: Vec<[Tex; ACCUM]>,
     rs: egui_wgpu::RenderState,
+    /// Whether this adapter supports alternate sRGB views of UNORM textures.
+    srgb_views_supported: bool,
     device: wgpu::Device,
     queue: wgpu::Queue,
     /// Optional non-blocking GPU timings when the adapter supports timestamps.
@@ -1721,8 +1776,14 @@ struct FillVariationNoiseCache {
     roughness: Option<Tex>,
 }
 
-fn accum_set(device: &wgpu::Device, res: u32, label: &str) -> [Tex; ACCUM] {
-    ACCUM_FORMATS.map(|f| Tex::new(device, label, res, res, f, LAYER_USAGE))
+fn accum_set(device: &wgpu::Device, res: u32, label: &str, srgb_views_supported: bool) -> [Tex; ACCUM] {
+    ACCUM_FORMATS.map(|f| {
+        if srgb_views_supported && f == F::Rgba8Unorm {
+            Tex::new(device, label, res, res, f, LAYER_USAGE)
+        } else {
+            Tex::new_without_srgb_view(device, label, res, res, f, LAYER_USAGE)
+        }
+    })
 }
 
 /// Maximum number of disjoint scissors per composite. Above this, merge
@@ -1946,13 +2007,12 @@ impl Engine {
         for channel in 0..ACCUM {
             let scratch = 1 - self.final_indices[channel];
             if self.accum[scratch][channel].width != 1 {
-                self.accum[scratch][channel] = Tex::new(
-                    &self.device, "parked composite scratch", 1, 1, ACCUM_FORMATS[channel], LAYER_USAGE,
+                self.accum[scratch][channel] = self.new_tex("parked composite scratch", 1, 1, ACCUM_FORMATS[channel], LAYER_USAGE,
                 );
             }
         }
         if self.stroke.width != 1 {
-            self.stroke = Tex::new(&self.device, "parked stroke mask", 1, 1, STROKE_FORMAT, LAYER_USAGE);
+            self.stroke = self.new_tex("parked stroke mask", 1, 1, STROKE_FORMAT, LAYER_USAGE);
         }
         self.snap = Default::default();
         self.snap_mask = None;
@@ -2017,9 +2077,9 @@ impl Engine {
         if self.pos.width == 1 && self.nrm.width == 1 && self.tan.width == 1 {
             return false;
         }
-        self.pos = Tex::new(&self.device, "parked position map", 1, 1, POS_FORMAT, LAYER_USAGE);
-        self.nrm = Tex::new(&self.device, "parked normal map", 1, 1, NRM_FORMAT, LAYER_USAGE);
-        self.tan = Tex::new(&self.device, "parked tangent map", 1, 1, TAN_FORMAT, LAYER_USAGE);
+        self.pos = self.new_tex("parked position map", 1, 1, POS_FORMAT, LAYER_USAGE);
+        self.nrm = self.new_tex("parked normal map", 1, 1, NRM_FORMAT, LAYER_USAGE);
+        self.tan = self.new_tex("parked tangent map", 1, 1, TAN_FORMAT, LAYER_USAGE);
         self.uv_version = self.uv_version.wrapping_add(1);
         true
     }
@@ -2042,12 +2102,26 @@ impl Engine {
         }
     }
 
+    fn new_tex(
+        &self,
+        label: &str,
+        width: u32,
+        height: u32,
+        format: F,
+        usage: wgpu::TextureUsages,
+    ) -> Tex {
+        if self.srgb_views_supported {
+            Tex::new(&self.device, label, width, height, format, usage)
+        } else {
+            Tex::new_without_srgb_view(&self.device, label, width, height, format, usage)
+        }
+    }
+
     fn ensure_composite_working_set(&mut self) {
         for set in 0..2 {
             for channel in 0..ACCUM {
                 if self.accum[set][channel].width != self.res {
-                    self.accum[set][channel] = Tex::new(
-                        &self.device,
+                    self.accum[set][channel] = self.new_tex(
                         if set == 0 { "accum A (restored)" } else { "accum B (restored)" },
                         self.res,
                         self.res,
@@ -2061,7 +2135,7 @@ impl Engine {
 
     fn ensure_stroke_target(&mut self) {
         if self.stroke.width != self.res {
-            self.stroke = Tex::new(&self.device, "stroke mask (restored)", self.res, self.res, STROKE_FORMAT, LAYER_USAGE);
+            self.stroke = self.new_tex("stroke mask (restored)", self.res, self.res, STROKE_FORMAT, LAYER_USAGE);
         }
     }
 
@@ -2101,10 +2175,15 @@ impl Engine {
         let _allocation = crate::startup_trace::span("Engine::with_pipelines GPU allocations");
         let device = rs.device.clone();
         let queue = rs.queue.clone();
+        let srgb_views_supported = rs
+            .adapter
+            .get_downlevel_capabilities()
+            .flags
+            .contains(wgpu::DownlevelFlags::VIEW_FORMATS);
         let sampler = gpu::linear_sampler(&device, wgpu::AddressMode::ClampToEdge);
         let gpu_profiler = device.features().contains(wgpu::Features::TIMESTAMP_QUERY).then(|| GpuStrokeProfiler::new(&device));
 
-        let dummy = Tex::new(&device, "dummy", 1, 1, F::Rgba8Unorm, LAYER_USAGE);
+        let dummy = Tex::new_without_srgb_view(&device, "dummy", 1, 1, F::Rgba8Unorm, LAYER_USAGE);
         queue.write_texture(dummy.copy_info(), &[0, 0, 0, 0], Default::default(), dummy.extent());
         let maps = Self::default_maps(&device, &queue);
 
@@ -2134,17 +2213,21 @@ impl Engine {
             Engine {
             id,
             rs: rs.clone(),
+            srgb_views_supported,
             gpu_profiler,
             active_gpu_profile: None,
             composite_profile_requested: false,
             forced_composite_profile: false,
             last_end_stages_ms: [0.0; 5],
-            pos: Tex::new(&device, "position map", res, res, POS_FORMAT, LAYER_USAGE),
-            nrm: Tex::new(&device, "normal map", res, res, NRM_FORMAT, LAYER_USAGE),
-            tan: Tex::new(&device, "tangent map", res, res, TAN_FORMAT, LAYER_USAGE),
-            accum: [accum_set(&device, res, "accum A"), accum_set(&device, res, "accum B")],
+            pos: Tex::new_without_srgb_view(&device, "position map", res, res, POS_FORMAT, LAYER_USAGE),
+            nrm: Tex::new_without_srgb_view(&device, "normal map", res, res, NRM_FORMAT, LAYER_USAGE),
+            tan: Tex::new_without_srgb_view(&device, "tangent map", res, res, TAN_FORMAT, LAYER_USAGE),
+            accum: [
+                accum_set(&device, res, "accum A", srgb_views_supported),
+                accum_set(&device, res, "accum B", srgb_views_supported),
+            ],
             final_indices: [0; ACCUM],
-            stroke: Tex::new(&device, "stroke mask", res, res, STROKE_FORMAT, LAYER_USAGE),
+            stroke: Tex::new_without_srgb_view(&device, "stroke mask", res, res, STROKE_FORMAT, LAYER_USAGE),
             snap: Default::default(),
             snap_mask: None,
             maps,
@@ -2189,8 +2272,8 @@ impl Engine {
             stamp_ubuf,
             stamp_sbuf,
             apply_ubuf,
-            brush_alpha: Tex::new(&device, "brush alpha", 1, 1, F::R8Unorm, LAYER_USAGE),
-            brush_grain: Tex::new(&device, "brush grain", 1, 1, F::R8Unorm, LAYER_USAGE),
+            brush_alpha: Tex::new_without_srgb_view(&device, "brush alpha", 1, 1, F::R8Unorm, LAYER_USAGE),
+            brush_grain: Tex::new_without_srgb_view(&device, "brush grain", 1, 1, F::R8Unorm, LAYER_USAGE),
             image_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             fill_image_ids_scratch: Default::default(),
             layers: Vec::new(),
@@ -2323,7 +2406,7 @@ impl Engine {
                     ty: wgpu::BindingType::Texture {
                         sample_type: if gl_depth_color { wgpu::TextureSampleType::Float { filterable: false } } else { wgpu::TextureSampleType::Depth },
                         view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: true,
+                        multisampled: !gl_depth_color,
                     },
                     count: None,
                 },
@@ -2460,49 +2543,112 @@ impl Engine {
         // Layer compositing.
         let composite_module =
             gpu::shader(device, "composite", concat!(include_str!("shaders/wear.wgsl"), include_str!("shaders/composite.wgsl")));
-        let mut entries = vec![gpu::uniform_entry(0, true)];
-        for b in 1..=11 {
-            // Layer slots 5-8 also hold fill images, which are filtered.
-            entries.push(gpu::tex_entry(b, (5..=8).contains(&b)));
-        }
-        for b in 12..=16 {
-            // 15: the custom maps, an array.
-            entries.push(if b == 15 {
-                wgpu::BindGroupLayoutEntry {
-                    binding: b,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        multisampled: false,
-                    },
-                    count: None,
-                }
-            } else {
-                gpu::tex_entry(b, true)
-            });
-        }
-        entries.push(gpu::sampler_entry(17));
-        entries.push(gpu::sampler_entry(18));
-        // The layer's opacity channel (paint) or image (fill).
-        entries.push(gpu::tex_entry(19, true));
-        // The stack's emission so far, and the layer's emission (paint) or image (fill).
-        entries.push(gpu::tex_entry(20, false));
-        entries.push(gpu::tex_entry(21, true));
-        // Normal and specular: the stack's so far, and the layer's (paint or fill image).
-        entries.push(gpu::tex_entry(22, false));
-        entries.push(gpu::tex_entry(23, true));
-        entries.push(gpu::tex_entry(24, false));
-        entries.push(gpu::tex_entry(25, true));
-        // The tangent frame, for normal images projected in world space.
-        entries.push(gpu::tex_entry(26, false));
-        // Cached color/roughness variation is read with textureLoad, not a sampler.
-        entries.push(gpu::tex_entry(27, false));
-        entries.push(gpu::tex_entry(28, false));
-        let composite_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("composite"),
-            entries: &entries,
+        let custom_maps_entry = wgpu::BindGroupLayoutEntry {
+            binding: 15,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        };
+
+        // A smart mask is evaluated in its own pass and cached in l_mask.
+        // Its source pipeline therefore has a compact, independent layout.
+        let gl_mask_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("composite mask source"),
+            entries: &[
+                gpu::uniform_entry(0, true),
+                gpu::tex_entry(9, false),
+                gpu::tex_entry(10, false),
+                gpu::tex_entry(11, false),
+                gpu::tex_entry(12, true),
+                gpu::tex_entry(13, true),
+                gpu::tex_entry(14, true),
+                custom_maps_entry.clone(),
+                gpu::tex_entry(16, true),
+                gpu::sampler_entry(17),
+            ],
         });
+
+        // The OpenGL core pass composites color, roughness, metal, and height.
+        // It binds 15 sampled textures at most, including the cached mask.
+        let mut gl_core_entries = vec![gpu::uniform_entry(0, true)];
+        for b in 1..=11 {
+            gl_core_entries.push(gpu::tex_entry(b, (5..=8).contains(&b)));
+        }
+        gl_core_entries.push(gpu::tex_entry(13, true)); // part-random map
+        gl_core_entries.push(gpu::sampler_entry(17));
+        gl_core_entries.push(gpu::sampler_entry(18));
+        gl_core_entries.push(gpu::tex_entry(19, true)); // opacity image/channel
+        gl_core_entries.push(gpu::tex_entry(27, false)); // cached color variation
+        gl_core_entries.push(gpu::tex_entry(28, false)); // cached roughness variation
+
+        // The OpenGL extra pass handles emission, normal, and specular.
+        let gl_extra_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("OpenGL composite extra"),
+            entries: &[
+                gpu::uniform_entry(0, true),
+                gpu::tex_entry(9, false),
+                gpu::tex_entry(10, false),
+                gpu::tex_entry(11, false),
+                gpu::sampler_entry(18),
+                gpu::tex_entry(20, false),
+                gpu::tex_entry(21, true),
+                gpu::tex_entry(22, false),
+                gpu::tex_entry(23, true),
+                gpu::tex_entry(24, false),
+                gpu::tex_entry(25, true),
+                gpu::tex_entry(26, false),
+            ],
+        });
+
+        // Folder merging reads seven prior channels, seven folder channels,
+        // and the cached mask: exactly 15 sampled textures.
+        let mut gl_folder_entries = vec![gpu::uniform_entry(0, true)];
+        for b in 1..=9 {
+            gl_folder_entries.push(gpu::tex_entry(b, false));
+        }
+        for b in 20..=25 {
+            gl_folder_entries.push(gpu::tex_entry(b, false));
+        }
+        let gl_folder_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("OpenGL folder merge"),
+            entries: &gl_folder_entries,
+        });
+
+        let composite_bgl = if gl_depth_color {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("OpenGL composite core"),
+                entries: &gl_core_entries,
+            })
+        } else {
+            let mut entries = vec![gpu::uniform_entry(0, true)];
+            for b in 1..=11 {
+                // Layer slots 5-8 also hold fill images, which are filtered.
+                entries.push(gpu::tex_entry(b, (5..=8).contains(&b)));
+            }
+            for b in 12..=16 {
+                entries.push(if b == 15 { custom_maps_entry } else { gpu::tex_entry(b, true) });
+            }
+            entries.push(gpu::sampler_entry(17));
+            entries.push(gpu::sampler_entry(18));
+            entries.push(gpu::tex_entry(19, true));
+            entries.push(gpu::tex_entry(20, false));
+            entries.push(gpu::tex_entry(21, true));
+            entries.push(gpu::tex_entry(22, false));
+            entries.push(gpu::tex_entry(23, true));
+            entries.push(gpu::tex_entry(24, false));
+            entries.push(gpu::tex_entry(25, true));
+            entries.push(gpu::tex_entry(26, false));
+            entries.push(gpu::tex_entry(27, false));
+            entries.push(gpu::tex_entry(28, false));
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("composite"),
+                entries: &entries,
+            })
+        };
         // The color/roughness FBM prepass needs only the layer uniform and position map.
         let fill_variation_noise_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fill variation noise"),
@@ -2513,29 +2659,47 @@ impl Engine {
         // expensive FBM shader during Engine construction.
         let fill_variation_noise = std::sync::OnceLock::new();
         let composite_layout = gpu::layout(device, &composite_bgl);
-        let composite = gpu::fullscreen_pipeline(
-            device,
-            "composite",
-            &composite_module,
-            "fs_layer",
-            &composite_layout,
-            &ACCUM_FORMATS.map(gpu::target),
-        );
-        let folder_merge = gpu::fullscreen_pipeline(
-            device,
-            "folder merge",
-            &composite_module,
-            "fs_folder_merge",
-            &composite_layout,
-            &ACCUM_FORMATS.map(gpu::target),
-        );
+        let gl_extra_layout = gpu::layout(device, &gl_extra_bgl);
+        let gl_folder_layout = gpu::layout(device, &gl_folder_bgl);
+        let gl_mask_layout = gpu::layout(device, &gl_mask_bgl);
+        let composite = if gl_depth_color {
+            // This shared core pipeline may be selected by the full seven-slot
+            // accumulation pass. Keep all attachment slots in the pipeline
+            // signature, while retaining the actual formats but disabling writes to the three outputs owned by the extra
+            // OpenGL pass. The dedicated per-layer core pipelines below still
+            // use four slots because their render passes have four attachments.
+            let targets = ACCUM_FORMATS.iter().enumerate().map(|(channel, &format)| {
+                gpu::target(format).map(|mut target| {
+                    if channel >= 4 {
+                        target.write_mask = wgpu::ColorWrites::empty();
+                    }
+                    target
+                })
+            }).collect::<Vec<_>>();
+            gpu::fullscreen_pipeline(
+                device, "OpenGL composite core", &composite_module, "fs_layer_gl_core",
+                &composite_layout, &targets,
+            )
+        } else {
+            gpu::fullscreen_pipeline(
+                device, "composite", &composite_module, "fs_layer",
+                &composite_layout, &ACCUM_FORMATS.map(gpu::target),
+            )
+        };
+        let folder_merge = if gl_depth_color {
+            gpu::fullscreen_pipeline(
+                device, "OpenGL folder merge", &composite_module, "fs_folder_merge_gl",
+                &gl_folder_layout, &ACCUM_FORMATS.map(gpu::target),
+            )
+        } else {
+            gpu::fullscreen_pipeline(
+                device, "folder merge", &composite_module, "fs_folder_merge",
+                &composite_layout, &ACCUM_FORMATS.map(gpu::target),
+            )
+        };
         let mask_source = gpu::fullscreen_pipeline(
-            device,
-            "mask source",
-            &composite_module,
-            "fs_mask_source",
-            &gpu::layout(device, &composite_bgl),
-            &[gpu::target(MASK_FILTER_FORMAT)],
+            device, "mask source", &composite_module, "fs_mask_source",
+            &gl_mask_layout, &[gpu::target(MASK_FILTER_FORMAT)],
         );
         let mask_filter_module = gpu::shader(device, "mask filter", include_str!("shaders/mask_filter.wgsl"));
         let mask_filter_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -2624,6 +2788,12 @@ impl Engine {
             composite_layout,
             composite_variants: Default::default(),
             composite_bgl,
+            gl_composite: gl_depth_color,
+            gl_extra_layout,
+            gl_extra_bgl,
+            gl_folder_bgl,
+            gl_mask_bgl,
+            gl_composite_variants: Default::default(),
             composite_module,
             fill_variation_noise,
             fill_variation_noise_bgl,
@@ -2648,17 +2818,17 @@ impl Engine {
     fn bake_uv_internal(&mut self, mesh: &GpuMesh, invalidate_composite: bool) {
         self.apply_bg = None;
         if self.pos.width != self.res || self.nrm.width != self.res || self.tan.width != self.res {
-            self.pos = Tex::new(&self.device, "position map", self.res, self.res, POS_FORMAT, LAYER_USAGE);
-            self.nrm = Tex::new(&self.device, "normal map", self.res, self.res, NRM_FORMAT, LAYER_USAGE);
-            self.tan = Tex::new(&self.device, "tangent map", self.res, self.res, TAN_FORMAT, LAYER_USAGE);
+            self.pos = self.new_tex("position map", self.res, self.res, POS_FORMAT, LAYER_USAGE);
+            self.nrm = self.new_tex("normal map", self.res, self.res, NRM_FORMAT, LAYER_USAGE);
+            self.tan = self.new_tex("tangent map", self.res, self.res, TAN_FORMAT, LAYER_USAGE);
         }
         // A mesh change can leave the range past the end; the app sets the
         // new range right after, and this draws nothing meanwhile.
         let tris = self.tris.start.min(mesh.index_count)..self.tris.end.min(mesh.index_count);
         let device = &self.device;
-        let tmp_pos = Tex::new(device, "dilate pos", self.res, self.res, POS_FORMAT, LAYER_USAGE);
-        let tmp_nrm = Tex::new(device, "dilate nrm", self.res, self.res, NRM_FORMAT, LAYER_USAGE);
-        let tmp_tan = Tex::new(device, "dilate tan", self.res, self.res, TAN_FORMAT, LAYER_USAGE);
+        let tmp_pos = Tex::new_without_srgb_view(device, "dilate pos", self.res, self.res, POS_FORMAT, LAYER_USAGE);
+        let tmp_nrm = Tex::new_without_srgb_view(device, "dilate nrm", self.res, self.res, NRM_FORMAT, LAYER_USAGE);
+        let tmp_tan = Tex::new_without_srgb_view(device, "dilate tan", self.res, self.res, TAN_FORMAT, LAYER_USAGE);
         let mut encoder = device.create_command_encoder(&Default::default());
         {
             let clear = wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT);
@@ -2758,7 +2928,7 @@ impl Engine {
 
     /// 1x1 neutral maps used until the first bake.
     fn default_maps(device: &wgpu::Device, queue: &wgpu::Queue) -> [Tex; MAP_TEXTURES] {
-        let maps = std::array::from_fn(|i| Tex::new(device, "mesh map", 1, 1, MAP_FORMATS[i], LAYER_USAGE));
+        let maps = std::array::from_fn(|i| Tex::new_without_srgb_view(device, "mesh map", 1, 1, MAP_FORMATS[i], LAYER_USAGE));
         // f16 bit patterns: 0.0 = 0x0000, 0.5 = 0x3800, 1.0 = 0x3C00.
         let map_b: [u16; 4] = [0x3C00, 0x3C00, 0x3C00, 0x3800];
         let half: [u16; 4] = [0, 0, 0x3800, 0];
@@ -3066,7 +3236,7 @@ impl Engine {
             let res = self.res;
             let reuse = self.resolved[t].as_ref().is_some_and(|r| r.width == res);
             if !reuse {
-                self.resolved[t] = Some(Tex::new(&self.device, "resolved map", res, res, MAP_FORMATS[t], LAYER_USAGE));
+                self.resolved[t] = Some(self.new_tex("resolved map", res, res, MAP_FORMATS[t], LAYER_USAGE));
             }
             let out = self.resolved[t].as_ref().unwrap();
             let mut pass = gpu::pass(&mut encoder, "maps resolve", &[gpu::color_attachment(&out.view, wgpu::LoadOp::Load)]);
@@ -3109,7 +3279,7 @@ impl Engine {
 
     /// A layer-sized texture holding `bytes` (tightly packed texels).
     pub fn texture_from_bytes(&self, label: &str, format: F, width: u32, height: u32, bytes: &[u8]) -> Tex {
-        let tex = Tex::new(&self.device, label, width, height, format, LAYER_USAGE);
+        let tex = self.new_tex( label, width, height, format, LAYER_USAGE);
         let row = width * gpu::bytes_per_texel(format);
         self.queue.write_texture(
             tex.copy_info(),
@@ -3482,7 +3652,7 @@ impl Engine {
             if texels.len() != (size * size * gpu::bytes_per_texel(format)) as usize {
                 continue;
             }
-            let src = Tex::new(&self.device, CH_NAMES[ch], size, size, format, LAYER_USAGE);
+            let src = self.new_tex( CH_NAMES[ch], size, size, format, LAYER_USAGE);
             let layout = wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(size * gpu::bytes_per_texel(format)), rows_per_image: Some(size) };
             self.queue.write_texture(src.copy_info(), &texels, layout, src.extent());
             chans[ch] = Some(if size == self.res { src } else { self.resample(&mut encoder, &src, self.res) });
@@ -3658,7 +3828,7 @@ impl Engine {
         let src = &self.layers[idx];
         let mut encoder = self.device.create_command_encoder(&Default::default());
         let copy = |encoder: &mut wgpu::CommandEncoder, t: &Tex| {
-            let n = Tex::new(&self.device, "layer", t.width, t.height, t.format, LAYER_USAGE);
+            let n = self.new_tex("layer", t.width, t.height, t.format, LAYER_USAGE);
             encoder.copy_texture_to_texture(t.copy_info(), n.copy_info(), t.extent());
             n
         };
@@ -4116,7 +4286,7 @@ impl Engine {
     }
 
     fn new_mask_texture(&self, white: bool) -> Tex {
-        let tex = Tex::new(&self.device, "mask", self.res, self.res, MASK_FORMAT, LAYER_USAGE);
+        let tex = self.new_tex("mask", self.res, self.res, MASK_FORMAT, LAYER_USAGE);
         let mut encoder = self.device.create_command_encoder(&Default::default());
         let v = if white { 1.0 } else { 0.0 };
         gpu::clear_texture(&mut encoder, &tex, wgpu::Color { r: v, g: v, b: v, a: 1.0 });
@@ -4126,15 +4296,16 @@ impl Engine {
 
     fn ensure_channel(&mut self, idx: usize, ch: usize) {
         let res = self.res;
-        let layer = &mut self.layers[idx];
-        let Content::Paint(chans) = &mut layer.content else { return };
-        if chans[ch].is_some() {
-            return;
+        match &self.layers[idx].content {
+            Content::Paint(chans) if chans[ch].is_none() => {}
+            _ => return,
         }
-        let tex = Tex::new(&self.device, CH_NAMES[ch], res, res, PAINT_FORMATS[ch], LAYER_USAGE);
+        let tex = self.new_tex(CH_NAMES[ch], res, res, PAINT_FORMATS[ch], LAYER_USAGE);
         let mut encoder = self.device.create_command_encoder(&Default::default());
         gpu::clear_texture(&mut encoder, &tex, wgpu::Color::TRANSPARENT);
         self.queue.submit([encoder.finish()]);
+        let layer = &mut self.layers[idx];
+        let Content::Paint(chans) = &mut layer.content else { return };
         if ch == 0 {
             layer.thumb = Some(self.rs.renderer.write().register_native_texture(
                 &self.device,
@@ -4174,7 +4345,7 @@ impl Engine {
             if erase {
                 return false;
             }
-            let tex = Tex::new(&self.device, "map fix", self.res, self.res, PAINT_FORMATS[Self::FIX_CHANNEL], LAYER_USAGE);
+            let tex = self.new_tex("map fix", self.res, self.res, PAINT_FORMATS[Self::FIX_CHANNEL], LAYER_USAGE);
             let mut encoder = self.device.create_command_encoder(&Default::default());
             gpu::clear_texture(&mut encoder, &tex, wgpu::Color::TRANSPARENT);
             self.queue.submit([encoder.finish()]);
@@ -4241,8 +4412,7 @@ impl Engine {
                 for &channel in &channels {
                     self.ensure_channel(idx, channel);
                     if self.snap[channel].is_none() {
-                        self.snap[channel] = Some(Tex::new(
-                            &self.device, "snapshot", self.res, self.res, PAINT_FORMATS[channel], LAYER_USAGE,
+                        self.snap[channel] = Some(self.new_tex("snapshot", self.res, self.res, PAINT_FORMATS[channel], LAYER_USAGE,
                         ));
                     }
                 }
@@ -4252,16 +4422,14 @@ impl Engine {
                     .expect("active mask layer still exists");
                 self.ensure_mask_paint(idx);
                 if self.snap_mask.is_none() {
-                    self.snap_mask = Some(Tex::new(
-                        &self.device, "mask snapshot", self.res, self.res, MASK_FORMAT, LAYER_USAGE,
+                    self.snap_mask = Some(self.new_tex("mask snapshot", self.res, self.res, MASK_FORMAT, LAYER_USAGE,
                     ));
                 }
             }
             StrokeTarget::BakeFix(_) => {
                 let channel = Self::FIX_CHANNEL;
                 if self.snap[channel].is_none() {
-                    self.snap[channel] = Some(Tex::new(
-                        &self.device, "snapshot", self.res, self.res, PAINT_FORMATS[channel], LAYER_USAGE,
+                    self.snap[channel] = Some(self.new_tex("snapshot", self.res, self.res, PAINT_FORMATS[channel], LAYER_USAGE,
                     ));
                 }
             }
@@ -4596,7 +4764,7 @@ impl Engine {
         self.apply_bg = None;
         let (pixels, size) = grain.unwrap_or((&[255], 1));
         if self.brush_grain.width != size {
-            self.brush_grain = Tex::new(&self.device, "brush grain", size, size, F::R8Unorm, LAYER_USAGE);
+            self.brush_grain = self.new_tex("brush grain", size, size, F::R8Unorm, LAYER_USAGE);
         }
         self.queue.write_texture(
             self.brush_grain.copy_info(),
@@ -4611,7 +4779,7 @@ impl Engine {
         let (pixels, size) = alpha.unwrap_or((&[255], 1));
         if self.brush_alpha.width != size {
             self.stamp_bg = [None, None];
-            self.brush_alpha = Tex::new(&self.device, "brush alpha", size, size, F::R8Unorm, LAYER_USAGE);
+            self.brush_alpha = self.new_tex("brush alpha", size, size, F::R8Unorm, LAYER_USAGE);
         }
         self.queue.write_texture(
             self.brush_alpha.copy_info(),
@@ -5159,7 +5327,7 @@ impl Engine {
         let (lo, hi) = self.bounds;
         u.bmin = [lo.x, lo.y, lo.z, 0.0];
         u.bsize = [hi.x - lo.x, hi.y - lo.y, hi.z - lo.z, 0.0];
-        u.gx = [self.edge_max, 0.0, 0.0, 0.0];
+        u.gx = [self.edge_max, self.res as f32, 0.0, 0.0];
         u
     }
 
@@ -5219,7 +5387,7 @@ impl Engine {
         let retained_depth = retained_folder_depth(self.folder_below.len(), max_depth);
         self.folder_below.truncate(retained_depth);
         while self.folder_below.len() < retained_depth {
-            let set = ACCUM_FORMATS.map(|f| Tex::new(&self.device, "folder below", self.res, self.res, f, LAYER_USAGE));
+            let set = ACCUM_FORMATS.map(|f| self.new_tex("folder below", self.res, self.res, f, LAYER_USAGE));
             self.folder_below.push(set);
         }
 
@@ -5261,8 +5429,8 @@ impl Engine {
                 variation_noise_hits += 1;
                 continue;
             }
-            let color = color_enabled.then(|| Tex::new(&self.device, "fill color FBM cache", self.res, self.res, F::R32Float, LAYER_USAGE));
-            let roughness = roughness_enabled.then(|| Tex::new(&self.device, "fill roughness FBM cache", self.res, self.res, F::R32Float, LAYER_USAGE));
+            let color = color_enabled.then(|| self.new_tex("fill color FBM cache", self.res, self.res, F::R32Float, LAYER_USAGE));
+            let roughness = roughness_enabled.then(|| self.new_tex("fill roughness FBM cache", self.res, self.res, F::R32Float, LAYER_USAGE));
             self.fill_variation_noise.insert(layer.id, FillVariationNoiseCache { key, color, roughness });
             if color_enabled {
                 variation_noise_misses.push((slot, li, layer.id, false));
@@ -5403,14 +5571,14 @@ impl Engine {
         });
         for id in &cached_ids {
             if !self.mask_out.contains_key(id) {
-                let t = Tex::new(&self.device, "cached mask result", res, res, MASK_FILTER_FORMAT, LAYER_USAGE);
+                let t = self.new_tex("cached mask result", res, res, MASK_FILTER_FORMAT, LAYER_USAGE);
                 self.mask_out.insert(*id, t);
             }
         }
         if !has_filtered_masks {
             self.mask_scratch = None;
         } else if self.mask_scratch.as_ref().is_none_or(|set| set[0].width != res) {
-            let t = || Tex::new(&self.device, "filtered mask scratch", res, res, MASK_FILTER_FORMAT, LAYER_USAGE);
+            let t = || self.new_tex("filtered mask scratch", res, res, MASK_FILTER_FORMAT, LAYER_USAGE);
             self.mask_scratch = Some([t(), t(), t()]);
         }
         // Filter steps' uniforms, written up front: (kind, a, b, c), (dir x, dir y, scale).
@@ -5502,7 +5670,7 @@ impl Engine {
             passes.iter().position(|p| matches!(*p, Pass::Layer(li) | Pass::End(li) if self.layers[li].id == id))
         });
         if record.is_some_and(|k| k + 1 < passes.len()) && self.prefix_cache.as_ref().is_none_or(|c| c[0].width != self.res) {
-            self.prefix_cache = Some(ACCUM_FORMATS.map(|f| Tex::new(&self.device, "composite prefix", self.res, self.res, f, LAYER_USAGE)));
+            self.prefix_cache = Some(ACCUM_FORMATS.map(|f| self.new_tex("composite prefix", self.res, self.res, f, LAYER_USAGE)));
         }
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -5819,6 +5987,114 @@ impl Engine {
                     wgpu::BindGroupEntry { binding: 28, resource: view(roughness_noise) },
                 ],
             });
+            let make_mask_bg = |mask: Option<&Tex>| self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("composite mask source"),
+                layout: &self.p.gl_mask_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &self.layer_ubuf,
+                            offset: 0,
+                            size: NonZeroU64::new(size_of::<LayerUniform>() as u64),
+                        }),
+                    },
+                    wgpu::BindGroupEntry { binding: 9, resource: or_dummy(mask, dummy) },
+                    wgpu::BindGroupEntry { binding: 10, resource: view(Some(&self.pos)) },
+                    wgpu::BindGroupEntry { binding: 11, resource: view(Some(&self.nrm)) },
+                    wgpu::BindGroupEntry { binding: 12, resource: view(Some(self.map_tex(0))) },
+                    wgpu::BindGroupEntry { binding: 13, resource: view(Some(self.map_tex(1))) },
+                    wgpu::BindGroupEntry { binding: 14, resource: view(Some(self.map_tex(2))) },
+                    wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(&self.custom_array.1) },
+                    wgpu::BindGroupEntry { binding: 16, resource: view(Some(self.map_tex(4))) },
+                    wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                ],
+            });
+            let make_gl_core_bg = |mask: Option<&Tex>| self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("OpenGL composite core"),
+                layout: &self.p.composite_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &self.layer_ubuf,
+                            offset: 0,
+                            size: NonZeroU64::new(size_of::<LayerUniform>() as u64),
+                        }),
+                    },
+                    wgpu::BindGroupEntry { binding: 1, resource: view(Some(prev[0])) },
+                    wgpu::BindGroupEntry { binding: 2, resource: view(Some(prev[1])) },
+                    wgpu::BindGroupEntry { binding: 3, resource: view(Some(prev[2])) },
+                    wgpu::BindGroupEntry { binding: 4, resource: view(Some(prev[3])) },
+                    wgpu::BindGroupEntry { binding: 5, resource: view(chans[0]) },
+                    wgpu::BindGroupEntry { binding: 6, resource: view(chans[1]) },
+                    wgpu::BindGroupEntry { binding: 7, resource: view(chans[2]) },
+                    wgpu::BindGroupEntry { binding: 8, resource: view(chans[3]) },
+                    wgpu::BindGroupEntry { binding: 9, resource: or_dummy(mask, dummy) },
+                    wgpu::BindGroupEntry { binding: 10, resource: view(Some(&self.pos)) },
+                    wgpu::BindGroupEntry { binding: 11, resource: view(Some(&self.nrm)) },
+                    wgpu::BindGroupEntry { binding: 13, resource: view(Some(self.map_tex(1))) },
+                    wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                    wgpu::BindGroupEntry { binding: 18, resource: wgpu::BindingResource::Sampler(&self.repeat_sampler) },
+                    wgpu::BindGroupEntry { binding: 19, resource: view(chans[OPACITY]) },
+                    wgpu::BindGroupEntry { binding: 27, resource: view(color_noise) },
+                    wgpu::BindGroupEntry { binding: 28, resource: view(roughness_noise) },
+                ],
+            });
+            let make_gl_extra_bg = |mask: Option<&Tex>| self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("OpenGL composite extra"),
+                layout: &self.p.gl_extra_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &self.layer_ubuf,
+                            offset: 0,
+                            size: NonZeroU64::new(size_of::<LayerUniform>() as u64),
+                        }),
+                    },
+                    wgpu::BindGroupEntry { binding: 9, resource: or_dummy(mask, dummy) },
+                    wgpu::BindGroupEntry { binding: 10, resource: view(Some(&self.pos)) },
+                    wgpu::BindGroupEntry { binding: 11, resource: view(Some(&self.nrm)) },
+                    wgpu::BindGroupEntry { binding: 18, resource: wgpu::BindingResource::Sampler(&self.repeat_sampler) },
+                    wgpu::BindGroupEntry { binding: 20, resource: view(Some(prev[FINAL_EMISSION])) },
+                    wgpu::BindGroupEntry { binding: 21, resource: view(chans[EMISSION]) },
+                    wgpu::BindGroupEntry { binding: 22, resource: view(Some(prev[FINAL_NORMAL])) },
+                    wgpu::BindGroupEntry { binding: 23, resource: view(chans[NORMAL]) },
+                    wgpu::BindGroupEntry { binding: 24, resource: view(Some(prev[FINAL_SPECULAR])) },
+                    wgpu::BindGroupEntry { binding: 25, resource: view(chans[SPECULAR]) },
+                    wgpu::BindGroupEntry { binding: 26, resource: view(Some(&self.tan)) },
+                ],
+            });
+            let make_gl_folder_bg = |mask: Option<&Tex>| self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("OpenGL folder merge"),
+                layout: &self.p.gl_folder_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &self.layer_ubuf,
+                            offset: 0,
+                            size: NonZeroU64::new(size_of::<LayerUniform>() as u64),
+                        }),
+                    },
+                    wgpu::BindGroupEntry { binding: 1, resource: view(Some(prev[0])) },
+                    wgpu::BindGroupEntry { binding: 2, resource: view(Some(prev[1])) },
+                    wgpu::BindGroupEntry { binding: 3, resource: view(Some(prev[2])) },
+                    wgpu::BindGroupEntry { binding: 4, resource: view(Some(prev[3])) },
+                    wgpu::BindGroupEntry { binding: 5, resource: view(chans[0]) },
+                    wgpu::BindGroupEntry { binding: 6, resource: view(chans[1]) },
+                    wgpu::BindGroupEntry { binding: 7, resource: view(chans[2]) },
+                    wgpu::BindGroupEntry { binding: 8, resource: view(chans[3]) },
+                    wgpu::BindGroupEntry { binding: 9, resource: or_dummy(mask, dummy) },
+                    wgpu::BindGroupEntry { binding: 20, resource: view(Some(prev[FINAL_EMISSION])) },
+                    wgpu::BindGroupEntry { binding: 21, resource: view(chans[EMISSION]) },
+                    wgpu::BindGroupEntry { binding: 22, resource: view(Some(prev[FINAL_NORMAL])) },
+                    wgpu::BindGroupEntry { binding: 23, resource: view(chans[NORMAL]) },
+                    wgpu::BindGroupEntry { binding: 24, resource: view(Some(prev[FINAL_SPECULAR])) },
+                    wgpu::BindGroupEntry { binding: 25, resource: view(chans[SPECULAR]) },
+                ],
+            });
             // A filtered mask depends on its own paint/generator/filter data,
             // not on the accumulated layers below it. Reuse the previous result
             // until that mask is edited; a mask-paint stroke invalidates only
@@ -5830,7 +6106,7 @@ impl Engine {
                         Some(&self.mask_out[&layer.id])
                     } else {
                         mask_cache_misses += 1;
-                        let source_bg = make_bg(mask);
+                        let source_bg = make_mask_bg(mask);
                         if self.has_mask_filters(li) {
                             let ops = layer_ops.get(&li).map_or(&[][..], |o| &o[..]);
                             mask_gpu_passes += 1 + ops.iter().map(|op| match op {
@@ -5871,19 +6147,9 @@ impl Engine {
             if filtered.is_some() && !self.mask_final.contains(&layer.id) {
                 finals.push(layer.id);
             }
-            let bg = make_bg(filtered.or(mask));
             // A patch keeps what is around it. Inactive channel attachments
             // are absent from the pass to avoid read/write traffic.
             let load = if scissors.is_some() { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(wgpu::Color::BLACK) };
-            let attachments: [Option<wgpu::RenderPassColorAttachment<'_>>; ACCUM] =
-                std::array::from_fn(|channel| {
-                    if output_mask & (1 << channel) == 0 {
-                        None
-                    } else {
-                        let dst = 1 - src_indices[channel];
-                        gpu::color_attachment(&self.accum[dst][channel].view, load)
-                    }
-                });
             let profile = self.active_gpu_profile.as_ref().filter(|_| profile_layer == Some(layer.id));
             composite_profiled |= profile.is_some();
             let detailed_profile_slot = if profile_query.is_some() && profile_stage_count < GPU_PROFILE_MAX_LAYER_PASSES {
@@ -5898,30 +6164,157 @@ impl Engine {
                 let kind = if matches!(*pass, Pass::End(_)) { "Folder merge" } else { "Layer" };
                 format!("{kind} #{} {}", li + 1, layer.name)
             });
-            let pipeline = self.p.composite_pipeline(&self.device, output_mask, layer.is_folder());
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("composite layer"),
-                color_attachments: &attachments,
-                depth_stencil_attachment: None,
-                timestamp_writes: profile.map(|p| wgpu::RenderPassTimestampWrites {
-                    query_set: &p.query_set,
-                    beginning_of_pass_write_index: Some(4),
-                    end_of_pass_write_index: Some(5),
-                }),
-                occlusion_query_set: None,
-                multiview_mask: None,
-            }).forget_lifetime();
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(0, &bg, &[(k as u64 * UNIFORM_STRIDE) as u32]);
-            if let Some(rects) = &scissors {
-                for &[x0, y0, x1, y1] in rects {
-                    pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
-                    pass.draw(0..3, 0..1);
+
+            if self.p.gl_composite {
+                let resolved_mask = filtered.or(mask);
+                if layer.is_folder() {
+                    let bg = make_gl_folder_bg(resolved_mask);
+                    let attachments: [Option<wgpu::RenderPassColorAttachment<'_>>; ACCUM] =
+                        std::array::from_fn(|channel| {
+                            if output_mask & (1 << channel) == 0 {
+                                None
+                            } else {
+                                let dst = 1 - src_indices[channel];
+                                gpu::color_attachment(&self.accum[dst][channel].view, load)
+                            }
+                        });
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("OpenGL folder merge"),
+                        color_attachments: &attachments,
+                        depth_stencil_attachment: None,
+                        timestamp_writes: profile.map(|p| wgpu::RenderPassTimestampWrites {
+                            query_set: &p.query_set,
+                            beginning_of_pass_write_index: Some(4),
+                            end_of_pass_write_index: Some(5),
+                        }),
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    }).forget_lifetime();
+                    pass.set_pipeline(&self.p.folder_merge);
+                    pass.set_bind_group(0, &bg, &[(k as u64 * UNIFORM_STRIDE) as u32]);
+                    if let Some(rects) = &scissors {
+                        for &[x0, y0, x1, y1] in rects {
+                            pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                            pass.draw(0..3, 0..1);
+                        }
+                    } else {
+                        pass.draw(0..3, 0..1);
+                    }
+                    drop(pass);
+                } else {
+                    let (core_pipeline, extra_pipeline) = self.p.gl_layer_pipelines(&self.device, output_mask);
+                    let has_core = core_pipeline.is_some();
+                    let has_extra = extra_pipeline.is_some();
+                    if let Some(pipeline) = core_pipeline.as_ref() {
+                        let bg = make_gl_core_bg(resolved_mask);
+                        let core_mask = output_mask & 0x0f;
+                        let attachments: [Option<wgpu::RenderPassColorAttachment<'_>>; 4] =
+                            std::array::from_fn(|channel| {
+                                if core_mask & (1 << channel) == 0 {
+                                    None
+                                } else {
+                                    let dst = 1 - src_indices[channel];
+                                    gpu::color_attachment(&self.accum[dst][channel].view, load)
+                                }
+                            });
+                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("OpenGL layer core"),
+                            color_attachments: &attachments,
+                            depth_stencil_attachment: None,
+                            timestamp_writes: profile.map(|p| wgpu::RenderPassTimestampWrites {
+                                query_set: &p.query_set,
+                                beginning_of_pass_write_index: Some(4),
+                                end_of_pass_write_index: if has_extra { None } else { Some(5) },
+                            }),
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        }).forget_lifetime();
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(0, &bg, &[(k as u64 * UNIFORM_STRIDE) as u32]);
+                        if let Some(rects) = &scissors {
+                            for &[x0, y0, x1, y1] in rects {
+                                pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                                pass.draw(0..3, 0..1);
+                            }
+                        } else {
+                            pass.draw(0..3, 0..1);
+                        }
+                        drop(pass);
+                    }
+                    if let Some(pipeline) = extra_pipeline.as_ref() {
+                        let bg = make_gl_extra_bg(resolved_mask);
+                        let extra_mask = (output_mask >> 4) & 0x07;
+                        let attachments: [Option<wgpu::RenderPassColorAttachment<'_>>; 3] =
+                            std::array::from_fn(|channel| {
+                                if extra_mask & (1 << channel) == 0 {
+                                    None
+                                } else {
+                                    let output_channel = channel + 4;
+                                    let dst = 1 - src_indices[output_channel];
+                                    gpu::color_attachment(&self.accum[dst][output_channel].view, load)
+                                }
+                            });
+                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("OpenGL layer extra"),
+                            color_attachments: &attachments,
+                            depth_stencil_attachment: None,
+                            timestamp_writes: profile.map(|p| wgpu::RenderPassTimestampWrites {
+                                query_set: &p.query_set,
+                                beginning_of_pass_write_index: if has_core { None } else { Some(4) },
+                                end_of_pass_write_index: Some(5),
+                            }),
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        }).forget_lifetime();
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(0, &bg, &[(k as u64 * UNIFORM_STRIDE) as u32]);
+                        if let Some(rects) = &scissors {
+                            for &[x0, y0, x1, y1] in rects {
+                                pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                                pass.draw(0..3, 0..1);
+                            }
+                        } else {
+                            pass.draw(0..3, 0..1);
+                        }
+                        drop(pass);
+                    }
                 }
             } else {
-                pass.draw(0..3, 0..1);
+                let bg = make_bg(filtered.or(mask));
+                let attachments: [Option<wgpu::RenderPassColorAttachment<'_>>; ACCUM] =
+                    std::array::from_fn(|channel| {
+                        if output_mask & (1 << channel) == 0 {
+                            None
+                        } else {
+                            let dst = 1 - src_indices[channel];
+                            gpu::color_attachment(&self.accum[dst][channel].view, load)
+                        }
+                    });
+                let pipeline = self.p.composite_pipeline(&self.device, output_mask, layer.is_folder());
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("composite layer"),
+                    color_attachments: &attachments,
+                    depth_stencil_attachment: None,
+                    timestamp_writes: profile.map(|p| wgpu::RenderPassTimestampWrites {
+                        query_set: &p.query_set,
+                        beginning_of_pass_write_index: Some(4),
+                        end_of_pass_write_index: Some(5),
+                    }),
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                }).forget_lifetime();
+                pass.set_pipeline(&pipeline);
+                pass.set_bind_group(0, &bg, &[(k as u64 * UNIFORM_STRIDE) as u32]);
+                if let Some(rects) = &scissors {
+                    for &[x0, y0, x1, y1] in rects {
+                        pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                        pass.draw(0..3, 0..1);
+                    }
+                } else {
+                    pass.draw(0..3, 0..1);
+                }
+                drop(pass);
             }
-            drop(pass);
             if let Some(slot) = detailed_profile_slot {
                 encoder.write_timestamp(profile_query.as_deref().expect("profile slot requires query set"), GPU_PROFILE_BASE_QUERY_COUNT + (slot as u32 * 2) + 1);
                 if let Some(label) = detailed_profile_label {
@@ -6070,7 +6463,7 @@ impl Engine {
     }
 
     fn resample(&self, encoder: &mut wgpu::CommandEncoder, src: &Tex, res: u32) -> Tex {
-        let dst = Tex::new(&self.device, "resampled", res, res, src.format, LAYER_USAGE);
+        let dst = self.new_tex("resampled", res, res, src.format, LAYER_USAGE);
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &self.p.resample_bgl,
@@ -6136,12 +6529,15 @@ impl Engine {
         self.apply_bg = None;
         self.res = res;
         self.uv_version += 1;
-        self.pos = Tex::new(&self.device, "position map", res, res, POS_FORMAT, LAYER_USAGE);
+        self.pos = self.new_tex("position map", res, res, POS_FORMAT, LAYER_USAGE);
 
-        self.nrm = Tex::new(&self.device, "normal map", res, res, NRM_FORMAT, LAYER_USAGE);
-        self.tan = Tex::new(&self.device, "tangent map", res, res, TAN_FORMAT, LAYER_USAGE);
-        self.accum = [accum_set(&self.device, res, "accum A"), accum_set(&self.device, res, "accum B")];
-        self.stroke = Tex::new(&self.device, "stroke mask", res, res, STROKE_FORMAT, LAYER_USAGE);
+        self.nrm = self.new_tex("normal map", res, res, NRM_FORMAT, LAYER_USAGE);
+        self.tan = self.new_tex("tangent map", res, res, TAN_FORMAT, LAYER_USAGE);
+        self.accum = [
+            accum_set(&self.device, res, "accum A", self.srgb_views_supported),
+            accum_set(&self.device, res, "accum B", self.srgb_views_supported),
+        ];
+        self.stroke = self.new_tex("stroke mask", res, res, STROKE_FORMAT, LAYER_USAGE);
         self.snap = Default::default();
         self.snap_mask = None;
         undo.clear();
@@ -6361,6 +6757,55 @@ mod composite_pass_tests {
             GPU_PROFILE_BASE_QUERY_COUNT + GPU_PROFILE_MAX_LAYER_PASSES as u32 * 2,
         );
         assert!(GPU_PROFILE_QUERY_COUNT > 10);
+    }
+
+    /// The shared GL core pipeline can be used with the full seven-slot
+    /// accumulation render pass. Its fragment shader writes only core outputs;
+    /// the trailing extra-channel attachments must remain disabled, not absent.
+    #[test]
+    #[ignore]
+    fn gl_composite_core_matches_full_accum_attachment_slots() {
+        let (_instance, adapter, device, queue) = crate::bake::tests::gpu_with_adapter();
+        assert_eq!(
+            adapter.get_info().backend,
+            wgpu::Backend::Gl,
+            "OpenGL compatibility test did not obtain a GL adapter",
+        );
+
+        let pipelines = Engine::create_pipelines(&device, true);
+        let textures = ACCUM_FORMATS.iter().map(|&format| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("OpenGL composite compatibility target"),
+                size: wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+        }).collect::<Vec<_>>();
+        assert_eq!(textures.len(), ACCUM, "test must bind every accumulation channel");
+        let views = textures.iter().map(|texture| texture.create_view(&Default::default())).collect::<Vec<_>>();
+        let attachments = views.iter().map(|view| {
+            gpu::color_attachment(view, wgpu::LoadOp::Clear(wgpu::Color::BLACK))
+        }).collect::<Vec<_>>();
+
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("OpenGL seven-slot composite compatibility"),
+                color_attachments: &attachments,
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            // This is the exact operation that failed while opening the user's project.
+            pass.set_pipeline(&pipelines.composite);
+        }
+        queue.submit([encoder.finish()]);
+        device.poll(wgpu::PollType::wait_indefinitely()).expect("OpenGL composite compatibility poll");
     }
 
     #[test]

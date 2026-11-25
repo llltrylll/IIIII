@@ -51,6 +51,32 @@ jobs:
       - name: Restore Rust build cache
         uses: Swatinem/rust-cache@v2
 
+      - name: OpenGL smoke - GPU bake pipeline with adapter format features
+        run: "xvfb-run -a cargo test --locked --bin material_painter preview_test::gl_format_capabilities -- --ignored --exact --nocapture --test-threads 1"
+        env:
+          WGPU_BACKEND: gl
+          LIBGL_ALWAYS_SOFTWARE: "1"
+
+      - name: OpenGL smoke - seven-slot composite pipeline compatibility
+        run: "xvfb-run -a cargo test --locked --bin material_painter engine::composite_pass_tests::gl_composite_core_matches_full_accum_attachment_slots -- --ignored --exact --nocapture --test-threads 1"
+        env:
+          WGPU_BACKEND: gl
+          LIBGL_ALWAYS_SOFTWARE: "1"
+      - name: Upload OpenGL format capability report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gl-format-capabilities
+          path: target/bake_test/gl-format-capabilities.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: OpenGL smoke - low-poly bake end to end
+        run: "xvfb-run -a cargo test --locked --bin material_painter bake::tests::gl_adapter_low_poly_bake_roundtrip -- --ignored --exact --nocapture --test-threads 1"
+        env:
+          WGPU_BACKEND: gl
+          LIBGL_ALWAYS_SOFTWARE: "1"
+
       # Keep the correctness gates focused on brush/mask GPU parity.
       # The broader preview suite also contains unrelated interactive UI tests.
       - name: GPU parity - stacked UV screen paint

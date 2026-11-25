@@ -77,7 +77,7 @@ fn fill_image(t: texture_2d<f32>, uv: vec2<f32>, p: vec3<f32>, n: vec3<f32>, tex
     let mode = i32(u.var1.z + 0.5);
     if (mode == 0) {
         let q = rot2(uv - 0.5, u.img.y) * tiling + 0.5 + u.img.zw;
-        let lod = log2(max(tiling * size / f32(textureDimensions(prev_color).x), 1.0));
+        let lod = log2(max(tiling * size / max(u.gx.y, 1.0), 1.0));
         return textureSampleLevel(t, rsamp, q, lod);
     }
     if (mode >= 2) {
@@ -190,7 +190,10 @@ fn generator(c: vec2<i32>, uv: vec2<f32>) -> f32 {
         && all(u.gc < vec4<f32>(0.0))
         && u.gp0.w == 0.0;
     if (only_id) {
-        let id = textureSampleLevel(map_e, samp, uv, 0.0).rgb;
+        // ID colors are categorical, not continuous data: linear filtering
+        // blends neighboring islands/material IDs and can make a narrow region
+        // fail its color comparison. Read the exact texel under this fragment.
+        let id = textureLoad(map_e, c, 0).rgb;
         let tolerance = max(u.gid.w, 1e-3);
         var value = 1.0 - smoothstep(tolerance * 0.5, tolerance, distance(id, u.gid.rgb));
         for (var k = 0; k < 7; k++) {
@@ -218,7 +221,8 @@ fn generator(c: vec2<i32>, uv: vec2<f32>) -> f32 {
     if (need_a) { s.a = textureSampleLevel(map_a, samp, uv, 0.0); }
     if (need_b) { s.b = textureSampleLevel(map_b, samp, uv, 0.0); }
     if (need_c) { s.c = textureSampleLevel(map_c, samp, uv, 0.0); }
-    if (need_e) { s.e = textureSampleLevel(map_e, samp, uv, 0.0); }
+    // The ID map is categorical. Never bilinear-filter colors across ID borders.
+    if (need_e) { s.e = textureLoad(map_e, c, 0); }
 
     let need_position = u.gp0.w != 0.0 || weight(9) != 0.0 || weight(12) != 0.0
         || weight(13) != 0.0 || weight(16) != 0.0 || weight(17) != 0.0
@@ -291,7 +295,9 @@ fn layer_mask(c: vec2<i32>, uv: vec2<f32>) -> f32 {
 @fragment
 fn fs_mask_source(in: FsOut) -> @location(0) vec4<f32> {
     let c = vec2<i32>(in.pos.xy);
-    let uv = in.pos.xy / vec2<f32>(textureDimensions(pos_map));
+    // Position maps may be parked at 1x1 when this generator needs only
+    // baked scalar maps. Use a map that remains full resolution for UVs.
+    let uv = in.pos.xy / vec2<f32>(textureDimensions(map_a));
     return vec4<f32>(layer_mask(c, uv), 0.0, 0.0, 1.0);
 }
 
@@ -346,7 +352,8 @@ fn fs_layer(in: FsOut) -> AccumOut {
     let needs_inline_color = u.ch.x > 0.5 && u.var0.x != 0.0 && u.varc.y < 0.5;
     let needs_inline_roughness = u.ch.y > 0.5 && u.var0.z != 0.0 && u.varc.x < 0.5;
     let needs_height_variation = u.ch.w > 0.5 && u.var0.w != 0.0;
-    if (u.p0.z > 0.5 && (bits != 0u || needs_inline_color || needs_inline_roughness || needs_height_variation)) {
+    let needs_projected_images = bits != 0u && u.var1.z > 0.5;
+    if (u.p0.z > 0.5 && (needs_projected_images || needs_inline_color || needs_inline_roughness || needs_height_variation)) {
         p = textureLoad(pos_map, c, 0).xyz;
         n = normalize(textureLoad(nrm_map, c, 0).xyz * 2.0 - 1.0);
     }
@@ -415,7 +422,10 @@ fn fs_layer(in: FsOut) -> AccumOut {
         // Fill layer: images replace their channels' values, then procedural
         // and per-part variation apply on top.
         if (bits != 0u) {
-            let texel_world = texel_size(c, p);
+            var texel_world = 0.0;
+            if (u.var1.z > 0.5) {
+                texel_world = texel_size(c, p);
+            }
             if ((bits & 1u) != 0u) {
                 let img = fill_image(l_color, uv, p, n, texel_world);
                 sc = select(img.rgb, img.rrr, (bits & 16u) != 0u);
@@ -534,6 +544,268 @@ fn fs_folder_merge(in: FsOut) -> AccumOut {
     }
     if (u.gp1.z > 0.5) {
         m *= generator(c, uv);
+    }
+    var out: AccumOut;
+    out.color = mix(textureLoad(l_color, c, 0), textureLoad(prev_color, c, 0), m);
+    out.rough = vec4<f32>(mix(textureLoad(l_rough, c, 0).r, textureLoad(prev_rough, c, 0).r, m));
+    out.metal = vec4<f32>(mix(textureLoad(l_metal, c, 0).r, textureLoad(prev_metal, c, 0).r, m));
+    out.height = vec4<f32>(mix(textureLoad(l_height, c, 0).r, textureLoad(prev_height, c, 0).r, m));
+    out.emission = mix(textureLoad(l_emission, c, 0), textureLoad(prev_emission, c, 0), m);
+    let nl = textureLoad(l_normal, c, 0).xyz * 2.0 - 1.0;
+    let np = textureLoad(prev_normal, c, 0).xyz * 2.0 - 1.0;
+    out.normal = vec4<f32>(normalize(mix(nl, np, m)) * 0.5 + 0.5, 1.0);
+    out.spec = vec4<f32>(mix(textureLoad(l_spec, c, 0).r, textureLoad(prev_spec, c, 0).r, m));
+    return out;
+}
+
+
+// OpenGL fallback: split the seven accumulation outputs into two passes.
+// Smart masks are already evaluated by fs_mask_source and arrive through
+// l_mask, so these entry points do not bind the five baked mask resources.
+struct GlCoreOut {
+    @location(0) color: vec4<f32>,
+    @location(1) rough: vec4<f32>,
+    @location(2) metal: vec4<f32>,
+    @location(3) height: vec4<f32>,
+};
+
+struct GlExtraOut {
+    @location(0) emission: vec4<f32>,
+    @location(1) normal: vec4<f32>,
+    @location(2) spec: vec4<f32>,
+};
+
+fn gl_layer_mask(c: vec2<i32>) -> f32 {
+    if (u.p0.w > 0.5) {
+        return textureLoad(l_mask, c, 0).r;
+    }
+    return 1.0;
+}
+
+@fragment
+fn fs_layer_gl_core(in: FsOut) -> GlCoreOut {
+    let c = vec2<i32>(in.pos.xy);
+    let dims = vec2<f32>(textureDimensions(pos_map));
+    let uv = in.pos.xy / dims;
+    let outputs = u32(u.varc.w + 0.5);
+
+    var pc4 = vec4<f32>(0.0);
+    var pr = 0.0;
+    var pm = 0.0;
+    var ph = 0.0;
+    if ((outputs & 1u) != 0u) { pc4 = textureLoad(prev_color, c, 0); }
+    if ((outputs & 2u) != 0u) { pr = textureLoad(prev_rough, c, 0).r; }
+    if ((outputs & 4u) != 0u) { pm = textureLoad(prev_metal, c, 0).r; }
+    if ((outputs & 8u) != 0u) { ph = textureLoad(prev_height, c, 0).r; }
+    let pc = pc4.rgb;
+    let po = pc4.a;
+
+    let bits = u32(u.var1.w);
+    var p = vec3<f32>(0.0);
+    var n = vec3<f32>(0.0, 0.0, 1.0);
+    let needs_inline_color = u.ch.x > 0.5 && u.var0.x != 0.0 && u.varc.y < 0.5;
+    let needs_inline_roughness = u.ch.y > 0.5 && u.var0.z != 0.0 && u.varc.x < 0.5;
+    let needs_height_variation = u.ch.w > 0.5 && u.var0.w != 0.0;
+    if (u.p0.z > 0.5 && ((bits & 63u) != 0u || needs_inline_color || needs_inline_roughness || needs_height_variation)) {
+        p = textureLoad(pos_map, c, 0).xyz;
+        n = normalize(textureLoad(nrm_map, c, 0).xyz * 2.0 - 1.0);
+    }
+
+    var sc = u.fill_color.rgb;
+    var sr = u.fill_rmh.x;
+    var sm = u.fill_rmh.y;
+    var sh = u.fill_rmh.z;
+    var ac = u.ch.x;
+    var ar = u.ch.y;
+    var am = u.ch.z;
+    var ah = u.ch.w;
+    var so = u.fill_color.w;
+    var ao = u.fill_rmh.w;
+
+    if (u.p0.z < 0.5) {
+        if (u.ch.x > 0.5) {
+            let t = textureLoad(l_color, c, 0);
+            sc = t.rgb;
+            ac = t.a;
+        }
+        if (u.ch.y > 0.5) {
+            let t = textureLoad(l_rough, c, 0).rg;
+            sr = t.x;
+            ar = t.y;
+        }
+        if (u.ch.z > 0.5) {
+            let t = textureLoad(l_metal, c, 0).rg;
+            sm = t.x;
+            am = t.y;
+        }
+        if (u.ch.w > 0.5) {
+            let t = textureLoad(l_height, c, 0).rg;
+            sh = t.x;
+            ah = t.y;
+        }
+        if (u.fill_rmh.w > 0.5) {
+            let t = textureLoad(l_opacity, c, 0).rg;
+            so = t.x;
+            ao = t.y;
+        }
+    } else {
+        if ((bits & 63u) != 0u) {
+            let texel_world = texel_size(c, p);
+            if ((bits & 1u) != 0u) {
+                let img = fill_image(l_color, uv, p, n, texel_world);
+                sc = select(img.rgb, img.rrr, (bits & 16u) != 0u);
+            }
+            if ((bits & 2u) != 0u) {
+                sr = fill_image(l_rough, uv, p, n, texel_world).r;
+            }
+            if ((bits & 4u) != 0u) {
+                sm = fill_image(l_metal, uv, p, n, texel_world).r;
+            }
+            if ((bits & 8u) != 0u) {
+                sh = (fill_image(l_height, uv, p, n, texel_world).r - 0.5) * 2.0 * u.fill_rmh.z;
+            }
+            if ((bits & 32u) != 0u) {
+                so = fill_image(l_opacity, uv, p, n, texel_world).r * u.fill_color.w;
+            }
+        }
+        var part = 0.5;
+        if (u.var1.y != 0.0 && ((u.ch.x > 0.5) || (u.ch.y > 0.5))) {
+            part = textureSampleLevel(map_b, samp, uv, 0.0).a;
+        }
+        let vs = u.var0.y;
+        if (u.ch.x > 0.5 && u.varc.y > 0.5) {
+            let noise = textureLoad(fill_color_noise, c, 0).r;
+            let part_factor = select(1.0, 1.0 + (part - 0.5) * 2.0 * u.var1.y, u.var1.y != 0.0);
+            sc = clamp(sc * (1.0 + (noise - 0.5) * 2.0 * u.var0.x) * part_factor, vec3<f32>(0.0), vec3<f32>(1.0));
+        } else if (u.ch.x > 0.5) {
+            sc = fill_variation(sc, 0, p, u.var0.x, vs, u.var1.x, u.var1.y, part);
+        }
+        if (u.ch.y > 0.5 && u.varc.x > 0.5) {
+            let noise = textureLoad(fill_roughness_noise, c, 0).r;
+            let part_delta = select(0.0, (fract(part * 7.31) - 0.5) * u.var1.y * 0.6, u.var1.y != 0.0);
+            sr = clamp(sr + (noise - 0.5) * u.var0.z + part_delta, 0.0, 1.0);
+        } else if (u.ch.y > 0.5) {
+            sr = fill_variation(vec3<f32>(sr), 1, p, u.var0.z, vs, u.var1.x, u.var1.y, part).x;
+        }
+        if (u.ch.w > 0.5) {
+            sh = fill_variation(vec3<f32>(sh), 3, p, u.var0.w, vs, u.var1.x, 0.0, part).x;
+        }
+    }
+
+    let mask = u.p0.x * gl_layer_mask(c);
+    let mode = i32(u.p0.y);
+    var out: GlCoreOut;
+    if ((outputs & 1u) != 0u) {
+        let opacity = clamp(mix(po, blend1(mode, po, so), ao * mask), 0.0, 1.0);
+        out.color = vec4<f32>(clamp(mix(pc, blend3(mode, pc, sc), ac * mask), vec3<f32>(0.0), vec3<f32>(1.0)), opacity);
+    } else {
+        out.color = vec4<f32>(0.0);
+    }
+    if ((outputs & 2u) != 0u) {
+        out.rough = vec4<f32>(clamp(mix(pr, blend1(mode, pr, sr), ar * mask), 0.0, 1.0));
+    } else {
+        out.rough = vec4<f32>(0.0);
+    }
+    if ((outputs & 4u) != 0u) {
+        out.metal = vec4<f32>(clamp(mix(pm, blend1(mode, pm, sm), am * mask), 0.0, 1.0));
+    } else {
+        out.metal = vec4<f32>(0.0);
+    }
+    if ((outputs & 8u) != 0u) {
+        out.height = vec4<f32>(mix(ph, blend1(mode, ph, sh), ah * mask));
+    } else {
+        out.height = vec4<f32>(0.0);
+    }
+    return out;
+}
+
+@fragment
+fn fs_layer_gl_extra(in: FsOut) -> GlExtraOut {
+    let c = vec2<i32>(in.pos.xy);
+    let dims = vec2<f32>(textureDimensions(pos_map));
+    let uv = in.pos.xy / dims;
+    let outputs = u32(u.varc.w + 0.5);
+
+    var pe = vec3<f32>(0.0);
+    var pn = vec3<f32>(0.0, 0.0, 1.0);
+    var ps = 0.0;
+    if ((outputs & 16u) != 0u) { pe = textureLoad(prev_emission, c, 0).rgb; }
+    if ((outputs & 32u) != 0u) { pn = textureLoad(prev_normal, c, 0).xyz * 2.0 - 1.0; }
+    if ((outputs & 64u) != 0u) { ps = textureLoad(prev_spec, c, 0).r; }
+
+    let bits = u32(u.var1.w);
+    var p = vec3<f32>(0.0);
+    var n = vec3<f32>(0.0, 0.0, 1.0);
+    var texel_world = 0.0;
+    if (u.p0.z > 0.5 && (bits & 448u) != 0u) {
+        p = textureLoad(pos_map, c, 0).xyz;
+        n = normalize(textureLoad(nrm_map, c, 0).xyz * 2.0 - 1.0);
+        texel_world = texel_size(c, p);
+    }
+
+    var se = u.emis.rgb;
+    var ae = u.emis.w;
+    var sn = vec3<f32>(0.0, 0.0, 1.0);
+    var an = u.ns.y;
+    var ss = u.ns.z;
+    var as_ = u.ns.w;
+
+    if (u.p0.z < 0.5) {
+        if (u.emis.w > 0.5) {
+            let t = textureLoad(l_emission, c, 0);
+            se = t.rgb;
+            ae = t.a;
+        }
+        if (u.ns.y > 0.5) {
+            let t = textureLoad(l_normal, c, 0);
+            sn = normalize(t.xyz * 2.0 - 1.0);
+            an = t.a;
+        }
+        if (u.ns.w > 0.5) {
+            let t = textureLoad(l_spec, c, 0).rg;
+            ss = t.x;
+            as_ = t.y;
+        }
+    } else {
+        if ((bits & 64u) != 0u) {
+            se = fill_image(l_emission, uv, p, n, texel_world).rgb * u.emis.rgb;
+        }
+        if ((bits & 128u) != 0u) {
+            sn = fill_normal(c, uv, p, n, texel_world);
+        }
+        if ((bits & 256u) != 0u) {
+            ss = clamp(fill_image(l_spec, uv, p, n, texel_world).r * u.ns.z * 2.0, 0.0, 1.0);
+        }
+    }
+
+    let mask = u.p0.x * gl_layer_mask(c);
+    let mode = i32(u.p0.y);
+    var out: GlExtraOut;
+    if ((outputs & 16u) != 0u) {
+        out.emission = vec4<f32>(clamp(mix(pe, blend3(mode, pe, se), ae * mask), vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    } else {
+        out.emission = vec4<f32>(0.0);
+    }
+    if ((outputs & 32u) != 0u) {
+        let nb = normalize(pn);
+        out.normal = vec4<f32>(normalize(mix(nb, combine_normals(nb, sn), an * mask)) * 0.5 + 0.5, 1.0);
+    } else {
+        out.normal = vec4<f32>(0.5, 0.5, 1.0, 1.0);
+    }
+    if ((outputs & 64u) != 0u) {
+        out.spec = vec4<f32>(clamp(mix(ps, blend1(mode, ps, ss), as_ * mask), 0.0, 1.0));
+    } else {
+        out.spec = vec4<f32>(0.5);
+    }
+    return out;
+}
+
+@fragment
+fn fs_folder_merge_gl(in: FsOut) -> AccumOut {
+    let c = vec2<i32>(in.pos.xy);
+    var m = u.p0.x;
+    if (u.p0.w > 0.5) {
+        m *= textureLoad(l_mask, c, 0).r;
     }
     var out: AccumOut;
     out.color = mix(textureLoad(l_color, c, 0), textureLoad(prev_color, c, 0), m);

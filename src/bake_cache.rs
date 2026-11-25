@@ -244,7 +244,7 @@ impl Entry {
     pub fn upload(self, device: &wgpu::Device, queue: &wgpu::Queue) -> (BakedMaps, BakeReport) {
         let usage = LAYER_USAGE | wgpu::TextureUsages::STORAGE_BINDING;
         let make = |format: wgpu::TextureFormat, (res, data): (u32, Vec<u8>)| {
-            let tex = Tex::new(device, "mesh map", res, res, format, usage);
+            let tex = Tex::new_without_srgb_view(device, "mesh map", res, res, format, usage);
             let layout = wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(res * gpu::bytes_per_texel(format)),

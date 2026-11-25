@@ -1,0 +1,16 @@
+OPENGL VIEWPORT TEST
+
+To test the OpenGL viewport, double-click:
+  Start-OpenGL-4x.bat
+
+Do not launch MaterialPainter.exe directly for this test.
+The launcher sets WGPU_BACKEND=gl before starting the application.
+
+To launch the Vulkan backend instead, use:
+  Start-Vulkan-4x.bat
+
+After opening a project, use the diagnostic snapshot and verify:
+  backend: GL
+(or the OpenGL backend name reported by wgpu)
+
+If the diagnostic reports Vulkan, the OpenGL test was not launched correctly.

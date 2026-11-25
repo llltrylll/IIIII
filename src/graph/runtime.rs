@@ -471,7 +471,7 @@ impl Runtime {
                     self.rendered.insert(id, Rendered { hash, tex: Some(tex), thumb: None });
                 }
                 Ok(Some(tex)) => {
-                    let thumb = Arc::new(Tex::new(device, "graph thumb", THUMB, THUMB, wgpu::TextureFormat::Rgba8Unorm, LAYER_USAGE));
+                    let thumb = Arc::new(Tex::new_without_srgb_view(device, "graph thumb", THUMB, THUMB, wgpu::TextureFormat::Rgba8Unorm, LAYER_USAGE));
                     let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("graph thumb"),
                         layout: &self.blit_bgl,

@@ -23,7 +23,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequiredOverridesAllowed=dialog
 WizardStyle=modern
-UninstallDisplayIcon={app}\MaterialPainter.exe
+UninstallDisplayIcon={app}\Material Painter.exe
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
@@ -32,9 +32,10 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "..\dist\Material Painter\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\Material Painter"; Filename: "{app}\MaterialPainter.exe"
+Name: "{group}\Material Painter"; Filename: "{app}\Material Painter.exe"; WorkingDir: "{app}"; IconFilename: "{app}\Material Painter.exe"
+Name: "{group}\Material Painter (Vulkan)"; Filename: "{app}\Material Painter (Vulkan).exe"; WorkingDir: "{app}"; IconFilename: "{app}\Material Painter (Vulkan).exe"
 Name: "{group}\Uninstall Material Painter"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\Material Painter"; Filename: "{app}\MaterialPainter.exe"; Tasks: desktopicon
+Name: "{autodesktop}\Material Painter"; Filename: "{app}\Material Painter.exe"; WorkingDir: "{app}"; IconFilename: "{app}\Material Painter.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\MaterialPainter.exe"; Description: "{cm:LaunchProgram,Material Painter}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\Material Painter.exe"; Description: "{cm:LaunchProgram,Material Painter}"; Flags: nowait postinstall skipifsilent
