@@ -991,9 +991,11 @@ pub struct PainterApp {
     /// A crash report the last run left, shown once.
     crash_report: Option<std::path::PathBuf>,
     frame_ms: f32,
-    /// Smoothed interval between UI/viewport frames, in milliseconds.
+    /// egui's stable delta (may be predicted after reactive/idle periods), in milliseconds.
     frame_interval_ms: f32,
-    /// Start of the previous UI frame, used by the 80 FPS limiter.
+    /// Monotonic time between successive UI callback starts, including backend/presentation stalls.
+    frame_wall_interval_ms: f32,
+    /// Start of the previous UI frame, used by the 80 FPS limiter and wall interval measurement.
     frame_limiter_last_frame: Option<Instant>,
     /// The slowest recent frame (decays), to spot stutter that the average hides.
     frame_peak_ms: f32,
@@ -2549,6 +2551,7 @@ impl PainterApp {
             crash_report: crate::crash::take_report(),
             frame_ms: 0.0,
             frame_interval_ms: 0.0,
+            frame_wall_interval_ms: 0.0,
             frame_limiter_last_frame: None,
             frame_peak_ms: 0.0,
             ppp: cc.egui_ctx.pixels_per_point(),
@@ -5933,7 +5936,11 @@ impl eframe::App for PainterApp {
                 std::thread::sleep(next_frame - now);
             }
         }
-        self.frame_limiter_last_frame = Some(Instant::now());
+        let frame_started = Instant::now();
+        if let Some(previous) = self.frame_limiter_last_frame {
+            self.frame_wall_interval_ms = frame_started.duration_since(previous).as_secs_f32() * 1000.0;
+        }
+        self.frame_limiter_last_frame = Some(frame_started);
 
         let _trace_frame = crate::startup_trace::frame();
         let start = Instant::now();
