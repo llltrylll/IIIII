@@ -5,7 +5,7 @@
 
 use super::{PainterApp, icons, theme};
 use crate::bvh::Bvh;
-use crate::engine::Engine;
+use crate::engine::{Content, Engine, MaskSource, Projection};
 use crate::undo::{StrokeTarget, UndoStack};
 use crate::viewport::{OverlaySlot, SetLook};
 use eframe::egui;
@@ -53,6 +53,72 @@ pub(super) fn engines<'a>(active: &'a Engine, sets: &'a TextureSets, count: usiz
             None => active,
         })
         .collect()
+}
+
+
+/// Whether one smart-mask generator reads baked surface position or normal maps.
+fn generator_needs_surface_maps(generator: crate::engine::Generator) -> bool {
+    use crate::engine::gin;
+    generator.noise != 0.0
+        || [
+            gin::UP,
+            gin::WORLD_HEIGHT,
+            gin::STREAKS,
+            gin::OVERHANG,
+            gin::GRAIN,
+            gin::CELLS,
+            gin::SCRATCHES,
+            gin::FRONT,
+        ].into_iter().any(|input| generator.weights[input] != 0.0)
+}
+
+/// A parked Engine only needs its full-resolution position/normal/tangent maps
+/// when a pending composite actually samples them. UV-only fills, ordinary
+/// paint and categorical ID masks can composite against the 1x1 placeholders.
+fn engine_needs_surface_maps_for_composite(
+    engine: &Engine,
+    docs: &[super::graph_ui::GraphDoc],
+    lib: &crate::graph::Library,
+) -> bool {
+    if super::graph_ui::engine_uses_surface_graph(engine, docs, lib) {
+        return true;
+    }
+
+    engine.layers.iter().any(|layer| {
+        let fill_needs_surface = match &layer.content {
+            Content::Fill(fill) => {
+                let projected_image = fill.projection != Projection::Uv
+                    && layer.images.iter().enumerate().any(|(channel, image)| {
+                        image.is_some() && !layer.disabled_channels[channel]
+                    });
+                let cached_variation = (fill.color_var != 0.0
+                    && fill.mat.enabled[0]
+                    && !layer.disabled_channels[0])
+                    || (fill.rough_var != 0.0
+                        && fill.mat.enabled[1]
+                        && !layer.disabled_channels[1]);
+                let projected_height_variation = fill.projection != Projection::Uv
+                    && fill.height_var != 0.0
+                    && fill.mat.enabled[3]
+                    && !layer.disabled_channels[3];
+                projected_image || cached_variation || projected_height_variation
+            }
+            _ => false,
+        };
+
+        let mask_needs_surface = layer.mask.as_ref().is_some_and(|mask| {
+            mask.generator.is_some_and(generator_needs_surface_maps)
+                || mask.layers.iter().any(|mask_layer| {
+                    mask_layer.enabled
+                        && matches!(
+                            mask_layer.source,
+                            MaskSource::Generator(generator) if generator_needs_surface_maps(generator)
+                        )
+                })
+        });
+
+        fill_needs_surface || mask_needs_surface
+    })
 }
 
 impl PainterApp {
@@ -156,14 +222,33 @@ impl PainterApp {
     /// Spreads parked-set recomposition across frames during interactive use.
     pub(super) fn composite_parked_one(&mut self, ctx: &egui::Context) {
         let mesh = &self.gpu_mesh;
+        let docs = &self.graphs.docs;
+        let lib = &self.graphs.lib;
         if let Some((index, p)) = self.sets.parked.iter_mut().enumerate()
             .find_map(|(index, parked)| parked.as_mut().filter(|p| p.engine.dirty).map(|p| (index, p)))
         {
-            if p.engine.ensure_surface_maps(mesh) {
-                self.views.invalidate_texture_set_binding(index);
+            let set_name = self.mesh.sets.get(index).map_or("unknown", |set| set.name.as_str());
+            let _background = crate::startup_trace::span_d(
+                "parked texture set: background recomposition",
+                format!("index={index} name={set_name} layers={}", p.engine.layers.len()),
+            );
+            if engine_needs_surface_maps_for_composite(&p.engine, docs, lib) {
+                let _ensure = crate::startup_trace::span("parked texture set: ensure surface maps");
+                if p.engine.ensure_surface_maps(mesh) {
+                    self.views.invalidate_texture_set_binding(index);
+                }
+            } else {
+                crate::startup_trace::count("parked composites skipped unnecessary surface-map bake", 1);
             }
-            p.engine.composite();
-            p.engine.release_inactive_working_set();
+            {
+                let _composite = crate::startup_trace::span("parked texture set: composite");
+                p.engine.composite();
+            }
+            {
+                let _release = crate::startup_trace::span("parked texture set: release inactive working set");
+                p.engine.release_inactive_working_set();
+            }
+            crate::startup_trace::count("parked texture sets recomposited", 1);
             ctx.request_repaint();
         }
     }

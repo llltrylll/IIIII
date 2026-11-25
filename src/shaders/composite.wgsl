@@ -77,7 +77,7 @@ fn fill_image(t: texture_2d<f32>, uv: vec2<f32>, p: vec3<f32>, n: vec3<f32>, tex
     let mode = i32(u.var1.z + 0.5);
     if (mode == 0) {
         let q = rot2(uv - 0.5, u.img.y) * tiling + 0.5 + u.img.zw;
-        let lod = log2(max(tiling * size / f32(textureDimensions(pos_map).x), 1.0));
+        let lod = log2(max(tiling * size / f32(textureDimensions(prev_color).x), 1.0));
         return textureSampleLevel(t, rsamp, q, lod);
     }
     if (mode >= 2) {
@@ -295,7 +295,9 @@ fn layer_mask(c: vec2<i32>, uv: vec2<f32>) -> f32 {
 @fragment
 fn fs_mask_source(in: FsOut) -> @location(0) vec4<f32> {
     let c = vec2<i32>(in.pos.xy);
-    let uv = in.pos.xy / vec2<f32>(textureDimensions(pos_map));
+    // Position maps may be parked at 1x1 when this generator needs only
+    // baked scalar maps. Use a map that remains full resolution for UVs.
+    let uv = in.pos.xy / vec2<f32>(textureDimensions(map_a));
     return vec4<f32>(layer_mask(c, uv), 0.0, 0.0, 1.0);
 }
 

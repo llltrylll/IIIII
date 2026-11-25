@@ -637,6 +637,18 @@ impl PainterApp {
         );
         let shared_undo_staging_bytes = self.engine.snapshot_buffer_pool_cached_bytes();
         let undo_bytes = self.undo.ram_bytes() as u64;
+        let parked_dirty_count = self.sets.parked.iter().flatten().filter(|parked| parked.engine.dirty).count();
+        let parked_set_report = self.sets.parked.iter().enumerate().filter_map(|(index, parked)| {
+            let parked = parked.as_ref()?;
+            let name = self.mesh.sets.get(index).map_or("unknown", |set| set.name.as_str());
+            Some(format!(
+                "  [{index}] {name} | dirty={} | layers={} | resolution={}",
+                parked.engine.dirty,
+                parked.engine.layers.len(),
+                parked.engine.res,
+            ))
+        }).collect::<Vec<_>>().join("\n");
+        let custom_shader = self.views.has_custom_shader();
         let bake = self.engine.bake_report.as_ref().map_or_else(
             || "No completed bake report.".to_string(),
             |report| format!(
@@ -677,13 +689,17 @@ impl PainterApp {
         };
 
         format!(
-            "{}\n\nAPPLICATION / FRAME\nframe_interval_ms={:.6}\nviewport_fps_estimate={:.3}\nui_frame_cpu_ema_ms={:.6}\nui_frame_recent_peak_ms={:.6}\nstatus={}\n\nGPU ADAPTER\n{:#?}\n\nGPU DEVICE LIMITS\n{:#?}\ngpu_resource_allocation_estimate_bytes={}\ndocument_shared_undo_readback_cache_bytes={}\nundo_memory_bytes={}\nundo_memory_limit_bytes={}\nundo_steps={}\n\nBAKE REPORT\n{}\nCURRENT BAKE SETTINGS\n{:#?}\n\nF6 PAINT PROFILER\n{}\n\nMESH / UV / NORMAL / TANGENT DIAGNOSTICS\n{}",
+            "{}\n\nAPPLICATION / FRAME\nframe_interval_ms={:.6}\nviewport_fps_estimate={:.3}\nui_frame_cpu_ema_ms={:.6}\nui_frame_recent_peak_ms={:.6}\nstatus={}\n\nVIEWPORT / BACKGROUND RECOMPOSITION\ncustom_preview_shader_compiled={}\nparked_texture_sets_dirty={}/{}\n{}\n\nGPU ADAPTER\n{:#?}\n\nGPU DEVICE LIMITS\n{:#?}\ngpu_resource_allocation_estimate_bytes={}\ndocument_shared_undo_readback_cache_bytes={}\nundo_memory_bytes={}\nundo_memory_limit_bytes={}\nundo_steps={}\n\nBAKE REPORT\n{}\nCURRENT BAKE SETTINGS\n{:#?}\n\nF6 PAINT PROFILER\n{}\n\nMESH / UV / NORMAL / TANGENT DIAGNOSTICS\n{}",
             self.diagnostic_context_report("technical panel copy"),
             self.frame_interval_ms,
             if self.frame_interval_ms > 0.01 { 1000.0 / self.frame_interval_ms } else { 0.0 },
             self.frame_ms,
             self.frame_peak_ms,
             self.status.replace('\n', " | "),
+            custom_shader,
+            parked_dirty_count,
+            self.sets.parked.iter().flatten().count(),
+            parked_set_report,
             info,
             self.rs.device.limits(),
             gpu_bytes,
