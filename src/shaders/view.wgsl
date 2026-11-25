@@ -18,7 +18,8 @@ struct Globals {
     light_vp: mat4x4<f32>, // key light shadow projection
     sun: vec4<f32>,      // direction toward the key light, intensity
     sun_c: vec4<f32>,    // key light color (linear), on (1) / off (0)
-    clip: vec4<f32>,     // camera near/far planes
+    clip: vec4<f32>,     // camera near/far planes, active point-light count
+    point_lights: array<vec4<f32>, 16>, // position/intensity, then color/range
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -285,6 +286,31 @@ fn key_light(s: Surface, n: vec3<f32>, v: vec3<f32>, shadow: f32) -> vec3<f32> {
     return direct_light(s, n, v, g.sun.xyz, g.sun_c.rgb, g.sun.w, shadow);
 }
 
+// Additional editable point lights. They use inverse-square attenuation with
+// a smooth finite-radius cutoff; unlike the directional key, they do not cast
+// shadows in this viewport pass.
+fn point_lighting(s: Surface, n: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
+    var total = vec3<f32>(0.0);
+    let count = u32(clamp(g.clip.z, 0.0, 8.0));
+    for (var i = 0u; i < 8u; i += 1u) {
+        if (i >= count) {
+            break;
+        }
+        let source = g.point_lights[i * 2u];
+        let color_range = g.point_lights[i * 2u + 1u];
+        let to_light = source.xyz - s.wpos;
+        let distance_squared = max(dot(to_light, to_light), 1e-4);
+        let distance = sqrt(distance_squared);
+        let range = color_range.w;
+        if (source.w > 0.0 && range > 0.0 && distance < range) {
+            let edge = max(1.0 - pow(distance / range, 4.0), 0.0);
+            let attenuation = edge * edge / distance_squared;
+            total += direct_light(s, n, v, to_light, color_range.rgb, source.w * attenuation, 1.0);
+        }
+    }
+    return total;
+}
+
 // The UV panel is a flat material sheet, not a surface in the 3D scene.
 // Interpret its tangent-space normal in the canvas plane and light it with
 // fixed neutral studio sources. This keeps metallic and rough materials
@@ -364,6 +390,7 @@ fn shade_pbr(s: Surface, n: vec3<f32>, v: vec3<f32>, shadow: f32) -> vec3<f32> {
     col += env(r, rough) * spec * spec_ao;
     // Baked AO darkens the key light only a little: it's mostly sky occlusion.
     col += key_light(s, n, v, shadow) * mix(1.0, ao, 0.35);
+    col += point_lighting(s, n, v) * mix(1.0, ao, 0.35);
     col += s.emission * g.bg2.z;
     return col;
 }
