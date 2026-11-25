@@ -20,7 +20,7 @@ use crate::presets::{self, PreviewLayer};
 use crate::raytrace::{RayTracer, RtSettings};
 use crate::theme;
 use crate::undo::{StrokeTarget, UndoStack};
-use crate::viewport::{Background, Cam2d, FAR, NEAR, OrbitCam, OverlaySlot, Overlays, ViewMode, ViewRenderer, ViewSettings};
+use crate::viewport::{Background, Cam2d, FAR, NEAR, OrbitCam, OverlaySlot, Overlays, PointLight, MAX_POINT_LIGHTS, ViewMode, ViewRenderer, ViewSettings};
 use eframe::{egui, egui_wgpu, wgpu};
 use egui::{Color32, Rect, Sense, Stroke, pos2, vec2};
 use glam::{Vec2, Vec3};
@@ -59,6 +59,7 @@ mod project_settings_ui;
 mod layers_ui;
 mod shelf_ui;
 mod view_ui;
+mod lighting_ui;
 mod windows_ui;
 use color_ui::{ColorSliders, color_edit, hsv_to_rgb, rgb_to_hsv};
 mod vertex_id;
@@ -917,6 +918,7 @@ pub struct PainterApp {
     /// The running bake only makes the ID map (from vertex colors).
     bake_id_only: bool,
     cam: OrbitCam,
+    selected_point_light: usize,
     /// Blender-style first-person navigation, active only over the 3D viewport.
     walk_navigation: bool,
     /// Discard the stale/warp motion that can arrive immediately after cursor lock.
@@ -2499,6 +2501,7 @@ impl PainterApp {
             engine_epoch: 0,
             bake_id_only: false,
             cam: OrbitCam::default(),
+            selected_point_light: 0,
             walk_navigation: false,
             walk_skip_mouse_delta: false,
             walk_speed: 1.5,
