@@ -334,7 +334,7 @@ impl PainterApp {
                                         if !clip_rect.intersects(rect) {
                                             continue;
                                         }
-                                        let id = content_ui.id().with(("shelf-swatch", tile.id_salt()));
+                                        let id = content_ui.scope_id().with(("shelf-swatch", tile.id_salt()));
                                         match tile {
                                             ShelfTile::Graph(i) => {
                                                 let graph = &self.graphs.shelf[i];
@@ -522,14 +522,6 @@ impl PainterApp {
                     self.share_smart(ui.ctx(), &path);
                 }
             });
-    }
-
-    /// A shelf thumbnail `size` points wide with its name below; hovering
-    /// shows it at twice the size.
-    pub(super) fn swatch(ui: &mut egui::Ui, tex: egui::TextureId, name: &str, size: f32) -> egui::Response {
-        let named = size >= NAMED_MIN;
-        let (id, rect) = ui.allocate_space(vec2(size + 12.0, size + if named { 22.0 } else { 8.0 }));
-        Self::swatch_at(ui, id, rect, tex, name, size)
     }
 
     fn swatch_at(
