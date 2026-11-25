@@ -636,6 +636,14 @@ impl ViewTarget {
 /// Parameter slots (vec4 each) of a custom preview shader.
 pub const CUSTOM_PARAMS: usize = 128;
 
+fn custom_param_bits(values: &[[f32; 4]]) -> [[u32; 4]; CUSTOM_PARAMS] {
+    let mut bits = [[0u32; 4]; CUSTOM_PARAMS];
+    for (dst, src) in bits.iter_mut().zip(values.iter()) {
+        *dst = src.map(f32::to_bits);
+    }
+    bits
+}
+
 /// How the 3D view draws one texture set.
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
 pub struct SetLook {
@@ -759,9 +767,9 @@ impl ViewEngineStamp {
     }
 }
 
-/// Complete visual inputs for the built-in 3D raster viewport.
+/// Complete visual inputs for the 3D raster viewport.
 /// Reusing the image is safe only while every input that affects its pixels
-/// remains unchanged. Dynamic custom shaders bypass this cache.
+/// remains unchanged. Custom shader and parameter changes invalidate the key.
 #[derive(Clone, PartialEq)]
 struct View3dCacheKey {
     size: [u32; 2],
@@ -888,6 +896,9 @@ pub struct ViewRenderer {
     /// The mesh drawn with a custom preview shader (a compiled shading graph).
     custom_mesh: Option<wgpu::RenderPipeline>,
     custom_params: wgpu::Buffer,
+    /// Exact parameter values last uploaded; stable values let custom preview
+    /// shaders reuse the cached viewport image on idle frames.
+    custom_param_bits: [[u32; 4]; CUSTOM_PARAMS],
     post: PostFx,
     env_sampler: wgpu::Sampler,
     sky: wgpu::RenderPipeline,
@@ -1185,6 +1196,7 @@ impl ViewRenderer {
             set_looks: Vec::new(),
             custom_mesh: None,
             custom_params,
+            custom_param_bits: [[0; 4]; CUSTOM_PARAMS],
             post: PostFx::new(rs, COLOR_FORMAT),
             env_sampler: env_sampler(device),
             sky,
@@ -1282,10 +1294,14 @@ impl ViewRenderer {
     }
 
     /// The custom preview shader's parameter values (see `CUSTOM_PARAMS`).
-    pub fn set_custom_params(&self, queue: &wgpu::Queue, values: &[[f32; 4]]) {
-        let n = values.len().min(CUSTOM_PARAMS);
-        if n > 0 {
-            queue.write_buffer(&self.custom_params, 0, bytemuck::cast_slice(&values[..n]));
+    /// Identical values are not uploaded again; changed values invalidate the
+    /// 3D image cache before the next render.
+    pub fn set_custom_params(&mut self, queue: &wgpu::Queue, values: &[[f32; 4]]) {
+        let next = custom_param_bits(values);
+        if self.custom_param_bits != next {
+            self.custom_param_bits = next;
+            queue.write_buffer(&self.custom_params, 0, bytemuck::cast_slice(&self.custom_param_bits));
+            self.view3d_cache_key = None;
         }
     }
 
@@ -1555,7 +1571,9 @@ impl ViewRenderer {
         }
         let size = self.view3d.size;
         let overlay_generation = overlays.map_or(0, Overlays::generation);
-        let cacheable = self.custom_mesh.is_none();
+        // The custom pipeline is deterministic for the complete key too:
+        // set_custom_shader() and set_custom_params() clear this key on change.
+        let cacheable = true;
         let cache_hit = {
             let _s = crate::startup_trace::span("viewport 3D: frame cache comparison");
             if cacheable {
@@ -2169,5 +2187,34 @@ mod gl_view_shader_tests {
         let vk = view_shader_source(false, false);
         assert!(vk.contains("@binding(16) var shadow_map"));
         assert!(vk.contains("textureSampleCompareLevel(shadow_map"));
+    }
+}
+
+
+#[cfg(test)]
+mod custom_param_cache_tests {
+    use super::{CUSTOM_PARAMS, custom_param_bits};
+
+    #[test]
+    fn identical_custom_preview_parameters_have_identical_cache_keys() {
+        let values = [[0.25, 0.5, 0.75, 1.0], [2.0, 3.0, 4.0, 5.0]];
+        assert_eq!(custom_param_bits(&values), custom_param_bits(&values));
+    }
+
+    #[test]
+    fn changed_custom_preview_parameter_changes_cache_key() {
+        let first = [[0.25, 0.5, 0.75, 1.0]];
+        let second = [[0.25, 0.5, 0.75, 0.9]];
+        assert_ne!(custom_param_bits(&first), custom_param_bits(&second));
+    }
+
+    #[test]
+    fn shorter_parameter_list_clears_stale_values() {
+        let longer = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]];
+        let short = [[1.0, 2.0, 3.0, 4.0]];
+        let bits = custom_param_bits(&short);
+        assert_eq!(bits[0], longer[0].map(f32::to_bits));
+        assert_eq!(bits[1], [0; 4]);
+        assert_eq!(bits.len(), CUSTOM_PARAMS);
     }
 }
