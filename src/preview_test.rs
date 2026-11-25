@@ -9,9 +9,9 @@ use crate::bake::{BakeSettings, GpuBaker};
 use crate::bake::tests::{gpu_with_adapter, run_bake};
 use crate::engine::{Engine, MAPS};
 use crate::gpu::{GpuMesh, read_texture};
-use crate::mesh::Mesh;
+use crate::mesh::{Mesh, Primitive};
 use crate::presets;
-use crate::viewport::{OrbitCam, ViewMode, ViewRenderer, ViewSettings};
+use crate::viewport::{Background, OrbitCam, PointLight, ViewMode, ViewRenderer, ViewSettings};
 use eframe::{egui, egui_wgpu, wgpu};
 use glam::Vec3;
 use std::path::Path;
@@ -183,6 +183,44 @@ fn preview_mesh() {
         }
     }
     println!("  previews in {}", dir.display());
+}
+
+#[test]
+#[ignore]
+fn point_lights_affect_the_material_viewport() {
+    let mesh = Primitive::RoundedCube.build();
+    let rs = render_state();
+    let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+    let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 128);
+    engine.composite();
+    let env = crate::environment::EnvBaker::new(&rs.device)
+        .upload(&rs, &crate::environment::decode(&crate::environment::EnvSource::Builtin(0)).unwrap());
+    let mut views = ViewRenderer::new(&rs);
+    let cam = OrbitCam::default();
+    let size = [320, 240];
+
+    let mut settings = ViewSettings::default();
+    settings.key.on = false;
+    settings.env_intensity = 0.0;
+    settings.ao_strength = 0.0;
+    settings.background = Background::Color;
+    settings.bg_color = [0.0, 0.0, 0.0];
+
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &settings, None);
+    let unlit = read_texture(&rs.device, &rs.queue, views.view3d.image());
+    let unlit_energy: u64 = unlit.chunks_exact(4).map(|p| p[0] as u64 + p[1] as u64 + p[2] as u64).sum();
+
+    let mut point = PointLight::new(cam.eye());
+    point.range = 20.0;
+    point.intensity = 80.0;
+    settings.point_lights[0] = point;
+    settings.point_light_count = 1;
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &settings, None);
+    let lit = read_texture(&rs.device, &rs.queue, views.view3d.image());
+    let lit_energy: u64 = lit.chunks_exact(4).map(|p| p[0] as u64 + p[1] as u64 + p[2] as u64).sum();
+
+    assert!(lit_energy > unlit_energy + 10_000, "point light did not brighten the rendered mesh: unlit={unlit_energy}, lit={lit_energy}");
+    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 }
 
 
