@@ -1,6 +1,32 @@
 //! The 3D and 2D viewports: input, drawing of the panes and end-of-frame bookkeeping.
 use super::*;
 
+/// Project a world-space point-light position into the 3D viewport's UI coordinates.
+fn point_light_screen_position(cam: &OrbitCam, position: Vec3, rect: Rect) -> Option<egui::Pos2> {
+    if rect.width() <= 1.0 || rect.height() <= 1.0 || !position.is_finite() {
+        return None;
+    }
+    let clip = cam.view_proj(rect.width() / rect.height()) * position.extend(1.0);
+    if !clip.w.is_finite() || clip.w <= 1e-5 {
+        return None;
+    }
+    let ndc = clip.truncate() / clip.w;
+    if !ndc.is_finite()
+        || ndc.z < 0.0
+        || ndc.z > 1.0
+        || ndc.x < -1.0
+        || ndc.x > 1.0
+        || ndc.y < -1.0
+        || ndc.y > 1.0
+    {
+        return None;
+    }
+    Some(pos2(
+        rect.left() + (ndc.x * 0.5 + 0.5) * rect.width(),
+        rect.top() + (0.5 - ndc.y * 0.5) * rect.height(),
+    ))
+}
+
 /// Points of the opacity arc, starting at the top and going clockwise.
 /// `turn_segments` is how many straight pieces a full turn would use.
 fn stroke_opacity_arc_points_dense(center: egui::Pos2, radius: f32, opacity: f32, turn_segments: f32) -> Vec<egui::Pos2> {
@@ -112,6 +138,64 @@ impl PainterApp {
         let ppp = self.ppp;
         let local = |p: egui::Pos2| Vec2::new((p.x - rect.min.x) * ppp, (p.y - rect.min.y) * ppp);
         use egui::PointerButton as B;
+
+        // Moving a light is a one-click placement mode, not a paint gesture.
+        // Use the mesh hit when possible; otherwise place it on the camera's
+        // focal plane so lights can also be moved into empty space.
+        if self.move_point_light && kind == ViewKind::V3d {
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.move_point_light = false;
+                self.status = "Point-light move mode cancelled.".into();
+                ui.ctx().request_repaint();
+                return;
+            }
+            if pressed && resp.hovered() && let Some(pointer) = hover {
+                let size = Vec2::new(rect.width() * ppp, rect.height() * ppp);
+                let (origin, direction) = self.cam.ray(local(pointer), size);
+                let position = if let Some(hit) = self.bvh.raycast(origin, direction) {
+                    Some(hit.pos - direction * 0.25)
+                } else {
+                    let forward = (self.cam.target - origin).normalize_or_zero();
+                    let denominator = direction.dot(forward);
+                    if denominator.abs() > 1e-5 {
+                        let distance = (self.cam.target - origin).dot(forward) / denominator;
+                        (distance > 0.0).then_some(origin + direction * distance)
+                    } else {
+                        None
+                    }
+                };
+                let count = self.view.point_light_count.min(crate::viewport::MAX_POINT_LIGHTS);
+                if count > 0 && self.selected_point_light < count && let Some(position) = position.filter(|p| p.is_finite()) {
+                    self.view.point_lights[self.selected_point_light].position = position;
+                    self.move_point_light = false;
+                    self.status = format!(
+                        "Point {} moved to X {:.2}, Y {:.2}, Z {:.2}.",
+                        self.selected_point_light + 1, position.x, position.y, position.z
+                    );
+                }
+                ui.ctx().request_repaint();
+            }
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            return;
+        }
+
+        // Clicking a marker selects its light and is deliberately intercepted
+        // before the regular paint input path.
+        if kind == ViewKind::V3d && self.show_point_light_markers && pressed && resp.hovered()
+            && let Some(pointer) = hover
+        {
+            let count = self.view.point_light_count.min(crate::viewport::MAX_POINT_LIGHTS);
+            for index in 0..count {
+                if point_light_screen_position(&self.cam, self.view.point_lights[index].position, rect)
+                    .is_some_and(|marker| marker.distance(pointer) <= 12.0)
+                {
+                    self.selected_point_light = index;
+                    self.status = format!("Point light {} selected.", index + 1);
+                    ui.ctx().request_repaint();
+                    return;
+                }
+            }
+        }
 
         // Ctrl+' toggles first-person navigation while the pointer is over
         // the 3D viewport. While active, the pointer is locked/hidden and
@@ -553,6 +637,44 @@ impl PainterApp {
             ViewKind::V2d => self.views.view2d.egui_id,
         };
         painter.image(id, rect, uv, Color32::WHITE);
+        if kind == ViewKind::V3d && self.show_point_light_markers {
+            let count = self.view.point_light_count.min(crate::viewport::MAX_POINT_LIGHTS);
+            for index in 0..count {
+                let light = self.view.point_lights[index];
+                let Some(marker) = point_light_screen_position(&self.cam, light.position, rect) else { continue };
+                let tint = Color32::from_rgba_unmultiplied(
+                    (light.color[0].clamp(0.0, 1.0) * 255.0) as u8,
+                    (light.color[1].clamp(0.0, 1.0) * 255.0) as u8,
+                    (light.color[2].clamp(0.0, 1.0) * 255.0) as u8,
+                    if light.on { 255 } else { 105 },
+                );
+                let selected = index == self.selected_point_light;
+                let outline = if selected { theme::ACCENT } else { tint };
+                painter.circle_filled(marker, 8.5, Color32::from_black_alpha(220));
+                painter.circle_stroke(marker, 8.0, Stroke::new(if selected { 2.0 } else { 1.5 }, outline));
+                painter.circle_filled(marker, 2.8, tint);
+                for (dx, dy) in [(0.0, -12.0), (12.0, 0.0), (0.0, 12.0), (-12.0, 0.0)] {
+                    let start = marker + vec2(dx * 0.62, dy * 0.62);
+                    let end = marker + vec2(dx, dy);
+                    painter.line_segment([start, end], Stroke::new(1.4, outline));
+                }
+                let label_rect = Rect::from_min_size(marker + vec2(11.0, -9.0), vec2(26.0, 17.0));
+                painter.rect_filled(label_rect, 3.0, Color32::from_black_alpha(205));
+                painter.text(
+                    label_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    format!("L{}", index + 1),
+                    egui::FontId::proportional(10.0),
+                    if light.on { Color32::WHITE } else { Color32::from_gray(165) },
+                );
+            }
+        }
+        if kind == ViewKind::V3d && self.move_point_light {
+            let prompt = format!("Move Point {} · click the model to place · Esc cancels", self.selected_point_light + 1);
+            let prompt_rect = Rect::from_min_size(rect.left_bottom() + vec2(8.0, -28.0), vec2(290.0, 20.0));
+            painter.rect_filled(prompt_rect, 3.0, Color32::from_black_alpha(205));
+            painter.text(prompt_rect.center(), egui::Align2::CENTER_CENTER, prompt, egui::FontId::proportional(11.0), Color32::WHITE);
+        }
         self.draw_path(&painter, kind, rect);
         self.draw_gizmo(&painter, kind, rect);
         self.draw_cage_brush(&painter, kind);
