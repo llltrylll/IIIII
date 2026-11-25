@@ -7,7 +7,7 @@ use glam::Vec3;
 fn camera_light_position(cam: &OrbitCam, horizontal_offset: f32, vertical_offset: f32) -> Vec3 {
     let (right, up) = cam.basis();
     let forward = (cam.target - cam.eye()).normalize_or_zero();
-    let in_front_distance = (cam.dist * 0.4).min(3.0);
+    let in_front_distance = (cam.dist * 0.4).clamp(0.25, 3.0);
     cam.target - forward * in_front_distance + right * horizontal_offset + up * vertical_offset
 }
 
@@ -131,6 +131,14 @@ mod tests {
         cam.set_distance(500.0);
         let position = camera_light_position(&cam, 0.0, 0.0);
         assert!((position.distance(cam.target) - 3.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn auto_placed_light_stays_far_enough_from_focus_for_close_camera() {
+        let mut cam = OrbitCam::default();
+        cam.set_distance(0.01);
+        let position = camera_light_position(&cam, 0.0, 0.0);
+        assert!((position.distance(cam.target) - 0.25).abs() < 1e-4);
     }
 
     #[test]
