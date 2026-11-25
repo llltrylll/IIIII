@@ -1,5 +1,6 @@
 //! Camera lens and editable viewport lighting controls.
 use super::*;
+use crate::viewport::{PointLight, MAX_POINT_LIGHTS};
 
 impl PainterApp {
     pub(super) fn lighting_panel(&mut self, ui: &mut egui::Ui) {
