@@ -2299,7 +2299,7 @@ mod camera_frame_tests {
         let mut cam = OrbitCam::default();
         let original = cam;
         cam.frame_bounds(Vec3::splat(f32::NAN), Vec3::ONE, 1.0);
-        assert_eq!(cam, original);
+        assert!(cam == original);
     }
 }
 
