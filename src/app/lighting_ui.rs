@@ -39,7 +39,11 @@ impl PainterApp {
             }
 
             section(ui, "Directional key");
-            labeled(ui, "Enabled", |ui| ui.checkbox(&mut self.view.key.on, ""));
+            ui.checkbox(
+                &mut self.view.key.on,
+                theme::with_icon(icons::SUN, "Directional light with shadows"),
+            )
+            .on_hover_text("A sun-like light with shadows. Its direction turns with the environment rotation.");
             slider(ui, "Azimuth", &mut self.view.key.azimuth, -180.0..=180.0);
             slider(ui, "Elevation", &mut self.view.key.elevation, -89.0..=89.0);
             slider(ui, "Intensity", &mut self.view.key.intensity, 0.0..=8.0);
