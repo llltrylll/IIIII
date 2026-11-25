@@ -967,6 +967,8 @@ pub struct PainterApp {
     technical_ui: technical_ui::TechnicalUi,
     /// A 3D view drew this frame (else its depth is rendered offscreen).
     drew_3d: bool,
+    /// Mesh ID whose bounds were used for the current initial camera framing.
+    view_framed_mesh_id: Option<u64>,
     pending: Vec<Action>,
     /// A deep copy of a layer block; survives texture-set switches.
     layer_clipboard: Option<Vec<Layer>>,
@@ -2532,6 +2534,7 @@ impl PainterApp {
             project_panel_open: false,
             technical_ui: technical_ui::TechnicalUi::load(),
             drew_3d: false,
+            view_framed_mesh_id: None,
             pending: Vec::new(),
             layer_clipboard: None,
             status: "Ready. Paint with LMB, orbit with Alt+LMB or RMB, pan with MMB.".into(),
@@ -3892,8 +3895,7 @@ impl PainterApp {
                 self.view.show_wire_3d = !self.view.show_wire_3d;
             }
             if i.key_pressed(Key::F) {
-                self.cam = OrbitCam { yaw: self.cam.yaw, pitch: self.cam.pitch, fov_y: self.cam.fov_y, ..OrbitCam::default() };
-                self.cam2d.zoom = 0.0;
+                self.frame_mesh_views();
             }
             if i.key_pressed(Key::M) {
                 self.view.mode = ViewMode::Material;
@@ -4068,8 +4070,7 @@ impl PainterApp {
                 });
                 ui.add(egui::Checkbox::new(&mut self.rt.enabled, "Ray traced preview (F10)"));
                 if ui.add(egui::Button::new("Frame mesh").shortcut_text("F")).clicked() {
-                    self.cam = OrbitCam { fov_y: self.cam.fov_y, ..OrbitCam::default() };
-                    self.cam2d.zoom = 0.0;
+                    self.frame_mesh_views();
                     ui.close();
                 }
             });
