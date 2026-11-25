@@ -8,11 +8,11 @@ set "MP_STARTUP_TRACE=%~dp0OpenGL-startup-trace.txt"
 > "%~dp0OpenGL-launch.log" echo Material Painter OpenGL launcher
 >> "%~dp0OpenGL-launch.log" echo Requested backend: %WGPU_BACKEND%
 >> "%~dp0OpenGL-launch.log" echo Started: %DATE% %TIME%
->> "%~dp0OpenGL-launch.log" echo Executable: %~dp0MaterialPainter.exe
+>> "%~dp0OpenGL-launch.log" echo Executable: %~dp0Material Painter.exe
 
 echo Starting Material Painter with OpenGL (WGPU_BACKEND=gl)...
 echo If startup fails, this window will remain open.
-"%~dp0MaterialPainter.exe" >> "%~dp0OpenGL-launch.log" 2>&1
+"%~dp0Material Painter.exe" >> "%~dp0OpenGL-launch.log" 2>&1
 set "APP_EXIT=%ERRORLEVEL%"
 
 >> "%~dp0OpenGL-launch.log" echo Exit code: %APP_EXIT%
