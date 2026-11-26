@@ -432,6 +432,8 @@ pub struct PainterApp {
     id_color_pick_target: Option<(usize, Option<usize>)>,
     /// Whether the imported Low Poly vertex colors are drawn over the 3D mesh.
     vertex_color_preview_active: bool,
+    /// Texture-set visibility used to build the current vertex-color overlay.
+    vertex_color_preview_hidden: Vec<bool>,
     /// Connected-component IDs for the Low Poly mesh; built once and reused by the eyedropper.
     mesh_part_ids: Option<Vec<u32>>,
     cam: OrbitCam,
@@ -1406,6 +1408,7 @@ impl PainterApp {
             brush: Brush::default(),
             id_color_pick_target: None,
             vertex_color_preview_active: false,
+            vertex_color_preview_hidden: Vec::new(),
             mesh_part_ids: None,
             cam: OrbitCam::default(),
             cam2d: Cam2d::default(),
@@ -1667,6 +1670,7 @@ impl PainterApp {
         self.mesh = Arc::new(mesh);
         self.id_color_pick_target = None;
         self.vertex_color_preview_active = false;
+        self.vertex_color_preview_hidden.clear();
         self.mesh_part_ids = None;
         self.overlays.clear(OverlaySlot::VertexColors);
         if self.bake_settings.id_source == IdSource::VertexColors
@@ -5000,27 +5004,40 @@ impl PainterApp {
         let show = self.bake_settings.id_source == IdSource::VertexColors
             && self.bake_settings.high_poly.is_none()
             && has_colors;
-        if show == self.vertex_color_preview_active {
+        let hidden = self.sets.hidden.clone();
+        let visibility_changed = show && hidden != self.vertex_color_preview_hidden;
+        if show == self.vertex_color_preview_active && !visibility_changed {
             return;
         }
         if show {
             let mut triangles = Vec::with_capacity(self.mesh.indices.len());
             if let Some(colors) = &self.mesh.tri_vertex_color {
-                for (tri_index, tri) in self.mesh.indices.chunks_exact(3).enumerate() {
-                    let tri_colors = colors[tri_index];
-                    for corner in 0..3 {
-                        let Some(vertex) = self.mesh.vertices.get(tri[corner] as usize) else { continue; };
-                        let rgb = tri_colors[corner];
-                        triangles.push(OverlayVertex {
-                            pos: vertex.pos,
-                            color: [rgb[0], rgb[1], rgb[2], 255],
-                        });
+                // Overlays are rendered after the visible texture sets; omit
+                // hidden sets explicitly so their colors don't float over them.
+                for (set_index, set) in self.mesh.sets.iter().enumerate() {
+                    if hidden.get(set_index).copied().unwrap_or(false) {
+                        continue;
+                    }
+                    for tri_index in set.tris.clone() {
+                        let tri_index = tri_index as usize;
+                        let tri = &self.mesh.indices[tri_index * 3..tri_index * 3 + 3];
+                        let tri_colors = colors[tri_index];
+                        for corner in 0..3 {
+                            let Some(vertex) = self.mesh.vertices.get(tri[corner] as usize) else { continue; };
+                            let rgb = tri_colors[corner];
+                            triangles.push(OverlayVertex {
+                                pos: vertex.pos,
+                                color: [rgb[0], rgb[1], rgb[2], 255],
+                            });
+                        }
                     }
                 }
             }
             self.overlays.set(&self.rs.device, OverlaySlot::VertexColors, &triangles, &[]);
+            self.vertex_color_preview_hidden = hidden;
         } else {
             self.overlays.clear(OverlaySlot::VertexColors);
+            self.vertex_color_preview_hidden.clear();
         }
         self.vertex_color_preview_active = show;
         ctx.request_repaint();
