@@ -13,6 +13,8 @@ fn camera_light_position(cam: &OrbitCam, horizontal_offset: f32, vertical_offset
 
 impl PainterApp {
     pub(super) fn toggle_point_light_move(&mut self) {
+        self.drag_point_light = None;
+        self.point_light_pointer_capture = false;
         let count = self.view.point_light_count.min(MAX_POINT_LIGHTS);
         if count == 0 {
             self.move_point_light = false;
@@ -31,7 +33,7 @@ impl PainterApp {
     pub(super) fn lighting_panel(&mut self, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new("Scene lighting controls").strong().color(Color32::WHITE));
         ui.label(
-            egui::RichText::new("Position and tune viewport light sources. Camera FOV is available from the Support menu.")
+            egui::RichText::new("Position and tune viewport light sources. Camera FOV is on the top bar.")
                 .small()
                 .color(theme::TEXT_DIM),
         );
@@ -66,12 +68,14 @@ impl PainterApp {
                     self.view.point_light_count = existing + 1;
                     self.selected_point_light = existing;
                 }
-                let move_label = if self.move_point_light { "Cancel move" } else { "Move selected" };
+                let move_label = if self.move_point_light { "Cancel placement" } else { "Place with click" };
                 if ui.add_enabled(existing > 0, egui::Button::new(move_label)).clicked() {
                     self.toggle_point_light_move();
                 }
                 if ui.add_enabled(existing > 0, egui::Button::new("Remove")).clicked() {
                     let selected = self.selected_point_light.min(existing - 1);
+                    self.drag_point_light = None;
+                    self.point_light_pointer_capture = false;
                     for index in selected..(existing - 1) {
                         self.view.point_lights[index] = self.view.point_lights[index + 1];
                     }
@@ -98,7 +102,7 @@ impl PainterApp {
                 let selected = self.selected_point_light;
                 section(ui, &format!("Point light {}", selected + 1));
                 ui.horizontal(|ui| {
-                    let move_button = egui::Button::new(if self.move_point_light { "Cancel placement" } else { "Move in 3D view" })
+                    let move_button = egui::Button::new(if self.move_point_light { "Cancel placement" } else { "Place with click" })
                         .min_size(vec2(150.0, 26.0));
                     if ui.add(move_button).clicked() {
                         self.toggle_point_light_move();
@@ -108,7 +112,7 @@ impl PainterApp {
                     }
                 });
                 ui.label(
-                    egui::RichText::new("Viewport marker: left-click to select, right-click to toggle this light.")
+                    egui::RichText::new("Drag the marker in the 3D view to move it. Right-click the marker to toggle it; Place with click snaps it to a surface.")
                         .small()
                         .color(theme::TEXT_DIM),
                 );
@@ -127,7 +131,7 @@ impl PainterApp {
             ui.add_space(8.0);
             if self.move_point_light {
                 ui.label(
-                    egui::RichText::new(format!("Move mode active: click the model in the 3D view to place Point {}. Esc cancels.", self.selected_point_light + 1))
+                    egui::RichText::new(format!("Placement mode: click a surface in the 3D view to place Point {}. Esc cancels.", self.selected_point_light + 1))
                         .small()
                         .color(theme::ACCENT),
                 );
