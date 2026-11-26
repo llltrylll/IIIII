@@ -644,7 +644,7 @@ impl PainterApp {
         }
         if !m["tri_vertex_color"].is_null() {
             let bytes = r.blob(&m["tri_vertex_color"])?;
-            mesh.tri_vertex_color = decode_triangle_vertex_colors(&bytes, tris);
+            mesh.tri_vertex_color = Some(decode_triangle_vertex_colors(&bytes, tris).ok_or_else(bad)?);
         }
         // Legacy .mpp projects contain only the average color per triangle.
         // Preserve their old flat-ID behavior rather than silently dropping it.
