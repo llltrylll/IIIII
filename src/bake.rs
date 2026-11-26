@@ -3121,7 +3121,8 @@ mod low_poly_vertex_id_tests {
         for id_source in [IdSource::MeshParts, IdSource::Materials] {
             let settings = BakeSettings { id_source, ..BakeSettings::default() };
             let scene = prepare(&mesh, &settings, 0).expect("flat ID source prepares");
-            assert!(scene.tri_vcolor.is_empty(), "flat ID source must not allocate 3 colors per triangle");
+            assert!(scene.tri_vcolor.is_empty(), "flat ID source must not store per-corner colors");
+            assert_eq!(scene.tri_vcolor.capacity(), 0, "flat ID source must not reserve per-corner color memory");
             assert!(!scene.ids.is_empty(), "flat ID source keeps its compact palette");
         }
     }
