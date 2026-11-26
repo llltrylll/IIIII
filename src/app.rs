@@ -1662,6 +1662,15 @@ impl PainterApp {
         };
         let old_names: Vec<String> = self.mesh.sets.iter().map(|s| s.name.clone()).collect();
         self.mesh = Arc::new(mesh);
+        self.id_color_pick_target = None;
+        self.vertex_color_preview_active = false;
+        self.overlays.clear(OverlaySlot::VertexColors);
+        if self.bake_settings.id_source == IdSource::VertexColors
+            && (self.bake_settings.high_poly.is_some()
+                || self.mesh.tri_vertex_color.as_ref().is_none_or(|colors| colors.len() != self.mesh.indices.len() / 3))
+        {
+            self.bake_settings.id_source = IdSource::MeshParts;
+        }
         self.rebuild_sets(&old_names, sizes);
         // Mesh-dependent helpers rebuild for the new mesh on demand.
         self.poly.topo = None;
