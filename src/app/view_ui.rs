@@ -1,6 +1,14 @@
 //! The 3D and 2D viewports: input, drawing of the panes and end-of-frame bookkeeping.
 use super::*;
 
+/// The raster viewport is the supported preview while any local point light is enabled.
+fn has_enabled_point_lights(view: &ViewSettings) -> bool {
+    view.point_lights
+        .iter()
+        .take(view.point_light_count.min(crate::viewport::MAX_POINT_LIGHTS))
+        .any(|light| light.on)
+}
+
 /// Project a world-space point-light position into the 3D viewport's UI coordinates.
 fn point_light_screen_position(cam: &OrbitCam, position: Vec3, rect: Rect) -> Option<egui::Pos2> {
     if rect.width() <= 1.0 || rect.height() <= 1.0 || !position.is_finite() {
@@ -687,10 +695,7 @@ impl PainterApp {
                 // the map display modes use the raster view, which reacts instantly.
                 // Keep the raster viewport responsive while editing a local
                 // light. Ray tracing is resumed automatically on release.
-                let local_point_lights_active = self.view.point_lights
-                    .iter()
-                    .take(self.view.point_light_count.min(crate::viewport::MAX_POINT_LIGHTS))
-                    .any(|light| light.on);
+                let local_point_lights_active = has_enabled_point_lights(&self.view);
                 if self.rt.enabled && !local_point_lights_active
                     && self.drag_point_light.is_none() && self.view.point_light_preview.is_none()
                     && self.stroke.is_none() && self.view.mode == ViewMode::Material && self.preview_update_at.is_none()
@@ -1105,3 +1110,35 @@ mod point_light_drag_tests {
     }
 }
 
+#[cfg(test)]
+mod local_point_light_rt_fallback_tests {
+    use super::has_enabled_point_lights;
+    use crate::viewport::ViewSettings;
+
+    #[test]
+    fn no_active_light_allows_ray_tracing() {
+        let mut view = ViewSettings::default();
+        assert!(!has_enabled_point_lights(&view));
+
+        view.point_light_count = 1;
+        view.point_lights[0].on = false;
+        assert!(!has_enabled_point_lights(&view));
+    }
+
+    #[test]
+    fn any_enabled_light_keeps_the_raster_preview() {
+        let mut view = ViewSettings::default();
+        view.point_light_count = 2;
+        view.point_lights[0].on = false;
+        view.point_lights[1].on = true;
+        assert!(has_enabled_point_lights(&view));
+    }
+
+    #[test]
+    fn enabled_slots_outside_active_count_are_ignored() {
+        let mut view = ViewSettings::default();
+        view.point_light_count = 0;
+        view.point_lights[0].on = true;
+        assert!(!has_enabled_point_lights(&view));
+    }
+}
