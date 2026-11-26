@@ -672,7 +672,11 @@ impl PainterApp {
                 self.drew_3d = true;
                 // Path tracing replaces the 3D view while it's idle. Painting and
                 // the map display modes use the raster view, which reacts instantly.
-                if self.rt.enabled && self.stroke.is_none() && self.view.mode == ViewMode::Material && self.preview_update_at.is_none() {
+                // Keep the raster viewport responsive while editing a local
+                // light. Ray tracing is resumed automatically on release.
+                if self.rt.enabled && self.drag_point_light.is_none() && self.view.point_light_preview.is_none()
+                    && self.stroke.is_none() && self.view.mode == ViewMode::Material && self.preview_update_at.is_none()
+                {
                     if self.raytracer.is_none() {
                         let _s = crate::startup_trace::span("raytraced preview: lazy RayTracer::new + set_mesh");
                         let mut raytracer = RayTracer::new(&self.rs);
