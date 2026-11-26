@@ -214,12 +214,34 @@ fn point_lights_affect_the_material_viewport() {
     point.range = 20.0;
     point.intensity = 80.0;
     settings.point_lights[0] = point;
-    settings.point_light_count = 1;
+    let mut second = PointLight::new(cam.eye() + Vec3::X * 1.5);
+    second.color = [0.15, 0.35, 1.0];
+    second.range = 20.0;
+    second.intensity = 45.0;
+    settings.point_lights[1] = second;
+    settings.point_light_count = 2;
     views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &settings, None);
     let lit = read_texture(&rs.device, &rs.queue, views.view3d.image());
     let lit_energy: u64 = lit.chunks_exact(4).map(|p| p[0] as u64 + p[1] as u64 + p[2] as u64).sum();
 
-    assert!(lit_energy > unlit_energy + 10_000, "point light did not brighten the rendered mesh: unlit={unlit_energy}, lit={lit_energy}");
+    // The interactive path must pack just the selected source into slot zero.
+    // Compare it with an equivalent one-light scene to guard against both
+    // stale slot data and accidentally evaluating the other local lights.
+    let mut interactive = settings;
+    interactive.point_light_preview = Some(1);
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &interactive, None);
+    let interactive_image = read_texture(&rs.device, &rs.queue, views.view3d.image());
+
+    let mut selected_only = settings;
+    selected_only.point_lights = [PointLight::default(); crate::viewport::MAX_POINT_LIGHTS];
+    selected_only.point_lights[0] = second;
+    selected_only.point_light_count = 1;
+    selected_only.point_light_preview = Some(0);
+    views.render_3d(&rs, size, &[&engine], &env, &gpu_mesh, &cam, &selected_only, None);
+    let selected_only_image = read_texture(&rs.device, &rs.queue, views.view3d.image());
+
+    assert!(lit_energy > unlit_energy + 10_000, "point lights did not brighten the rendered mesh: unlit={unlit_energy}, lit={lit_energy}");
+    assert_eq!(interactive_image, selected_only_image, "interactive preview must shade only the selected point light");
     rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 }
 
