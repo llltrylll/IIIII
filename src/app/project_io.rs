@@ -918,7 +918,7 @@ mod tests {
             [[10, 11, 12], [13, 14, 15], [16, 17, 18]],
         ];
         let bytes = bytemuck::cast_slice(&colors);
-        assert_eq!(decode_triangle_vertex_colors(bytes, 2), Some(colors));
+        assert_eq!(decode_triangle_vertex_colors(bytes, 2), Some(colors.clone()));
         assert!(decode_triangle_vertex_colors(bytes, 1).is_none());
         assert!(decode_triangle_vertex_colors(&bytes[..bytes.len() - 1], 2).is_none());
     }
