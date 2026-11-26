@@ -526,8 +526,11 @@ pub struct PreparedScene {
     nodes: Vec<[f32; 4]>,
     tri_pos: Vec<[f32; 4]>,
     tri_nrm: Vec<[f32; 4]>,
-    /// Per-corner sRGB vertex colors, or the selected flat ID color.
+    /// Three sRGB vertex colors per triangle, only for the Low Poly Vertex
+    /// Color ID source. Other ID sources use the compact per-region palette.
     tri_vcolor: Vec<[f32; 4]>,
+    /// Compact generated or imported ID colors, indexed by tri_pos' ID field.
+    ids: Vec<[f32; 4]>,
     parts: Vec<[f32; 4]>,
     /// Hard-edge segments (two entries each) and their BVH: convex edges, then concave creases.
     seg_nodes: Vec<[f32; 4]>,
@@ -1215,13 +1218,10 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
             let n = normals[v as usize];
             tri_pos.push([p.x, p.y, p.z, w[k]]);
             tri_nrm.push([n.x, n.y, n.z, curvature.get(v as usize).copied().unwrap_or(0.0)]);
-            let color = if settings.id_source == IdSource::VertexColors {
+            if settings.id_source == IdSource::VertexColors {
                 let rgb = tri_vertex_color.as_ref().expect("validated Low Poly vertex colors")[t][k];
-                [rgb[0] as f32 / 255.0, rgb[1] as f32 / 255.0, rgb[2] as f32 / 255.0, 1.0]
-            } else {
-                flat_id
-            };
-            tri_vcolor.push(color);
+                tri_vcolor.push([rgb[0] as f32 / 255.0, rgb[1] as f32 / 255.0, rgb[2] as f32 / 255.0, 1.0]);
+            }
         }
     }
     // A low poly's interpolated normals give unreliable texel curvature, so
@@ -1272,6 +1272,7 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
         tri_pos,
         tri_nrm,
         tri_vcolor,
+        ids,
         parts,
         seg_nodes,
         segs,
@@ -1601,6 +1602,7 @@ impl GpuBaker {
                 (5, Storage(false)),
                 (6, Storage(false)),
                 (7, Storage(false)),
+                (8, Storage(false)),
                 (39, Storage(false)),
                 (9, StorageTex(F::Rgba32Float)),
                 (10, StorageTex(F::Rgba16Float)),
@@ -1902,7 +1904,8 @@ impl GpuBaker {
             ],
             c: [s.thickness_distance, if s.bakes(4) { s.sky_rays as f32 } else { 0.0 }, s.sky_cone_deg.to_radians().cos(), s.curvature_radius],
             d: [s.edge_threshold, scene.edge_max_distance, scene.curvature_scale, if s.high_poly.is_none() { 1.0 } else { 0.0 }],
-            e: [0.0, 0.0, 0.0, 1.0],
+            // e.w selects interpolated per-corner colors vs the compact flat-ID palette.
+            e: [0.0, 0.0, 0.0, f32::from(s.id_source == IdSource::VertexColors)],
             f: [scene.edge_roots[0], scene.edge_roots[1], if cage.is_some() { 1.0 } else { 0.0 }, scene.edge_seed_curvature],
             // Random ray sets are picked per world cell of about two texels
             // (see `world_seed` in bake.wgsl).
@@ -1918,7 +1921,12 @@ impl GpuBaker {
         let nodes = Self::storage(device, "bvh nodes", &scene.nodes);
         let tri_pos = Self::storage(device, "tri positions", &scene.tri_pos);
         let tri_nrm = Self::storage(device, "tri normals", &scene.tri_nrm);
-        let tri_vcolor = Self::storage(device, "tri vertex colors", &scene.tri_vcolor);
+        // Only Vertex Color ID needs three colors per triangle. For parts or
+        // materials, bind a one-element dummy buffer and keep the compact palette.
+        let empty_tri_vcolor = [[0.0f32; 4]; 1];
+        let tri_vcolor_data = if scene.tri_vcolor.is_empty() { &empty_tri_vcolor[..] } else { &scene.tri_vcolor[..] };
+        let tri_vcolor = Self::storage(device, "tri vertex colors", tri_vcolor_data);
+        let ids = Self::storage(device, "ID palette", &scene.ids);
         let parts = Self::storage(device, "parts", &scene.parts);
         let seg_nodes = Self::storage(device, "edge bvh nodes", &scene.seg_nodes);
         let segs = Self::storage(device, "edge segments", &scene.segs);
@@ -1953,6 +1961,7 @@ impl GpuBaker {
                 (5, tri_pos.as_entire_binding()),
                 (6, tri_nrm.as_entire_binding()),
                 (7, parts.as_entire_binding()),
+                (8, ids.as_entire_binding()),
                 (39, tri_vcolor.as_entire_binding()),
                 (9, v(&surf_pos)),
                 (10, v(&surf_nrm)),
