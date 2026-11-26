@@ -3054,6 +3054,7 @@ pub(crate) mod tests {
                 "ID map channel {channel} should vary across the triangle, got {min}..{max}"
             );
         }
+    }
 
     /// End-to-end GPU regression: flat Mesh Parts IDs still use the compact palette.
     #[test]
@@ -3111,8 +3112,6 @@ pub(crate) mod tests {
             }
         }
         assert!(interior > 100, "the flat-ID triangle must cover enough texels ({interior})");
-    }
-
     }
 }
 
