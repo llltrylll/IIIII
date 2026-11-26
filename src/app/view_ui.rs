@@ -602,6 +602,14 @@ impl PainterApp {
         if rect.width() < 4.0 || rect.height() < 4.0 {
             return;
         }
+        // Do not leave the reduced interaction preview active if a slider
+        // was released while its Lighting tab became inactive.
+        if kind == ViewKind::V3d && self.drag_point_light.is_none()
+            && self.view.point_light_preview.is_some()
+            && !ui.input(|i| i.pointer.any_down())
+        {
+            self.view.point_light_preview = None;
+        }
         // Camera and UV pan can outlive a project reload. Fit the first frame
         // of each new GPU mesh to its actual bounds rather than showing empty space.
         if kind == ViewKind::V3d
