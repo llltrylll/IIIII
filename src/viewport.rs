@@ -376,6 +376,9 @@ pub struct ViewSettings {
     /// settings cheap to copy and straightforward to cache.
     pub point_lights: [PointLight; MAX_POINT_LIGHTS],
     pub point_light_count: usize,
+    /// Temporary interaction preview: render only this light, without its
+    /// specular lobe, while the user drags or edits it. None renders all lights.
+    pub point_light_preview: Option<usize>,
 }
 
 /// A directional key light with shadows, on top of the environment. Its
@@ -431,6 +434,7 @@ impl Default for ViewSettings {
             key: KeyLight::default(),
             point_lights: [PointLight::default(); MAX_POINT_LIGHTS],
             point_light_count: 0,
+            point_light_preview: None,
         }
     }
 }
@@ -1505,12 +1509,23 @@ impl ViewRenderer {
             light_vp: Self::light_view_proj(engine, s).to_cols_array_2d(),
             sun: s.key.direction(s.env_rotation).extend(s.key.intensity).to_array(),
             sun_c: [s.key.color[0], s.key.color[1], s.key.color[2], if s.key.on { 1.0 } else { 0.0 }],
-            clip: [NEAR, FAR, s.point_light_count.min(MAX_POINT_LIGHTS) as f32, 0.0],
+            clip: [
+                NEAR,
+                FAR,
+                if s.point_light_preview.is_some_and(|index| index < s.point_light_count.min(MAX_POINT_LIGHTS)) {
+                    1.0
+                } else {
+                    s.point_light_count.min(MAX_POINT_LIGHTS) as f32
+                },
+                if s.point_light_preview.is_some_and(|index| index < s.point_light_count.min(MAX_POINT_LIGHTS)) { 1.0 } else { 0.0 },
+            ],
             point_lights: std::array::from_fn(|slot| {
-                let index = slot / 2;
+                let preview = s.point_light_preview.filter(|&index| index < s.point_light_count.min(MAX_POINT_LIGHTS));
+                let index = preview.unwrap_or(slot / 2);
                 let light = s.point_lights[index];
                 if slot % 2 == 0 {
-                    let intensity = if index < s.point_light_count.min(MAX_POINT_LIGHTS) && light.on { light.intensity.max(0.0) } else { 0.0 };
+                    let enabled = preview.is_some() || index < s.point_light_count.min(MAX_POINT_LIGHTS);
+                    let intensity = if enabled && light.on { light.intensity.max(0.0) } else { 0.0 };
                     [light.position.x, light.position.y, light.position.z, intensity]
                 } else {
                     [light.color[0], light.color[1], light.color[2], light.range.max(0.0)]
