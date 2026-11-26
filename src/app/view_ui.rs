@@ -167,6 +167,7 @@ impl PainterApp {
             if !down {
                 self.drag_point_light = None;
                 self.point_light_pointer_capture = false;
+                self.view.point_light_preview = None;
                 self.status = format!("Point {} repositioned.", index + 1);
                 ui.ctx().request_repaint();
             } else if let Some(pointer) = hover.filter(|p| rect.contains(*p)) {
@@ -176,6 +177,7 @@ impl PainterApp {
                     && let Some(light) = self.view.point_lights.get_mut(index)
                 {
                     light.position = position;
+                    self.view.point_light_preview = Some(index);
                     ui.ctx().request_repaint();
                 }
             }
@@ -219,6 +221,7 @@ impl PainterApp {
                 let count = self.view.point_light_count.min(crate::viewport::MAX_POINT_LIGHTS);
                 if count > 0 && self.selected_point_light < count && let Some(position) = position.filter(|p| p.is_finite()) {
                     self.view.point_lights[self.selected_point_light].position = position;
+                    self.view.point_light_preview = None;
                     self.point_light_pointer_capture = true;
                     self.move_point_light = false;
                     self.status = format!(
@@ -254,6 +257,7 @@ impl PainterApp {
                     } else {
                         let forward = (self.cam.target - self.cam.eye()).normalize_or_zero();
                         self.drag_point_light = Some((index, position, forward));
+                        self.view.point_light_preview = Some(index);
                         self.status = format!("Dragging Point {}. Release to place; right-click toggles it.", index + 1);
                     }
                     ui.ctx().request_repaint();
