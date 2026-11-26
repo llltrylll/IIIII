@@ -63,7 +63,7 @@ fn load_with_vertex_colors(path: &Path, collect_vertex_colors: bool) -> Result<R
 fn load_obj(path: &Path, collect_vertex_colors: bool) -> Result<RawMesh, String> {
     let (models, materials) = tobj::load_obj(path, &tobj::LoadOptions { single_index: true, triangulate: true, ..Default::default() })
         .map_err(|e| format!("Failed to read OBJ: {e}"))?;
-    let mut out = Builder::default();
+    let mut out = Builder::new(collect_vertex_colors);
     // A missing .mtl leaves the indices (and default names).
     out.material_names = materials.map(|m| m.into_iter().map(|m| m.name).collect()).unwrap_or_default();
     for m in &models {
@@ -109,7 +109,7 @@ fn load_fbx(path: &Path, collect_vertex_colors: bool) -> Result<RawMesh, String>
     let path_str = path.to_str().ok_or("The FBX path is not valid UTF-8.")?;
     let scene = ufbx::load_file(path_str, opts).map_err(|e| format!("Failed to read FBX: {e:?}"))?;
 
-    let mut out = Builder::default();
+    let mut out = Builder::new(collect_vertex_colors);
     let material_count = scene.materials.len().max(1) as u32;
     out.material_names = scene.materials.iter().map(|m| m.element.name.to_string()).collect();
     let mut tri = Vec::new();
@@ -182,6 +182,8 @@ struct Builder {
     material_names: Vec<String>,
     objects: Vec<String>,
     tri_object: Vec<u32>,
+    /// Collect colors for the paintable Low Poly source only.
+    collect_vertex_colors: bool,
     any_colors: bool,
     tri_color: Vec<[u8; 3]>,
     tri_vertex_color: Vec<[[u8; 3]; 3]>,
@@ -191,6 +193,10 @@ struct Builder {
 }
 
 impl Builder {
+    fn new(collect_vertex_colors: bool) -> Self {
+        Self { collect_vertex_colors, ..Default::default() }
+    }
+
     /// Starts a new object; its triangles are tagged with its index.
     fn begin_object(&mut self, name: &str) {
         self.objects.push(name.to_string());
@@ -204,21 +210,23 @@ impl Builder {
         self.corners += 1;
         self.all_normals &= c.normal.is_some();
         self.all_uvs &= c.uv.is_some();
-        // Keep vertex colors even when only some objects carry a color layer.
-        // Unpainted objects receive white so they remain a selectable ID region.
-        self.any_colors |= c.color.is_some();
-        let corner = (self.corners - 1) % 3;
-        let color = c.color.unwrap_or(Vec3::ONE);
-        self.color_acc += color;
-        self.color_corners[corner] = color.to_array().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
-        if self.corners % 3 == 0 {
-            // Keep the average for older ID-region summaries, but preserve
-            // each corner so the GPU can interpolate the real vertex color.
-            let avg = self.color_acc / 3.0;
-            self.tri_color.push(avg.to_array().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
-            self.tri_vertex_color.push(self.color_corners);
-            self.color_corners = [[0; 3]; 3];
-            self.color_acc = Vec3::ZERO;
+        if self.collect_vertex_colors {
+            // Keep colors even when only some objects carry a color layer.
+            // Unpainted objects receive white so they remain a selectable ID region.
+            self.any_colors |= c.color.is_some();
+            let corner = (self.corners - 1) % 3;
+            let color = c.color.unwrap_or(Vec3::ONE);
+            self.color_acc += color;
+            self.color_corners[corner] = color.to_array().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+            if self.corners % 3 == 0 {
+                // Keep the average for older ID-region summaries, but preserve
+                // each corner so the GPU can interpolate the real vertex color.
+                let avg = self.color_acc / 3.0;
+                self.tri_color.push(avg.to_array().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
+                self.tri_vertex_color.push(self.color_corners);
+                self.color_corners = [[0; 3]; 3];
+                self.color_acc = Vec3::ZERO;
+            }
         }
         let n = c.normal.unwrap_or(Vec3::ZERO);
         let uv = c.uv.unwrap_or(Vec2::ZERO);
@@ -256,8 +264,8 @@ impl Builder {
             missing_uvs: self.missing_uvs,
             tri_object: self.tri_object,
             objects: self.objects,
-            tri_color: (self.any_colors && self.corners > 0).then_some(self.tri_color),
-            tri_vertex_color: (self.any_colors && self.corners > 0).then_some(self.tri_vertex_color),
+            tri_color: (self.collect_vertex_colors && self.any_colors && self.corners > 0).then_some(self.tri_color),
+            tri_vertex_color: (self.collect_vertex_colors && self.any_colors && self.corners > 0).then_some(self.tri_vertex_color),
         }
     }
 }
@@ -269,7 +277,7 @@ mod tests {
     /// Opt-in smoke test: `MP_IMPORT_TEST="a.fbx;b.obj" cargo test -- --ignored`.
     #[test]
     fn vertex_colors_preserve_each_corner_and_unpainted_objects_are_white() {
-        let mut builder = Builder::default();
+        let mut builder = Builder::new(true);
         let p = [
             Vec3::new(0.0, 0.0, 0.0),
             Vec3::new(1.0, 0.0, 0.0),
