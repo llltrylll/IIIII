@@ -19,6 +19,10 @@ use std::time::Instant;
 use wgpu::TextureFormat as F;
 use wgpu::util::DeviceExt;
 
+/// Number of distinct vertex-color IDs exposed in the bake report. This
+/// matches the top palette entries shown in the Vertex ID panel.
+pub const MAX_VERTEX_COLOR_ID_REGIONS: usize = 48;
+
 /// Largest resolution the baker works at. Its working textures take about
 /// 240 bytes a texel (surface, low-poly and cage maps in 32-bit float, the
 /// edge search, the ray-traced maps and their scratch copies): 4 GB at
@@ -1133,6 +1137,66 @@ pub fn validate_settings(settings: &BakeSettings) -> Result<(), String> {
     Ok(())
 }
 
+/// Counts vertex colors, keeps only the same most-used palette entries shown
+/// by the ID panel, and calculates their region bounds. The baked texture still
+/// receives every raw corner color; only the report/MCP index is bounded.
+fn vertex_color_id_data(
+    colors: &[[[u8; 3]; 3]],
+    indices: &[u32],
+    positions: &[Vec3],
+    cancel: &AtomicBool,
+) -> Result<(Vec<[f32; 4]>, Vec<IdRegion>), String> {
+    let mut counts: HashMap<[u8; 3], u32> = HashMap::new();
+    for (triangle, corners) in colors.iter().enumerate() {
+        if triangle.is_multiple_of(8192) {
+            check_prepare_cancelled(cancel)?;
+        }
+        for color in corners {
+            *counts.entry(*color).or_default() += 1;
+        }
+    }
+
+    let mut palette: Vec<_> = counts.into_iter().collect();
+    palette.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    palette.truncate(MAX_VERTEX_COLOR_ID_REGIONS);
+    palette.shrink_to_fit();
+
+    let ids: Vec<[f32; 4]> = palette.iter().map(|(rgb, _)| {
+        [rgb[0] as f32 / 255.0, rgb[1] as f32 / 255.0, rgb[2] as f32 / 255.0, 1.0]
+    }).collect();
+    let lookup: HashMap<[u8; 3], usize> = palette.iter().enumerate().map(|(index, (rgb, _))| (*rgb, index)).collect();
+    let mut regions: Vec<IdRegion> = ids.iter()
+        .map(|color| IdRegion {
+            color: [color[0], color[1], color[2]],
+            triangles: 0,
+            min: [f32::MAX; 3],
+            max: [f32::MIN; 3],
+        })
+        .collect();
+
+    for (triangle, (indices, corners)) in indices.chunks_exact(3).zip(colors).enumerate() {
+        if triangle.is_multiple_of(8192) {
+            check_prepare_cancelled(cancel)?;
+        }
+        let mut seen = [usize::MAX; 3];
+        let mut seen_count = 0usize;
+        for corner in 0..3 {
+            let Some(&region) = lookup.get(&corners[corner]) else { continue };
+            if !seen[..seen_count].contains(&region) {
+                seen[seen_count] = region;
+                seen_count += 1;
+                regions[region].triangles += 1;
+            }
+            let position = positions[indices[corner] as usize].to_array();
+            for axis in 0..3 {
+                regions[region].min[axis] = regions[region].min[axis].min(position[axis]);
+                regions[region].max[axis] = regions[region].max[axis].max(position[axis]);
+            }
+        }
+    }
+    Ok((ids, regions))
+}
+
 /// Prepares baking texture set `set` of `low` (its triangles get maps; the
 /// whole mesh occludes).
 pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<PreparedScene, String> {
@@ -1331,84 +1395,45 @@ pub fn prepare_cancellable(
         .map(|p| [hash01(p as u32 + 1), part_lo[p], (part_hi[p] - part_lo[p]).max(1e-5), 0.0])
         .collect();
     let use_materials = settings.id_source == IdSource::Materials && material_count > 1;
-    // Vertex-color IDs are the actual per-corner colors, not the legacy
-    // triangle average. Keep an index for every distinct corner color so MCP
-    // ID-region selection and the baked map refer to the same RGB values.
-    let color_ids: Option<(Vec<u32>, Vec<[f32; 4]>, HashMap<[u8; 3], usize>)> =
-        match (&tri_vertex_color, settings.id_source) {
-            (Some(colors), IdSource::VertexColors) if colors.len() == indices.len() / 3 => {
-                let mut seen: HashMap<[u8; 3], usize> = HashMap::new();
-                let mut palette = Vec::new();
-                let mut per_tri = Vec::with_capacity(colors.len());
-                for corners in colors {
-                    for color in corners {
-                        seen.entry(*color).or_insert_with(|| {
-                            let id = palette.len();
-                            palette.push([
-                                color[0] as f32 / 255.0,
-                                color[1] as f32 / 255.0,
-                                color[2] as f32 / 255.0,
-                                1.0,
-                            ]);
-                            id
-                        });
+    let (tri_id, ids, id_regions): (Cow<'_, [u32]>, Vec<[f32; 4]>, Vec<IdRegion>) =
+        if settings.id_source == IdSource::VertexColors {
+            let colors = tri_vertex_color.as_ref().expect("vertex-color source was validated above");
+            let (ids, regions) = vertex_color_id_data(colors, &indices, &positions, cancel)?;
+            // The shader reads the original per-corner colors directly. The
+            // flat ID slot is unused in this mode, so borrow part IDs rather
+            // than allocating one extra index per triangle.
+            (Cow::Borrowed(&tri_part), ids, regions)
+        } else {
+            let (tri_id, ids): (Cow<'_, [u32]>, Vec<[f32; 4]>) = if use_materials {
+                (Cow::Owned(tri_material), (0..material_count).map(id_color).collect())
+            } else {
+                (Cow::Borrowed(&tri_part), (0..part_count).map(id_color).collect())
+            };
+            let mut regions: Vec<IdRegion> = ids
+                .iter()
+                .map(|color| IdRegion {
+                    color: [color[0], color[1], color[2]],
+                    triangles: 0,
+                    min: [f32::MAX; 3],
+                    max: [f32::MIN; 3],
+                })
+                .collect();
+            for (triangle, tri) in indices.chunks_exact(3).enumerate() {
+                if triangle.is_multiple_of(8192) {
+                    check_prepare_cancelled(cancel)?;
+                }
+                let region = &mut regions[tri_id[triangle] as usize];
+                region.triangles += 1;
+                for &vertex in tri {
+                    let position = positions[vertex as usize].to_array();
+                    for axis in 0..3 {
+                        region.min[axis] = region.min[axis].min(position[axis]);
+                        region.max[axis] = region.max[axis].max(position[axis]);
                     }
-                    per_tri.push(*seen.get(&corners[0]).expect("the first corner was inserted") as u32);
                 }
-                Some((per_tri, palette, seen))
             }
-            _ => None,
+            (tri_id, ids, regions)
         };
-    check_prepare_cancelled(cancel)?;
-    let (tri_id, ids, vertex_color_indices): (Cow<'_, [u32]>, Vec<[f32; 4]>, HashMap<[u8; 3], usize>) =
-        match color_ids {
-            Some((per_tri, palette, indices)) => (Cow::Owned(per_tri), palette, indices),
-            None if use_materials => (Cow::Owned(tri_material), (0..material_count).map(id_color).collect(), HashMap::new()),
-            None => (Cow::Borrowed(&tri_part), (0..part_count).map(id_color).collect(), HashMap::new()),
-        };
-    let mut id_regions: Vec<IdRegion> = ids
-        .iter()
-        .map(|c| IdRegion { color: [c[0], c[1], c[2]], triangles: 0, min: [f32::MAX; 3], max: [f32::MIN; 3] })
-        .collect();
-    if settings.id_source == IdSource::VertexColors {
-        let colors = tri_vertex_color.as_ref().expect("vertex-color source was validated above");
-        for (t, (tri, corners)) in indices.chunks_exact(3).zip(colors).enumerate() {
-            if t.is_multiple_of(8192) {
-                check_prepare_cancelled(cancel)?;
-            }
-            let mut triangle_ids = [usize::MAX; 3];
-            let mut unique_count = 0usize;
-            for k in 0..3 {
-                let id = *vertex_color_indices.get(&corners[k])
-                    .expect("every per-corner color is present in the vertex-color palette");
-                if !triangle_ids[..unique_count].contains(&id) {
-                    triangle_ids[unique_count] = id;
-                    unique_count += 1;
-                    id_regions[id].triangles += 1;
-                }
-                let p = positions[tri[k] as usize].to_array();
-                for axis in 0..3 {
-                    id_regions[id].min[axis] = id_regions[id].min[axis].min(p[axis]);
-                    id_regions[id].max[axis] = id_regions[id].max[axis].max(p[axis]);
-                }
-            }
-        }
-    } else {
-        for (t, tri) in indices.chunks_exact(3).enumerate() {
-            if t.is_multiple_of(8192) {
-                check_prepare_cancelled(cancel)?;
-            }
-            let r = &mut id_regions[tri_id[t] as usize];
-            r.triangles += 1;
-            for &v in tri {
-                let p = positions[v as usize].to_array();
-                for k in 0..3 {
-                    r.min[k] = r.min[k].min(p[k]);
-                    r.max[k] = r.max[k].max(p[k]);
-                }
-            }
-        }
-    }
 
     // Baking needs node bounds and triangle order, not a second CPU triangle
     // array. Build those directly from the source indices.
@@ -3674,6 +3699,39 @@ mod vertex_color_id_source_tests {
         let settings = BakeSettings { id_source: IdSource::VertexColors, ..Default::default() };
         let prepared = prepare(&mesh, &settings, 0).expect("complete vertex-color source");
         assert_eq!(prepared.tri_vcolor.len(), mesh.indices.len());
+    }
+
+    #[test]
+    fn vertex_color_id_regions_match_the_bounded_ui_palette() {
+        let mut mesh = Primitive::Sphere.build();
+        let triangles = mesh.triangle_count();
+        let colors = (0..triangles).map(|triangle| {
+            std::array::from_fn(|corner| {
+                let index = (triangle * 3 + corner) % 60;
+                let red = index as u8;
+                [red, 255 - red, red.wrapping_mul(7)]
+            })
+        }).collect::<Vec<_>>();
+        mesh.tri_vertex_color = Some(colors);
+        let settings = BakeSettings { id_source: IdSource::VertexColors, ..Default::default() };
+
+        let prepared = prepare(&mesh, &settings, 0).expect("vertex-color palette");
+
+        assert_eq!(prepared.id_regions.len(), MAX_VERTEX_COLOR_ID_REGIONS);
+        assert!(prepared.ids.len() <= MAX_VERTEX_COLOR_ID_REGIONS);
+        let mut ordered: Vec<_> = mesh.tri_vertex_color.as_ref().unwrap().iter()
+            .flat_map(|corners| corners.iter().copied())
+            .fold(HashMap::<[u8; 3], u32>::new(), |mut counts, color| {
+                *counts.entry(color).or_default() += 1;
+                counts
+            })
+            .into_iter()
+            .collect();
+        ordered.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        ordered.truncate(MAX_VERTEX_COLOR_ID_REGIONS);
+        let expected: Vec<_> = ordered.iter().map(|(rgb, _)| rgb.map(|v| v as f32 / 255.0)).collect();
+        let actual: Vec<_> = prepared.id_regions.iter().map(|region| region.color).collect();
+        assert_eq!(actual, expected, "bake report order must match the Vertex ID panel palette");
     }
 
     #[test]

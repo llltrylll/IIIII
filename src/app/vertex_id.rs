@@ -14,7 +14,7 @@ use egui::{Color32, Sense, Stroke, vec2};
 use std::collections::HashMap;
 
 /// Colors listed in the palette (the most used ones).
-pub const PALETTE_MAX: usize = 48;
+pub const PALETTE_MAX: usize = crate::bake::MAX_VERTEX_COLOR_ID_REGIONS;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PaletteEntry {
