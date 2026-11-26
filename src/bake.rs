@@ -3049,6 +3049,34 @@ pub(crate) mod tests {
                 "ID map channel {channel} should vary across the triangle, got {min}..{max}"
             );
         }
+
+        // The ordinary flat ID path must still resolve the compact palette,
+        // without depending on the per-corner vertex-color storage buffer.
+        let mut flat_settings = BakeSettings { id_source: IdSource::MeshParts, ..BakeSettings::default() };
+        flat_settings.apply_quality(Quality::Draft);
+        flat_settings.aa = 1;
+        let (flat_maps, _, flat_low_pos) = run_bake(&device, &queue, &mesh, &gpu_mesh, &flat_settings, 96);
+        let flat_id = &flat_maps.maps[MAPS[crate::engine::ID_MAP_INDEX].tex];
+        let flat_id_bytes = read_texture(&device, &queue, flat_id);
+        let flat_low_bytes = read_texture(&device, &queue, &flat_low_pos);
+        let expected = id_color(0).map(|v| (v * 255.0).round() as u8);
+        let mut interior_flat = 0usize;
+        for (texel, low) in flat_low_bytes.chunks_exact(16).enumerate() {
+            let alpha = f32::from_le_bytes([low[12], low[13], low[14], low[15]]);
+            if alpha <= 0.75 {
+                continue;
+            }
+            interior_flat += 1;
+            for channel in 0..3 {
+                let actual = flat_id_bytes[texel * 4 + channel];
+                assert!(
+                    actual.abs_diff(expected[channel]) <= 1,
+                    "flat ID palette channel {channel}: expected {}, got {actual}",
+                    expected[channel]
+                );
+            }
+        }
+        assert!(interior_flat > 100, "the flat-ID triangle must cover enough texels ({interior_flat})");
     }
 }
 
@@ -3082,6 +3110,17 @@ mod low_poly_vertex_id_tests {
             [0.0, 1.0, 0.0, 1.0],
             [0.0, 0.0, 1.0, 1.0],
         ]);
+    }
+
+    #[test]
+    fn flat_id_sources_keep_the_compact_palette_without_per_corner_storage() {
+        let mesh = colored_triangle();
+        for id_source in [IdSource::MeshParts, IdSource::Materials] {
+            let settings = BakeSettings { id_source, ..BakeSettings::default() };
+            let scene = prepare(&mesh, &settings, 0).expect("flat ID source prepares");
+            assert!(scene.tri_vcolor.is_empty(), "flat ID source must not allocate 3 colors per triangle");
+            assert!(!scene.ids.is_empty(), "flat ID source keeps its compact palette");
+        }
     }
 
     #[test]
