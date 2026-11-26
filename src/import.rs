@@ -312,6 +312,28 @@ mod tests {
     }
 
     #[test]
+    fn high_poly_import_skips_vertex_color_storage() {
+        let mut builder = Builder::new(false);
+        builder.begin_object("high");
+        for (pos, color) in [
+            (Vec3::ZERO, Vec3::X),
+            (Vec3::X, Vec3::Y),
+            (Vec3::Y, Vec3::Z),
+        ] {
+            builder.push_corner(Corner {
+                pos,
+                normal: Some(Vec3::Z),
+                uv: Some(Vec2::ZERO),
+                color: Some(color),
+            });
+        }
+        builder.push_materials(1, 0);
+        let raw = builder.finish();
+        assert!(raw.tri_color.is_none());
+        assert!(raw.tri_vertex_color.is_none());
+    }
+
+    #[test]
     #[ignore]
     fn import_files_from_env() {
         let list = std::env::var("MP_IMPORT_TEST").unwrap_or_default();
