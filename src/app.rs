@@ -20,7 +20,7 @@ use crate::presets::{self, PreviewLayer};
 use crate::raytrace::{RayTracer, RtSettings};
 use crate::theme;
 use crate::undo::{StrokeTarget, UndoStack};
-use crate::viewport::{Background, Cam2d, FAR, NEAR, OrbitCam, OverlaySlot, Overlays, ViewMode, ViewRenderer, ViewSettings};
+use crate::viewport::{Background, Cam2d, FAR, NEAR, OrbitCam, OverlaySlot, OverlayVertex, Overlays, ViewMode, ViewRenderer, ViewSettings};
 use eframe::{egui, egui_wgpu, wgpu};
 use egui::{Color32, Rect, Sense, Stroke, pos2, vec2};
 use glam::{Vec2, Vec3};
