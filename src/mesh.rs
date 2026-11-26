@@ -331,6 +331,14 @@ impl Mesh {
     pub fn triangle_count(&self) -> usize {
         self.indices.len() / 3
     }
+
+    /// Whether both the legacy triangle averages and original per-corner
+    /// colors are complete for every Low Poly triangle.
+    pub fn has_vertex_colors(&self) -> bool {
+        let tris = self.triangle_count();
+        self.tri_color.as_ref().is_some_and(|colors| colors.len() == tris)
+            && self.tri_vertex_color.as_ref().is_some_and(|colors| colors.len() == tris)
+    }
 }
 
 pub fn smooth_normals(positions: &[Vec3], indices: &[u32]) -> Vec<Vec3> {
