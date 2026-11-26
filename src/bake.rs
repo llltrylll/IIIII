@@ -2994,7 +2994,7 @@ pub(crate) mod tests {
     /// triangle corner's color through barycentric interpolation.
     #[test]
     #[ignore = "needs a GPU"]
-    fn low_poly_vertex_color_id_map_interpolates_each_corner() {
+    fn low_poly_vertex_id_gpu_interpolates_corner_colors() {
         let Some((_instance, _adapter, device, queue)) = try_gpu_with_adapter() else {
             eprintln!("Skipping GPU regression: no usable adapter is available.");
             return;
@@ -3055,25 +3055,54 @@ pub(crate) mod tests {
             );
         }
 
-        // The ordinary flat ID path must still resolve the compact palette,
-        // without depending on the per-corner vertex-color storage buffer.
-        let mut flat_settings = BakeSettings { id_source: IdSource::MeshParts, ..BakeSettings::default() };
-        flat_settings.apply_quality(Quality::Draft);
-        flat_settings.aa = 1;
-        let (flat_maps, _, flat_low_pos) = run_bake(&device, &queue, &mesh, &gpu_mesh, &flat_settings, 96);
-        let flat_id = &flat_maps.maps[MAPS[crate::engine::ID_MAP_INDEX].tex];
-        let flat_id_bytes = read_texture(&device, &queue, flat_id);
-        let flat_low_bytes = read_texture(&device, &queue, &flat_low_pos);
+    /// End-to-end GPU regression: flat Mesh Parts IDs still use the compact palette.
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn low_poly_vertex_id_gpu_keeps_flat_palette_mode() {
+        let Some((_instance, _adapter, device, queue)) = try_gpu_with_adapter() else {
+            eprintln!("Skipping GPU regression: no usable adapter is available.");
+            return;
+        };
+        let positions = vec![
+            Vec3::new(-1.0, -1.0, 0.0),
+            Vec3::new(1.0, -1.0, 0.0),
+            Vec3::new(-1.0, 1.0, 0.0),
+        ];
+        let normals = Some(vec![Vec3::Z; 3]);
+        let uvs = vec![Vec2::ZERO, Vec2::X, Vec2::Y];
+        let mut mesh = Mesh::from_parts(
+            "Flat ID palette test".into(),
+            positions,
+            normals,
+            uvs,
+            vec![0, 1, 2],
+        );
+        mesh.tri_color = Some(vec![[85, 85, 85]]);
+        mesh.tri_vertex_color = Some(vec![[
+            [255, 0, 0],
+            [0, 255, 0],
+            [0, 0, 255],
+        ]]);
+
+        let gpu_mesh = GpuMesh::new(&device, &mesh);
+        let mut settings = BakeSettings { id_source: IdSource::MeshParts, ..BakeSettings::default() };
+        settings.apply_quality(Quality::Draft);
+        settings.aa = 1;
+        let (maps, _, low_pos) = run_bake(&device, &queue, &mesh, &gpu_mesh, &settings, 96);
+
+        let id_map = &maps.maps[MAPS[crate::engine::ID_MAP_INDEX].tex];
+        let id_bytes = read_texture(&device, &queue, id_map);
+        let low_bytes = read_texture(&device, &queue, &low_pos);
         let expected = id_color(0).map(|v| (v * 255.0).round() as u8);
-        let mut interior_flat = 0usize;
-        for (texel, low) in flat_low_bytes.chunks_exact(16).enumerate() {
+        let mut interior = 0usize;
+        for (texel, low) in low_bytes.chunks_exact(16).enumerate() {
             let alpha = f32::from_le_bytes([low[12], low[13], low[14], low[15]]);
             if alpha <= 0.75 {
                 continue;
             }
-            interior_flat += 1;
+            interior += 1;
             for channel in 0..3 {
-                let actual = flat_id_bytes[texel * 4 + channel];
+                let actual = id_bytes[texel * 4 + channel];
                 assert!(
                     actual.abs_diff(expected[channel]) <= 1,
                     "flat ID palette channel {channel}: expected {}, got {actual}",
@@ -3081,7 +3110,9 @@ pub(crate) mod tests {
                 );
             }
         }
-        assert!(interior_flat > 100, "the flat-ID triangle must cover enough texels ({interior_flat})");
+        assert!(interior > 100, "the flat-ID triangle must cover enough texels ({interior})");
+    }
+
     }
 }
 
