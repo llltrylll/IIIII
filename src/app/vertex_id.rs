@@ -92,12 +92,15 @@ pub enum Shown {
 /// The overlay triangles use the original per-corner sRGB values in both
 /// display modes. The dedicated ID overlay shader interpolates these values
 /// across the triangle first, then evaluates the same mask as the baked map.
-pub fn overlay(mesh: &Mesh, _shown: &Shown, hidden_objects: &[bool]) -> Vec<OverlayVertex> {
+pub fn overlay(mesh: &Mesh, _shown: &Shown, hidden_objects: &[bool], hidden_sets: &[bool]) -> Vec<OverlayVertex> {
     let Some(colors) = &mesh.tri_vertex_color else { return Vec::new() };
     let mut out = Vec::with_capacity(mesh.indices.len());
     for (tri_index, (tri, corners)) in mesh.indices.chunks_exact(3).zip(colors).enumerate() {
         let object = mesh.tri_object.get(tri_index).copied().unwrap_or(u32::MAX) as usize;
-        if hidden_objects.get(object).copied().unwrap_or(false) {
+        let set = mesh.set_of(tri_index as u32);
+        if hidden_objects.get(object).copied().unwrap_or(false)
+            || hidden_sets.get(set).copied().unwrap_or(false)
+        {
             continue;
         }
         for k in 0..3 {
@@ -375,7 +378,7 @@ mod tests {
         let colors = [[255, 0, 0], [0, 255, 0], [0, 0, 255]];
         mesh.tri_vertex_color = Some(vec![[colors[0], colors[1], colors[2]]; mesh.triangle_count()]);
         let shown = Shown::Mask(vec![[1.0, 0.0, 0.0].map(f32::to_bits)], 0.15f32.to_bits());
-        let overlay = super::overlay(&mesh, &shown, &[]);
+        let overlay = super::overlay(&mesh, &shown, &[], &[]);
 
         assert_eq!(overlay.len(), mesh.indices.len());
         for (vertex, expected) in overlay.iter().zip(colors.into_iter().cycle()) {
@@ -394,7 +397,7 @@ mod tests {
         mesh.tri_object = (0..triangles).map(|tri| (tri % 2) as u32).collect();
 
         let visible_triangles = mesh.tri_object.iter().filter(|&&object| object == 1).count();
-        let overlay = super::overlay(&mesh, &Shown::Colors, &[true, false]);
+        let overlay = super::overlay(&mesh, &Shown::Colors, &[true, false], &[]);
 
         assert_eq!(overlay.len(), visible_triangles * 3);
     }

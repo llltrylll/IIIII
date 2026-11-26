@@ -254,7 +254,7 @@ impl PainterApp {
         }
         match &want {
             Some(shown) => {
-                let triangles = vertex_id::overlay(&self.mesh, shown, &self.hidden_objects);
+                let triangles = vertex_id::overlay(&self.mesh, shown, &self.hidden_objects, &self.sets.hidden);
                 match shown {
                     vertex_id::Shown::Mask(ids, tolerance) => {
                         let ids: Vec<[f32; 3]> = ids.iter().map(|rgb| rgb.map(f32::from_bits)).collect();
