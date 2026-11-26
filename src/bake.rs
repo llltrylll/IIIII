@@ -2974,6 +2974,7 @@ pub(crate) mod tests {
 #[cfg(test)]
 mod low_poly_vertex_id_tests {
     use super::*;
+    use glam::Vec2;
     use crate::mesh::Mesh;
 
     fn colored_triangle() -> Mesh {
