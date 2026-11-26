@@ -424,12 +424,18 @@ impl PainterApp {
             "set_mask" => {
                 let i = self.layer_index(args)?;
                 if args.get("remove").and_then(Value::as_bool) == Some(true) {
+                    if self.id_color_pick_target.is_some_and(|(layer, _)| layer == i) {
+                        self.id_color_pick_target = None;
+                    }
                     self.engine.remove_mask(i, &mut self.undo);
                     self.after_history_step();
                     return Ok(text("Mask removed."));
                 }
                 if let Some(g) = str_arg(args, "generator") {
                     let kind = generator_kind(g).ok_or(format!("unknown generator '{g}'"))?;
+                    if self.id_color_pick_target == Some((i, None)) {
+                        self.id_color_pick_target = None;
+                    }
                     if kind == GenKind::IdMask {
                         self.bake_settings.id_source = if self.mesh.has_vertex_colors() && self.bake_settings.high_poly.is_none() {
                             crate::bake::IdSource::VertexColors
