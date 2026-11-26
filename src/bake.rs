@@ -1206,7 +1206,11 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
     let curvature = vertex_curvature(&positions, &normals, &indices, 1.0 / settings.curvature_scale_for(low).max(1e-6));
     let mut tri_pos = Vec::with_capacity(bvh.order.len() * 3);
     let mut tri_nrm = Vec::with_capacity(bvh.order.len() * 3);
-    let mut tri_vcolor = Vec::with_capacity(bvh.order.len() * 3);
+    let mut tri_vcolor = Vec::with_capacity(if settings.id_source == IdSource::VertexColors {
+        bvh.order.len() * 3
+    } else {
+        0
+    });
     for &t in &bvh.order {
         let t = t as usize;
         // Per-triangle attributes ride in the w components: part index, ID
