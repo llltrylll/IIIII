@@ -1157,8 +1157,12 @@ fn vertex_color_id_data(
     }
 
     let mut palette: Vec<_> = counts.into_iter().collect();
-    palette.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    palette.truncate(MAX_VERTEX_COLOR_ID_REGIONS);
+    let order = |a: &([u8; 3], u32), b: &([u8; 3], u32)| b.1.cmp(&a.1).then(a.0.cmp(&b.0));
+    if palette.len() > MAX_VERTEX_COLOR_ID_REGIONS {
+        palette.select_nth_unstable_by(MAX_VERTEX_COLOR_ID_REGIONS, order);
+        palette.truncate(MAX_VERTEX_COLOR_ID_REGIONS);
+    }
+    palette.sort_unstable_by(order);
     palette.shrink_to_fit();
 
     let ids: Vec<[f32; 4]> = palette.iter().map(|(rgb, _)| {

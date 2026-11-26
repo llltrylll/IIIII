@@ -40,8 +40,12 @@ pub fn palette(colors: &[[[u8; 3]; 3]]) -> Palette {
     }
     let distinct = counts.len();
     let mut entries: Vec<PaletteEntry> = counts.into_iter().map(|(rgb, corners)| PaletteEntry { rgb, corners }).collect();
-    entries.sort_by(|a, b| b.corners.cmp(&a.corners).then(a.rgb.cmp(&b.rgb)));
-    entries.truncate(PALETTE_MAX);
+    let order = |a: &PaletteEntry, b: &PaletteEntry| b.corners.cmp(&a.corners).then(a.rgb.cmp(&b.rgb));
+    if entries.len() > PALETTE_MAX {
+        entries.select_nth_unstable_by(PALETTE_MAX, order);
+        entries.truncate(PALETTE_MAX);
+    }
+    entries.sort_unstable_by(order);
     Palette { entries, distinct }
 }
 
