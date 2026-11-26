@@ -60,6 +60,8 @@ pub struct Mesh {
     pub objects: Vec<String>,
     /// Vertex colors per triangle (sRGB), for color ID maps.
     pub tri_color: Option<Vec<[u8; 3]>>,
+    /// Original vertex colors for each triangle corner, in triangle order.
+    pub tri_vertex_color: Option<Vec<[[u8; 3]; 3]>>,
     /// Texture sets, one per material, in triangle order; never empty.
     pub sets: Vec<MeshSet>,
 }
@@ -197,6 +199,7 @@ impl Mesh {
             tri_object: Vec::new(),
             objects: Vec::new(),
             tri_color: None,
+            tri_vertex_color: None,
             sets: Vec::new(),
         };
         mesh.set_ranges(Vec::new());
@@ -223,6 +226,7 @@ impl Mesh {
             tri_object: Vec::new(),
             objects: Vec::new(),
             tri_color: None,
+            tri_vertex_color: None,
             sets: Vec::new(),
         };
         mesh.set_ranges(Vec::new());
@@ -250,6 +254,9 @@ impl Mesh {
         }
         if let Some(c) = &self.tri_color {
             self.tri_color = Some(order.iter().map(|&t| c[t]).collect());
+        }
+        if let Some(c) = &self.tri_vertex_color {
+            self.tri_vertex_color = Some(order.iter().map(|&t| c[t]).collect());
         }
         let mut ranges: Vec<(String, Range<u32>)> = Vec::new();
         for (k, &t) in order.iter().enumerate() {
@@ -316,6 +323,7 @@ impl Mesh {
         mesh.tri_object = raw.tri_object;
         mesh.objects = raw.objects;
         mesh.tri_color = raw.tri_color;
+        mesh.tri_vertex_color = raw.tri_vertex_color;
         mesh.split_by_material(&raw.tri_material, &raw.material_names);
         Ok(mesh)
     }
@@ -883,5 +891,30 @@ pub(crate) mod set_tests {
         m.set_ranges(vec![("A".into(), 0..2), ("B".into(), 3..n)]);
         assert_eq!(m.sets.len(), 1);
         assert_eq!(m.sets[0].tris, 0..n);
+    }
+}
+
+#[cfg(test)]
+mod vertex_color_tests {
+    use super::*;
+
+    #[test]
+    fn material_sort_keeps_vertex_colors_attached_to_their_triangles() {
+        let positions = vec![
+            Vec3::new(0.0, 0.0, 0.0), Vec3::X, Vec3::Y,
+            Vec3::new(2.0, 0.0, 0.0), Vec3::new(3.0, 0.0, 0.0), Vec3::new(2.0, 1.0, 0.0),
+        ];
+        let uvs = vec![Vec2::ZERO, Vec2::X, Vec2::Y, Vec2::ZERO, Vec2::X, Vec2::Y];
+        let indices = vec![0, 1, 2, 3, 4, 5];
+        let mut mesh = Mesh::from_parts("two triangles".into(), positions, None, uvs, indices);
+        let first = [[10, 20, 30], [40, 50, 60], [70, 80, 90]];
+        let second = [[100, 110, 120], [130, 140, 150], [160, 170, 180]];
+        mesh.tri_color = Some(vec![[40, 50, 60], [130, 140, 150]]);
+        mesh.tri_vertex_color = Some(vec![first, second]);
+
+        mesh.split_by_material(&[1, 0], &["A".into(), "B".into()]);
+
+        assert_eq!(mesh.tri_vertex_color.as_ref().unwrap(), &[second, first]);
+        assert_eq!(mesh.tri_color.as_ref().unwrap(), &[[130, 140, 150], [40, 50, 60]]);
     }
 }
