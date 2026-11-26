@@ -253,6 +253,8 @@ impl Builder {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     /// Opt-in smoke test: `MP_IMPORT_TEST="a.fbx;b.obj" cargo test -- --ignored`.
     #[test]
     fn vertex_colors_preserve_each_corner_and_unpainted_objects_are_white() {
