@@ -4011,9 +4011,7 @@ impl PainterApp {
     fn mask_properties(&mut self, ui: &mut egui::Ui, idx: usize) -> bool {
         let mut dirty = false;
         let custom = self.bake_settings.custom.clone();
-        let has_vertex_colors = self.mesh.tri_vertex_color.as_ref().is_some_and(|colors| {
-            colors.len() == self.mesh.indices.len() / 3
-        });
+        let has_vertex_colors = self.mesh.has_vertex_colors();
         let can_sample_low_poly = self.bake_settings.high_poly.is_none();
         section(ui, "Mask");
         self.missing_maps_note(ui, idx);
@@ -4068,9 +4066,7 @@ impl PainterApp {
         section(ui, "Mask layers");
         let mut dirty = false;
         let custom = self.bake_settings.custom.clone();
-        let has_vertex_colors = self.mesh.tri_vertex_color.as_ref().is_some_and(|colors| {
-            colors.len() == self.mesh.indices.len() / 3
-        });
+        let has_vertex_colors = self.mesh.has_vertex_colors();
         let can_sample_low_poly = self.bake_settings.high_poly.is_none();
         let (mut remove, mut swap) = (None, None);
         let count = mask.layers.len();
@@ -4965,9 +4961,7 @@ impl PainterApp {
     /// Shows the imported Low Poly vertex colors in the 3D viewport when they
     /// are selected as the ID-map source. This is a preview, not a paint edit.
     fn sync_vertex_color_preview(&mut self, ctx: &egui::Context) {
-        let has_colors = self.mesh.tri_vertex_color.as_ref().is_some_and(|colors| {
-            colors.len() == self.mesh.indices.len() / 3
-        });
+        let has_colors = self.mesh.has_vertex_colors();
         let show = self.bake_settings.id_source == IdSource::VertexColors
             && self.bake_settings.high_poly.is_none()
             && has_colors;
