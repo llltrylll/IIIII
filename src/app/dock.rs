@@ -166,14 +166,46 @@ fn valid(tree: &Tree<Pane>, ws: Workspace) -> bool {
         && tree.tiles.tiles().filter(|t| matches!(t, Tile::Pane(_))).count() == panes(ws).len()
 }
 
+/// Keep the Lighting panel beside Shelf on the left, even for layouts saved
+/// before that placement was standardized. Move only this pane and preserve
+/// every other user split, tab order and size.
+fn move_lighting_to_left(tree: &mut Tree<Pane>) -> bool {
+    let (Some(lighting), Some(shelf)) = (
+        tree.tiles.find_pane(&Pane::Lighting),
+        tree.tiles.find_pane(&Pane::Shelf),
+    ) else {
+        return false;
+    };
+    let (Some(lighting_tabs), Some(shelf_tabs)) = (
+        tree.tiles.parent_of(lighting),
+        tree.tiles.parent_of(shelf),
+    ) else {
+        return false;
+    };
+    if lighting_tabs == shelf_tabs
+        || !matches!(tree.tiles.get(shelf_tabs), Some(Tile::Container(Container::Tabs(_))))
+    {
+        return false;
+    }
+    tree.move_tile_to_container(lighting, shelf_tabs, usize::MAX, false);
+    tree.make_active(|id, tile| id == lighting && matches!(tile, Tile::Pane(Pane::Lighting)));
+    true
+}
+
 impl Docks {
     pub fn load() -> Docks {
         let saved: Option<Vec<Tree<Pane>>> =
             layout_path().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok());
+        let mut dirty = false;
         let trees = Workspace::ALL.map(|ws| {
-            saved.as_ref().and_then(|s| s.get(index(ws)).cloned()).filter(|t| valid(t, ws)).unwrap_or_else(|| default_tree(ws))
+            let mut tree = saved.as_ref().and_then(|s| s.get(index(ws)).cloned())
+                .filter(|t| valid(t, ws)).unwrap_or_else(|| default_tree(ws));
+            if ws == Workspace::Paint && move_lighting_to_left(&mut tree) {
+                dirty = true;
+            }
+            tree
         });
-        Docks { trees, dirty: false }
+        Docks { trees, dirty }
     }
 
     /// Brings a pane's tab to the front.
@@ -343,6 +375,21 @@ impl PainterApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_lighting_tab_is_moved_beside_shelf_without_resetting_layout() {
+        let mut tree = default_tree(Workspace::Paint);
+        let lighting = tree.tiles.find_pane(&Pane::Lighting).unwrap();
+        let shelf = tree.tiles.find_pane(&Pane::Shelf).unwrap();
+        let preview = tree.tiles.find_pane(&Pane::Preview).unwrap();
+        let right_tabs = tree.tiles.parent_of(preview).unwrap();
+        tree.move_tile_to_container(lighting, right_tabs, usize::MAX, false);
+        assert_ne!(tree.tiles.parent_of(lighting), tree.tiles.parent_of(shelf));
+
+        assert!(move_lighting_to_left(&mut tree));
+        assert_eq!(tree.tiles.parent_of(lighting), tree.tiles.parent_of(shelf));
+        assert!(valid(&tree, Workspace::Paint));
+    }
 
     #[test]
     fn default_layouts_are_complete_and_survive_saving() {
