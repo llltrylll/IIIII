@@ -12,6 +12,9 @@ impl PainterApp {
 
     /// Bakes the texture set being edited.
     pub(super) fn start_bake(&mut self, ctx: &egui::Context) {
+        // A manual bake of the active set is always a full bake, even after
+        // an ID-only queue was cancelled or failed.
+        self.bake_id_only = false;
         self.sets.bake_queue.clear();
         self.start_bake_set(self.sets.active, ctx);
     }
@@ -96,8 +99,10 @@ impl PainterApp {
             self.start_bake_set(set, ctx);
         } else {
             // The selected source becomes authoritative only after every
-            // texture set has successfully adopted its new maps.
+            // texture set has successfully adopted its new maps. Do not let
+            // the one-shot mode leak into the next manual Bake action.
             self.baked_id_source = self.bake_settings.id_source;
+            self.bake_id_only = false;
         }
     }
 
