@@ -567,6 +567,10 @@ pub const MAPS: [MapInfo; MAP_COUNT] = [
     map("ID", 4, 0, MapKind::Info, "Color per material or mesh part, for ID masks."),
 ];
 
+/// Packed texture index of the categorical ID map. Unlike scalar/vector maps,
+/// this channel stores discrete RGB labels and must never be linearly filtered.
+const ID_MAP_TEXTURE: usize = MAPS[MAP_COUNT - 1].tex;
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Levels {
     pub black: f32,
@@ -1364,6 +1368,8 @@ struct Pipelines {
     mask_filter: wgpu::RenderPipeline,
     mask_filter_bgl: wgpu::BindGroupLayout,
     resample: HashMap<F, wgpu::RenderPipeline>,
+    /// The categorical ID labels use an integer texel load instead of bilinear filtering.
+    resample_nearest_id: wgpu::RenderPipeline,
     resample_bgl: wgpu::BindGroupLayout,
     resolve: HashMap<F, wgpu::RenderPipeline>,
     resolve_bgl: wgpu::BindGroupLayout,
@@ -2736,6 +2742,14 @@ impl Engine {
                 (f, pl)
             })
             .collect();
+        let resample_nearest_id = gpu::fullscreen_pipeline(
+            device,
+            "ID map nearest resample",
+            &resample_module,
+            "fs_resample_nearest",
+            &resample_layout,
+            &[gpu::target(MAP_FORMATS[ID_MAP_TEXTURE])],
+        );
 
         // Mesh-map levels and painted fixes.
         let resolve_module = gpu::shader(device, "maps resolve", include_str!("shaders/maps_resolve.wgsl"));
@@ -2801,6 +2815,7 @@ impl Engine {
             mask_filter,
             mask_filter_bgl,
             resample,
+            resample_nearest_id,
             resample_bgl,
             resolve,
             resolve_bgl,
@@ -3065,7 +3080,7 @@ impl Engine {
         let BakedMaps { maps, .. } = baked;
         let [_, _, _, _, id] = maps;
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        let id = if id.width != self.res { self.resample(&mut encoder, &id, self.res) } else { id };
+        let id = if id.width != self.res { self.resample_id_map(&mut encoder, &id, self.res) } else { id };
         self.queue.submit([encoder.finish()]);
         self.maps[4] = id;
         self.maps_version = self.maps_version.wrapping_add(1);
@@ -3080,7 +3095,13 @@ impl Engine {
         let mut encoder = self.device.create_command_encoder(&Default::default());
         let BakedMaps { maps, custom } = baked;
         let (maps, custom) = if maps[0].width < self.res {
-            let up = maps.each_ref().map(|m| self.resample(&mut encoder, m, self.res));
+            let up = std::array::from_fn(|index| {
+                if index == ID_MAP_TEXTURE {
+                    self.resample_id_map(&mut encoder, &maps[index], self.res)
+                } else {
+                    self.resample(&mut encoder, &maps[index], self.res)
+                }
+            });
             let custom = custom.iter().map(|m| self.resample(&mut encoder, m, self.res)).collect();
             (up, custom)
         } else {
@@ -6484,6 +6505,30 @@ impl Engine {
         dst
     }
 
+    /// Resamples the categorical ID map with nearest-neighbor sampling. A
+    /// linear average of two different ID colors creates a label that did
+    /// not exist in the source mesh and makes the mask miss both regions.
+    fn resample_id_map(&self, encoder: &mut wgpu::CommandEncoder, src: &Tex, res: u32) -> Tex {
+        debug_assert_eq!(src.format, MAP_FORMATS[ID_MAP_TEXTURE]);
+        let dst = self.new_tex("resampled ID map", res, res, src.format, LAYER_USAGE);
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("nearest ID map resample"),
+            layout: &self.p.resample_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&src.view) },
+                // The nearest entry point uses textureLoad, so the sampler is
+                // present only to satisfy the shared bind-group layout.
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
+        });
+        let mut pass = gpu::pass(encoder, "resample ID map (nearest)", &[gpu::color_attachment(&dst.view, wgpu::LoadOp::Load)]);
+        pass.set_pipeline(&self.p.resample_nearest_id);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.draw(0..3, 0..1);
+        drop(pass);
+        dst
+    }
+
     /// Changes the texture set resolution, resampling every painted texture.
     pub fn set_resolution(&mut self, res: u32, mesh: &GpuMesh, undo: &mut UndoStack) {
         if res == self.res || self.active.is_some() {
@@ -6500,13 +6545,26 @@ impl Engine {
             new_layers.push((content, mask));
         }
         if self.has_bake {
-            let maps = std::array::from_fn(|t| self.resample(&mut encoder, &self.maps[t], res));
+            let maps = std::array::from_fn(|t| {
+                if t == ID_MAP_TEXTURE {
+                    self.resample_id_map(&mut encoder, &self.maps[t], res)
+                } else {
+                    self.resample(&mut encoder, &self.maps[t], res)
+                }
+            });
             self.maps = maps;
             self.custom = self.custom.iter().map(|t| self.resample(&mut encoder, t, res)).collect();
             self.build_custom_array(&mut encoder);
         }
-        let fixes: Vec<Option<Tex>> =
-            self.map_fix.iter().map(|f| f.as_ref().map(|t| self.resample(&mut encoder, t, res))).collect();
+        let fixes: Vec<Option<Tex>> = self.map_fix.iter().enumerate().map(|(map, fix)| {
+            fix.as_ref().map(|tex| {
+                if MAPS[map].tex == ID_MAP_TEXTURE {
+                    self.resample_id_map(&mut encoder, tex, res)
+                } else {
+                    self.resample(&mut encoder, tex, res)
+                }
+            })
+        }).collect();
         for (dst, f) in self.map_fix.iter_mut().zip(fixes) {
             *dst = f;
         }
