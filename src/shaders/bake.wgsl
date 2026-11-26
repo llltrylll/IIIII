@@ -42,7 +42,6 @@ struct BakeU {
 @group(0) @binding(5) var<storage, read> tri_pos: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read> tri_nrm: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read> parts: array<vec4<f32>>;
-@group(0) @binding(8) var<storage, read> ids: array<vec4<f32>>;
 @group(0) @binding(9) var surf_pos_w: texture_storage_2d<rgba32float, write>;
 @group(0) @binding(10) var surf_nrm_w: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(11) var map_d_w: texture_storage_2d<rgba16float, write>;
