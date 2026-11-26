@@ -922,7 +922,6 @@ pub struct PainterApp {
     show_point_light_markers: bool,
     move_point_light: bool,
     point_light_pointer_capture: bool,
-    support_popup_open: bool,
     /// Blender-style first-person navigation, active only over the 3D viewport.
     walk_navigation: bool,
     /// Discard the stale/warp motion that can arrive immediately after cursor lock.
@@ -2509,7 +2508,6 @@ impl PainterApp {
             show_point_light_markers: true,
             move_point_light: false,
             point_light_pointer_capture: false,
-            support_popup_open: false,
             walk_navigation: false,
             walk_skip_mouse_delta: false,
             walk_speed: 1.5,
@@ -4128,38 +4126,22 @@ impl PainterApp {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let resp = theme::donate_button(ui, "Support", vec2(0.0, 22.0))
-                    .on_hover_text("Camera field of view and project support");
-                if resp.clicked() {
-                    self.support_popup_open = !self.support_popup_open;
-                }
-                if self.support_popup_open {
-                    let popup_pos = pos2(
-                        (resp.rect.right() - 270.0).max(ui.min_rect().left() + 8.0),
-                        resp.rect.bottom() + 6.0,
-                    );
-                    egui::Area::new(egui::Id::unique("support_fov_popup"))
-                        .order(egui::Order::Foreground)
-                        .fixed_pos(popup_pos)
-                        .show(ui.ctx(), |ui| {
-                            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                                ui.set_min_width(250.0);
-                                ui.label(egui::RichText::new("Camera field of view").strong());
-                                let mut fov_degrees = self.cam.fov_y.to_degrees();
-                                if ui.add(egui::Slider::new(&mut fov_degrees, 10.0..=120.0).suffix("°")).changed() {
-                                    self.cam.fov_y = fov_degrees.to_radians();
-                                }
-                                if ui.small_button("Reset FOV").clicked() {
-                                    self.cam.fov_y = self.prefs.fov_deg.clamp(10.0, 120.0).to_radians();
-                                }
-                                ui.separator();
-                                if ui.button(theme::with_icon(icons::HEART, "Support development on Ko-fi")).clicked() {
-                                    ui.ctx().open_url(egui::OpenUrl::new_tab(welcome::DONATE_URL));
-                                    self.support_popup_open = false;
-                                }
-                            });
-                        });
-                }
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("FOV").strong());
+                    let mut fov_degrees = self.cam.fov_y.to_degrees();
+                    let slider = egui::Slider::new(&mut fov_degrees, 10.0..=120.0)
+                        .suffix("°")
+                        .show_value(true);
+                    if ui.add_sized([190.0, 20.0], slider)
+                        .on_hover_text("Camera field of view")
+                        .changed()
+                    {
+                        self.cam.fov_y = fov_degrees.to_radians();
+                    }
+                    if ui.small_button("↺").on_hover_text("Reset FOV").clicked() {
+                        self.cam.fov_y = self.prefs.fov_deg.clamp(10.0, 120.0).to_radians();
+                    }
+                });
             });
         });
     }
