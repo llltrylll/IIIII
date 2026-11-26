@@ -302,6 +302,13 @@ fn point_direct_light(
     if (nl <= 0.0) {
         return vec3<f32>(0.0);
     }
+    let diffuse = s.albedo * (1.0 - s.metal) / PI;
+    // During direct manipulation only the selected light is active and its
+    // specular lobe is skipped. Avoiding per-fragment pow() keeps marker drags
+    // responsive on integrated GPUs; the full local-light look returns on release.
+    if (g.clip.w > 0.5) {
+        return diffuse * light_color * intensity * nl;
+    }
     let half_vector = light_dir + v;
     let half_length_squared = dot(half_vector, half_vector);
     var specular_lobe = 0.0;
@@ -313,7 +320,6 @@ fn point_direct_light(
         specular_lobe = pow(nh, exponent) * (exponent + 2.0) * (0.5 / PI);
     }
     let f0 = mix(vec3<f32>(0.08 * s.spec), s.albedo, s.metal);
-    let diffuse = s.albedo * (1.0 - s.metal) / PI;
     return (diffuse + f0 * specular_lobe) * light_color * intensity * nl;
 }
 
