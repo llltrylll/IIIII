@@ -1767,6 +1767,9 @@ impl PainterApp {
                     }
                 }
                 Action::AddGenerator(kind) => {
+                    if self.id_color_pick_target == Some((self.selected, None)) {
+                        self.id_color_pick_target = None;
+                    }
                     if kind == GenKind::IdMask && self.mesh.has_vertex_colors() && self.bake_settings.high_poly.is_none() {
                         self.bake_settings.id_source = IdSource::VertexColors;
                     }
@@ -1785,6 +1788,9 @@ impl PainterApp {
                     }
                 }
                 Action::RemoveMask => {
+                    if self.id_color_pick_target.is_some_and(|(layer, _)| layer == self.selected) {
+                        self.id_color_pick_target = None;
+                    }
                     self.engine.remove_mask(self.selected, &mut self.undo);
                     self.target = StrokeTarget::Content;
                 }
@@ -3704,6 +3710,9 @@ impl PainterApp {
             egui::ComboBox::from_id_salt(("gen", salt)).selected_text(g.kind.name()).show_ui(ui, |ui| {
                 for k in GenKind::ALL {
                     if ui.selectable_label(g.kind == k, k.name()).clicked() && g.kind != k {
+                        if *pick_target == Some(target) {
+                            *pick_target = None;
+                        }
                         *g = new_generator(k, custom);
                         if k == GenKind::IdMask {
                             bake_settings.id_source = if has_vertex_colors && can_sample_low_poly {
@@ -4020,6 +4029,9 @@ impl PainterApp {
     }
 
     fn mask_properties(&mut self, ui: &mut egui::Ui, idx: usize) -> bool {
+        if self.id_color_pick_target.is_some_and(|(layer, _)| layer != idx) {
+            self.id_color_pick_target = None;
+        }
         let mut dirty = false;
         let custom = self.bake_settings.custom.clone();
         let has_vertex_colors = self.mesh.has_vertex_colors();
@@ -4123,6 +4135,11 @@ impl PainterApp {
                 });
             });
             ui.add_space(3.0);
+        }
+        if remove.is_some() || swap.is_some() {
+            if self.id_color_pick_target.is_some_and(|(layer, mask_layer)| layer == idx && mask_layer.is_some()) {
+                self.id_color_pick_target = None;
+            }
         }
         if let Some(i) = remove {
             mask.layers.remove(i);
