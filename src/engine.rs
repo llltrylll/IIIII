@@ -3059,6 +3059,9 @@ impl Engine {
         if !self.has_bake {
             return self.set_maps(baked, report);
         }
+        let report = self.bake_report.as_ref()
+            .map(|existing| Arc::new(existing.with_id_regions_from(&report)))
+            .unwrap_or(report);
         let BakedMaps { maps, .. } = baked;
         let [_, _, _, _, id] = maps;
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -3066,6 +3069,7 @@ impl Engine {
         self.queue.submit([encoder.finish()]);
         self.maps[4] = id;
         self.maps_version = self.maps_version.wrapping_add(1);
+        self.bake_report = Some(report);
         self.map_fix = Default::default();
         self.maps_dirty = true;
         self.mark_dirty();

@@ -1315,20 +1315,28 @@ pub fn prepare_cancellable(
         .map(|p| [hash01(p as u32 + 1), part_lo[p], (part_hi[p] - part_lo[p]).max(1e-5), 0.0])
         .collect();
     let use_materials = settings.id_source == IdSource::Materials && material_count > 1;
-    // Vertex colors: one ID per distinct color, shown as that color.
-    let color_ids: Option<(Vec<u32>, Vec<[f32; 4]>)> = match (&tri_color, settings.id_source) {
+    // Vertex-color IDs are the actual per-corner colors, not the legacy
+    // triangle average. Keep an index for every distinct corner color so MCP
+    // ID-region selection and the baked map refer to the same RGB values.
+    let color_ids: Option<(Vec<u32>, Vec<[f32; 4]>)> = match (&tri_vertex_color, settings.id_source) {
         (Some(colors), IdSource::VertexColors) if colors.len() == indices.len() / 3 => {
             let mut seen: HashMap<[u8; 3], u32> = HashMap::new();
             let mut palette = Vec::new();
-            let per_tri = colors
-                .iter()
-                .map(|c| {
-                    *seen.entry(*c).or_insert_with(|| {
-                        palette.push([c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, 1.0]);
+            let mut per_tri = Vec::with_capacity(colors.len());
+            for corners in colors {
+                for color in corners {
+                    seen.entry(*color).or_insert_with(|| {
+                        palette.push([
+                            color[0] as f32 / 255.0,
+                            color[1] as f32 / 255.0,
+                            color[2] as f32 / 255.0,
+                            1.0,
+                        ]);
                         palette.len() as u32 - 1
-                    })
-                })
-                .collect();
+                    });
+                }
+                per_tri.push(*seen.get(&corners[0]).expect("the first corner was inserted"));
+            }
             Some((per_tri, palette))
         }
         _ => None,
@@ -1339,21 +1347,53 @@ pub fn prepare_cancellable(
         None if use_materials => (Cow::Owned(tri_material), (0..material_count).map(id_color).collect()),
         None => (Cow::Borrowed(&tri_part), (0..part_count).map(id_color).collect()),
     };
+    let vertex_color_indices: HashMap<[u8; 3], usize> = if settings.id_source == IdSource::VertexColors {
+        ids.iter().enumerate().map(|(index, color)| {
+            ([0, 1, 2].map(|k| (color[k].clamp(0.0, 1.0) * 255.0).round() as u8), index)
+        }).collect()
+    } else {
+        HashMap::new()
+    };
     let mut id_regions: Vec<IdRegion> = ids
         .iter()
         .map(|c| IdRegion { color: [c[0], c[1], c[2]], triangles: 0, min: [f32::MAX; 3], max: [f32::MIN; 3] })
         .collect();
-    for (t, tri) in indices.chunks_exact(3).enumerate() {
-        if t.is_multiple_of(8192) {
-            check_prepare_cancelled(cancel)?;
-        }
-        let r = &mut id_regions[tri_id[t] as usize];
-        r.triangles += 1;
-        for &v in tri {
-            let p = positions[v as usize].to_array();
+    if settings.id_source == IdSource::VertexColors {
+        let colors = tri_vertex_color.as_ref().expect("vertex-color source was validated above");
+        for (t, (tri, corners)) in indices.chunks_exact(3).zip(colors).enumerate() {
+            if t.is_multiple_of(8192) {
+                check_prepare_cancelled(cancel)?;
+            }
+            let mut triangle_ids = [usize::MAX; 3];
+            let mut unique_count = 0usize;
             for k in 0..3 {
-                r.min[k] = r.min[k].min(p[k]);
-                r.max[k] = r.max[k].max(p[k]);
+                let id = *vertex_color_indices.get(&corners[k])
+                    .expect("every per-corner color is present in the vertex-color palette");
+                if !triangle_ids[..unique_count].contains(&id) {
+                    triangle_ids[unique_count] = id;
+                    unique_count += 1;
+                    id_regions[id].triangles += 1;
+                }
+                let p = positions[tri[k] as usize].to_array();
+                for axis in 0..3 {
+                    id_regions[id].min[axis] = id_regions[id].min[axis].min(p[axis]);
+                    id_regions[id].max[axis] = id_regions[id].max[axis].max(p[axis]);
+                }
+            }
+        }
+    } else {
+        for (t, tri) in indices.chunks_exact(3).enumerate() {
+            if t.is_multiple_of(8192) {
+                check_prepare_cancelled(cancel)?;
+            }
+            let r = &mut id_regions[tri_id[t] as usize];
+            r.triangles += 1;
+            for &v in tri {
+                let p = positions[v as usize].to_array();
+                for k in 0..3 {
+                    r.min[k] = r.min[k].min(p[k]);
+                    r.max[k] = r.max[k].max(p[k]);
+                }
             }
         }
     }
@@ -1567,6 +1607,34 @@ impl BakeReport {
     pub fn finished(&self) -> bool {
         self.finished.load(Ordering::Acquire)
     }
+
+    /// Keeps the full-bake report intact while replacing only the ID-region
+    /// index with the metadata for a separately rebaked ID texture.
+    pub fn with_id_regions_from(&self, id_report: &BakeReport) -> BakeReport {
+        BakeReport {
+            source: self.source.clone(),
+            triangles: self.triangles,
+            parts: self.parts,
+            hard_edges: self.hard_edges,
+            resolution: self.resolution,
+            rays_per_texel: self.rays_per_texel,
+            prep_seconds: self.prep_seconds,
+            edge_max_distance: self.edge_max_distance,
+            id_regions: id_report.id_regions.clone(),
+            matched_names: self.matched_names,
+            used_cage: self.used_cage,
+            baked: self.baked,
+            custom: self.custom.clone(),
+            from_cache: self.from_cache,
+            started: self.started.clone(),
+            gpu_seconds: AtomicU32::new(self.gpu_seconds.load(Ordering::Relaxed)),
+            finished: AtomicBool::new(self.finished.load(Ordering::Acquire)),
+            valid_texels: AtomicU32::new(self.valid_texels.load(Ordering::Relaxed)),
+            missed_texels: AtomicU32::new(self.missed_texels.load(Ordering::Relaxed)),
+            filled_texels: AtomicU32::new(self.filled_texels.load(Ordering::Relaxed)),
+        }
+    }
+
     pub fn missed_percent(&self) -> Option<f32> {
         if !self.finished() {
             return None;
