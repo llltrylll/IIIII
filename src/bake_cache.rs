@@ -121,6 +121,12 @@ pub fn key(mesh: &Mesh, settings: &BakeSettings, res: u32, set: usize) -> Key {
         Some(c) => h.bytes(bytemuck::cast_slice(c)),
         None => h.word(0),
     }
+    // Per-corner colors affect the generated ID texture even when their
+    // triangle averages are unchanged.
+    match &mesh.tri_vertex_color {
+        Some(c) => h.bytes(bytemuck::cast_slice(c)),
+        None => h.word(0),
+    }
     h.bytes(bytemuck::cast_slice(&mesh.center.to_array()));
     h.word(mesh.scale.to_bits() as u64);
     Key(format!("{:016x}", h.0))
@@ -314,6 +320,22 @@ mod tests {
         let mut s2 = s.clone();
         s2.ao_distance += 0.01;
         assert_ne!(k, key(&ball, &s2, 2048, 0));
+    }
+
+    #[test]
+    fn key_tracks_per_corner_vertex_colors_even_when_average_is_unchanged() {
+        let mut mesh = Primitive::MaterialBall.build();
+        let triangles = mesh.triangle_count();
+        mesh.tri_color = Some(vec![[128, 128, 128]; triangles]);
+        mesh.tri_vertex_color = Some(vec![[[128, 128, 128]; 3]; triangles]);
+        let settings = BakeSettings { id_source: crate::bake::IdSource::VertexColors, ..Default::default() };
+        let original = key(&mesh, &settings, 1024, 0);
+
+        // Exchange corner colors while preserving the same average RGB.
+        mesh.tri_vertex_color.as_mut().unwrap()[0] = [
+            [255, 0, 129], [0, 255, 129], [129, 129, 126],
+        ];
+        assert_ne!(original, key(&mesh, &settings, 1024, 0));
     }
 
     #[test]
