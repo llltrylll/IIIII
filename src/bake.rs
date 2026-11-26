@@ -3751,8 +3751,16 @@ mod vertex_color_id_source_tests {
         let prepared = prepare(&mesh, &settings, 0).expect("complete vertex-color source");
 
         assert_eq!(prepared.id_regions.len(), 3, "every distinct vertex color needs its own region");
-        for (region, expected) in prepared.id_regions.iter().zip(corners) {
-            assert_eq!(region.color, expected.map(|v| v as f32 / 255.0));
+        let mut actual: Vec<[u8; 3]> = prepared.id_regions.iter().map(|region| {
+            region.color.map(|channel| (channel * 255.0).round() as u8)
+        }).collect();
+        let mut expected = corners.to_vec();
+        actual.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(actual, expected, "all original per-corner colors must have distinct regions, not one averaged ID");
+        for expected in corners {
+            let color = expected.map(|v| v as f32 / 255.0);
+            let region = prepared.id_regions.iter().find(|region| region.color == color).expect("each corner color has a report region");
             assert_eq!(region.triangles, triangles, "each color appears in every test triangle");
         }
     }
