@@ -35,11 +35,22 @@ pub struct RawMesh {
 
 pub const EXTENSIONS: [&str; 2] = ["obj", "fbx"];
 
+/// Loads a paintable Low Poly mesh, preserving its imported vertex colors.
 pub fn load(path: &Path) -> Result<RawMesh, String> {
+    load_with_vertex_colors(path, true)
+}
+
+/// Loads a bake-only mesh without allocating the per-corner vertex-color
+/// buffers that only the paintable Low Poly path consumes.
+pub fn load_high_poly(path: &Path) -> Result<RawMesh, String> {
+    load_with_vertex_colors(path, false)
+}
+
+fn load_with_vertex_colors(path: &Path, collect_vertex_colors: bool) -> Result<RawMesh, String> {
     let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     let mut mesh = match ext.as_str() {
-        "obj" => load_obj(path)?,
-        "fbx" => load_fbx(path)?,
+        "obj" => load_obj(path, collect_vertex_colors)?,
+        "fbx" => load_fbx(path, collect_vertex_colors)?,
         _ => return Err(format!("Unsupported mesh format '.{ext}'. Use OBJ or FBX.")),
     };
     if mesh.indices.is_empty() {
@@ -49,7 +60,7 @@ pub fn load(path: &Path) -> Result<RawMesh, String> {
     Ok(mesh)
 }
 
-fn load_obj(path: &Path) -> Result<RawMesh, String> {
+fn load_obj(path: &Path, collect_vertex_colors: bool) -> Result<RawMesh, String> {
     let (models, materials) = tobj::load_obj(path, &tobj::LoadOptions { single_index: true, triangulate: true, ..Default::default() })
         .map_err(|e| format!("Failed to read OBJ: {e}"))?;
     let mut out = Builder::default();
@@ -64,7 +75,7 @@ fn load_obj(path: &Path) -> Result<RawMesh, String> {
             out.missing_uvs.push(m.name.clone());
         }
         let material = mesh.material_id.unwrap_or(0) as u32;
-        let has_c = mesh.vertex_color.len() >= count * 3;
+        let has_c = collect_vertex_colors && mesh.vertex_color.len() >= count * 3;
         out.begin_object(&m.name);
         for &i in &mesh.indices {
             let i = i as usize;
@@ -80,7 +91,7 @@ fn load_obj(path: &Path) -> Result<RawMesh, String> {
     Ok(out.finish())
 }
 
-fn load_fbx(path: &Path) -> Result<RawMesh, String> {
+fn load_fbx(path: &Path, collect_vertex_colors: bool) -> Result<RawMesh, String> {
     let opts = ufbx::LoadOpts {
         ignore_animation: true,
         ignore_embedded: true,
@@ -111,7 +122,7 @@ fn load_fbx(path: &Path) -> Result<RawMesh, String> {
         if !has_uv {
             out.missing_uvs.push(node.element.name.to_string());
         }
-        let has_c = mesh.vertex_color.exists;
+        let has_c = collect_vertex_colors && mesh.vertex_color.exists;
         out.begin_object(&node.element.name);
         tri.resize(mesh.max_face_triangles * 3, 0u32);
         for (face_index, &face) in mesh.faces.iter().enumerate() {
