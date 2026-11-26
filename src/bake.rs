@@ -1320,42 +1320,38 @@ pub fn prepare_cancellable(
     // Vertex-color IDs are the actual per-corner colors, not the legacy
     // triangle average. Keep an index for every distinct corner color so MCP
     // ID-region selection and the baked map refer to the same RGB values.
-    let color_ids: Option<(Vec<u32>, Vec<[f32; 4]>)> = match (&tri_vertex_color, settings.id_source) {
-        (Some(colors), IdSource::VertexColors) if colors.len() == indices.len() / 3 => {
-            let mut seen: HashMap<[u8; 3], u32> = HashMap::new();
-            let mut palette = Vec::new();
-            let mut per_tri = Vec::with_capacity(colors.len());
-            for corners in colors {
-                for color in corners {
-                    seen.entry(*color).or_insert_with(|| {
-                        palette.push([
-                            color[0] as f32 / 255.0,
-                            color[1] as f32 / 255.0,
-                            color[2] as f32 / 255.0,
-                            1.0,
-                        ]);
-                        palette.len() as u32 - 1
-                    });
+    let color_ids: Option<(Vec<u32>, Vec<[f32; 4]>, HashMap<[u8; 3], usize>)> =
+        match (&tri_vertex_color, settings.id_source) {
+            (Some(colors), IdSource::VertexColors) if colors.len() == indices.len() / 3 => {
+                let mut seen: HashMap<[u8; 3], usize> = HashMap::new();
+                let mut palette = Vec::new();
+                let mut per_tri = Vec::with_capacity(colors.len());
+                for corners in colors {
+                    for color in corners {
+                        seen.entry(*color).or_insert_with(|| {
+                            let id = palette.len();
+                            palette.push([
+                                color[0] as f32 / 255.0,
+                                color[1] as f32 / 255.0,
+                                color[2] as f32 / 255.0,
+                                1.0,
+                            ]);
+                            id
+                        });
+                    }
+                    per_tri.push(*seen.get(&corners[0]).expect("the first corner was inserted") as u32);
                 }
-                per_tri.push(*seen.get(&corners[0]).expect("the first corner was inserted"));
+                Some((per_tri, palette, seen))
             }
-            Some((per_tri, palette))
-        }
-        _ => None,
-    };
+            _ => None,
+        };
     check_prepare_cancelled(cancel)?;
-    let (tri_id, ids): (Cow<'_, [u32]>, Vec<[f32; 4]>) = match color_ids {
-        Some((per_tri, palette)) => (Cow::Owned(per_tri), palette),
-        None if use_materials => (Cow::Owned(tri_material), (0..material_count).map(id_color).collect()),
-        None => (Cow::Borrowed(&tri_part), (0..part_count).map(id_color).collect()),
-    };
-    let vertex_color_indices: HashMap<[u8; 3], usize> = if settings.id_source == IdSource::VertexColors {
-        ids.iter().enumerate().map(|(index, color)| {
-            ([0, 1, 2].map(|k| (color[k].clamp(0.0, 1.0) * 255.0).round() as u8), index)
-        }).collect()
-    } else {
-        HashMap::new()
-    };
+    let (tri_id, ids, vertex_color_indices): (Cow<'_, [u32]>, Vec<[f32; 4]>, HashMap<[u8; 3], usize>) =
+        match color_ids {
+            Some((per_tri, palette, indices)) => (Cow::Owned(per_tri), palette, indices),
+            None if use_materials => (Cow::Owned(tri_material), (0..material_count).map(id_color).collect(), HashMap::new()),
+            None => (Cow::Borrowed(&tri_part), (0..part_count).map(id_color).collect(), HashMap::new()),
+        };
     let mut id_regions: Vec<IdRegion> = ids
         .iter()
         .map(|c| IdRegion { color: [c[0], c[1], c[2]], triangles: 0, min: [f32::MAX; 3], max: [f32::MIN; 3] })
