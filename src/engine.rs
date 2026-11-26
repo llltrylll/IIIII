@@ -3085,7 +3085,8 @@ impl Engine {
         self.maps[4] = id;
         self.maps_version = self.maps_version.wrapping_add(1);
         self.bake_report = Some(report);
-        self.map_fix = Default::default();
+        // The ID map is an Info map and has no paintable fix layer. Preserve
+        // user-painted fixes on every other baked map during an ID-only rebake.
         self.maps_dirty = true;
         self.mark_dirty();
     }
