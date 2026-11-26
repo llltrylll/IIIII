@@ -2968,6 +2968,69 @@ pub(crate) mod tests {
         println!("  bulge normals, filled vs fitted cage: {mean:.3}");
         assert!(mean > 0.9, "the nearest surface is the bulge itself ({mean})");
     }
+
+    /// End-to-end GPU regression: the ID texture must carry each Low Poly
+    /// triangle corner's color through barycentric interpolation.
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn low_poly_vertex_color_id_map_interpolates_each_corner() {
+        let (device, queue) = gpu();
+        let positions = vec![
+            Vec3::new(-1.0, -1.0, 0.0),
+            Vec3::new(1.0, -1.0, 0.0),
+            Vec3::new(-1.0, 1.0, 0.0),
+        ];
+        let normals = Some(vec![Vec3::Z; 3]);
+        let uvs = vec![Vec2::ZERO, Vec2::X, Vec2::Y];
+        let mut mesh = Mesh::from_parts(
+            "Vertex ID color test".into(),
+            positions,
+            normals,
+            uvs,
+            vec![0, 1, 2],
+        );
+        mesh.tri_color = Some(vec![[85, 85, 85]]);
+        mesh.tri_vertex_color = Some(vec![[
+            [255, 0, 0],
+            [0, 255, 0],
+            [0, 0, 255],
+        ]]);
+
+        let gpu_mesh = GpuMesh::new(&device, &mesh);
+        let mut settings = BakeSettings { id_source: IdSource::VertexColors, ..BakeSettings::default() };
+        settings.apply_quality(Quality::Draft);
+        settings.aa = 1;
+        let (maps, _, low_pos) = run_bake(&device, &queue, &mesh, &gpu_mesh, &settings, 96);
+
+        let id_map = &maps.maps[MAPS[crate::engine::ID_MAP_INDEX].tex];
+        let id_bytes = read_texture(&device, &queue, id_map);
+        let low_bytes = read_texture(&device, &queue, &low_pos);
+        assert_eq!(id_bytes.len(), 96 * 96 * 4);
+        assert_eq!(low_bytes.len(), 96 * 96 * 16);
+
+        let mut ranges = [[u8::MAX, 0u8]; 3];
+        let mut interior = 0usize;
+        for (texel, low) in low_bytes.chunks_exact(16).enumerate() {
+            let alpha = f32::from_le_bytes([low[12], low[13], low[14], low[15]]);
+            if alpha <= 0.75 {
+                continue;
+            }
+            interior += 1;
+            for channel in 0..3 {
+                let value = id_bytes[texel * 4 + channel];
+                ranges[channel][0] = ranges[channel][0].min(value);
+                ranges[channel][1] = ranges[channel][1].max(value);
+            }
+        }
+
+        assert!(interior > 100, "the test triangle must cover enough texels ({interior})");
+        for (channel, [min, max]) in ranges.into_iter().enumerate() {
+            assert!(
+                max.saturating_sub(min) > 120,
+                "ID map channel {channel} should vary across the triangle, got {min}..{max}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
