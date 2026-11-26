@@ -564,7 +564,7 @@ pub const MAPS: [MapInfo; MAP_COUNT] = [
     map("Bent Normal", 2, 0, MapKind::Info, "Average unoccluded direction (world space)."),
     map("Normal", 3, 0, MapKind::Normal, "Tangent-space normal from the high poly."),
     map("Height", 3, 2, MapKind::Scalar, "High-poly displacement relative to the low poly."),
-    map("ID", 4, 0, MapKind::Info, "Color per material or mesh part, for ID masks."),
+    map("ID", 4, 0, MapKind::Info, "Color per material, mesh part, or imported vertex color, for ID masks."),
 ];
 
 /// Packed texture index of the categorical ID map. Unlike scalar/vector maps,
@@ -7184,7 +7184,7 @@ mod id_map_resample_tests {
         let rs = render_state();
         let mesh = Primitive::Plane.build();
         let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
-        let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 4);
+        let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 64);
 
         let source = Tex::new_without_srgb_view(
             &rs.device,
