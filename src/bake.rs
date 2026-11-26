@@ -2079,7 +2079,9 @@ impl GpuBaker {
             let [x, y, pass] = run.tiles[run.next_tile];
             run.next_tile += 1;
             let mut u = run.uniform;
-            u.e = [x as f32, y as f32, 0.0, run.next_tile as f32];
+            // Preserve e.w: the surface pass uses it to select vertex
+            // color interpolation vs the compact flat-ID palette.
+            u.e = [x as f32, y as f32, 0.0, run.uniform.e[3]];
             let ubuf = Self::uniform_buffer(device, &u);
             let mut encoder = device.create_command_encoder(&Default::default());
             if pass == 0 {
