@@ -1767,6 +1767,9 @@ impl PainterApp {
                     }
                 }
                 Action::AddGenerator(kind) => {
+                    if kind == GenKind::IdMask && self.mesh.has_vertex_colors() && self.bake_settings.high_poly.is_none() {
+                        self.bake_settings.id_source = IdSource::VertexColors;
+                    }
                     let g = new_generator(kind, &self.bake_settings.custom);
                     if let Some(layer) = self.engine.layers.get_mut(self.selected) {
                         match &mut layer.mask {
@@ -3762,8 +3765,13 @@ impl PainterApp {
                     .small().color(theme::TEXT_DIM));
             }
             if *pick_target == Some(target) {
-                ui.label(egui::RichText::new("Click a region in the 3D viewport to sample its ID color.")
-                    .small().color(theme::ACCENT));
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new("Click a region in the 3D viewport to sample its ID color.")
+                        .small().color(theme::ACCENT));
+                    if ui.small_button("Cancel sampling").clicked() {
+                        *pick_target = None;
+                    }
+                });
             }
         }
         dirty | generator_inputs_ui(ui, g, custom)
@@ -4124,6 +4132,13 @@ impl PainterApp {
         ui.menu_button(theme::with_icon(icons::STACK, "Add mask layer ▾"), |ui| {
             for k in GenKind::ALL {
                 if ui.button(k.name()).clicked() {
+                    if k == GenKind::IdMask {
+                        self.bake_settings.id_source = if has_vertex_colors && can_sample_low_poly {
+                            IdSource::VertexColors
+                        } else {
+                            IdSource::MeshParts
+                        };
+                    }
                     mask.layers.push(MaskLayer { source: MaskSource::Generator(new_generator(k, &custom)), blend: MaskBlend::Multiply, opacity: 1.0, enabled: true });
                     dirty = true;
                     ui.close();
