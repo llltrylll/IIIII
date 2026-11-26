@@ -422,6 +422,12 @@ mod tests {
         let p = palette(&colors);
         assert_eq!(p.distinct, 100);
         assert_eq!(p.entries.len(), PALETTE_MAX);
+        let selected: Vec<u8> = p.entries.iter().map(|entry| entry.rgb[0]).collect();
+        assert_eq!(
+            selected,
+            (0..PALETTE_MAX).map(|index| index as u8).collect::<Vec<_>>(),
+            "equal-frequency palette ties must choose the lowest RGB values deterministically",
+        );
     }
 
     #[test]
