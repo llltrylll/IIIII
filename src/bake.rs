@@ -617,11 +617,14 @@ pub(crate) fn base_name(name: &str) -> String {
     s
 }
 
-/// One color of the ID map: a mesh part, or a material when IDs come from materials.
+/// One source ID in the baked map: a mesh part, material, or imported
+/// vertex color. Vertex-color regions may share triangles when a face has
+/// different colors at its corners.
 #[derive(Clone, Debug)]
 pub struct IdRegion {
     /// sRGB, the value an ID mask matches.
     pub color: [f32; 3],
+    /// Triangles containing this ID (regions may overlap in vertex-color mode).
     pub triangles: usize,
     /// Bounds in the normalized mesh space the viewport shows.
     pub min: [f32; 3],
