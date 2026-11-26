@@ -430,6 +430,13 @@ impl PainterApp {
                 }
                 if let Some(g) = str_arg(args, "generator") {
                     let kind = generator_kind(g).ok_or(format!("unknown generator '{g}'"))?;
+                    if kind == GenKind::IdMask {
+                        self.bake_settings.id_source = if self.mesh.has_vertex_colors() && self.bake_settings.high_poly.is_none() {
+                            crate::bake::IdSource::VertexColors
+                        } else {
+                            crate::bake::IdSource::MeshParts
+                        };
+                    }
                     let mut generator = kind.default_generator();
                     self.tune_generator(&mut generator, args)?;
                     match &mut self.engine.layers[i].mask {
