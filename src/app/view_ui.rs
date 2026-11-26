@@ -1,6 +1,58 @@
 //! The 3D and 2D viewports: input, drawing of the panes and end-of-frame bookkeeping.
 use super::*;
 
+/// The raster viewport is the supported preview while any local point light is enabled.
+fn has_enabled_point_lights(view: &ViewSettings) -> bool {
+    view.point_lights
+        .iter()
+        .take(view.point_light_count.min(crate::viewport::MAX_POINT_LIGHTS))
+        .any(|light| light.on)
+}
+
+/// Project a world-space point-light position into the 3D viewport's UI coordinates.
+fn point_light_screen_position(cam: &OrbitCam, position: Vec3, rect: Rect) -> Option<egui::Pos2> {
+    if rect.width() <= 1.0 || rect.height() <= 1.0 || !position.is_finite() {
+        return None;
+    }
+    let clip = cam.view_proj(rect.width() / rect.height()) * position.extend(1.0);
+    if !clip.w.is_finite() || clip.w <= 1e-5 {
+        return None;
+    }
+    let ndc = clip.truncate() / clip.w;
+    if !ndc.is_finite()
+        || ndc.z < 0.0
+        || ndc.z > 1.0
+        || ndc.x < -1.0
+        || ndc.x > 1.0
+        || ndc.y < -1.0
+        || ndc.y > 1.0
+    {
+        return None;
+    }
+    Some(pos2(
+        rect.left() + (ndc.x * 0.5 + 0.5) * rect.width(),
+        rect.top() + (0.5 - ndc.y * 0.5) * rect.height(),
+    ))
+}
+
+/// Intersect a pointer ray with the camera-facing plane that contains a light.
+/// This keeps direct marker dragging independent from the comparatively expensive
+/// mesh BVH raycast, while preserving the light's depth during the drag.
+fn ray_plane_intersection(origin: Vec3, direction: Vec3, plane_point: Vec3, plane_normal: Vec3) -> Option<Vec3> {
+    let denominator = direction.dot(plane_normal);
+    if !origin.is_finite() || !direction.is_finite() || !plane_point.is_finite()
+        || !plane_normal.is_finite() || denominator.abs() <= 1e-5
+    {
+        return None;
+    }
+    let distance = (plane_point - origin).dot(plane_normal) / denominator;
+    if !distance.is_finite() || distance <= 0.0 {
+        return None;
+    }
+    let position = origin + direction * distance;
+    position.is_finite().then_some(position)
+}
+
 /// Points of the opacity arc, starting at the top and going clockwise.
 /// `turn_segments` is how many straight pieces a full turn would use.
 fn stroke_opacity_arc_points_dense(center: egui::Pos2, radius: f32, opacity: f32, turn_segments: f32) -> Vec<egui::Pos2> {
@@ -90,18 +142,19 @@ impl PainterApp {
         }
         if let Some(hit) = self.bvh.raycast(eye, forward) {
             let distance = eye.distance(hit.pos);
-            if distance.is_finite() && (0.05..=40.0).contains(&distance) {
+            if distance.is_finite() && distance >= crate::viewport::CAMERA_MIN_DISTANCE {
                 self.cam.focus_on(hit.pos);
             }
         }
     }
 
     pub(super) fn view_input(&mut self, ui: &egui::Ui, kind: ViewKind, rect: Rect, resp: &egui::Response) {
-        let (hover, pressed, down, mods, delta, scroll, x_down, z_down) = ui.input(|i| {
+        let (hover, pressed, down, secondary_pressed, mods, delta, scroll, x_down, z_down) = ui.input(|i| {
             (
                 i.pointer.hover_pos(),
                 i.pointer.primary_pressed(),
                 i.pointer.primary_down(),
+                i.pointer.button_pressed(egui::PointerButton::Secondary),
                 i.modifiers,
                 i.pointer.delta(),
                 i.smooth_scroll_delta.y,
@@ -112,6 +165,119 @@ impl PainterApp {
         let ppp = self.ppp;
         let local = |p: egui::Pos2| Vec2::new((p.x - rect.min.x) * ppp, (p.y - rect.min.y) * ppp);
         use egui::PointerButton as B;
+
+        // Direct marker dragging uses a camera-facing plane, not a mesh
+        // raycast on every mouse update. This keeps movement responsive and
+        // prevents the drag gesture from ever reaching the paint tool.
+        if kind == ViewKind::V3d
+            && let Some((index, plane_point, plane_normal, drag_offset)) = self.drag_point_light
+        {
+            if !down {
+                self.drag_point_light = None;
+                self.point_light_pointer_capture = false;
+                self.view.point_light_preview = None;
+                self.status = format!("Point {} repositioned.", index + 1);
+                ui.ctx().request_repaint();
+            } else if let Some(pointer) = hover.filter(|p| rect.contains(*p)) {
+                let size = Vec2::new(rect.width() * ppp, rect.height() * ppp);
+                let (origin, direction) = self.cam.ray(local(pointer), size);
+                if let Some(position) = ray_plane_intersection(origin, direction, plane_point, plane_normal)
+                    && let Some(light) = self.view.point_lights.get_mut(index)
+                {
+                    light.position = position + drag_offset;
+                    self.view.point_light_preview = Some(index);
+                    ui.ctx().request_repaint();
+                }
+            }
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Move);
+            return;
+        }
+
+        // Consume non-drag marker clicks so they cannot leak into brush painting.
+        if kind == ViewKind::V3d && self.point_light_pointer_capture {
+            if !down {
+                self.point_light_pointer_capture = false;
+            }
+            return;
+        }
+
+        // Moving a light is a one-click placement mode, not a paint gesture.
+        // Use the mesh hit when possible; otherwise place it on the camera's
+        // focal plane so lights can also be moved into empty space.
+        if self.move_point_light && kind == ViewKind::V3d {
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.move_point_light = false;
+                self.status = "Point-light move mode cancelled.".into();
+                ui.ctx().request_repaint();
+                return;
+            }
+            if pressed && resp.hovered() && let Some(pointer) = hover {
+                let size = Vec2::new(rect.width() * ppp, rect.height() * ppp);
+                let (origin, direction) = self.cam.ray(local(pointer), size);
+                let position = if let Some(hit) = self.bvh.raycast(origin, direction) {
+                    Some(hit.pos - direction * 0.25)
+                } else {
+                    let forward = (self.cam.target - origin).normalize_or_zero();
+                    let denominator = direction.dot(forward);
+                    if denominator.abs() > 1e-5 {
+                        let distance = (self.cam.target - origin).dot(forward) / denominator;
+                        (distance > 0.0).then_some(origin + direction * distance)
+                    } else {
+                        None
+                    }
+                };
+                let count = self.view.point_light_count.min(crate::viewport::MAX_POINT_LIGHTS);
+                if count > 0 && self.selected_point_light < count && let Some(position) = position.filter(|p| p.is_finite()) {
+                    self.view.point_lights[self.selected_point_light].position = position;
+                    self.view.point_light_preview = None;
+                    self.point_light_pointer_capture = true;
+                    self.move_point_light = false;
+                    self.status = format!(
+                        "Point {} moved to X {:.2}, Y {:.2}, Z {:.2}.",
+                        self.selected_point_light + 1, position.x, position.y, position.z
+                    );
+                }
+                ui.ctx().request_repaint();
+            }
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            return;
+        }
+
+        // The 2D light marker is an interactive viewport gizmo:
+        // left-click selects and starts a direct drag; right-click toggles it.
+        // Both gestures are intercepted before the normal paint input path.
+        if kind == ViewKind::V3d && self.show_point_light_markers
+            && (pressed || secondary_pressed) && resp.hovered()
+            && let Some(pointer) = hover
+        {
+            let count = self.view.point_light_count.min(crate::viewport::MAX_POINT_LIGHTS);
+            for index in 0..count {
+                let position = self.view.point_lights[index].position;
+                if point_light_screen_position(&self.cam, position, rect)
+                    .is_some_and(|marker| marker.distance(pointer) <= 14.0)
+                {
+                    self.selected_point_light = index;
+                    self.point_light_pointer_capture = true;
+                    if secondary_pressed {
+                        let light = &mut self.view.point_lights[index];
+                        light.on = !light.on;
+                        self.status = format!("Point light {} turned {}.", index + 1, if light.on { "on" } else { "off" });
+                    } else {
+                        let forward = (self.cam.target - self.cam.eye()).normalize_or_zero();
+                        let size = Vec2::new(rect.width() * ppp, rect.height() * ppp);
+                        let (origin, direction) = self.cam.ray(local(pointer), size);
+                        let offset = ray_plane_intersection(origin, direction, position, forward)
+                            .map(|cursor_hit| position - cursor_hit)
+                            .unwrap_or(Vec3::ZERO);
+                        self.drag_point_light = Some((index, position, forward, offset));
+                        self.view.point_light_preview = Some(index);
+                        self.status = format!("Dragging Point {}. Release to place; right-click toggles it.", index + 1);
+                    }
+                    ui.ctx().request_repaint();
+                    return;
+                }
+            }
+        }
 
         // Ctrl+' toggles first-person navigation while the pointer is over
         // the 3D viewport. While active, the pointer is locked/hidden and
@@ -251,13 +417,13 @@ impl PainterApp {
                     self.cam.target += (-right * delta.x + up * delta.y) * k;
                 }
                 if resp.dragged_by(B::Secondary) && mods.alt && !adjust_brush {
-                    self.cam.dist = (self.cam.dist * (delta.y * 0.01).exp()).clamp(0.3, 40.0);
+                    self.cam.set_distance(self.cam.dist * (delta.y * 0.01).exp());
                 }
                 if resp.dragged_by(B::Secondary) && mods.shift && !adjust_brush {
                     self.view.env_rotation += delta.x * 0.01;
                 }
                 if resp.hovered() && scroll != 0.0 {
-                    self.cam.dist = (self.cam.dist * (-scroll * self.zoom_rate()).exp()).clamp(0.3, 40.0);
+                    self.cam.set_distance(self.cam.dist * (-scroll * self.zoom_rate()).exp());
                 }
                 if resp.double_clicked() && mods.alt
                     && let Some(p) = hover {
@@ -449,6 +615,14 @@ impl PainterApp {
         if rect.width() < 4.0 || rect.height() < 4.0 {
             return;
         }
+        // Do not leave the reduced interaction preview active if a slider
+        // was released while its Lighting tab became inactive.
+        if kind == ViewKind::V3d && self.drag_point_light.is_none()
+            && self.view.point_light_preview.is_some()
+            && !ui.input(|i| i.pointer.any_down())
+        {
+            self.view.point_light_preview = None;
+        }
         // Camera and UV pan can outlive a project reload. Fit the first frame
         // of each new GPU mesh to its actual bounds rather than showing empty space.
         if kind == ViewKind::V3d
@@ -519,7 +693,13 @@ impl PainterApp {
                 self.drew_3d = true;
                 // Path tracing replaces the 3D view while it's idle. Painting and
                 // the map display modes use the raster view, which reacts instantly.
-                if self.rt.enabled && self.stroke.is_none() && self.view.mode == ViewMode::Material && self.preview_update_at.is_none() {
+                // Keep the raster viewport responsive while editing a local
+                // light. Ray tracing is resumed automatically on release.
+                let local_point_lights_active = has_enabled_point_lights(&self.view);
+                if self.rt.enabled && !local_point_lights_active
+                    && self.drag_point_light.is_none() && self.view.point_light_preview.is_none()
+                    && self.stroke.is_none() && self.view.mode == ViewMode::Material && self.preview_update_at.is_none()
+                {
                     if self.raytracer.is_none() {
                         let _s = crate::startup_trace::span("raytraced preview: lazy RayTracer::new + set_mesh");
                         let mut raytracer = RayTracer::new(&self.rs);
@@ -553,6 +733,44 @@ impl PainterApp {
             ViewKind::V2d => self.views.view2d.egui_id,
         };
         painter.image(id, rect, uv, Color32::WHITE);
+        if kind == ViewKind::V3d && self.show_point_light_markers {
+            let count = self.view.point_light_count.min(crate::viewport::MAX_POINT_LIGHTS);
+            for index in 0..count {
+                let light = self.view.point_lights[index];
+                let Some(marker) = point_light_screen_position(&self.cam, light.position, rect) else { continue };
+                let tint = Color32::from_rgba_unmultiplied(
+                    (light.color[0].clamp(0.0, 1.0) * 255.0) as u8,
+                    (light.color[1].clamp(0.0, 1.0) * 255.0) as u8,
+                    (light.color[2].clamp(0.0, 1.0) * 255.0) as u8,
+                    if light.on { 255 } else { 105 },
+                );
+                let selected = index == self.selected_point_light;
+                let outline = if selected { theme::ACCENT } else { tint };
+                painter.circle_filled(marker, 8.5, Color32::from_black_alpha(220));
+                painter.circle_stroke(marker, 8.0, Stroke::new(if selected { 2.0 } else { 1.5 }, outline));
+                painter.circle_filled(marker, 2.8, tint);
+                for (dx, dy) in [(0.0, -12.0), (12.0, 0.0), (0.0, 12.0), (-12.0, 0.0)] {
+                    let start = marker + vec2(dx * 0.62, dy * 0.62);
+                    let end = marker + vec2(dx, dy);
+                    painter.line_segment([start, end], Stroke::new(1.4, outline));
+                }
+                let label_rect = Rect::from_min_size(marker + vec2(11.0, -9.0), vec2(42.0, 17.0));
+                painter.rect_filled(label_rect, 3.0, Color32::from_black_alpha(205));
+                painter.text(
+                    label_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    format!("L{} {}", index + 1, if light.on { "ON" } else { "OFF" }),
+                    egui::FontId::proportional(9.0),
+                    if light.on { Color32::WHITE } else { Color32::from_gray(165) },
+                );
+            }
+        }
+        if kind == ViewKind::V3d && self.move_point_light {
+            let prompt = format!("Move Point {} · click the model to place · Esc cancels", self.selected_point_light + 1);
+            let prompt_rect = Rect::from_min_size(rect.left_bottom() + vec2(8.0, -28.0), vec2(290.0, 20.0));
+            painter.rect_filled(prompt_rect, 3.0, Color32::from_black_alpha(205));
+            painter.text(prompt_rect.center(), egui::Align2::CENTER_CENTER, prompt, egui::FontId::proportional(11.0), Color32::WHITE);
+        }
         self.draw_path(&painter, kind, rect);
         self.draw_gizmo(&painter, kind, rect);
         self.draw_cage_brush(&painter, kind);
@@ -856,5 +1074,71 @@ mod cursor_opacity_tests {
         assert!(ticks[2].1.y > 10.0);
         assert!(ticks[3].1.x < -10.0);
         assert!(super::stroke_opacity_tick_segments(pos2(0.0, 0.0), 0.0).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod point_light_drag_tests {
+    use super::ray_plane_intersection;
+    use glam::Vec3;
+
+    #[test]
+    fn ray_drag_keeps_the_light_on_its_camera_facing_plane() {
+        let point = ray_plane_intersection(
+            Vec3::new(0.0, 0.0, 5.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::ZERO,
+            Vec3::Z,
+        ).unwrap();
+        assert!(point.length() < 1e-6);
+    }
+
+    #[test]
+    fn ray_drag_rejects_parallel_and_behind_camera_intersections() {
+        assert!(ray_plane_intersection(
+            Vec3::new(0.0, 0.0, 5.0),
+            Vec3::X,
+            Vec3::ZERO,
+            Vec3::Z,
+        ).is_none());
+        assert!(ray_plane_intersection(
+            Vec3::new(0.0, 0.0, 5.0),
+            Vec3::Z,
+            Vec3::ZERO,
+            Vec3::Z,
+        ).is_none());
+    }
+}
+
+#[cfg(test)]
+mod local_point_light_rt_fallback_tests {
+    use super::has_enabled_point_lights;
+    use crate::viewport::ViewSettings;
+
+    #[test]
+    fn no_active_light_allows_ray_tracing() {
+        let mut view = ViewSettings::default();
+        assert!(!has_enabled_point_lights(&view));
+
+        view.point_light_count = 1;
+        view.point_lights[0].on = false;
+        assert!(!has_enabled_point_lights(&view));
+    }
+
+    #[test]
+    fn any_enabled_light_keeps_the_raster_preview() {
+        let mut view = ViewSettings::default();
+        view.point_light_count = 2;
+        view.point_lights[0].on = false;
+        view.point_lights[1].on = true;
+        assert!(has_enabled_point_lights(&view));
+    }
+
+    #[test]
+    fn enabled_slots_outside_active_count_are_ignored() {
+        let mut view = ViewSettings::default();
+        view.point_light_count = 0;
+        view.point_lights[0].on = true;
+        assert!(!has_enabled_point_lights(&view));
     }
 }

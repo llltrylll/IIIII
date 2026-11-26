@@ -19,6 +19,10 @@ use std::time::Instant;
 use wgpu::TextureFormat as F;
 use wgpu::util::DeviceExt;
 
+/// Number of distinct vertex-color IDs exposed in the bake report. This
+/// matches the top palette entries shown in the Vertex ID panel.
+pub const MAX_VERTEX_COLOR_ID_REGIONS: usize = 48;
+
 /// Largest resolution the baker works at. Its working textures take about
 /// 240 bytes a texel (surface, low-poly and cage maps in 32-bit float, the
 /// edge search, the ray-traced maps and their scratch copies): 4 GB at
@@ -617,11 +621,14 @@ pub(crate) fn base_name(name: &str) -> String {
     s
 }
 
-/// One color of the ID map: a mesh part, or a material when IDs come from materials.
+/// One source ID in the baked map: a mesh part, material, or imported
+/// vertex color. Vertex-color regions may share triangles when a face has
+/// different colors at its corners.
 #[derive(Clone, Debug)]
 pub struct IdRegion {
     /// sRGB, the value an ID mask matches.
     pub color: [f32; 3],
+    /// Triangles containing this ID (regions may overlap in vertex-color mode).
     pub triangles: usize,
     /// Bounds in the normalized mesh space the viewport shows.
     pub min: [f32; 3],
@@ -1121,6 +1128,79 @@ fn check_prepare_cancelled(cancel: &AtomicBool) -> Result<(), String> {
     }
 }
 
+/// Rejects source combinations that cannot produce IDs matching the visible
+/// low-poly palette. This runs before both cache lookup and CPU preparation.
+pub fn validate_settings(settings: &BakeSettings) -> Result<(), String> {
+    if settings.id_source == IdSource::VertexColors && settings.high_poly.is_some() {
+        return Err("Vertex Colors IDs come from the loaded low-poly mesh, while a high-poly projection uses a different triangle topology. Finish the high-poly bake with Mesh parts or Materials, then use the Vertex ID panel to rebake only the ID map from the low-poly colors.".into());
+    }
+    Ok(())
+}
+
+/// Counts vertex colors, keeps only the same most-used palette entries shown
+/// by the ID panel, and calculates their region bounds. The baked texture still
+/// receives every raw corner color; only the report/MCP index is bounded.
+fn vertex_color_id_data(
+    colors: &[[[u8; 3]; 3]],
+    indices: &[u32],
+    positions: &[Vec3],
+    cancel: &AtomicBool,
+) -> Result<(Vec<[f32; 4]>, Vec<IdRegion>), String> {
+    let mut counts: HashMap<[u8; 3], u32> = HashMap::new();
+    for (triangle, corners) in colors.iter().enumerate() {
+        if triangle.is_multiple_of(8192) {
+            check_prepare_cancelled(cancel)?;
+        }
+        for color in corners {
+            *counts.entry(*color).or_default() += 1;
+        }
+    }
+
+    let mut palette: Vec<_> = counts.into_iter().collect();
+    let order = |a: &([u8; 3], u32), b: &([u8; 3], u32)| b.1.cmp(&a.1).then(a.0.cmp(&b.0));
+    if palette.len() > MAX_VERTEX_COLOR_ID_REGIONS {
+        palette.select_nth_unstable_by(MAX_VERTEX_COLOR_ID_REGIONS, order);
+        palette.truncate(MAX_VERTEX_COLOR_ID_REGIONS);
+    }
+    palette.sort_unstable_by(order);
+    palette.shrink_to_fit();
+
+    let ids: Vec<[f32; 4]> = palette.iter().map(|(rgb, _)| {
+        [rgb[0] as f32 / 255.0, rgb[1] as f32 / 255.0, rgb[2] as f32 / 255.0, 1.0]
+    }).collect();
+    let lookup: HashMap<[u8; 3], usize> = palette.iter().enumerate().map(|(index, (rgb, _))| (*rgb, index)).collect();
+    let mut regions: Vec<IdRegion> = ids.iter()
+        .map(|color| IdRegion {
+            color: [color[0], color[1], color[2]],
+            triangles: 0,
+            min: [f32::MAX; 3],
+            max: [f32::MIN; 3],
+        })
+        .collect();
+
+    for (triangle, (indices, corners)) in indices.chunks_exact(3).zip(colors).enumerate() {
+        if triangle.is_multiple_of(8192) {
+            check_prepare_cancelled(cancel)?;
+        }
+        let mut seen = [usize::MAX; 3];
+        let mut seen_count = 0usize;
+        for corner in 0..3 {
+            let Some(&region) = lookup.get(&corners[corner]) else { continue };
+            if !seen[..seen_count].contains(&region) {
+                seen[seen_count] = region;
+                seen_count += 1;
+                regions[region].triangles += 1;
+            }
+            let position = positions[indices[corner] as usize].to_array();
+            for axis in 0..3 {
+                regions[region].min[axis] = regions[region].min[axis].min(position[axis]);
+                regions[region].max[axis] = regions[region].max[axis].max(position[axis]);
+            }
+        }
+    }
+    Ok((ids, regions))
+}
+
 /// Prepares baking texture set `set` of `low` (its triangles get maps; the
 /// whole mesh occludes).
 pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<PreparedScene, String> {
@@ -1135,10 +1215,15 @@ pub fn prepare_cancellable(
     cancel: &AtomicBool,
 ) -> Result<PreparedScene, String> {
     check_prepare_cancelled(cancel)?;
+    if settings.id_source == IdSource::VertexColors && settings.high_poly.is_some() {
+        return Err(
+            "Vertex Colors IDs come from the loaded low-poly mesh, while a high-poly projection uses a different triangle topology. Finish the high-poly bake with Mesh parts or Materials, then use the Vertex ID panel to rebake only the ID map from the low-poly colors.".into()
+        );
+    }
     let start = Instant::now();
     let low_tris = low.indices.len() / 3;
     let raster = low.sets.get(set).map_or(0..low_tris as u32, |s| s.tris.clone());
-    let (positions, normals, indices, tri_material, material_count, source, src_objects, tri_color, tri_vertex_color) = match &settings.high_poly {
+    let (positions, normals, indices, tri_material, material_count, source, src_objects, tri_vertex_color) = match &settings.high_poly {
         Some(path) => {
             let mut hp = HighPoly::load(path, low.center, low.scale)?;
             check_prepare_cancelled(cancel)?;
@@ -1159,10 +1244,10 @@ pub fn prepare_cancellable(
             } else {
                 Vec::new()
             };
-            let (tri_color, tri_vertex_color) = if settings.id_source == IdSource::VertexColors {
-                (hp.tri_color, hp.tri_vertex_color)
+            let tri_vertex_color = if settings.id_source == IdSource::VertexColors {
+                hp.tri_vertex_color
             } else {
-                (None, None)
+                None
             };
             (
                 hp.positions,
@@ -1172,7 +1257,6 @@ pub fn prepare_cancellable(
                 hp.material_count,
                 format!("{} (high poly)", hp.name),
                 objects,
-                tri_color,
                 tri_vertex_color,
             )
         }
@@ -1193,16 +1277,23 @@ pub fn prepare_cancellable(
                     tri_material[s.tris.start as usize..s.tris.end as usize].fill(k as u32);
                 }
             }
-            let (tri_color, tri_vertex_color) = if settings.id_source == IdSource::VertexColors {
-                (low.tri_color.clone(), low.tri_vertex_color.clone())
+            let tri_vertex_color = if settings.id_source == IdSource::VertexColors {
+                low.tri_vertex_color.clone()
             } else {
-                (None, None)
+                None
             };
-            (positions, normals, Cow::Borrowed(&low.indices), tri_material, count, format!("{} (low poly)", low.name), None, tri_color, tri_vertex_color)
+            (positions, normals, Cow::Borrowed(&low.indices), tri_material, count, format!("{} (low poly)", low.name), None, tri_vertex_color)
         }
     };
     check_prepare_cancelled(cancel)?;
     let triangle_count = indices.len() / 3;
+    if settings.id_source == IdSource::VertexColors
+        && tri_vertex_color.as_ref().is_none_or(|colors| colors.len() != triangle_count)
+    {
+        return Err(format!(
+            "Vertex Colors was selected as the ID source, but the chosen bake source ({source}) has no complete vertex-color data. Add a color attribute to that mesh or choose Mesh parts/Materials."
+        ));
+    }
 
     // Name groups: 1-based per distinct low-poly base name; 0 = unmatched
     // (an unmatched low part sees everything, an unmatched high part is seen
@@ -1308,48 +1399,45 @@ pub fn prepare_cancellable(
         .map(|p| [hash01(p as u32 + 1), part_lo[p], (part_hi[p] - part_lo[p]).max(1e-5), 0.0])
         .collect();
     let use_materials = settings.id_source == IdSource::Materials && material_count > 1;
-    // Vertex colors: one ID per distinct color, shown as that color.
-    let color_ids: Option<(Vec<u32>, Vec<[f32; 4]>)> = match (&tri_color, settings.id_source) {
-        (Some(colors), IdSource::VertexColors) if colors.len() == indices.len() / 3 => {
-            let mut seen: HashMap<[u8; 3], u32> = HashMap::new();
-            let mut palette = Vec::new();
-            let per_tri = colors
+    let (tri_id, ids, id_regions): (Cow<'_, [u32]>, Vec<[f32; 4]>, Vec<IdRegion>) =
+        if settings.id_source == IdSource::VertexColors {
+            let colors = tri_vertex_color.as_ref().expect("vertex-color source was validated above");
+            let (ids, regions) = vertex_color_id_data(colors, &indices, &positions, cancel)?;
+            // The shader reads the original per-corner colors directly. The
+            // flat ID slot is unused in this mode, so borrow part IDs rather
+            // than allocating one extra index per triangle.
+            (Cow::Borrowed(&tri_part), ids, regions)
+        } else {
+            let (tri_id, ids): (Cow<'_, [u32]>, Vec<[f32; 4]>) = if use_materials {
+                (Cow::Owned(tri_material), (0..material_count).map(id_color).collect())
+            } else {
+                (Cow::Borrowed(&tri_part), (0..part_count).map(id_color).collect())
+            };
+            let mut regions: Vec<IdRegion> = ids
                 .iter()
-                .map(|c| {
-                    *seen.entry(*c).or_insert_with(|| {
-                        palette.push([c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, 1.0]);
-                        palette.len() as u32 - 1
-                    })
+                .map(|color| IdRegion {
+                    color: [color[0], color[1], color[2]],
+                    triangles: 0,
+                    min: [f32::MAX; 3],
+                    max: [f32::MIN; 3],
                 })
                 .collect();
-            Some((per_tri, palette))
-        }
-        _ => None,
-    };
-    check_prepare_cancelled(cancel)?;
-    let (tri_id, ids): (Cow<'_, [u32]>, Vec<[f32; 4]>) = match color_ids {
-        Some((per_tri, palette)) => (Cow::Owned(per_tri), palette),
-        None if use_materials => (Cow::Owned(tri_material), (0..material_count).map(id_color).collect()),
-        None => (Cow::Borrowed(&tri_part), (0..part_count).map(id_color).collect()),
-    };
-    let mut id_regions: Vec<IdRegion> = ids
-        .iter()
-        .map(|c| IdRegion { color: [c[0], c[1], c[2]], triangles: 0, min: [f32::MAX; 3], max: [f32::MIN; 3] })
-        .collect();
-    for (t, tri) in indices.chunks_exact(3).enumerate() {
-        if t.is_multiple_of(8192) {
-            check_prepare_cancelled(cancel)?;
-        }
-        let r = &mut id_regions[tri_id[t] as usize];
-        r.triangles += 1;
-        for &v in tri {
-            let p = positions[v as usize].to_array();
-            for k in 0..3 {
-                r.min[k] = r.min[k].min(p[k]);
-                r.max[k] = r.max[k].max(p[k]);
+            for (triangle, tri) in indices.chunks_exact(3).enumerate() {
+                if triangle.is_multiple_of(8192) {
+                    check_prepare_cancelled(cancel)?;
+                }
+                let region = &mut regions[tri_id[triangle] as usize];
+                region.triangles += 1;
+                for &vertex in tri {
+                    let position = positions[vertex as usize].to_array();
+                    for axis in 0..3 {
+                        region.min[axis] = region.min[axis].min(position[axis]);
+                        region.max[axis] = region.max[axis].max(position[axis]);
+                    }
+                }
             }
-        }
-    }
+            (tri_id, ids, regions)
+        };
 
     // Baking needs node bounds and triangle order, not a second CPU triangle
     // array. Build those directly from the source indices.
@@ -1389,7 +1477,6 @@ pub fn prepare_cancellable(
     // These source payloads have been reduced to the final GPU arrays/palette.
     // Release them before feature-edge construction allocates its own scratch.
     drop(tri_id);
-    drop(tri_color);
     drop(tri_vertex_color);
     drop(src_group);
 
@@ -1560,6 +1647,34 @@ impl BakeReport {
     pub fn finished(&self) -> bool {
         self.finished.load(Ordering::Acquire)
     }
+
+    /// Keeps the full-bake report intact while replacing only the ID-region
+    /// index with the metadata for a separately rebaked ID texture.
+    pub fn with_id_regions_from(&self, id_report: &BakeReport) -> BakeReport {
+        BakeReport {
+            source: self.source.clone(),
+            triangles: self.triangles,
+            parts: self.parts,
+            hard_edges: self.hard_edges,
+            resolution: self.resolution,
+            rays_per_texel: self.rays_per_texel,
+            prep_seconds: self.prep_seconds,
+            edge_max_distance: self.edge_max_distance,
+            id_regions: id_report.id_regions.clone(),
+            matched_names: self.matched_names,
+            used_cage: self.used_cage,
+            baked: self.baked,
+            custom: self.custom.clone(),
+            from_cache: self.from_cache,
+            started: self.started.clone(),
+            gpu_seconds: AtomicU32::new(self.gpu_seconds.load(Ordering::Relaxed)),
+            finished: AtomicBool::new(self.finished.load(Ordering::Acquire)),
+            valid_texels: AtomicU32::new(self.valid_texels.load(Ordering::Relaxed)),
+            missed_texels: AtomicU32::new(self.missed_texels.load(Ordering::Relaxed)),
+            filled_texels: AtomicU32::new(self.filled_texels.load(Ordering::Relaxed)),
+        }
+    }
+
     pub fn missed_percent(&self) -> Option<f32> {
         if !self.finished() {
             return None;
@@ -3543,5 +3658,158 @@ pub(crate) mod tests {
         let mean = agree.iter().sum::<f32>() / agree.len().max(1) as f32;
         println!("  bulge normals, filled vs fitted cage: {mean:.3}");
         assert!(mean > 0.9, "the nearest surface is the bulge itself ({mean})");
+    }
+}
+
+
+#[cfg(test)]
+mod vertex_color_id_source_tests {
+    use super::{prepare, BakeSettings, IdSource, MAX_VERTEX_COLOR_ID_REGIONS};
+    use crate::mesh::Primitive;
+    use std::collections::HashMap;
+
+    #[test]
+    fn vertex_color_id_source_rejects_high_poly_projection_before_loading_it() {
+        let mesh = Primitive::Plane.build();
+        let settings = BakeSettings {
+            id_source: IdSource::VertexColors,
+            high_poly: Some(std::path::PathBuf::from("this-file-does-not-need-to-exist.fbx")),
+            ..Default::default()
+        };
+        let error = match prepare(&mesh, &settings, 0) {
+            Ok(_) => panic!("low-poly vertex colors must not index high-poly triangles"),
+            Err(error) => error,
+        };
+        assert!(error.contains("different triangle topology"), "{error}");
+        assert!(error.contains("rebake only the ID map"), "{error}");
+    }
+
+    #[test]
+    fn vertex_color_id_source_rejects_missing_color_attributes() {
+        let mesh = Primitive::Plane.build();
+        let settings = BakeSettings { id_source: IdSource::VertexColors, ..Default::default() };
+        let error = match prepare(&mesh, &settings, 0) {
+            Ok(_) => panic!("Vertex Colors mode must not silently fall back to mesh-part IDs"),
+            Err(error) => error,
+        };
+        assert!(error.contains("Vertex Colors was selected as the ID source"), "{error}");
+    }
+
+    #[test]
+    fn vertex_color_id_source_keeps_the_per_corner_payload() {
+        let mut mesh = Primitive::Plane.build();
+        let triangles = mesh.triangle_count();
+        mesh.tri_color = Some(vec![[255, 0, 0]; triangles]);
+        mesh.tri_vertex_color = Some(vec![[[255, 0, 0]; 3]; triangles]);
+        let settings = BakeSettings { id_source: IdSource::VertexColors, ..Default::default() };
+        let prepared = prepare(&mesh, &settings, 0).expect("complete vertex-color source");
+        assert_eq!(prepared.tri_vcolor.len(), mesh.indices.len());
+    }
+
+    #[test]
+    fn vertex_color_id_regions_match_the_bounded_ui_palette() {
+        let mut mesh = Primitive::Sphere.build();
+        let triangles = mesh.triangle_count();
+        let colors = (0..triangles).map(|triangle| {
+            std::array::from_fn(|corner| {
+                let index = (triangle * 3 + corner) % 60;
+                let red = index as u8;
+                [red, 255 - red, red.wrapping_mul(7)]
+            })
+        }).collect::<Vec<_>>();
+        mesh.tri_vertex_color = Some(colors);
+        let settings = BakeSettings { id_source: IdSource::VertexColors, ..Default::default() };
+
+        let prepared = prepare(&mesh, &settings, 0).expect("vertex-color palette");
+
+        assert_eq!(prepared.id_regions.len(), MAX_VERTEX_COLOR_ID_REGIONS);
+        assert!(prepared.ids.len() <= MAX_VERTEX_COLOR_ID_REGIONS);
+        let mut ordered: Vec<_> = mesh.tri_vertex_color.as_ref().unwrap().iter()
+            .flat_map(|corners| corners.iter().copied())
+            .fold(HashMap::<[u8; 3], u32>::new(), |mut counts, color| {
+                *counts.entry(color).or_default() += 1;
+                counts
+            })
+            .into_iter()
+            .collect();
+        ordered.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        ordered.truncate(MAX_VERTEX_COLOR_ID_REGIONS);
+        let expected: Vec<_> = ordered.iter().map(|(rgb, _)| rgb.map(|v| v as f32 / 255.0)).collect();
+        let actual: Vec<_> = prepared.id_regions.iter().map(|region| region.color).collect();
+        assert_eq!(actual, expected, "bake report order must match the Vertex ID panel palette");
+    }
+
+    #[test]
+    fn vertex_color_id_regions_use_all_corner_colors_not_triangle_averages() {
+        let mut mesh = Primitive::Plane.build();
+        let triangles = mesh.triangle_count();
+        let corners = [[255, 0, 0], [0, 255, 0], [0, 0, 255]];
+        mesh.tri_color = Some(vec![[85, 85, 85]; triangles]);
+        mesh.tri_vertex_color = Some(vec![corners; triangles]);
+        let settings = BakeSettings { id_source: IdSource::VertexColors, ..Default::default() };
+
+        let prepared = prepare(&mesh, &settings, 0).expect("complete vertex-color source");
+
+        assert_eq!(prepared.id_regions.len(), 3, "every distinct vertex color needs its own region");
+        let mut actual: Vec<[u8; 3]> = prepared.id_regions.iter().map(|region| {
+            region.color.map(|channel| (channel * 255.0).round() as u8)
+        }).collect();
+        let mut expected = corners.to_vec();
+        actual.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(actual, expected, "all original per-corner colors must have distinct regions, not one averaged ID");
+        for expected in corners {
+            let color = expected.map(|v| v as f32 / 255.0);
+            let region = prepared.id_regions.iter().find(|region| region.color == color).expect("each corner color has a report region");
+            assert_eq!(region.triangles, triangles, "each color appears in every test triangle");
+        }
+    }
+
+    #[test]
+    fn merging_id_regions_preserves_the_full_bake_report() {
+        use super::{BakeReport, IdRegion};
+        use std::sync::atomic::{AtomicBool, AtomicU32};
+        use std::time::Instant;
+
+        let report = |source: &str, regions: Vec<IdRegion>, baked: u32| BakeReport {
+            source: source.into(),
+            triangles: 12,
+            parts: 3,
+            hard_edges: 9,
+            resolution: 1024,
+            rays_per_texel: 48,
+            prep_seconds: 0.5,
+            edge_max_distance: 0.25,
+            id_regions: regions,
+            matched_names: 2,
+            used_cage: true,
+            baked,
+            custom: vec![4, 7],
+            from_cache: false,
+            started: Instant::now(),
+            gpu_seconds: AtomicU32::new(1.25f32.to_bits()),
+            finished: AtomicBool::new(true),
+            valid_texels: AtomicU32::new(100),
+            missed_texels: AtomicU32::new(3),
+            filled_texels: AtomicU32::new(2),
+        };
+        let region = |color| IdRegion {
+            color,
+            triangles: 2,
+            min: [0.0; 3],
+            max: [1.0; 3],
+        };
+        let full = report("high poly", vec![region([1.0, 0.0, 0.0])], 0b1111);
+        let id_only = report("low poly", vec![region([0.0, 1.0, 0.0]), region([0.0, 0.0, 1.0])], 1 << 4);
+
+        let merged = full.with_id_regions_from(&id_only);
+
+        assert_eq!(merged.source, "high poly");
+        assert_eq!(merged.id_regions.len(), 2);
+        assert_eq!(merged.id_regions[0].color, [0.0, 1.0, 0.0]);
+        assert_eq!(merged.baked, 0b1111);
+        assert_eq!(merged.custom, vec![4, 7]);
+        assert_eq!(merged.triangles, 12);
+        assert_eq!(merged.missed_percent(), Some(3.0));
     }
 }

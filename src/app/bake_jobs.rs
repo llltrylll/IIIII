@@ -12,6 +12,9 @@ impl PainterApp {
 
     /// Bakes the texture set being edited.
     pub(super) fn start_bake(&mut self, ctx: &egui::Context) {
+        // A manual bake of the active set is always a full bake, even after
+        // an ID-only queue was cancelled or failed.
+        self.bake_id_only = false;
         self.sets.bake_queue.clear();
         self.start_bake_set(self.sets.active, ctx);
     }
@@ -24,6 +27,12 @@ impl PainterApp {
         if self.bake_id_only {
             settings.maps = 0;
             settings.custom.clear();
+            // The Properties ID panel and its eyedropper refer to the current
+            // low-poly mesh. Its ID-only rebake must read that same attribute,
+            // not silently switch to a high-poly file's unrelated vertex colors.
+            settings.high_poly = None;
+            settings.cage = None;
+            settings.cage_paint = None;
         }
         settings
     }
@@ -55,21 +64,24 @@ impl PainterApp {
         }
         let mesh = Arc::clone(&self.mesh);
         let settings = self.job_bake_settings();
-        self.baked_id_source = settings.id_source;
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let key = bake_cache::key(&mesh, &settings, res, set);
-            let prepared = if worker_cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                Err("Bake preparation cancelled".into())
-            } else {
-                match bake_cache::load(&key) {
-                    Some(entry) if !worker_cancel.load(std::sync::atomic::Ordering::Relaxed) => Ok(Prepared::Cached(entry)),
-                    Some(_) => Err("Bake preparation cancelled".into()),
-                    None => bake::prepare_cancellable(&mesh, &settings, set, &worker_cancel)
-                        .map(|scene| Prepared::Scene(scene, key)),
+            let prepared = match bake::validate_settings(&settings) {
+                Err(error) => Err(error),
+                Ok(()) if worker_cancel.load(std::sync::atomic::Ordering::Relaxed) => {
+                    Err("Bake preparation cancelled".into())
+                }
+                Ok(()) => {
+                    let key = bake_cache::key(&mesh, &settings, res, set);
+                    match bake_cache::load(&key) {
+                        Some(entry) if !worker_cancel.load(std::sync::atomic::Ordering::Relaxed) => Ok(Prepared::Cached(entry)),
+                        Some(_) => Err("Bake preparation cancelled".into()),
+                        None => bake::prepare_cancellable(&mesh, &settings, set, &worker_cancel)
+                            .map(|scene| Prepared::Scene(scene, key)),
+                    }
                 }
             };
             let _ = tx.send(prepared);
@@ -89,6 +101,12 @@ impl PainterApp {
         self.bake_job = None;
         if let Some(set) = self.sets.bake_queue.pop_front() {
             self.start_bake_set(set, ctx);
+        } else {
+            // The selected source becomes authoritative only after every
+            // texture set has successfully adopted its new maps. Do not let
+            // the one-shot mode leak into the next manual Bake action.
+            self.baked_id_source = self.bake_settings.id_source;
+            self.bake_id_only = false;
         }
     }
 

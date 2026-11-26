@@ -464,7 +464,7 @@ pub fn tool_list() -> Vec<Value> {
         ),
         tool(
             "set_mask",
-            "Give a layer a smart generator mask, a plain paintable mask, or remove its mask. Generator masks start from the named preset; the optional values below override it. To isolate one mesh part or material use generator 'ID Mask' with `id` from the bake report's id_regions.",
+            "Give a layer a smart generator mask, a plain paintable mask, or remove its mask. Generator masks start from the named preset; the optional values below override it. To isolate a mesh part, material, or imported vertex color use generator 'ID Mask' with `id` from the bake report's id_regions.",
             schema(json!({
                 "index": {"type": "integer"},
                 "generator": {"type": "string", "description": "Generator name, e.g. Edge Wear"},

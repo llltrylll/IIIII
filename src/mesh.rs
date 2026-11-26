@@ -87,7 +87,6 @@ pub struct HighPoly {
     pub material_count: u32,
     pub tri_object: Vec<u32>,
     pub objects: Vec<String>,
-    pub tri_color: Option<Vec<[u8; 3]>>,
     pub tri_vertex_color: Option<Vec<[[u8; 3]; 3]>>,
 }
 
@@ -115,7 +114,6 @@ impl HighPoly {
             material_count: raw.material_count,
             tri_object: raw.tri_object,
             objects: raw.objects,
-            tri_color: raw.tri_color,
             tri_vertex_color: raw.tri_vertex_color,
         })
     }

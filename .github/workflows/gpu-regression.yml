@@ -51,6 +51,23 @@ jobs:
       - name: Restore Rust build cache
         uses: Swatinem/rust-cache@v2
 
+      # Run the new lighting regressions before legacy OpenGL smoke tests;
+      # a failure in those older checks must not skip point-light validation.
+      - name: GPU map - ID resampling preserves categorical labels
+        run: "cargo test --locked --bin material_painter engine::id_map_resample_tests::id_map_resample_nearest_preserves_categorical_labels -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU map - ID-only rebake preserves other painted map fixes
+        run: "cargo test --locked --bin material_painter engine::id_map_resample_tests::id_only_rebake_preserves_non_id_painted_fixes -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: GPU viewport - editable point-light contribution
+        run: "cargo test --locked --bin material_painter preview_test::point_lights_affect_the_material_viewport -- --ignored --exact --nocapture --test-threads 1"
+
+      - name: OpenGL viewport - editable point-light contribution
+        run: "xvfb-run -a cargo test --locked --bin material_painter preview_test::point_lights_affect_the_material_viewport -- --ignored --exact --nocapture --test-threads 1"
+        env:
+          WGPU_BACKEND: gl
+          LIBGL_ALWAYS_SOFTWARE: "1"
+
       - name: OpenGL smoke - GPU bake pipeline with adapter format features
         run: "xvfb-run -a cargo test --locked --bin material_painter preview_test::gl_format_capabilities -- --ignored --exact --nocapture --test-threads 1"
         env:
@@ -76,6 +93,7 @@ jobs:
         env:
           WGPU_BACKEND: gl
           LIBGL_ALWAYS_SOFTWARE: "1"
+
 
       # Keep the correctness gates focused on brush/mask GPU parity.
       # The broader preview suite also contains unrelated interactive UI tests.

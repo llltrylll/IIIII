@@ -254,8 +254,21 @@ impl PainterApp {
         }
         match &want {
             Some(shown) => {
-                let triangles = vertex_id::overlay(&self.mesh, shown, &self.hidden_objects);
-                self.overlays.set(&self.rs.device, OverlaySlot::VertexColors, &triangles, &[]);
+                let triangles = vertex_id::overlay(&self.mesh, shown, &self.hidden_objects, &self.sets.hidden);
+                match shown {
+                    vertex_id::Shown::Mask(ids, tolerance) => {
+                        let ids: Vec<[f32; 3]> = ids.iter().map(|rgb| rgb.map(f32::from_bits)).collect();
+                        self.overlays.set_vertex_id_mask(
+                            &self.rs.device,
+                            &triangles,
+                            &ids,
+                            f32::from_bits(*tolerance),
+                        );
+                    }
+                    vertex_id::Shown::Colors => {
+                        self.overlays.set(&self.rs.device, OverlaySlot::VertexColors, &triangles, &[]);
+                    }
+                }
             }
             None => self.overlays.clear(OverlaySlot::VertexColors),
         }
@@ -278,7 +291,18 @@ impl PainterApp {
             match vertex_id::colors_from_file(&self.mesh, &path) {
                 Ok(colors) => {
                     let found = vertex_id::palette(&colors).distinct;
+                    // Keep the legacy per-triangle ID summary in sync with the
+                    // authoritative per-corner attribute. Baking and preview
+                    // use the corner values; bake reports and palette metadata
+                    // still consume the average color per triangle.
+                    let tri_colors = colors.iter().map(|corners| {
+                        std::array::from_fn(|channel| {
+                            let sum: u32 = corners.iter().map(|rgb| rgb[channel] as u32).sum();
+                            (sum as f32 / 3.0).round() as u8
+                        })
+                    }).collect();
                     let mut mesh = (*self.mesh).clone();
+                    mesh.tri_color = Some(tri_colors);
                     mesh.tri_vertex_color = Some(colors);
                     self.mesh = Arc::new(mesh);
                     self.vertex_id.shown = None;

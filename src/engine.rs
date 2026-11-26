@@ -564,8 +564,12 @@ pub const MAPS: [MapInfo; MAP_COUNT] = [
     map("Bent Normal", 2, 0, MapKind::Info, "Average unoccluded direction (world space)."),
     map("Normal", 3, 0, MapKind::Normal, "Tangent-space normal from the high poly."),
     map("Height", 3, 2, MapKind::Scalar, "High-poly displacement relative to the low poly."),
-    map("ID", 4, 0, MapKind::Info, "Color per material or mesh part, for ID masks."),
+    map("ID", 4, 0, MapKind::Info, "Color per material, mesh part, or imported vertex color, for ID masks."),
 ];
+
+/// Packed texture index of the categorical ID map. Unlike scalar/vector maps,
+/// this channel stores discrete RGB labels and must never be linearly filtered.
+const ID_MAP_TEXTURE: usize = MAPS[MAP_COUNT - 1].tex;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Levels {
@@ -1364,6 +1368,8 @@ struct Pipelines {
     mask_filter: wgpu::RenderPipeline,
     mask_filter_bgl: wgpu::BindGroupLayout,
     resample: HashMap<F, wgpu::RenderPipeline>,
+    /// The categorical ID labels use an integer texel load instead of bilinear filtering.
+    resample_nearest_id: wgpu::RenderPipeline,
     resample_bgl: wgpu::BindGroupLayout,
     resolve: HashMap<F, wgpu::RenderPipeline>,
     resolve_bgl: wgpu::BindGroupLayout,
@@ -2736,6 +2742,14 @@ impl Engine {
                 (f, pl)
             })
             .collect();
+        let resample_nearest_id = gpu::fullscreen_pipeline(
+            device,
+            "ID map nearest resample",
+            &resample_module,
+            "fs_resample_nearest",
+            &resample_layout,
+            &[gpu::target(MAP_FORMATS[ID_MAP_TEXTURE])],
+        );
 
         // Mesh-map levels and painted fixes.
         let resolve_module = gpu::shader(device, "maps resolve", include_str!("shaders/maps_resolve.wgsl"));
@@ -2801,6 +2815,7 @@ impl Engine {
             mask_filter,
             mask_filter_bgl,
             resample,
+            resample_nearest_id,
             resample_bgl,
             resolve,
             resolve_bgl,
@@ -3059,14 +3074,19 @@ impl Engine {
         if !self.has_bake {
             return self.set_maps(baked, report);
         }
+        let report = self.bake_report.as_ref()
+            .map(|existing| Arc::new(existing.with_id_regions_from(&report)))
+            .unwrap_or(report);
         let BakedMaps { maps, .. } = baked;
         let [_, _, _, _, id] = maps;
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        let id = if id.width != self.res { self.resample(&mut encoder, &id, self.res) } else { id };
+        let id = if id.width != self.res { self.resample_id_map(&mut encoder, &id, self.res) } else { id };
         self.queue.submit([encoder.finish()]);
         self.maps[4] = id;
         self.maps_version = self.maps_version.wrapping_add(1);
-        self.map_fix = Default::default();
+        self.bake_report = Some(report);
+        // The ID map is an Info map and has no paintable fix layer. Preserve
+        // user-painted fixes on every other baked map during an ID-only rebake.
         self.maps_dirty = true;
         self.mark_dirty();
     }
@@ -3076,7 +3096,13 @@ impl Engine {
         let mut encoder = self.device.create_command_encoder(&Default::default());
         let BakedMaps { maps, custom } = baked;
         let (maps, custom) = if maps[0].width < self.res {
-            let up = maps.each_ref().map(|m| self.resample(&mut encoder, m, self.res));
+            let up = std::array::from_fn(|index| {
+                if index == ID_MAP_TEXTURE {
+                    self.resample_id_map(&mut encoder, &maps[index], self.res)
+                } else {
+                    self.resample(&mut encoder, &maps[index], self.res)
+                }
+            });
             let custom = custom.iter().map(|m| self.resample(&mut encoder, m, self.res)).collect();
             (up, custom)
         } else {
@@ -6480,6 +6506,30 @@ impl Engine {
         dst
     }
 
+    /// Resamples the categorical ID map with nearest-neighbor sampling. A
+    /// linear average of two different ID colors creates a label that did
+    /// not exist in the source mesh and makes the mask miss both regions.
+    fn resample_id_map(&self, encoder: &mut wgpu::CommandEncoder, src: &Tex, res: u32) -> Tex {
+        debug_assert_eq!(src.format, MAP_FORMATS[ID_MAP_TEXTURE]);
+        let dst = self.new_tex("resampled ID map", res, res, src.format, LAYER_USAGE);
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("nearest ID map resample"),
+            layout: &self.p.resample_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&src.view) },
+                // The nearest entry point uses textureLoad, so the sampler is
+                // present only to satisfy the shared bind-group layout.
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
+        });
+        let mut pass = gpu::pass(encoder, "resample ID map (nearest)", &[gpu::color_attachment(&dst.view, wgpu::LoadOp::Load)]);
+        pass.set_pipeline(&self.p.resample_nearest_id);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.draw(0..3, 0..1);
+        drop(pass);
+        dst
+    }
+
     /// Changes the texture set resolution, resampling every painted texture.
     pub fn set_resolution(&mut self, res: u32, mesh: &GpuMesh, undo: &mut UndoStack) {
         if res == self.res || self.active.is_some() {
@@ -6496,13 +6546,26 @@ impl Engine {
             new_layers.push((content, mask));
         }
         if self.has_bake {
-            let maps = std::array::from_fn(|t| self.resample(&mut encoder, &self.maps[t], res));
+            let maps = std::array::from_fn(|t| {
+                if t == ID_MAP_TEXTURE {
+                    self.resample_id_map(&mut encoder, &self.maps[t], res)
+                } else {
+                    self.resample(&mut encoder, &self.maps[t], res)
+                }
+            });
             self.maps = maps;
             self.custom = self.custom.iter().map(|t| self.resample(&mut encoder, t, res)).collect();
             self.build_custom_array(&mut encoder);
         }
-        let fixes: Vec<Option<Tex>> =
-            self.map_fix.iter().map(|f| f.as_ref().map(|t| self.resample(&mut encoder, t, res))).collect();
+        let fixes: Vec<Option<Tex>> = self.map_fix.iter().enumerate().map(|(map, fix)| {
+            fix.as_ref().map(|tex| {
+                if MAPS[map].tex == ID_MAP_TEXTURE {
+                    self.resample_id_map(&mut encoder, tex, res)
+                } else {
+                    self.resample(&mut encoder, tex, res)
+                }
+            })
+        }).collect();
         for (dst, f) in self.map_fix.iter_mut().zip(fixes) {
             *dst = f;
         }
@@ -7088,5 +7151,132 @@ mod uv_bake_key_tests {
     #[test]
     fn changed_resolution_must_bake() {
         assert!(!UvBakeKey::is_current(Some(&key()), 7, &(0..36), 1024));
+    }
+}
+
+
+#[cfg(test)]
+mod id_map_resample_tests {
+    use super::Engine;
+    use crate::bake::tests::gpu_with_adapter;
+    use crate::gpu::{GpuMesh, LAYER_USAGE, Tex, read_texture};
+    use crate::mesh::Primitive;
+    use eframe::{egui, egui_wgpu, wgpu};
+    use std::sync::Arc;
+
+    fn render_state() -> egui_wgpu::RenderState {
+        let (instance, adapter, device, queue) = gpu_with_adapter();
+        let target_format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let renderer = egui_wgpu::Renderer::new(&device, target_format, Default::default());
+        egui_wgpu::RenderState {
+            available_adapters: vec![adapter.clone()],
+            adapter,
+            instance,
+            device,
+            queue,
+            target_format,
+            renderer: Arc::new(egui::mutex::RwLock::new(renderer)),
+        }
+    }
+
+
+    #[test]
+    #[ignore]
+    fn id_only_rebake_preserves_non_id_painted_fixes() {
+        use crate::bake::{BakeReport, BakedMaps, MAP_FORMATS, MAP_TEXTURES};
+        use std::sync::Arc;
+
+        let rs = render_state();
+        let mesh = Primitive::Plane.build();
+        let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+        let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 64);
+        engine.has_bake = true;
+        engine.map_fix[0] = Some(Tex::new_without_srgb_view(
+            &rs.device,
+            "painted AO fix that must survive ID rebake",
+            64,
+            64,
+            wgpu::TextureFormat::Rgba8Unorm,
+            LAYER_USAGE,
+        ));
+
+        let maps: [Tex; MAP_TEXTURES] = std::array::from_fn(|index| {
+            Tex::new_without_srgb_view(
+                &rs.device,
+                "rebaked mesh map",
+                64,
+                64,
+                MAP_FORMATS[index],
+                LAYER_USAGE,
+            )
+        });
+        let report = Arc::new(BakeReport::from_cache_json(&serde_json::json!({
+            "source": "low poly",
+            "triangles": 2,
+            "parts": 1,
+            "hard_edges": 0,
+            "resolution": 64,
+            "rays_per_texel": 16,
+            "prep_seconds": 0.0,
+            "edge_max_distance": 0.1,
+            "id_regions": [],
+            "matched_names": 0,
+            "used_cage": false,
+            "baked": crate::bake::ALL_MAPS,
+            "custom": [],
+            "gpu_seconds": 0.0,
+            "valid_texels": 1,
+            "missed_texels": 0,
+            "filled_texels": 0
+        })).expect("test bake report"));
+        engine.replace_id_map(BakedMaps { maps, custom: Vec::new() }, report);
+
+        assert!(engine.map_fix[0].is_some(), "ID-only rebake must preserve the painted AO fix");
+        assert!(engine.has_bake);
+        assert_eq!(engine.maps_version, 1);
+    }
+
+    #[test]
+    #[ignore]
+    fn id_map_resample_nearest_preserves_categorical_labels() {
+        let rs = render_state();
+        let mesh = Primitive::Plane.build();
+        let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+        let engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 64);
+
+        let source = Tex::new_without_srgb_view(
+            &rs.device,
+            "categorical ID source",
+            2,
+            1,
+            wgpu::TextureFormat::Rgba8Unorm,
+            LAYER_USAGE,
+        );
+        let source_pixels = [
+            255u8, 0, 0, 255, // red ID
+            0, 255, 0, 255,   // green ID
+        ];
+        rs.queue.write_texture(
+            source.copy_info(),
+            &source_pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(8),
+                rows_per_image: Some(1),
+            },
+            source.extent(),
+        );
+
+        let mut encoder = rs.device.create_command_encoder(&Default::default());
+        let resized = engine.resample_id_map(&mut encoder, &source, 4);
+        rs.queue.submit([encoder.finish()]);
+        rs.device.poll(wgpu::PollType::wait_indefinitely()).expect("ID map nearest resample completion");
+
+        let pixels = read_texture(&rs.device, &rs.queue, &resized);
+        assert_eq!(pixels.len(), 4 * 4 * 4);
+        for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+            let expected = if index % 4 < 2 { [255, 0, 0, 255] } else { [0, 255, 0, 255] };
+            assert_eq!(pixel, expected, "resampled texel {index} must keep one of the original IDs");
+        }
     }
 }

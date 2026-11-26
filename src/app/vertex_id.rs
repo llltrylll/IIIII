@@ -14,7 +14,7 @@ use egui::{Color32, Sense, Stroke, vec2};
 use std::collections::HashMap;
 
 /// Colors listed in the palette (the most used ones).
-pub const PALETTE_MAX: usize = 48;
+pub const PALETTE_MAX: usize = crate::bake::MAX_VERTEX_COLOR_ID_REGIONS;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PaletteEntry {
@@ -40,8 +40,12 @@ pub fn palette(colors: &[[[u8; 3]; 3]]) -> Palette {
     }
     let distinct = counts.len();
     let mut entries: Vec<PaletteEntry> = counts.into_iter().map(|(rgb, corners)| PaletteEntry { rgb, corners }).collect();
-    entries.sort_by(|a, b| b.corners.cmp(&a.corners).then(a.rgb.cmp(&b.rgb)));
-    entries.truncate(PALETTE_MAX);
+    let order = |a: &PaletteEntry, b: &PaletteEntry| b.corners.cmp(&a.corners).then(a.rgb.cmp(&b.rgb));
+    if entries.len() > PALETTE_MAX {
+        entries.select_nth_unstable_by(PALETTE_MAX, order);
+        entries.truncate(PALETTE_MAX);
+    }
+    entries.sort_unstable_by(order);
     Palette { entries, distinct }
 }
 
@@ -62,13 +66,14 @@ pub fn selected_index(ids: &[[f32; 3]], rgb: [u8; 3]) -> Option<usize> {
     ids.iter().position(|id| to_u8(*id) == rgb)
 }
 
+#[cfg(test)]
 fn smoothstep(lo: f32, hi: f32, x: f32) -> f32 {
     let t = ((x - lo) / (hi - lo)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 
-/// How much `color` is one of `ids` (1 inside half the tolerance, 0 beyond
-/// it): the same function the smart mask input runs on the baked ID map.
+/// CPU reference for the shader's ID matching rule, used by unit tests.
+#[cfg(test)]
 pub fn match_value(color: [f32; 3], ids: &[[f32; 3]], tolerance: f32) -> f32 {
     let tol = tolerance.max(1e-3);
     ids.iter()
@@ -88,33 +93,23 @@ pub enum Shown {
     Mask(Vec<[u32; 3]>, u32),
 }
 
-/// The overlay triangles for `shown` (three corners a triangle).
-pub fn overlay(mesh: &Mesh, shown: &Shown, hidden_objects: &[bool]) -> Vec<OverlayVertex> {
+/// The overlay triangles use the original per-corner sRGB values in both
+/// display modes. The dedicated ID overlay shader interpolates these values
+/// across the triangle first, then evaluates the same mask as the baked map.
+pub fn overlay(mesh: &Mesh, _shown: &Shown, hidden_objects: &[bool], hidden_sets: &[bool]) -> Vec<OverlayVertex> {
     let Some(colors) = &mesh.tri_vertex_color else { return Vec::new() };
-    let ids: Vec<[f32; 3]> = match shown {
-        Shown::Colors => Vec::new(),
-        Shown::Mask(ids, _) => ids.iter().map(|c| c.map(f32::from_bits)).collect(),
-    };
-    let tol = match shown {
-        Shown::Colors => 0.0,
-        Shown::Mask(_, t) => f32::from_bits(*t),
-    };
     let mut out = Vec::with_capacity(mesh.indices.len());
     for (tri_index, (tri, corners)) in mesh.indices.chunks_exact(3).zip(colors).enumerate() {
         let object = mesh.tri_object.get(tri_index).copied().unwrap_or(u32::MAX) as usize;
-        if hidden_objects.get(object).copied().unwrap_or(false) {
+        let set = mesh.set_of(tri_index as u32);
+        if hidden_objects.get(object).copied().unwrap_or(false)
+            || hidden_sets.get(set).copied().unwrap_or(false)
+        {
             continue;
         }
         for k in 0..3 {
             let Some(v) = mesh.vertices.get(tri[k] as usize) else { continue };
-            let rgb = match shown {
-                Shown::Colors => corners[k],
-                Shown::Mask(..) => {
-                    let m = match_value(to_f32(corners[k]), &ids, tol);
-                    let lit = (34.0 + m * (240.0 - 34.0)).round() as u8;
-                    [lit, lit, lit]
-                }
-            };
+            let rgb = corners[k];
             out.push(OverlayVertex { pos: v.pos, color: [rgb[0], rgb[1], rgb[2], 255] });
         }
     }
@@ -126,21 +121,25 @@ pub fn has_colors(mesh: &Mesh) -> bool {
     mesh.tri_vertex_color.as_ref().is_some_and(|c| c.len() == mesh.indices.len() / 3)
 }
 
+/// Whether two imports retain the exact vertex and triangle ordering needed
+/// to attach per-corner colors safely. Counts and a sparse position sample are
+/// insufficient: a reordered face stream can paint colors onto unrelated faces.
+fn same_mesh_order(mesh: &Mesh, other: &Mesh) -> bool {
+    mesh.indices == other.indices
+        && (mesh.tri_object.is_empty() || other.tri_object.is_empty() || mesh.tri_object == other.tri_object)
+        && mesh.vertices.len() == other.vertices.len()
+        && mesh.vertices.iter().zip(&other.vertices).all(|(a, b)| {
+            (0..3).all(|k| a.pos[k].is_finite() && b.pos[k].is_finite() && (a.pos[k] - b.pos[k]).abs() < 1e-4)
+        })
+}
+
 /// The vertex colors of `file` for `mesh`, when it is the same mesh.
 pub fn colors_from_file(mesh: &Mesh, file: &std::path::Path) -> Result<Vec<[[u8; 3]; 3]>, String> {
     let other = Mesh::load_file(file)?;
-    let same = other.indices.len() == mesh.indices.len()
-        && other.vertices.len() == mesh.vertices.len()
-        && (0..mesh.vertices.len()).step_by((mesh.vertices.len() / 64).max(1)).all(|i| {
-            let (a, b) = (mesh.vertices[i].pos, other.vertices[i].pos);
-            (0..3).all(|k| (a[k] - b[k]).abs() < 1e-4)
-        });
-    if !same {
+    if !same_mesh_order(mesh, &other) {
         return Err(format!(
-            "'{}' is not the mesh that is loaded ({} triangles there, {} here). Pick the file this project was made from.",
-            file.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
-            other.triangle_count(),
-            mesh.triangle_count()
+            "'{}' does not match the loaded mesh's vertex positions or triangle order. Choose the exact FBX/OBJ used to create this project.",
+            file.file_name().and_then(|n| n.to_str()).unwrap_or("file")
         ));
     }
     match other.tri_vertex_color {
@@ -152,8 +151,10 @@ pub fn colors_from_file(mesh: &Mesh, file: &std::path::Path) -> Result<Vec<[[u8;
 /// What the ID mask panel keeps between frames.
 #[derive(Default)]
 pub struct VertexIdState {
-    /// The loaded mesh's palette and which mesh (pointer) it was made for.
-    pub palette: Option<(usize, Palette)>,
+    /// The loaded mesh's palette and a weak identity for the mesh it was made for.
+    /// Keeping the control block alive prevents allocator address reuse from
+    /// making a different mesh appear to be the cached one.
+    pub palette: Option<(std::sync::Weak<Mesh>, Palette)>,
     /// The mask preview on the model is switched off.
     pub preview_off: bool,
     /// The panel was drawn this frame, with these ID colors and tolerance.
@@ -170,10 +171,12 @@ pub struct VertexIdState {
 impl VertexIdState {
     /// The palette of `mesh`, made once per loaded mesh.
     pub fn palette_for(&mut self, mesh: &std::sync::Arc<Mesh>) -> &Palette {
-        let key = std::sync::Arc::as_ptr(mesh) as usize;
-        if self.palette.as_ref().is_none_or(|(k, _)| *k != key) {
+        let same_mesh = self.palette.as_ref().is_some_and(|(old, _)| {
+            old.upgrade().is_some_and(|old_mesh| std::sync::Arc::ptr_eq(&old_mesh, mesh))
+        });
+        if !same_mesh {
             let p = mesh.tri_vertex_color.as_deref().map(palette).unwrap_or_default();
-            self.palette = Some((key, p));
+            self.palette = Some((std::sync::Arc::downgrade(mesh), p));
             self.auto_baked = false;
         }
         &self.palette.as_ref().expect("just made").1
@@ -338,6 +341,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reimport_identity_checks_all_positions_and_triangle_order() {
+        use crate::mesh::Primitive;
+
+        let mesh = Primitive::Sphere.build();
+        assert!(same_mesh_order(&mesh, &mesh.clone()));
+
+        let mut moved_late_vertex = mesh.clone();
+        let late = moved_late_vertex.vertices.len() - 1;
+        moved_late_vertex.vertices[late].pos[0] += 0.01;
+        assert!(!same_mesh_order(&mesh, &moved_late_vertex), "a mismatch beyond the old 64-vertex sample must be caught");
+
+        let mut reordered = mesh.clone();
+        reordered.indices.swap(0, 1);
+        assert!(!same_mesh_order(&mesh, &reordered), "triangle corner order determines per-corner color assignment");
+    }
+
+    #[test]
+    fn palette_cache_rebuilds_when_the_mesh_arc_changes() {
+        use crate::mesh::Primitive;
+        use std::sync::Arc;
+
+        let mut red = Primitive::Plane.build();
+        red.tri_vertex_color = Some(vec![[[255, 0, 0]; 3]; red.triangle_count()]);
+        let mut green = Primitive::Plane.build();
+        green.tri_vertex_color = Some(vec![[[0, 255, 0]; 3]; green.triangle_count()]);
+        let red = Arc::new(red);
+        let green = Arc::new(green);
+
+        let mut state = VertexIdState::default();
+        assert_eq!(state.palette_for(&red).entries[0].rgb, [255, 0, 0]);
+        assert_eq!(state.palette_for(&green).entries[0].rgb, [0, 255, 0]);
+    }
+
+    #[test]
+    fn mask_overlay_keeps_raw_corner_colors_for_fragment_level_matching() {
+        use crate::mesh::Primitive;
+
+        let mut mesh = Primitive::Plane.build();
+        let colors = [[255, 0, 0], [0, 255, 0], [0, 0, 255]];
+        mesh.tri_vertex_color = Some(vec![[colors[0], colors[1], colors[2]]; mesh.triangle_count()]);
+        let shown = Shown::Mask(vec![[1.0, 0.0, 0.0].map(f32::to_bits)], 0.15f32.to_bits());
+        let overlay = super::overlay(&mesh, &shown, &[], &[]);
+
+        assert_eq!(overlay.len(), mesh.indices.len());
+        for (vertex, expected) in overlay.iter().zip(colors.into_iter().cycle()) {
+            assert_eq!(&vertex.color[..3], &expected);
+        }
+    }
+
+    #[test]
     fn vertex_color_overlay_excludes_hidden_imported_objects() {
         use crate::mesh::Primitive;
 
@@ -348,7 +401,7 @@ mod tests {
         mesh.tri_object = (0..triangles).map(|tri| (tri % 2) as u32).collect();
 
         let visible_triangles = mesh.tri_object.iter().filter(|&&object| object == 1).count();
-        let overlay = super::overlay(&mesh, &Shown::Colors, &[true, false]);
+        let overlay = super::overlay(&mesh, &Shown::Colors, &[true, false], &[]);
 
         assert_eq!(overlay.len(), visible_triangles * 3);
     }
@@ -369,6 +422,12 @@ mod tests {
         let p = palette(&colors);
         assert_eq!(p.distinct, 100);
         assert_eq!(p.entries.len(), PALETTE_MAX);
+        let selected: Vec<u8> = p.entries.iter().map(|entry| entry.rgb[0]).collect();
+        assert_eq!(
+            selected,
+            (0..PALETTE_MAX).map(|index| index as u8).collect::<Vec<_>>(),
+            "equal-frequency palette ties must choose the lowest RGB values deterministically",
+        );
     }
 
     #[test]

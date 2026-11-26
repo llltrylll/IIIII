@@ -59,6 +59,7 @@ mod project_settings_ui;
 mod layers_ui;
 mod shelf_ui;
 mod view_ui;
+mod lighting_ui;
 mod windows_ui;
 use color_ui::{ColorSliders, color_edit, hsv_to_rgb, rgb_to_hsv};
 mod vertex_id;
@@ -917,6 +918,12 @@ pub struct PainterApp {
     /// The running bake only makes the ID map (from vertex colors).
     bake_id_only: bool,
     cam: OrbitCam,
+    selected_point_light: usize,
+    show_point_light_markers: bool,
+    move_point_light: bool,
+    point_light_pointer_capture: bool,
+    /// Active marker drag: light index, camera-facing plane and initial cursor offset.
+    drag_point_light: Option<(usize, Vec3, Vec3, Vec3)>,
     /// Blender-style first-person navigation, active only over the 3D viewport.
     walk_navigation: bool,
     /// Discard the stale/warp motion that can arrive immediately after cursor lock.
@@ -2499,6 +2506,11 @@ impl PainterApp {
             engine_epoch: 0,
             bake_id_only: false,
             cam: OrbitCam::default(),
+            selected_point_light: 0,
+            show_point_light_markers: true,
+            move_point_light: false,
+            point_light_pointer_capture: false,
+            drag_point_light: None,
             walk_navigation: false,
             walk_skip_mouse_delta: false,
             walk_speed: 1.5,
@@ -2632,8 +2644,23 @@ impl PainterApp {
             return;
         }
         self.engine_epoch = self.engine_epoch.wrapping_add(1);
-        // A bake of the old mesh can't land on the new one.
+        // A bake of the old mesh can't land on the new one. Clear its
+        // one-shot ID workflow too, so no stale import/rebake can target the
+        // replacement mesh and the next manual Bake is a full bake.
         self.bake_job = None;
+        self.bake_id_only = false;
+        self.id_color_pick_target = None;
+        self.vertex_id.palette = None;
+        self.vertex_id.panel = None;
+        self.vertex_id.shown = None;
+        self.vertex_id.want_import = false;
+        self.vertex_id.want_rebake = false;
+        self.vertex_id.auto_baked = false;
+        // A normal mesh import starts without any previously baked ID map.
+        // Opening a project passes false and restores its separately saved source.
+        if start_auto_bake {
+            self.baked_id_source = IdSource::MeshParts;
+        }
         self.end_preview(false);
         self.gpu_mesh = GpuMesh::new(&self.rs.device, &mesh);
         self.views.invalidate_shadow();
@@ -4117,10 +4144,22 @@ impl PainterApp {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let resp = theme::donate_button(ui, "Support", vec2(0.0, 22.0));
-                if resp.on_hover_text("Material Painter is free; donations on Ko-fi keep it going").clicked() {
-                    ui.ctx().open_url(egui::OpenUrl::new_tab(welcome::DONATE_URL));
-                }
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("FOV").strong());
+                    let mut fov_degrees = self.cam.fov_y.to_degrees();
+                    let slider = egui::Slider::new(&mut fov_degrees, 10.0..=120.0)
+                        .suffix("°")
+                        .show_value(true);
+                    if ui.add_sized([190.0, 20.0], slider)
+                        .on_hover_text("Camera field of view")
+                        .changed()
+                    {
+                        self.cam.fov_y = fov_degrees.to_radians();
+                    }
+                    if ui.small_button("↺").on_hover_text("Reset FOV").clicked() {
+                        self.cam.fov_y = self.prefs.fov_deg.clamp(10.0, 120.0).to_radians();
+                    }
+                });
             });
         });
     }
@@ -4436,6 +4475,20 @@ impl PainterApp {
         ui.add_space(4.0);
         ui.separator();
         ui.add_space(4.0);
+        if theme::icon_button(ui, icons::CROSSHAIR, self.move_point_light, 34.0)
+            .on_hover_text("Place the selected light on a surface with one click. For continuous movement, drag its marker in the 3D view.")
+            .clicked()
+        {
+            self.toggle_point_light_move();
+        }
+        let marker_icon = if self.show_point_light_markers { icons::EYE } else { icons::EYE_SLASH };
+        if theme::icon_button(ui, marker_icon, self.show_point_light_markers, 34.0)
+            .on_hover_text("Show or hide point-light markers in the 3D view")
+            .clicked()
+        {
+            self.show_point_light_markers = !self.show_point_light_markers;
+        }
+        ui.separator();
         if theme::icon_button(ui, icons::CUBE_TRANSPARENT, self.view.show_wire_3d, 34.0).on_hover_text("Wireframe in the 3D view (W)").clicked() {
             self.view.show_wire_3d = !self.view.show_wire_3d;
         }
@@ -4608,12 +4661,6 @@ impl PainterApp {
 
     fn preview_panel(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            section(ui, "Camera");
-            let mut fov = self.cam.fov_y.to_degrees();
-            if slider(ui, "Field of view", &mut fov, 10.0..=90.0) {
-                self.cam.fov_y = fov.to_radians();
-            }
-
             section(ui, "Shader");
             self.preview_shader_section(ui);
             let v = &mut self.view;
@@ -4696,27 +4743,12 @@ impl PainterApp {
                     ui.close();
                 }
             });
-            let mut deg = v.env_rotation.to_degrees();
-            if slider(ui, "Rotation", &mut deg, -180.0..=180.0) {
-                v.env_rotation = deg.to_radians();
-            }
-            slider(ui, "Intensity", &mut v.env_intensity, 0.0..=4.0);
             labeled(ui, "Ambient occlusion", |ui| {
                 ui.add(egui::Slider::new(&mut v.ao_strength, 0.0..=1.0).custom_formatter(|x, _| format!("{:.0}%", x * 100.0)))
             })
             .on_hover_text("How much the baked ambient occlusion darkens crevices in the 3D view. Only the view: bakes and exports keep the full map.");
             labeled(ui, "Emission", |ui| ui.add(egui::Slider::new(&mut v.emission, 0.0..=20.0).logarithmic(true).max_decimals(2)))
                 .on_hover_text("How bright emissive parts glow in the 3D view and the ray tracer. Only the view: exports keep the emission color as painted.");
-
-            section(ui, "Key light");
-            ui.checkbox(&mut v.key.on, theme::with_icon(icons::SUN, "Directional light with shadows"))
-                .on_hover_text("A sun-like light on top of the environment: crisp highlights and contact shadows. It turns with the environment rotation (Shift+right-drag).");
-            if v.key.on {
-                slider(ui, "Intensity", &mut v.key.intensity, 0.0..=8.0);
-                slider(ui, "Direction", &mut v.key.azimuth, -180.0..=180.0);
-                slider(ui, "Height", &mut v.key.elevation, 5.0..=90.0);
-                labeled(ui, "Color", |ui| color_edit(ui, &mut v.key.color));
-            }
 
             section(ui, "Background");
             labeled(ui, "Show", |ui| {
@@ -5035,9 +5067,15 @@ impl PainterApp {
             labeled(ui, "ID from", |ui| {
                 ui.radio_value(&mut s.id_source, IdSource::MeshParts, "Mesh parts");
                 ui.radio_value(&mut s.id_source, IdSource::Materials, "Materials");
-                ui.radio_value(&mut s.id_source, IdSource::VertexColors, "Vertex colors");
+                ui.add_enabled_ui(s.high_poly.is_none(), |ui| {
+                    ui.radio_value(&mut s.id_source, IdSource::VertexColors, "Vertex colors")
+                        .on_hover_text("Vertex colors belong to the loaded low-poly mesh. With a high-poly projection, bake the other maps first, then rebake only the ID map from the Vertex ID panel.");
+                });
             });
-            if s.id_source == IdSource::VertexColors {
+            if s.id_source == IdSource::VertexColors && s.high_poly.is_some() {
+                ui.label(egui::RichText::new("Vertex colors are a low-poly ID source. For high-poly bakes, use Mesh parts or Materials, then use the Vertex ID panel to rebake only the ID map from the loaded mesh.")
+                    .small().color(theme::TEXT_DIM));
+            } else if s.id_source == IdSource::VertexColors {
                 if self.mesh.tri_vertex_color.is_some() {
                     ui.label(egui::RichText::new("Vertex colors detected. Bake the ID map to use the imported colors in ID masks.")
                         .small().color(theme::ACCENT));
@@ -5165,7 +5203,15 @@ impl PainterApp {
     fn stamp_uniform(&self, kind: ViewKind) -> StampUniform {
         let ppp_radius = self.brush.size * 0.5 * self.ppp;
         let brush = [ppp_radius.max(0.5), self.brush.hardness.min(0.99), self.brush.flow, self.brush.symmetry as f32];
-        let clip = [NEAR, FAR, if self.brush.tip.is_some() { 1.0 } else { 0.0 }, 0.0];
+        // Screen painting linearizes the viewport depth buffer with this
+        // same near/far pair. Keep it in lockstep with the camera projection,
+        // especially now that orbit distance can exceed the old fixed range.
+        let mut clip = [NEAR, FAR, if self.brush.tip.is_some() { 1.0 } else { 0.0 }, 0.0];
+        if kind == ViewKind::V3d {
+            let (near, far) = self.cam.clip_planes();
+            clip[0] = near;
+            clip[1] = far;
+        }
         let proj = [
             match self.brush.projection {
                 BrushProjection::Screen => 0.0,

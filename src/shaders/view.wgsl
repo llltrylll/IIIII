@@ -18,7 +18,10 @@ struct Globals {
     light_vp: mat4x4<f32>, // key light shadow projection
     sun: vec4<f32>,      // direction toward the key light, intensity
     sun_c: vec4<f32>,    // key light color (linear), on (1) / off (0)
-    clip: vec4<f32>,     // camera near/far planes
+    clip: vec4<f32>,     // camera near/far planes, active point-light count
+    point_lights: array<vec4<f32>, 16>, // position/intensity, then color/range
+    id_color: vec4<f32>, // vertex-ID preview color and tolerance
+    id_more: array<vec4<f32>, 7>, // additional selected vertex-ID colors; w marks active slots
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -285,6 +288,76 @@ fn key_light(s: Surface, n: vec3<f32>, v: vec3<f32>, shadow: f32) -> vec3<f32> {
     return direct_light(s, n, v, g.sun.xyz, g.sun_c.rgb, g.sun.w, shadow);
 }
 
+// Fast local-light BRDF. The environment and directional key retain the
+// full GGX model; point sources use a normalized Blinn lobe so dragging them
+// does not run the full microfacet distribution and visibility terms for
+// every light at every covered pixel.
+fn point_direct_light(
+    s: Surface,
+    n: vec3<f32>,
+    v: vec3<f32>,
+    light_dir: vec3<f32>,
+    light_color: vec3<f32>,
+    intensity: f32,
+) -> vec3<f32> {
+    let nl = max(dot(n, light_dir), 0.0);
+    if (nl <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let diffuse = s.albedo * (1.0 - s.metal) / PI;
+    // During direct manipulation only the selected light is active and its
+    // specular lobe is skipped. Avoiding per-fragment pow() keeps marker drags
+    // responsive on integrated GPUs; the full local-light look returns on release.
+    if (g.clip.w > 0.5) {
+        return diffuse * light_color * intensity * nl;
+    }
+    let half_vector = light_dir + v;
+    let half_length_squared = dot(half_vector, half_vector);
+    var specular_lobe = 0.0;
+    if (half_length_squared > 1e-8) {
+        let h = half_vector * inverseSqrt(half_length_squared);
+        let nh = max(dot(n, h), 0.0);
+        let rough = clamp(s.rough, 0.03, 1.0);
+        let exponent = mix(128.0, 2.0, rough * rough);
+        specular_lobe = pow(nh, exponent) * (exponent + 2.0) * (0.5 / PI);
+    }
+    let f0 = mix(vec3<f32>(0.08 * s.spec), s.albedo, s.metal);
+    return (diffuse + f0 * specular_lobe) * light_color * intensity * nl;
+}
+
+// Additional editable point lights use inverse-square attenuation with a
+// smooth finite-radius cutoff. Their lower-cost local BRDF keeps viewport
+// interaction responsive; unlike the directional key, they cast no shadows.
+fn point_lighting(s: Surface, n: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
+    var total = vec3<f32>(0.0);
+    let count = u32(clamp(g.clip.z, 0.0, 8.0));
+    if (count == 0u) {
+        return total;
+    }
+    for (var i = 0u; i < 8u; i += 1u) {
+        if (i >= count) {
+            break;
+        }
+        let source = g.point_lights[i * 2u];
+        let color_range = g.point_lights[i * 2u + 1u];
+        let to_light = source.xyz - s.wpos;
+        let distance_squared = dot(to_light, to_light);
+        let range = color_range.w;
+        if (source.w > 0.0 && range > 0.0 && distance_squared > 1e-4) {
+            let range_squared = range * range;
+            if (distance_squared < range_squared) {
+                // Work in squared distance for the cutoff, avoiding an extra
+                // square root and fourth-power attenuation for every fragment.
+                let edge = max(1.0 - distance_squared / range_squared, 0.0);
+                let attenuation = edge * edge / distance_squared;
+                let light_dir = to_light * inverseSqrt(distance_squared);
+                total += point_direct_light(s, n, v, light_dir, color_range.rgb, source.w * attenuation);
+            }
+        }
+    }
+    return total;
+}
+
 // The UV panel is a flat material sheet, not a surface in the 3D scene.
 // Interpret its tangent-space normal in the canvas plane and light it with
 // fixed neutral studio sources. This keeps metallic and rough materials
@@ -364,6 +437,7 @@ fn shade_pbr(s: Surface, n: vec3<f32>, v: vec3<f32>, shadow: f32) -> vec3<f32> {
     col += env(r, rough) * spec * spec_ao;
     // Baked AO darkens the key light only a little: it's mostly sky occlusion.
     col += key_light(s, n, v, shadow) * mix(1.0, ao, 0.35);
+    col += point_lighting(s, n, v) * mix(1.0, ao, 0.35);
     col += s.emission * g.bg2.z;
     return col;
 }
@@ -463,6 +537,7 @@ struct Shade {
 fn mesh_shade_inputs(in: MeshOut, front: bool) -> Shade {
     var c: Shade;
     c.s = sample_surface(in.uv);
+    c.s.wpos = in.wpos;
 
     // Raw channel/map views do not use lighting or a shading frame. Avoid
     // derivative reconstruction and the 3x3 shadow PCF on these unlit modes.
@@ -746,4 +821,28 @@ fn vs_overlay(v: OverlayIn) -> OverlayOut {
 @fragment
 fn fs_overlay(in: OverlayOut) -> @location(0) vec4<f32> {
     return in.color;
+}
+
+// The ID preview must compare the interpolated corner color, not compare
+// each vertex separately and interpolate the three mask values. This is the
+// same operation and tolerance used by composite.wgsl on the baked ID map.
+@vertex
+fn vs_overlay_id(v: OverlayIn) -> OverlayOut {
+    var out: OverlayOut;
+    out.clip = toward_eye(v.pos, 0.001);
+    out.color = v.color;
+    return out;
+}
+
+@fragment
+fn fs_overlay_id(in: OverlayOut) -> @location(0) vec4<f32> {
+    let tolerance = max(g.id_color.w, 1e-3);
+    var value = 1.0 - smoothstep(tolerance * 0.5, tolerance, distance(in.color.rgb, g.id_color.rgb));
+    for (var k = 0; k < 7; k++) {
+        if (g.id_more[k].w > 0.5) {
+            value = max(value, 1.0 - smoothstep(tolerance * 0.5, tolerance, distance(in.color.rgb, g.id_more[k].xyz)));
+        }
+    }
+    let srgb = vec3<f32>(34.0 / 255.0 + value * (206.0 / 255.0));
+    return vec4<f32>(pow(srgb, vec3<f32>(2.2)), in.color.a);
 }

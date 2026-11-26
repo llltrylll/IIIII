@@ -12,6 +12,10 @@ pub const NEAR: f32 = 0.02;
 pub const FAR: f32 = 100.0;
 const MSAA: u32 = 4;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+/// Camera orbit distance is no longer tied to a small fixed 40-unit ceiling.
+pub const CAMERA_MIN_DISTANCE: f32 = 0.001;
+pub const CAMERA_MAX_DISTANCE: f32 = 1_000_000.0;
+pub const MAX_POINT_LIGHTS: usize = 8;
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 /// What the viewports display. Discriminants match `shade()` in view.wgsl;
@@ -141,7 +145,31 @@ impl OrbitCam {
         self.target + Vec3::new(cp * sy, sp, cp * cy) * self.dist
     }
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
-        perspective_rh(self.fov_y, aspect.max(1e-3), NEAR, FAR) * look_at_rh(self.eye(), self.target, Vec3::Y)
+        let (near, far) = self.clip_planes();
+        let fov = self.fov_y.clamp(10.0_f32.to_radians(), 120.0_f32.to_radians());
+        perspective_rh(fov, aspect.max(1e-3), near, far) * look_at_rh(self.eye(), self.target, Vec3::Y)
+    }
+
+    /// Keeps clipping precision useful both for close surface inspection and
+    /// for orbiting far beyond the old 40-unit ceiling.
+    pub fn clip_planes(&self) -> (f32, f32) {
+        let distance = if self.dist.is_finite() { self.dist.max(CAMERA_MIN_DISTANCE) } else { 5.2 };
+        // Avoid shrinking the near plane too aggressively at ordinary
+        // working distances: that wastes depth precision and encourages
+        // z-fighting. Keep a smaller floor for close-up inspection.
+        let near = (distance * 0.005).clamp(0.0001, CAMERA_MAX_DISTANCE * 0.0005);
+        // Keep the ordinary scene's far plane at the historical FAR value;
+        // only extend it when the camera actually needs a longer view.
+        // Preserve the old 100-unit view at normal distances, but shorten
+        // the far plane for extreme close-ups so far/near stays bounded.
+        let far = (distance * 4.0).max(FAR).min(near * 10_000.0);
+        (near, far.max(near + 1.0))
+    }
+
+    pub fn set_distance(&mut self, distance: f32) {
+        if distance.is_finite() {
+            self.dist = distance.clamp(CAMERA_MIN_DISTANCE, CAMERA_MAX_DISTANCE);
+        }
     }
 
     /// Aim at the actual normalized mesh bounds and fit the entire bounding
@@ -155,7 +183,7 @@ impl OrbitCam {
         let hi = bounds_min.max(bounds_max);
         let center = (lo + hi) * 0.5;
         let radius = ((hi - lo) * 0.5).length().max(0.05);
-        let fov = self.fov_y.clamp(15.0_f32.to_radians(), 90.0_f32.to_radians());
+        let fov = self.fov_y.clamp(10.0_f32.to_radians(), 120.0_f32.to_radians());
         let half_vertical = fov * 0.5;
         let half_horizontal = (half_vertical.tan() * aspect.max(0.1)).atan();
         let half_fov = half_vertical.min(half_horizontal).max(0.05);
@@ -165,7 +193,7 @@ impl OrbitCam {
         }
         self.target = center;
         self.fov_y = fov;
-        self.dist = distance.clamp(0.3, 40.0);
+        self.set_distance(distance);
     }
 
     pub fn basis(&self) -> (Vec3, Vec3) {
@@ -185,7 +213,7 @@ impl OrbitCam {
         let eye = self.eye();
         let reference_fov = 38.0_f32.to_radians();
         let fov = if self.fov_y.is_finite() {
-            self.fov_y.clamp(10.0_f32.to_radians(), 90.0_f32.to_radians())
+            self.fov_y.clamp(10.0_f32.to_radians(), 120.0_f32.to_radians())
         } else {
             reference_fov
         };
@@ -218,7 +246,7 @@ impl OrbitCam {
         let eye = self.eye();
         let offset = eye - focus;
         let distance = offset.length();
-        if !distance.is_finite() || !(0.05..=40.0).contains(&distance) {
+        if !distance.is_finite() || distance < CAMERA_MIN_DISTANCE {
             return;
         }
 
@@ -227,7 +255,7 @@ impl OrbitCam {
         self.pitch = direction.y.clamp(-1.0, 1.0).asin().clamp(-1.55, 1.55);
         // Keep the exact eye-to-focus distance. Clamping here would teleport
         // the camera whenever a picked focus lies outside the orbit range.
-        self.dist = distance;
+        self.set_distance(distance);
         self.target = focus;
     }
 
@@ -289,6 +317,29 @@ impl Background {
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
+pub struct PointLight {
+    pub on: bool,
+    pub position: Vec3,
+    pub color: [f32; 3],
+    /// Radiant intensity scale for the physically attenuated point source.
+    pub intensity: f32,
+    /// The light fades smoothly to zero at this world-space radius.
+    pub range: f32,
+}
+
+impl PointLight {
+    pub fn new(position: Vec3) -> Self {
+        Self { on: true, position, color: [1.0, 0.94, 0.86], intensity: 28.0, range: 6.0 }
+    }
+}
+
+impl Default for PointLight {
+    fn default() -> Self {
+        Self::new(Vec3::new(2.0, 2.0, 2.0))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct ViewSettings {
     /// Display mode for the 3D material viewport.
     pub mode: ViewMode,
@@ -323,6 +374,13 @@ pub struct ViewSettings {
     pub emission: f32,
     pub post: PostSettings,
     pub key: KeyLight,
+    /// Additional local point sources; a fixed-size array keeps viewport
+    /// settings cheap to copy and straightforward to cache.
+    pub point_lights: [PointLight; MAX_POINT_LIGHTS],
+    pub point_light_count: usize,
+    /// Temporary interaction preview: render only this light, without its
+    /// specular lobe, while the user drags or edits it. None renders all lights.
+    pub point_light_preview: Option<usize>,
 }
 
 /// A directional key light with shadows, on top of the environment. Its
@@ -376,6 +434,9 @@ impl Default for ViewSettings {
             emission: 2.0,
             post: PostSettings::default(),
             key: KeyLight::default(),
+            point_lights: [PointLight::default(); MAX_POINT_LIGHTS],
+            point_light_count: 0,
+            point_light_preview: None,
         }
     }
 }
@@ -386,6 +447,30 @@ impl Default for ViewSettings {
 pub struct OverlayVertex {
     pub pos: [f32; 3],
     pub color: [u8; 4],
+}
+
+/// Parameters for the vertex-ID overlay. The fragment shader evaluates the
+/// same interpolated color and tolerance as the texture compositor.
+#[derive(Clone, Copy)]
+struct VertexIdOverlayMask {
+    id_color: [f32; 4],
+    id_more: [[f32; 4]; 7],
+}
+
+impl VertexIdOverlayMask {
+    fn new(ids: &[[f32; 3]], tolerance: f32) -> Self {
+        let mut id_color = [0.0; 4];
+        id_color[3] = tolerance.max(1e-3);
+        if let Some(first) = ids.first() {
+            id_color[..3].copy_from_slice(first);
+        }
+        let mut id_more = [[0.0; 4]; 7];
+        for (slot, color) in id_more.iter_mut().zip(ids.iter().skip(1)) {
+            slot[..3].copy_from_slice(color);
+            slot[3] = 1.0;
+        }
+        Self { id_color, id_more }
+    }
 }
 
 /// Independent overlays drawn over the 3D view.
@@ -411,7 +496,8 @@ struct OverlayBuffers {
 #[derive(Default)]
 pub struct Overlays {
     slots: [OverlayBuffers; 3],
-    /// Changes only when overlay geometry is replaced or removed.
+    vertex_id_mask: Option<VertexIdOverlayMask>,
+    /// Changes only when overlay geometry or its mask parameters are replaced or removed.
     generation: u64,
 }
 
@@ -419,8 +505,8 @@ impl Overlays {
     pub fn generation(&self) -> u64 {
         self.generation
     }
-    /// Replaces a slot's geometry: triangle-list and line-list vertices.
-    pub fn set(&mut self, device: &wgpu::Device, slot: OverlaySlot, tris: &[OverlayVertex], lines: &[OverlayVertex]) {
+
+    fn set_geometry(&mut self, device: &wgpu::Device, slot: OverlaySlot, tris: &[OverlayVertex], lines: &[OverlayVertex]) {
         use wgpu::util::DeviceExt;
         let upload = |label, v: &[OverlayVertex]| {
             (!v.is_empty()).then(|| {
@@ -432,13 +518,44 @@ impl Overlays {
                 (buffer, v.len() as u32)
             })
         };
-        self.slots[slot as usize] = OverlayBuffers { tris: upload("overlay tris", tris), lines: upload("overlay lines", lines) };
+        self.slots[slot as usize] = OverlayBuffers {
+            tris: upload("overlay tris", tris),
+            lines: upload("overlay lines", lines),
+        };
+    }
+
+    /// Replaces ordinary overlay geometry. The Vertex Colors slot uses the
+    /// standard sRGB-color shader unless the dedicated ID-mask setter is used.
+    pub fn set(&mut self, device: &wgpu::Device, slot: OverlaySlot, tris: &[OverlayVertex], lines: &[OverlayVertex]) {
+        self.set_geometry(device, slot, tris, lines);
+        if slot == OverlaySlot::VertexColors {
+            self.vertex_id_mask = None;
+        }
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Replaces the vertex-color overlay with an exact per-fragment ID preview.
+    /// Raw corner colors are interpolated first; the shader then performs the
+    /// same color-distance test as the baked texture mask.
+    pub fn set_vertex_id_mask(
+        &mut self,
+        device: &wgpu::Device,
+        tris: &[OverlayVertex],
+        ids: &[[f32; 3]],
+        tolerance: f32,
+    ) {
+        self.set_geometry(device, OverlaySlot::VertexColors, tris, &[]);
+        self.vertex_id_mask = Some(VertexIdOverlayMask::new(ids, tolerance));
         self.generation = self.generation.wrapping_add(1);
     }
 
     pub fn clear(&mut self, slot: OverlaySlot) {
-        if self.is_set(slot) {
+        let had_mask = slot == OverlaySlot::VertexColors && self.vertex_id_mask.is_some();
+        if self.is_set(slot) || had_mask {
             self.slots[slot as usize] = OverlayBuffers::default();
+            if slot == OverlaySlot::VertexColors {
+                self.vertex_id_mask = None;
+            }
             self.generation = self.generation.wrapping_add(1);
         }
     }
@@ -468,6 +585,11 @@ struct Globals {
     sun: [f32; 4],
     sun_c: [f32; 4],
     clip: [f32; 4],
+    /// Two vec4 slots per point light: position/intensity and color/range.
+    point_lights: [[f32; 4]; MAX_POINT_LIGHTS * 2],
+    /// Vertex-ID overlay test, kept identical to the texture compositor.
+    id_color: [f32; 4],
+    id_more: [[f32; 4]; 7],
 }
 
 /// OpenGL adapters commonly expose only 16 sampled fragment textures.
@@ -951,6 +1073,7 @@ pub struct ViewRenderer {
     seam2d: wgpu::RenderPipeline,
     seam3d: wgpu::RenderPipeline,
     overlay_tris: wgpu::RenderPipeline,
+    overlay_id_tris: wgpu::RenderPipeline,
     overlay_lines: wgpu::RenderPipeline,
     shadow: wgpu::RenderPipeline,
     shadow_bgl: wgpu::BindGroupLayout,
@@ -1176,6 +1299,7 @@ impl ViewRenderer {
             attributes: &OVERLAY_ATTRS,
         })];
         let overlay_tris = pipeline("overlay tris", "vs_overlay", "fs_overlay", &ob, tri, over(), view_samples, &hdr_blended);
+        let overlay_id_tris = pipeline("overlay vertex ID mask", "vs_overlay_id", "fs_overlay_id", &ob, tri, over(), view_samples, &hdr_blended);
         let overlay_lines = pipeline("overlay lines", "vs_overlay", "fs_overlay", &ob, line, over(), view_samples, &hdr_blended);
         // Key light shadow map: depth only, both faces (meshes may be open),
         // with slope-scaled bias against acne. Its own layout holds just the
@@ -1250,6 +1374,7 @@ impl ViewRenderer {
             seam2d,
             seam3d,
             overlay_tris,
+            overlay_id_tris,
             overlay_lines,
             shadow,
             shadow_bgl,
@@ -1448,7 +1573,30 @@ impl ViewRenderer {
             light_vp: Self::light_view_proj(engine, s).to_cols_array_2d(),
             sun: s.key.direction(s.env_rotation).extend(s.key.intensity).to_array(),
             sun_c: [s.key.color[0], s.key.color[1], s.key.color[2], if s.key.on { 1.0 } else { 0.0 }],
-            clip: [NEAR, FAR, 0.0, 0.0],
+            clip: [
+                NEAR,
+                FAR,
+                if s.point_light_preview.is_some_and(|index| index < s.point_light_count.min(MAX_POINT_LIGHTS)) {
+                    1.0
+                } else {
+                    s.point_light_count.min(MAX_POINT_LIGHTS) as f32
+                },
+                if s.point_light_preview.is_some_and(|index| index < s.point_light_count.min(MAX_POINT_LIGHTS)) { 1.0 } else { 0.0 },
+            ],
+            point_lights: std::array::from_fn(|slot| {
+                let preview = s.point_light_preview.filter(|&index| index < s.point_light_count.min(MAX_POINT_LIGHTS));
+                let index = preview.unwrap_or(slot / 2);
+                let light = s.point_lights[index];
+                if slot % 2 == 0 {
+                    let enabled = preview.is_some() || index < s.point_light_count.min(MAX_POINT_LIGHTS);
+                    let intensity = if enabled && light.on { light.intensity.max(0.0) } else { 0.0 };
+                    [light.position.x, light.position.y, light.position.z, intensity]
+                } else {
+                    [light.color[0], light.color[1], light.color[2], light.range.max(0.0)]
+                }
+            }),
+            id_color: [0.0; 4],
+            id_more: [[0.0; 4]; 7],
         }
     }
 
@@ -1667,6 +1815,10 @@ impl ViewRenderer {
                 continue;
             }
             let mut g = Self::base_globals(engine, settings, size, settings.mode);
+            if let Some(mask) = overlays.and_then(|o| o.vertex_id_mask) {
+                g.id_color = mask.id_color;
+                g.id_more = mask.id_more;
+            }
             // The custom preview shader can consume every Surface input. The
             // built-in material path uses only its PBR channels and selected maps.
             g.bg2[3] = if self.custom_mesh.is_some() && settings.mode == ViewMode::Material { 1.0 } else { 0.0 };
@@ -1674,6 +1826,9 @@ impl ViewRenderer {
             g.view_proj = vp.to_cols_array_2d();
             g.inv_view_proj = vp.inverse().to_cols_array_2d();
             g.cam_pos = cam.eye().extend(1.0).to_array();
+            let (camera_near, camera_far) = cam.clip_planes();
+            g.clip[0] = camera_near;
+            g.clip[1] = camera_far;
             rs.queue.write_buffer(&self.globals[k + 1], 0, bytemuck::bytes_of(&g));
 
             let key = ViewBindGroupKey {
@@ -1903,9 +2058,10 @@ impl ViewRenderer {
                 }
             }
             if let Some(overlays) = overlays {
-                for o in &overlays.slots {
+                for (slot, o) in overlays.slots.iter().enumerate() {
                     if let Some((buffer, count)) = &o.tris {
-                        pass.set_pipeline(&self.overlay_tris);
+                        let id_mask = slot == OverlaySlot::VertexColors as usize && overlays.vertex_id_mask.is_some();
+                        pass.set_pipeline(if id_mask { &self.overlay_id_tris } else { &self.overlay_tris });
                         pass.set_vertex_buffer(0, buffer.slice(..));
                         pass.draw(0..*count, 0..1);
                     }
@@ -2119,15 +2275,17 @@ mod walk_navigation_tests {
     }
 
     #[test]
-    fn focus_on_rejects_far_focus_without_moving_camera() {
+    fn focus_on_accepts_far_focus_and_preserves_camera_position() {
         let mut cam = OrbitCam::default();
         let eye_before = cam.eye();
-        let target_before = cam.target;
+        let focus = eye_before + Vec3::Z * 100.0;
 
-        cam.focus_on(eye_before + Vec3::Z * 100.0);
+        cam.focus_on(focus);
 
         assert!(cam.eye().distance(eye_before) < 1e-5);
-        assert_eq!(cam.target, target_before);
+        assert_eq!(cam.target, focus);
+        assert!((cam.dist - 100.0).abs() < 1e-4);
+        assert!(cam.clip_planes().1 > cam.dist);
     }
 
     #[test]
@@ -2274,7 +2432,7 @@ mod custom_param_cache_tests {
 
 #[cfg(test)]
 mod camera_frame_tests {
-    use super::OrbitCam;
+    use super::{OrbitCam, CAMERA_MIN_DISTANCE};
     use glam::Vec3;
 
     #[test]
@@ -2303,5 +2461,79 @@ mod camera_frame_tests {
         cam.frame_bounds(Vec3::splat(f32::NAN), Vec3::ONE, 1.0);
         assert!(cam == original);
     }
+
+    #[test]
+    fn orbit_distance_can_move_beyond_the_old_40_unit_limit() {
+        let mut cam = OrbitCam::default();
+        cam.set_distance(250.0);
+        assert_eq!(cam.dist, 250.0);
+        let (near, far) = cam.clip_planes();
+        assert!(near > 0.0 && far > 250.0);
+
+        cam.set_distance(0.0);
+        assert_eq!(cam.dist, super::CAMERA_MIN_DISTANCE);
+    }
+
+    #[test]
+    fn focus_on_keeps_a_far_orbit_distance() {
+        let mut cam = OrbitCam::default();
+        let focus = cam.eye() + Vec3::new(0.0, 0.0, 500.0);
+        cam.focus_on(focus);
+        assert!((cam.target - focus).length() < 1e-5);
+        assert!(cam.dist > 400.0);
+        assert!(cam.clip_planes().1 > cam.dist);
+    }
+
+    #[test]
+    fn near_clip_scales_with_camera_distance_for_depth_precision() {
+        let mut close = OrbitCam::default();
+        close.set_distance(10.0);
+        let mut far = OrbitCam::default();
+        far.set_distance(1_000.0);
+        let (close_near, close_far) = close.clip_planes();
+        let (far_near, far_far) = far.clip_planes();
+        assert!(far_near > close_near);
+        assert!(far_far > close_far);
+        assert!(far_far / far_near < 20_000.0);
+    }
+
+    #[test]
+    fn default_camera_keeps_depth_precision_close_to_original() {
+        let cam = OrbitCam::default();
+        let (near, far) = cam.clip_planes();
+        assert!(near >= 0.02);
+        assert!(far / near < 10_000.0, "depth ratio unexpectedly wide: {}", far / near);
+    }
+
+    #[test]
+    fn close_camera_keeps_a_small_but_safe_near_plane() {
+        let mut cam = OrbitCam::default();
+        cam.set_distance(CAMERA_MIN_DISTANCE);
+        let (near, far) = cam.clip_planes();
+        assert!(near >= 0.0001);
+        assert!(far > near);
+        assert!(far / near <= 10_001.0, "close-up depth ratio unexpectedly wide: {}", far / near);
+        assert!(far < 2.0, "extreme close-up should not retain the 100-unit far plane: {far}");
+    }
+
+    #[test]
+    fn frame_bounds_preserves_wide_field_of_view() {
+        let mut cam = OrbitCam { fov_y: 110.0_f32.to_radians(), ..OrbitCam::default() };
+        cam.frame_bounds(Vec3::splat(-1.0), Vec3::splat(1.0), 1.0);
+        assert!((cam.fov_y.to_degrees() - 110.0).abs() < 1e-4);
+    }
 }
 
+
+
+#[cfg(test)]
+mod vertex_id_overlay_shader_tests {
+    const SHADER: &str = include_str!("shaders/view.wgsl");
+
+    #[test]
+    fn vertex_id_preview_tests_interpolated_rgb_in_the_fragment_shader() {
+        assert!(SHADER.contains("distance(in.color.rgb, g.id_color.rgb)"));
+        assert!(SHADER.contains("distance(in.color.rgb, g.id_more[k].xyz)"));
+        assert!(SHADER.contains("let tolerance = max(g.id_color.w, 1e-3)"));
+    }
+}
