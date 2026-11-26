@@ -123,11 +123,12 @@ impl PainterApp {
     }
 
     pub(super) fn view_input(&mut self, ui: &egui::Ui, kind: ViewKind, rect: Rect, resp: &egui::Response) {
-        let (hover, pressed, down, mods, delta, scroll, x_down, z_down) = ui.input(|i| {
+        let (hover, pressed, down, secondary_pressed, mods, delta, scroll, x_down, z_down) = ui.input(|i| {
             (
                 i.pointer.hover_pos(),
                 i.pointer.primary_pressed(),
                 i.pointer.primary_down(),
+                i.pointer.button_pressed(egui::PointerButton::Secondary),
                 i.modifiers,
                 i.pointer.delta(),
                 i.smooth_scroll_delta.y,
@@ -189,19 +190,27 @@ impl PainterApp {
             return;
         }
 
-        // Clicking a marker selects its light and is deliberately intercepted
-        // before the regular paint input path.
-        if kind == ViewKind::V3d && self.show_point_light_markers && pressed && resp.hovered()
+        // The 2D light marker is an interactive viewport gizmo:
+        // left-click selects it; right-click toggles that source on/off.
+        // Intercept both before the normal paint input path.
+        if kind == ViewKind::V3d && self.show_point_light_markers
+            && (pressed || secondary_pressed) && resp.hovered()
             && let Some(pointer) = hover
         {
             let count = self.view.point_light_count.min(crate::viewport::MAX_POINT_LIGHTS);
             for index in 0..count {
                 if point_light_screen_position(&self.cam, self.view.point_lights[index].position, rect)
-                    .is_some_and(|marker| marker.distance(pointer) <= 12.0)
+                    .is_some_and(|marker| marker.distance(pointer) <= 14.0)
                 {
                     self.selected_point_light = index;
                     self.point_light_pointer_capture = true;
-                    self.status = format!("Point light {} selected.", index + 1);
+                    if secondary_pressed {
+                        let light = &mut self.view.point_lights[index];
+                        light.on = !light.on;
+                        self.status = format!("Point light {} turned {}.", index + 1, if light.on { "on" } else { "off" });
+                    } else {
+                        self.status = format!("Point light {} selected. Right-click its marker to toggle it.", index + 1);
+                    }
                     ui.ctx().request_repaint();
                     return;
                 }
@@ -669,13 +678,13 @@ impl PainterApp {
                     let end = marker + vec2(dx, dy);
                     painter.line_segment([start, end], Stroke::new(1.4, outline));
                 }
-                let label_rect = Rect::from_min_size(marker + vec2(11.0, -9.0), vec2(26.0, 17.0));
+                let label_rect = Rect::from_min_size(marker + vec2(11.0, -9.0), vec2(42.0, 17.0));
                 painter.rect_filled(label_rect, 3.0, Color32::from_black_alpha(205));
                 painter.text(
                     label_rect.center(),
                     egui::Align2::CENTER_CENTER,
-                    format!("L{}", index + 1),
-                    egui::FontId::proportional(10.0),
+                    format!("L{} {}", index + 1, if light.on { "ON" } else { "OFF" }),
+                    egui::FontId::proportional(9.0),
                     if light.on { Color32::WHITE } else { Color32::from_gray(165) },
                 );
             }
