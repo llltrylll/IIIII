@@ -7152,3 +7152,73 @@ mod uv_bake_key_tests {
         assert!(!UvBakeKey::is_current(Some(&key()), 7, &(0..36), 1024));
     }
 }
+
+
+#[cfg(test)]
+mod id_map_resample_tests {
+    use super::Engine;
+    use crate::bake::tests::gpu_with_adapter;
+    use crate::gpu::{GpuMesh, LAYER_USAGE, Tex, read_texture};
+    use crate::mesh::Primitive;
+    use eframe::{egui, egui_wgpu, wgpu};
+    use std::sync::Arc;
+
+    fn render_state() -> egui_wgpu::RenderState {
+        let (instance, adapter, device, queue) = gpu_with_adapter();
+        let target_format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let renderer = egui_wgpu::Renderer::new(&device, target_format, Default::default());
+        egui_wgpu::RenderState {
+            available_adapters: vec![adapter.clone()],
+            adapter,
+            instance,
+            device,
+            queue,
+            target_format,
+            renderer: Arc::new(egui::mutex::RwLock::new(renderer)),
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn id_map_resample_nearest_preserves_categorical_labels() {
+        let rs = render_state();
+        let mesh = Primitive::Plane.build();
+        let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+        let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 4);
+
+        let source = Tex::new_without_srgb_view(
+            &rs.device,
+            "categorical ID source",
+            2,
+            1,
+            wgpu::TextureFormat::Rgba8Unorm,
+            LAYER_USAGE,
+        );
+        let source_pixels = [
+            255u8, 0, 0, 255, // red ID
+            0, 255, 0, 255,   // green ID
+        ];
+        rs.queue.write_texture(
+            source.copy_info(),
+            &source_pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(8),
+                rows_per_image: Some(1),
+            },
+            source.extent(),
+        );
+
+        let mut encoder = rs.device.create_command_encoder(&Default::default());
+        let resized = engine.resample_id_map(&mut encoder, &source, 4);
+        rs.queue.submit([encoder.finish()]);
+        rs.device.poll(wgpu::PollType::wait_indefinitely()).expect("ID map nearest resample completion");
+
+        let pixels = read_texture(&rs.device, &rs.queue, &resized);
+        assert_eq!(pixels.len(), 4 * 4 * 4);
+        for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+            let expected = if index % 4 < 2 { [255, 0, 0, 255] } else { [0, 255, 0, 255] };
+            assert_eq!(pixel, expected, "resampled texel {index} must keep one of the original IDs");
+        }
+    }
+}
