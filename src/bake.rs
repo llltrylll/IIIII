@@ -529,7 +529,6 @@ pub struct PreparedScene {
     /// Per-corner sRGB vertex colors, or the selected flat ID color.
     tri_vcolor: Vec<[f32; 4]>,
     parts: Vec<[f32; 4]>,
-    ids: Vec<[f32; 4]>,
     /// Hard-edge segments (two entries each) and their BVH: convex edges, then concave creases.
     seg_nodes: Vec<[f32; 4]>,
     segs: Vec<[f32; 4]>,
@@ -1274,7 +1273,6 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
         tri_nrm,
         tri_vcolor,
         parts,
-        ids,
         seg_nodes,
         segs,
         edge_roots,
@@ -1923,7 +1921,6 @@ impl GpuBaker {
         let tri_nrm = Self::storage(device, "tri normals", &scene.tri_nrm);
         let tri_vcolor = Self::storage(device, "tri vertex colors", &scene.tri_vcolor);
         let parts = Self::storage(device, "parts", &scene.parts);
-        let ids = Self::storage(device, "ids", &scene.ids);
         let seg_nodes = Self::storage(device, "edge bvh nodes", &scene.seg_nodes);
         let segs = Self::storage(device, "edge segments", &scene.segs);
         let counters = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1958,7 +1955,6 @@ impl GpuBaker {
                 (6, tri_nrm.as_entire_binding()),
                 (7, parts.as_entire_binding()),
                 (39, tri_vcolor.as_entire_binding()),
-                (8, ids.as_entire_binding()),
                 (9, v(&surf_pos)),
                 (10, v(&surf_nrm)),
                 (11, v(&maps[3])),
