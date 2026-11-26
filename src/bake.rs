@@ -1602,7 +1602,6 @@ impl GpuBaker {
                 (6, Storage(false)),
                 (7, Storage(false)),
                 (39, Storage(false)),
-                (8, Storage(false)),
                 (9, StorageTex(F::Rgba32Float)),
                 (10, StorageTex(F::Rgba16Float)),
                 (11, StorageTex(F::Rgba16Float)),
