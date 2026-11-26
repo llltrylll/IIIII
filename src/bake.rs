@@ -2869,6 +2869,7 @@ pub(crate) mod tests {
     use crate::gpu::{GpuMesh, f16_to_f32, read_texture};
     use crate::mesh::Primitive;
     use glam::Vec2;
+    use std::collections::HashMap;
     use std::path::Path;
 
     #[test]
