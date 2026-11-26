@@ -62,13 +62,14 @@ pub fn selected_index(ids: &[[f32; 3]], rgb: [u8; 3]) -> Option<usize> {
     ids.iter().position(|id| to_u8(*id) == rgb)
 }
 
+#[cfg(test)]
 fn smoothstep(lo: f32, hi: f32, x: f32) -> f32 {
     let t = ((x - lo) / (hi - lo)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 
-/// How much `color` is one of `ids` (1 inside half the tolerance, 0 beyond
-/// it): the same function the smart mask input runs on the baked ID map.
+/// CPU reference for the shader's ID matching rule, used by unit tests.
+#[cfg(test)]
 pub fn match_value(color: [f32; 3], ids: &[[f32; 3]], tolerance: f32) -> f32 {
     let tol = tolerance.max(1e-3);
     ids.iter()
