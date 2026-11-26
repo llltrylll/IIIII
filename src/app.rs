@@ -1671,7 +1671,7 @@ impl PainterApp {
         self.overlays.clear(OverlaySlot::VertexColors);
         if self.bake_settings.id_source == IdSource::VertexColors
             && (self.bake_settings.high_poly.is_some()
-                || self.mesh.tri_vertex_color.as_ref().is_none_or(|colors| colors.len() != self.mesh.indices.len() / 3))
+                || !self.mesh.has_vertex_colors())
         {
             self.bake_settings.id_source = IdSource::MeshParts;
         }
@@ -3523,9 +3523,7 @@ impl PainterApp {
                 }
                 ui.label(egui::RichText::new("Red: the cage misses the high poly, raise Front/Rear. Amber: close to the limit. Magenta: another part is reached first and bleeds in; lower Front, load a cage or match by name.").small().color(theme::TEXT_DIM));
             }
-            let has_vertex_colors = self.mesh.tri_vertex_color.as_ref().is_some_and(|colors| {
-                colors.len() == self.mesh.indices.len() / 3
-            });
+            let has_vertex_colors = self.mesh.has_vertex_colors();
             if s.id_source == IdSource::VertexColors && (s.high_poly.is_some() || !has_vertex_colors) {
                 s.id_source = IdSource::MeshParts;
             }
