@@ -2644,8 +2644,23 @@ impl PainterApp {
             return;
         }
         self.engine_epoch = self.engine_epoch.wrapping_add(1);
-        // A bake of the old mesh can't land on the new one.
+        // A bake of the old mesh can't land on the new one. Clear its
+        // one-shot ID workflow too, so no stale import/rebake can target the
+        // replacement mesh and the next manual Bake is a full bake.
         self.bake_job = None;
+        self.bake_id_only = false;
+        self.id_color_pick_target = None;
+        self.vertex_id.palette = None;
+        self.vertex_id.panel = None;
+        self.vertex_id.shown = None;
+        self.vertex_id.want_import = false;
+        self.vertex_id.want_rebake = false;
+        self.vertex_id.auto_baked = false;
+        // A normal mesh import starts without any previously baked ID map.
+        // Opening a project passes false and restores its separately saved source.
+        if start_auto_bake {
+            self.baked_id_source = IdSource::MeshParts;
+        }
         self.end_preview(false);
         self.gpu_mesh = GpuMesh::new(&self.rs.device, &mesh);
         self.views.invalidate_shadow();
