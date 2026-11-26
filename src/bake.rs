@@ -2495,18 +2495,25 @@ pub(crate) mod tests {
         }
     }
 
-    /// Windowless GPU with the same limits the app requests.
-    pub(crate) fn gpu_with_adapter() -> (wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue) {
+    /// Windowless GPU with the same limits the app requests, when a usable
+    /// adapter is available on this machine.
+    pub(crate) fn try_gpu_with_adapter() -> Option<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = ready(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             ..Default::default()
-        }))
-        .expect("a GPU adapter");
-        let (device, queue) =
-            ready(adapter.request_device(&wgpu::DeviceDescriptor { required_limits: adapter.limits(), ..Default::default() }))
-                .expect("a GPU device");
-        (instance, adapter, device, queue)
+        })).ok()?;
+        let (device, queue) = ready(
+            adapter.request_device(&wgpu::DeviceDescriptor {
+                required_limits: adapter.limits(),
+                ..Default::default()
+            })
+        ).ok()?;
+        Some((instance, adapter, device, queue))
+    }
+
+    pub(crate) fn gpu_with_adapter() -> (wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue) {
+        try_gpu_with_adapter().expect("a GPU adapter and device")
     }
 
     pub(crate) fn gpu() -> (wgpu::Device, wgpu::Queue) {
@@ -2974,7 +2981,10 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs a GPU"]
     fn low_poly_vertex_color_id_map_interpolates_each_corner() {
-        let (device, queue) = gpu();
+        let Some((_instance, _adapter, device, queue)) = try_gpu_with_adapter() else {
+            eprintln!("Skipping GPU regression: no usable adapter is available.");
+            return;
+        };
         let positions = vec![
             Vec3::new(-1.0, -1.0, 0.0),
             Vec3::new(1.0, -1.0, 0.0),
