@@ -255,7 +255,20 @@ impl PainterApp {
         match &want {
             Some(shown) => {
                 let triangles = vertex_id::overlay(&self.mesh, shown, &self.hidden_objects);
-                self.overlays.set(&self.rs.device, OverlaySlot::VertexColors, &triangles, &[]);
+                match shown {
+                    vertex_id::Shown::Mask(ids, tolerance) => {
+                        let ids: Vec<[f32; 3]> = ids.iter().map(|rgb| rgb.map(f32::from_bits)).collect();
+                        self.overlays.set_vertex_id_mask(
+                            &self.rs.device,
+                            &triangles,
+                            &ids,
+                            f32::from_bits(*tolerance),
+                        );
+                    }
+                    vertex_id::Shown::Colors => {
+                        self.overlays.set(&self.rs.device, OverlaySlot::VertexColors, &triangles, &[]);
+                    }
+                }
             }
             None => self.overlays.clear(OverlaySlot::VertexColors),
         }

@@ -1203,6 +1203,13 @@ pub fn prepare_cancellable(
     };
     check_prepare_cancelled(cancel)?;
     let triangle_count = indices.len() / 3;
+    if settings.id_source == IdSource::VertexColors
+        && tri_vertex_color.as_ref().is_none_or(|colors| colors.len() != triangle_count)
+    {
+        return Err(format!(
+            "Vertex Colors was selected as the ID source, but the chosen bake source ({source}) has no complete vertex-color data. Add a color attribute to that mesh or choose Mesh parts/Materials."
+        ));
+    }
 
     // Name groups: 1-based per distinct low-poly base name; 0 = unmatched
     // (an unmatched low part sees everything, an unmatched high part is seen
@@ -3543,5 +3550,34 @@ pub(crate) mod tests {
         let mean = agree.iter().sum::<f32>() / agree.len().max(1) as f32;
         println!("  bulge normals, filled vs fitted cage: {mean:.3}");
         assert!(mean > 0.9, "the nearest surface is the bulge itself ({mean})");
+    }
+}
+
+
+#[cfg(test)]
+mod vertex_color_id_source_tests {
+    use super::{prepare, BakeSettings, IdSource};
+    use crate::mesh::Primitive;
+
+    #[test]
+    fn vertex_color_id_source_rejects_missing_color_attributes() {
+        let mesh = Primitive::Plane.build();
+        let settings = BakeSettings { id_source: IdSource::VertexColors, ..Default::default() };
+        let error = match prepare(&mesh, &settings, 0) {
+            Ok(_) => panic!("Vertex Colors mode must not silently fall back to mesh-part IDs"),
+            Err(error) => error,
+        };
+        assert!(error.contains("Vertex Colors was selected as the ID source"), "{error}");
+    }
+
+    #[test]
+    fn vertex_color_id_source_keeps_the_per_corner_payload() {
+        let mut mesh = Primitive::Plane.build();
+        let triangles = mesh.triangle_count();
+        mesh.tri_color = Some(vec![[255, 0, 0]; triangles]);
+        mesh.tri_vertex_color = Some(vec![[[255, 0, 0]; 3]; triangles]);
+        let settings = BakeSettings { id_source: IdSource::VertexColors, ..Default::default() };
+        let prepared = prepare(&mesh, &settings, 0).expect("complete vertex-color source");
+        assert_eq!(prepared.tri_vcolor.len(), mesh.indices.len());
     }
 }

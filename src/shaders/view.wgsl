@@ -20,6 +20,8 @@ struct Globals {
     sun_c: vec4<f32>,    // key light color (linear), on (1) / off (0)
     clip: vec4<f32>,     // camera near/far planes, active point-light count
     point_lights: array<vec4<f32>, 16>, // position/intensity, then color/range
+    id_color: vec4<f32>, // vertex-ID preview color and tolerance
+    id_more: array<vec4<f32>, 7>, // additional selected vertex-ID colors; w marks active slots
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -819,4 +821,28 @@ fn vs_overlay(v: OverlayIn) -> OverlayOut {
 @fragment
 fn fs_overlay(in: OverlayOut) -> @location(0) vec4<f32> {
     return in.color;
+}
+
+// The ID preview must compare the interpolated corner color, not compare
+// each vertex separately and interpolate the three mask values. This is the
+// same operation and tolerance used by composite.wgsl on the baked ID map.
+@vertex
+fn vs_overlay_id(v: OverlayIn) -> OverlayOut {
+    var out: OverlayOut;
+    out.clip = toward_eye(v.pos, 0.001);
+    out.color = v.color;
+    return out;
+}
+
+@fragment
+fn fs_overlay_id(in: OverlayOut) -> @location(0) vec4<f32> {
+    let tolerance = max(g.id_color.w, 1e-3);
+    var value = 1.0 - smoothstep(tolerance * 0.5, tolerance, distance(in.color.rgb, g.id_color.rgb));
+    for (var k = 0; k < 7; k++) {
+        if (g.id_more[k].w > 0.5) {
+            value = max(value, 1.0 - smoothstep(tolerance * 0.5, tolerance, distance(in.color.rgb, g.id_more[k].xyz)));
+        }
+    }
+    let srgb = vec3<f32>(34.0 / 255.0 + value * (206.0 / 255.0));
+    return vec4<f32>(pow(srgb, vec3<f32>(2.2)), in.color.a);
 }

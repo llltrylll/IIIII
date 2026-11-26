@@ -88,17 +88,11 @@ pub enum Shown {
     Mask(Vec<[u32; 3]>, u32),
 }
 
-/// The overlay triangles for `shown` (three corners a triangle).
-pub fn overlay(mesh: &Mesh, shown: &Shown, hidden_objects: &[bool]) -> Vec<OverlayVertex> {
+/// The overlay triangles use the original per-corner sRGB values in both
+/// display modes. The dedicated ID overlay shader interpolates these values
+/// across the triangle first, then evaluates the same mask as the baked map.
+pub fn overlay(mesh: &Mesh, _shown: &Shown, hidden_objects: &[bool]) -> Vec<OverlayVertex> {
     let Some(colors) = &mesh.tri_vertex_color else { return Vec::new() };
-    let ids: Vec<[f32; 3]> = match shown {
-        Shown::Colors => Vec::new(),
-        Shown::Mask(ids, _) => ids.iter().map(|c| c.map(f32::from_bits)).collect(),
-    };
-    let tol = match shown {
-        Shown::Colors => 0.0,
-        Shown::Mask(_, t) => f32::from_bits(*t),
-    };
     let mut out = Vec::with_capacity(mesh.indices.len());
     for (tri_index, (tri, corners)) in mesh.indices.chunks_exact(3).zip(colors).enumerate() {
         let object = mesh.tri_object.get(tri_index).copied().unwrap_or(u32::MAX) as usize;
@@ -107,14 +101,7 @@ pub fn overlay(mesh: &Mesh, shown: &Shown, hidden_objects: &[bool]) -> Vec<Overl
         }
         for k in 0..3 {
             let Some(v) = mesh.vertices.get(tri[k] as usize) else { continue };
-            let rgb = match shown {
-                Shown::Colors => corners[k],
-                Shown::Mask(..) => {
-                    let m = match_value(to_f32(corners[k]), &ids, tol);
-                    let lit = (34.0 + m * (240.0 - 34.0)).round() as u8;
-                    [lit, lit, lit]
-                }
-            };
+            let rgb = corners[k];
             out.push(OverlayVertex { pos: v.pos, color: [rgb[0], rgb[1], rgb[2], 255] });
         }
     }
@@ -126,21 +113,25 @@ pub fn has_colors(mesh: &Mesh) -> bool {
     mesh.tri_vertex_color.as_ref().is_some_and(|c| c.len() == mesh.indices.len() / 3)
 }
 
+/// Whether two imports retain the exact vertex and triangle ordering needed
+/// to attach per-corner colors safely. Counts and a sparse position sample are
+/// insufficient: a reordered face stream can paint colors onto unrelated faces.
+fn same_mesh_order(mesh: &Mesh, other: &Mesh) -> bool {
+    mesh.indices == other.indices
+        && (mesh.tri_object.is_empty() || other.tri_object.is_empty() || mesh.tri_object == other.tri_object)
+        && mesh.vertices.len() == other.vertices.len()
+        && mesh.vertices.iter().zip(&other.vertices).all(|(a, b)| {
+            (0..3).all(|k| a.pos[k].is_finite() && b.pos[k].is_finite() && (a.pos[k] - b.pos[k]).abs() < 1e-4)
+        })
+}
+
 /// The vertex colors of `file` for `mesh`, when it is the same mesh.
 pub fn colors_from_file(mesh: &Mesh, file: &std::path::Path) -> Result<Vec<[[u8; 3]; 3]>, String> {
     let other = Mesh::load_file(file)?;
-    let same = other.indices.len() == mesh.indices.len()
-        && other.vertices.len() == mesh.vertices.len()
-        && (0..mesh.vertices.len()).step_by((mesh.vertices.len() / 64).max(1)).all(|i| {
-            let (a, b) = (mesh.vertices[i].pos, other.vertices[i].pos);
-            (0..3).all(|k| (a[k] - b[k]).abs() < 1e-4)
-        });
-    if !same {
+    if !same_mesh_order(mesh, &other) {
         return Err(format!(
-            "'{}' is not the mesh that is loaded ({} triangles there, {} here). Pick the file this project was made from.",
-            file.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
-            other.triangle_count(),
-            mesh.triangle_count()
+            "'{}' has the same/different triangle count but its vertex or triangle order does not match the loaded mesh. Choose the exact FBX/OBJ used to create this project.",
+            file.file_name().and_then(|n| n.to_str()).unwrap_or("file")
         ));
     }
     match other.tri_vertex_color {
@@ -152,8 +143,10 @@ pub fn colors_from_file(mesh: &Mesh, file: &std::path::Path) -> Result<Vec<[[u8;
 /// What the ID mask panel keeps between frames.
 #[derive(Default)]
 pub struct VertexIdState {
-    /// The loaded mesh's palette and which mesh (pointer) it was made for.
-    pub palette: Option<(usize, Palette)>,
+    /// The loaded mesh's palette and a weak identity for the mesh it was made for.
+    /// Keeping the control block alive prevents allocator address reuse from
+    /// making a different mesh appear to be the cached one.
+    pub palette: Option<(std::sync::Weak<Mesh>, Palette)>,
     /// The mask preview on the model is switched off.
     pub preview_off: bool,
     /// The panel was drawn this frame, with these ID colors and tolerance.
@@ -170,10 +163,12 @@ pub struct VertexIdState {
 impl VertexIdState {
     /// The palette of `mesh`, made once per loaded mesh.
     pub fn palette_for(&mut self, mesh: &std::sync::Arc<Mesh>) -> &Palette {
-        let key = std::sync::Arc::as_ptr(mesh) as usize;
-        if self.palette.as_ref().is_none_or(|(k, _)| *k != key) {
+        let same_mesh = self.palette.as_ref().is_some_and(|(old, _)| {
+            old.upgrade().is_some_and(|old_mesh| std::sync::Arc::ptr_eq(&old_mesh, mesh))
+        });
+        if !same_mesh {
             let p = mesh.tri_vertex_color.as_deref().map(palette).unwrap_or_default();
-            self.palette = Some((key, p));
+            self.palette = Some((std::sync::Arc::downgrade(mesh), p));
             self.auto_baked = false;
         }
         &self.palette.as_ref().expect("just made").1
@@ -336,6 +331,56 @@ pub fn panel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reimport_identity_checks_all_positions_and_triangle_order() {
+        use crate::mesh::Primitive;
+
+        let mesh = Primitive::Sphere.build();
+        assert!(same_mesh_order(&mesh, &mesh.clone()));
+
+        let mut moved_late_vertex = mesh.clone();
+        let late = moved_late_vertex.vertices.len() - 1;
+        moved_late_vertex.vertices[late].pos[0] += 0.01;
+        assert!(!same_mesh_order(&mesh, &moved_late_vertex), "a mismatch beyond the old 64-vertex sample must be caught");
+
+        let mut reordered = mesh.clone();
+        reordered.indices.swap(0, 1);
+        assert!(!same_mesh_order(&mesh, &reordered), "triangle corner order determines per-corner color assignment");
+    }
+
+    #[test]
+    fn palette_cache_rebuilds_when_the_mesh_arc_changes() {
+        use crate::mesh::Primitive;
+        use std::sync::Arc;
+
+        let mut red = Primitive::Plane.build();
+        red.tri_vertex_color = Some(vec![[[255, 0, 0]; 3]; red.triangle_count()]);
+        let mut green = Primitive::Plane.build();
+        green.tri_vertex_color = Some(vec![[[0, 255, 0]; 3]; green.triangle_count()]);
+        let red = Arc::new(red);
+        let green = Arc::new(green);
+
+        let mut state = VertexIdState::default();
+        assert_eq!(state.palette_for(&red).entries[0].rgb, [255, 0, 0]);
+        assert_eq!(state.palette_for(&green).entries[0].rgb, [0, 255, 0]);
+    }
+
+    #[test]
+    fn mask_overlay_keeps_raw_corner_colors_for_fragment_level_matching() {
+        use crate::mesh::Primitive;
+
+        let mut mesh = Primitive::Plane.build();
+        let colors = [[255, 0, 0], [0, 255, 0], [0, 0, 255]];
+        mesh.tri_vertex_color = Some(vec![[colors[0], colors[1], colors[2]]; mesh.triangle_count()]);
+        let shown = Shown::Mask(vec![colors[0].map(f32::to_bits)], 0.15f32.to_bits());
+        let overlay = super::overlay(&mesh, &shown, &[]);
+
+        assert_eq!(overlay.len(), mesh.indices.len());
+        for (vertex, expected) in overlay.iter().zip(colors.into_iter().cycle()) {
+            assert_eq!(&vertex.color[..3], &expected);
+        }
+    }
 
     #[test]
     fn vertex_color_overlay_excludes_hidden_imported_objects() {

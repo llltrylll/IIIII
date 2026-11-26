@@ -449,6 +449,30 @@ pub struct OverlayVertex {
     pub color: [u8; 4],
 }
 
+/// Parameters for the vertex-ID overlay. The fragment shader evaluates the
+/// same interpolated color and tolerance as the texture compositor.
+#[derive(Clone, Copy)]
+struct VertexIdOverlayMask {
+    id_color: [f32; 4],
+    id_more: [[f32; 4]; 7],
+}
+
+impl VertexIdOverlayMask {
+    fn new(ids: &[[f32; 3]], tolerance: f32) -> Self {
+        let mut id_color = [0.0; 4];
+        id_color[3] = tolerance.max(1e-3);
+        if let Some(first) = ids.first() {
+            id_color[..3].copy_from_slice(first);
+        }
+        let mut id_more = [[0.0; 4]; 7];
+        for (slot, color) in id_more.iter_mut().zip(ids.iter().skip(1)) {
+            slot[..3].copy_from_slice(color);
+            slot[3] = 1.0;
+        }
+        Self { id_color, id_more }
+    }
+}
+
 /// Independent overlays drawn over the 3D view.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum OverlaySlot {
@@ -472,7 +496,8 @@ struct OverlayBuffers {
 #[derive(Default)]
 pub struct Overlays {
     slots: [OverlayBuffers; 3],
-    /// Changes only when overlay geometry is replaced or removed.
+    vertex_id_mask: Option<VertexIdOverlayMask>,
+    /// Changes only when overlay geometry or its mask parameters are replaced or removed.
     generation: u64,
 }
 
@@ -480,8 +505,8 @@ impl Overlays {
     pub fn generation(&self) -> u64 {
         self.generation
     }
-    /// Replaces a slot's geometry: triangle-list and line-list vertices.
-    pub fn set(&mut self, device: &wgpu::Device, slot: OverlaySlot, tris: &[OverlayVertex], lines: &[OverlayVertex]) {
+
+    fn set_geometry(&mut self, device: &wgpu::Device, slot: OverlaySlot, tris: &[OverlayVertex], lines: &[OverlayVertex]) {
         use wgpu::util::DeviceExt;
         let upload = |label, v: &[OverlayVertex]| {
             (!v.is_empty()).then(|| {
@@ -493,13 +518,44 @@ impl Overlays {
                 (buffer, v.len() as u32)
             })
         };
-        self.slots[slot as usize] = OverlayBuffers { tris: upload("overlay tris", tris), lines: upload("overlay lines", lines) };
+        self.slots[slot as usize] = OverlayBuffers {
+            tris: upload("overlay tris", tris),
+            lines: upload("overlay lines", lines),
+        };
+    }
+
+    /// Replaces ordinary overlay geometry. The Vertex Colors slot uses the
+    /// standard sRGB-color shader unless the dedicated ID-mask setter is used.
+    pub fn set(&mut self, device: &wgpu::Device, slot: OverlaySlot, tris: &[OverlayVertex], lines: &[OverlayVertex]) {
+        self.set_geometry(device, slot, tris, lines);
+        if slot == OverlaySlot::VertexColors {
+            self.vertex_id_mask = None;
+        }
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Replaces the vertex-color overlay with an exact per-fragment ID preview.
+    /// Raw corner colors are interpolated first; the shader then performs the
+    /// same color-distance test as the baked texture mask.
+    pub fn set_vertex_id_mask(
+        &mut self,
+        device: &wgpu::Device,
+        tris: &[OverlayVertex],
+        ids: &[[f32; 3]],
+        tolerance: f32,
+    ) {
+        self.set_geometry(device, OverlaySlot::VertexColors, tris, &[]);
+        self.vertex_id_mask = Some(VertexIdOverlayMask::new(ids, tolerance));
         self.generation = self.generation.wrapping_add(1);
     }
 
     pub fn clear(&mut self, slot: OverlaySlot) {
-        if self.is_set(slot) {
+        let had_mask = slot == OverlaySlot::VertexColors && self.vertex_id_mask.is_some();
+        if self.is_set(slot) || had_mask {
             self.slots[slot as usize] = OverlayBuffers::default();
+            if slot == OverlaySlot::VertexColors {
+                self.vertex_id_mask = None;
+            }
             self.generation = self.generation.wrapping_add(1);
         }
     }
@@ -531,6 +587,9 @@ struct Globals {
     clip: [f32; 4],
     /// Two vec4 slots per point light: position/intensity and color/range.
     point_lights: [[f32; 4]; MAX_POINT_LIGHTS * 2],
+    /// Vertex-ID overlay test, kept identical to the texture compositor.
+    id_color: [f32; 4],
+    id_more: [[f32; 4]; 7],
 }
 
 /// OpenGL adapters commonly expose only 16 sampled fragment textures.
@@ -1014,6 +1073,7 @@ pub struct ViewRenderer {
     seam2d: wgpu::RenderPipeline,
     seam3d: wgpu::RenderPipeline,
     overlay_tris: wgpu::RenderPipeline,
+    overlay_id_tris: wgpu::RenderPipeline,
     overlay_lines: wgpu::RenderPipeline,
     shadow: wgpu::RenderPipeline,
     shadow_bgl: wgpu::BindGroupLayout,
@@ -1239,6 +1299,7 @@ impl ViewRenderer {
             attributes: &OVERLAY_ATTRS,
         })];
         let overlay_tris = pipeline("overlay tris", "vs_overlay", "fs_overlay", &ob, tri, over(), view_samples, &hdr_blended);
+        let overlay_id_tris = pipeline("overlay vertex ID mask", "vs_overlay_id", "fs_overlay_id", &ob, tri, over(), view_samples, &hdr_blended);
         let overlay_lines = pipeline("overlay lines", "vs_overlay", "fs_overlay", &ob, line, over(), view_samples, &hdr_blended);
         // Key light shadow map: depth only, both faces (meshes may be open),
         // with slope-scaled bias against acne. Its own layout holds just the
@@ -1313,6 +1374,7 @@ impl ViewRenderer {
             seam2d,
             seam3d,
             overlay_tris,
+            overlay_id_tris,
             overlay_lines,
             shadow,
             shadow_bgl,
@@ -1533,6 +1595,8 @@ impl ViewRenderer {
                     [light.color[0], light.color[1], light.color[2], light.range.max(0.0)]
                 }
             }),
+            id_color: [0.0; 4],
+            id_more: [[0.0; 4]; 7],
         }
     }
 
@@ -1751,6 +1815,10 @@ impl ViewRenderer {
                 continue;
             }
             let mut g = Self::base_globals(engine, settings, size, settings.mode);
+            if let Some(mask) = overlays.and_then(|o| o.vertex_id_mask) {
+                g.id_color = mask.id_color;
+                g.id_more = mask.id_more;
+            }
             // The custom preview shader can consume every Surface input. The
             // built-in material path uses only its PBR channels and selected maps.
             g.bg2[3] = if self.custom_mesh.is_some() && settings.mode == ViewMode::Material { 1.0 } else { 0.0 };
@@ -1990,9 +2058,10 @@ impl ViewRenderer {
                 }
             }
             if let Some(overlays) = overlays {
-                for o in &overlays.slots {
+                for (slot, o) in overlays.slots.iter().enumerate() {
                     if let Some((buffer, count)) = &o.tris {
-                        pass.set_pipeline(&self.overlay_tris);
+                        let id_mask = slot == OverlaySlot::VertexColors as usize && overlays.vertex_id_mask.is_some();
+                        pass.set_pipeline(if id_mask { &self.overlay_id_tris } else { &self.overlay_tris });
                         pass.set_vertex_buffer(0, buffer.slice(..));
                         pass.draw(0..*count, 0..1);
                     }
@@ -2455,3 +2524,16 @@ mod camera_frame_tests {
     }
 }
 
+
+
+#[cfg(test)]
+mod vertex_id_overlay_shader_tests {
+    const SHADER: &str = include_str!("shaders/view.wgsl");
+
+    #[test]
+    fn vertex_id_preview_tests_interpolated_rgb_in_the_fragment_shader() {
+        assert!(SHADER.contains("distance(in.color.rgb, g.id_color.rgb)"));
+        assert!(SHADER.contains("distance(in.color.rgb, g.id_more[k].xyz)"));
+        assert!(SHADER.contains("let tolerance = max(g.id_color.w, 1e-3)"));
+    }
+}

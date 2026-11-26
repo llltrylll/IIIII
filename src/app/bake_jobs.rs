@@ -24,6 +24,12 @@ impl PainterApp {
         if self.bake_id_only {
             settings.maps = 0;
             settings.custom.clear();
+            // The Properties ID panel and its eyedropper refer to the current
+            // low-poly mesh. Its ID-only rebake must read that same attribute,
+            // not silently switch to a high-poly file's unrelated vertex colors.
+            settings.high_poly = None;
+            settings.cage = None;
+            settings.cage_paint = None;
         }
         settings
     }
@@ -55,7 +61,6 @@ impl PainterApp {
         }
         let mesh = Arc::clone(&self.mesh);
         let settings = self.job_bake_settings();
-        self.baked_id_source = settings.id_source;
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
@@ -89,6 +94,10 @@ impl PainterApp {
         self.bake_job = None;
         if let Some(set) = self.sets.bake_queue.pop_front() {
             self.start_bake_set(set, ctx);
+        } else {
+            // The selected source becomes authoritative only after every
+            // texture set has successfully adopted its new maps.
+            self.baked_id_source = self.bake_settings.id_source;
         }
     }
 
