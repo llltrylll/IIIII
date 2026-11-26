@@ -7179,6 +7179,63 @@ mod id_map_resample_tests {
         }
     }
 
+
+    #[test]
+    #[ignore]
+    fn id_only_rebake_preserves_non_id_painted_fixes() {
+        use crate::bake::{BakeReport, BakedMaps, MAP_FORMATS, MAP_TEXTURES};
+        use std::sync::Arc;
+
+        let rs = render_state();
+        let mesh = Primitive::Plane.build();
+        let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
+        let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 64);
+        engine.has_bake = true;
+        engine.map_fix[0] = Some(Tex::new_without_srgb_view(
+            &rs.device,
+            "painted AO fix that must survive ID rebake",
+            64,
+            64,
+            wgpu::TextureFormat::Rgba8Unorm,
+            LAYER_USAGE,
+        ));
+
+        let maps: [Tex; MAP_TEXTURES] = std::array::from_fn(|index| {
+            Tex::new_without_srgb_view(
+                &rs.device,
+                "rebaked mesh map",
+                64,
+                64,
+                MAP_FORMATS[index],
+                LAYER_USAGE,
+            )
+        });
+        let report = Arc::new(BakeReport::from_cache_json(&serde_json::json!({
+            "source": "low poly",
+            "triangles": 2,
+            "parts": 1,
+            "hard_edges": 0,
+            "resolution": 64,
+            "rays_per_texel": 16,
+            "prep_seconds": 0.0,
+            "edge_max_distance": 0.1,
+            "id_regions": [],
+            "matched_names": 0,
+            "used_cage": false,
+            "baked": crate::bake::ALL_MAPS,
+            "custom": [],
+            "gpu_seconds": 0.0,
+            "valid_texels": 1,
+            "missed_texels": 0,
+            "filled_texels": 0
+        })).expect("test bake report"));
+        engine.replace_id_map(BakedMaps { maps, custom: Vec::new() }, report);
+
+        assert!(engine.map_fix[0].is_some(), "ID-only rebake must preserve the painted AO fix");
+        assert!(engine.has_bake);
+        assert_eq!(engine.maps_version, 1);
+    }
+
     #[test]
     #[ignore]
     fn id_map_resample_nearest_preserves_categorical_labels() {
