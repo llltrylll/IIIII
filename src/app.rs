@@ -5714,7 +5714,11 @@ impl PainterApp {
                 self.drew_3d = true;
                 // Path tracing replaces the 3D view while it's idle. Painting and
                 // the map display modes use the raster view, which reacts instantly.
-                if self.rt.enabled && self.stroke.is_none() && self.view.mode == ViewMode::Material {
+                if self.rt.enabled
+                    && self.stroke.is_none()
+                    && self.view.mode == ViewMode::Material
+                    && !self.vertex_color_preview_active
+                {
                     let engines = texture_sets::engines(&self.engine, &self.sets, self.mesh.sets.len());
                     if self.raytracer.render(&self.rs, size, &engines, &self.env, &self.cam, &self.view, &self.rt) {
                         ui.ctx().request_repaint();
