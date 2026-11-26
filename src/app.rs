@@ -4461,7 +4461,7 @@ impl PainterApp {
         ui.separator();
         ui.add_space(4.0);
         if theme::icon_button(ui, icons::CROSSHAIR, self.move_point_light, 34.0)
-            .on_hover_text("Move the selected point light: click a surface in the 3D view")
+            .on_hover_text("Place the selected light on a surface with one click. For continuous movement, drag its marker in the 3D view.")
             .clicked()
         {
             self.toggle_point_light_move();
