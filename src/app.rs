@@ -5067,9 +5067,15 @@ impl PainterApp {
             labeled(ui, "ID from", |ui| {
                 ui.radio_value(&mut s.id_source, IdSource::MeshParts, "Mesh parts");
                 ui.radio_value(&mut s.id_source, IdSource::Materials, "Materials");
-                ui.radio_value(&mut s.id_source, IdSource::VertexColors, "Vertex colors");
+                ui.add_enabled_ui(s.high_poly.is_none(), |ui| {
+                    ui.radio_value(&mut s.id_source, IdSource::VertexColors, "Vertex colors")
+                        .on_hover_text("Vertex colors belong to the loaded low-poly mesh. With a high-poly projection, bake the other maps first, then rebake only the ID map from the Vertex ID panel.");
+                });
             });
-            if s.id_source == IdSource::VertexColors {
+            if s.id_source == IdSource::VertexColors && s.high_poly.is_some() {
+                ui.label(egui::RichText::new("Vertex colors are a low-poly ID source. For high-poly bakes, use Mesh parts or Materials, then use the Vertex ID panel to rebake only the ID map from the loaded mesh.")
+                    .small().color(theme::TEXT_DIM));
+            } else if s.id_source == IdSource::VertexColors {
                 if self.mesh.tri_vertex_color.is_some() {
                     ui.label(egui::RichText::new("Vertex colors detected. Bake the ID map to use the imported colors in ID masks.")
                         .small().color(theme::ACCENT));

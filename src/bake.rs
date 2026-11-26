@@ -1138,6 +1138,11 @@ pub fn prepare_cancellable(
     cancel: &AtomicBool,
 ) -> Result<PreparedScene, String> {
     check_prepare_cancelled(cancel)?;
+    if settings.id_source == IdSource::VertexColors && settings.high_poly.is_some() {
+        return Err(
+            "Vertex Colors IDs come from the loaded low-poly mesh, while a high-poly projection uses a different triangle topology. Finish the high-poly bake with Mesh parts or Materials, then use the Vertex ID panel to rebake only the ID map from the low-poly colors.".into()
+        );
+    }
     let start = Instant::now();
     let low_tris = low.indices.len() / 3;
     let raster = low.sets.get(set).map_or(0..low_tris as u32, |s| s.tris.clone());
@@ -3623,6 +3628,19 @@ pub(crate) mod tests {
 mod vertex_color_id_source_tests {
     use super::{prepare, BakeSettings, IdSource};
     use crate::mesh::Primitive;
+
+    #[test]
+    fn vertex_color_id_source_rejects_high_poly_projection_before_loading_it() {
+        let mesh = Primitive::Plane.build();
+        let settings = BakeSettings {
+            id_source: IdSource::VertexColors,
+            high_poly: Some(std::path::PathBuf::from("this-file-does-not-need-to-exist.fbx")),
+            ..Default::default()
+        };
+        let error = prepare(&mesh, &settings, 0).expect_err("low-poly vertex colors cannot index high-poly triangles");
+        assert!(error.contains("different triangle topology"), "{error}");
+        assert!(error.contains("rebake only the ID map"), "{error}");
+    }
 
     #[test]
     fn vertex_color_id_source_rejects_missing_color_attributes() {
