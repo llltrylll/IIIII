@@ -1041,6 +1041,7 @@ impl PainterApp {
             "quality": format!("{:?}", bs.quality),
             "high_poly": bs.high_poly.as_ref().map(|p| p.display().to_string()),
             "id_source": format!("{:?}", bs.id_source),
+            "baked_id_source": format!("{:?}", self.baked_id_source),
             "front": bs.front, "rear": bs.rear, "aa": bs.aa,
             "ao_rays": bs.ao_rays, "ao_distance": bs.ao_distance, "cavity_distance": bs.cavity_distance,
             "thickness_rays": bs.thickness_rays, "thickness_distance": bs.thickness_distance,
@@ -1247,8 +1248,15 @@ impl PainterApp {
             Some("VertexColors") => IdSource::VertexColors,
             _ => IdSource::MeshParts,
         };
-        // The maps stored in the project were baked with these settings.
-        self.baked_id_source = bs.id_source;
+        // Keep the source selected for the next bake separate from the source
+        // actually used by the stored ID map. Older projects have no separate
+        // field, so their saved ID source remains the best available fallback.
+        self.baked_id_source = match s(bv, "baked_id_source") {
+            Some("Materials") => IdSource::Materials,
+            Some("VertexColors") => IdSource::VertexColors,
+            Some("MeshParts") => IdSource::MeshParts,
+            _ => bs.id_source,
+        };
 
         // Texture sets: projects before version 3 have one, at the top level.
         let set_values: Vec<&Value> = match manifest["texture_sets"].as_array() {
