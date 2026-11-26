@@ -31,6 +31,7 @@ impl PainterApp {
     }
 
     pub(super) fn lighting_panel(&mut self, ui: &mut egui::Ui) {
+        let mut selected_light_dragging = false;
         ui.label(egui::RichText::new("Scene lighting controls").strong().color(Color32::WHITE));
         ui.label(
             egui::RichText::new("Position and tune viewport light sources. Camera FOV is on the top bar.")
@@ -112,20 +113,27 @@ impl PainterApp {
                     }
                 });
                 ui.label(
-                    egui::RichText::new("Drag the marker in the 3D view to move it. Right-click the marker to toggle it; Place with click snaps it to a surface.")
+                    egui::RichText::new("Drag the marker to move it. While editing, only this light is previewed for speed; all lights return on release. Right-click toggles it.")
                         .small()
                         .color(theme::TEXT_DIM),
                 );
                 let light = &mut self.view.point_lights[selected];
                 labeled(ui, "Enabled", |ui| ui.checkbox(&mut light.on, ""));
                 labeled(ui, "Color", |ui| color_edit(ui, &mut light.color));
-                slider(ui, "Intensity", &mut light.intensity, 0.0..=200.0);
-                slider(ui, "Range", &mut light.range, 0.1..=1_000.0);
+                let intensity = labeled(ui, "Intensity", |ui| {
+                    ui.add(egui::Slider::new(&mut light.intensity, 0.0..=200.0).max_decimals(2))
+                });
+                selected_light_dragging |= intensity.dragged();
+                let range = labeled(ui, "Range", |ui| {
+                    ui.add(egui::Slider::new(&mut light.range, 0.1..=1_000.0).max_decimals(2))
+                });
+                selected_light_dragging |= range.dragged();
 
                 section(ui, "Position");
-                ui.add(egui::DragValue::new(&mut light.position.x).speed(0.1).range(-1_000_000.0..=1_000_000.0).prefix("X "));
-                ui.add(egui::DragValue::new(&mut light.position.y).speed(0.1).range(-1_000_000.0..=1_000_000.0).prefix("Y "));
-                ui.add(egui::DragValue::new(&mut light.position.z).speed(0.1).range(-1_000_000.0..=1_000_000.0).prefix("Z "));
+                let x = ui.add(egui::DragValue::new(&mut light.position.x).speed(0.1).range(-1_000_000.0..=1_000_000.0).prefix("X "));
+                let y = ui.add(egui::DragValue::new(&mut light.position.y).speed(0.1).range(-1_000_000.0..=1_000_000.0).prefix("Y "));
+                let z = ui.add(egui::DragValue::new(&mut light.position.z).speed(0.1).range(-1_000_000.0..=1_000_000.0).prefix("Z "));
+                selected_light_dragging |= x.dragged() || y.dragged() || z.dragged();
             }
 
             ui.add_space(8.0);
@@ -142,6 +150,17 @@ impl PainterApp {
                     .color(theme::TEXT_DIM),
             );
         });
+
+        // Keep the selected source in a low-cost single-light preview while
+        // one of its numeric controls is being dragged. This also handles the
+        // panel interaction path, not only direct marker drags.
+        self.view.point_light_preview = if let Some((index, _, _)) = self.drag_point_light {
+            Some(index)
+        } else if selected_light_dragging {
+            Some(self.selected_point_light.min(self.view.point_light_count.saturating_sub(1)))
+        } else {
+            None
+        };
     }
 }
 
