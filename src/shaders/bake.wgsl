@@ -24,7 +24,7 @@ struct BakeU {
     b: vec4<f32>,   // AO rays, AO distance, cavity distance, thickness rays
     c: vec4<f32>,   // thickness distance, sky rays, cos(sky cone), curvature radius (texels)
     d: vec4<f32>,   // edge threshold, edge max distance, curvature scale, low-poly-only flag
-    e: vec4<f32>,   // tile x, tile y, JFA / filter step, seed
+    e: vec4<f32>,   // tile x, tile y, JFA / filter step, use per-corner vertex colors for ID
     f: vec4<f32>,   // convex edge BVH root, concave edge BVH root (-1 = none), has cage, low-poly-only edge seed curvature
     g: vec4<f32>,   // height range (largest distance above / below the low poly a ray can find), baked-map bits, random cell size (world), projection flags (1 built cage: rear scales with it, 2 ignore backfaces, 4 fill misses from the nearest surface)
     // Custom map slot k (see `bake::CustomMap`), three vec4 each:
@@ -42,6 +42,7 @@ struct BakeU {
 @group(0) @binding(5) var<storage, read> tri_pos: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read> tri_nrm: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read> parts: array<vec4<f32>>;
+@group(0) @binding(8) var<storage, read> ids: array<vec4<f32>>;
 @group(0) @binding(9) var surf_pos_w: texture_storage_2d<rgba32float, write>;
 @group(0) @binding(10) var surf_nrm_w: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(11) var map_d_w: texture_storage_2d<rgba16float, write>;
@@ -768,10 +769,15 @@ fn cs_surface(@builtin(global_invocation_id) gid: vec3<u32>) {
         let part = parts[pi];
         prand = part.x;
         pgrad = clamp((center_pos.y - part.y) / max(part.z, 1e-5), 0.0, 1.0);
-        let bary = vec3<f32>(1.0 - center_bary.x - center_bary.y, center_bary.x, center_bary.y);
-        idc = tri_vcolor[center_tri * 3u].xyz * bary.x
-            + tri_vcolor[center_tri * 3u + 1u].xyz * bary.y
-            + tri_vcolor[center_tri * 3u + 2u].xyz * bary.z;
+        if (u.e.w > 0.5) {
+            let bary = vec3<f32>(1.0 - center_bary.x - center_bary.y, center_bary.x, center_bary.y);
+            idc = tri_vcolor[center_tri * 3u].xyz * bary.x
+                + tri_vcolor[center_tri * 3u + 1u].xyz * bary.y
+                + tri_vcolor[center_tri * 3u + 2u].xyz * bary.z;
+        } else {
+            let id_index = bitcast<u32>(tri_pos[center_tri * 3u + 1u].w);
+            idc = ids[id_index].xyz;
+        }
         geo = vec4<f32>(hit_geo_normal(center_tri, center_n), f32(pi));
     }
     // Heights span [-range, range] around mid-gray. With a cage, rays start
