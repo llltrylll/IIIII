@@ -7184,7 +7184,7 @@ mod id_map_resample_tests {
         let rs = render_state();
         let mesh = Primitive::Plane.build();
         let gpu_mesh = GpuMesh::new(&rs.device, &mesh);
-        let mut engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 64);
+        let engine = Engine::new(&rs, &gpu_mesh, (mesh.bounds_min, mesh.bounds_max), 64);
 
         let source = Tex::new_without_srgb_view(
             &rs.device,
