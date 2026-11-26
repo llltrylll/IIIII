@@ -1212,7 +1212,6 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
         // Per-triangle attributes ride in the w components: part index, ID
         // index, name group.
         let w = [f32::from_bits(tri_part[t]), f32::from_bits(tri_id[t]), f32::from_bits(src_group[t])];
-        let flat_id = ids.get(tri_id[t] as usize).copied().unwrap_or([0.5, 0.5, 0.5, 1.0]);
         for (k, &v) in indices[t * 3..t * 3 + 3].iter().enumerate() {
             let p = positions[v as usize];
             let n = normals[v as usize];
