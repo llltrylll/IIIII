@@ -953,9 +953,10 @@ mod tests {
 
     #[test]
     fn legacy_id_mask_generator_name_still_loads() {
+        let weights = vec![0.0; crate::engine::GEN_INPUT_COUNT];
         let old_project_generator = json!({
             "kind": "ID Mask",
-            "weights": [0.0; crate::engine::GEN_INPUT_COUNT],
+            "weights": weights,
             "id_color": [0.2, 0.4, 0.6],
             "id_tolerance": 0.12
         });
@@ -963,6 +964,5 @@ mod tests {
         assert_eq!(loaded.kind, GenKind::IdMask);
         assert_eq!(loaded.id_color, [0.2, 0.4, 0.6]);
         assert_eq!(loaded.id_tolerance, 0.12);
-    }
     }
 }
