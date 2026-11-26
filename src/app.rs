@@ -3534,7 +3534,8 @@ impl PainterApp {
                 ui.radio_value(&mut s.id_source, IdSource::MeshParts, "Mesh parts");
                 ui.radio_value(&mut s.id_source, IdSource::Materials, "Materials");
                 ui.add_enabled_ui(has_vertex_colors && s.high_poly.is_none(), |ui| {
-                    ui.radio_value(&mut s.id_source, IdSource::VertexColors, "Vertex colors");
+                    ui.radio_value(&mut s.id_source, IdSource::VertexColors, "Vertex colors")
+                        .on_hover_text("Blender FBX: export Vertex Colors as sRGB (the default), not Linear. The ID map preserves these channel values.");
                 });
             });
             if s.high_poly.is_some() {
@@ -3738,7 +3739,9 @@ impl PainterApp {
                 dirty |= ui.radio_value(&mut bake_settings.id_source, IdSource::MeshParts, "Mesh parts").changed();
                 dirty |= ui.radio_value(&mut bake_settings.id_source, IdSource::Materials, "Materials").changed();
                 ui.add_enabled_ui(has_vertex_colors && can_sample_low_poly, |ui| {
-                    dirty |= ui.radio_value(&mut bake_settings.id_source, IdSource::VertexColors, "Vertex colors").changed();
+                    dirty |= ui.radio_value(&mut bake_settings.id_source, IdSource::VertexColors, "Vertex colors")
+                        .on_hover_text("Blender FBX: export Vertex Colors as sRGB (the default), not Linear. The ID map preserves these channel values.")
+                        .changed();
                 });
             });
             dirty |= labeled(ui, "ID color", |ui| color_edit(ui, &mut g.id_color));
@@ -3761,7 +3764,7 @@ impl PainterApp {
                     .small().color(theme::ACCENT));
             }
             if !can_sample_low_poly {
-                ui.label(egui::RichText::new("Vertex Color ID sampling is Low-Poly-only. Disable the separate High Poly source to use it.")
+                ui.label(egui::RichText::new("Sampling is disabled while a separate High Poly source is active; the viewport picker selects the Low Poly mesh.")
                     .small().color(theme::TEXT_DIM));
             }
             if *pick_target == Some(target) {
@@ -5215,7 +5218,7 @@ impl PainterApp {
             return;
         }
         if self.bake_settings.high_poly.is_some() {
-            self.status = "Vertex Color ID sampling is Low-Poly-only. Disable the separate High Poly source first.".into();
+            self.status = "ID sampling uses the Low Poly viewport mesh. Disable the separate High Poly source before sampling.".into();
             self.id_color_pick_target = None;
             return;
         }
