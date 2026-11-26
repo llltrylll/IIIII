@@ -158,7 +158,9 @@ impl OrbitCam {
         // working distances: that wastes depth precision and encourages
         // z-fighting. Keep a smaller floor for close-up inspection.
         let near = (distance * 0.005).clamp(0.0001, CAMERA_MAX_DISTANCE * 0.0005);
-        let far = (distance * 4.0 + FAR).clamp(FAR, CAMERA_MAX_DISTANCE * 4.0 + FAR);
+        // Keep the ordinary scene's far plane at the historical FAR value;
+        // only extend it when the camera actually needs a longer view.
+        let far = (distance * 4.0).clamp(FAR, CAMERA_MAX_DISTANCE * 4.0);
         (near, far.max(near + 1.0))
     }
 
