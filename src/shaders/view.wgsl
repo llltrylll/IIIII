@@ -121,7 +121,15 @@ fn sample_surface(uv: vec2<f32>) -> Surface {
     s.b = textureSampleLevel(map_b, samp, uv, 0.0);
     s.c = textureSampleLevel(map_c, samp, uv, 0.0);
     s.d = textureSampleLevel(map_d, samp, uv, 0.0);
-    s.e = textureSampleLevel(map_e, samp, uv, 0.0);
+    // ID colors are categorical values; use the same nearest-texel read as
+    // mask compositing so the displayed map has no blended region borders.
+    let id_dims = vec2<i32>(textureDimensions(map_e));
+    let id_coord = clamp(
+        vec2<i32>(floor(uv * vec2<f32>(id_dims))),
+        vec2<i32>(0),
+        id_dims - vec2<i32>(1),
+    );
+    s.e = textureLoad(map_e, id_coord, 0);
     let ci = max(i32(g.extra.z), 0);
     s.f = vec4<f32>(textureSampleLevel(custom_maps, samp, uv, ci / 4, 0.0)[ci % 4]);
     s.wnrm = textureSampleLevel(t_wnrm, samp, uv, 0.0).xyz * 2.0 - 1.0;
