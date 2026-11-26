@@ -14,6 +14,8 @@ struct RtU {
     bg: vec4<f32>,       // background color (linear), background intensity
     sun: vec4<f32>,      // direction toward the key light, intensity
     sun_c: vec4<f32>,    // key light color (linear), on (1) / off (0)
+    point_lights: array<vec4<f32>, 16>, // position/intensity, then color/range
+    point_light_meta: vec4<f32>, // active point-light count
 };
 
 @group(0) @binding(0) var<uniform> u: RtU;
@@ -441,6 +443,33 @@ fn trace(o_in: vec3<f32>, d_in: vec3<f32>) -> vec3<f32> {
             let snl = dot(s.n, sl);
             if (snl > 0.0 && dot(s.ng, sl) > 0.0 && intersect(origin, sl, 1e30, true).tri == NONE) {
                 radiance += throughput * brdf(s.m, s.n, v, sl) * snl * u.sun_c.rgb * u.sun.w;
+            }
+        }
+
+        // Editable point lights are delta sources. Match the raster viewport's
+        // inverse-square attenuation and finite range; like the raster lights,
+        // they intentionally do not cast shadows.
+        let point_count = u32(clamp(u.point_light_meta.x, 0.0, 8.0));
+        for (var light_index = 0u; light_index < 8u; light_index += 1u) {
+            if (light_index >= point_count) {
+                break;
+            }
+            let source = u.point_lights[light_index * 2u];
+            let color_range = u.point_lights[light_index * 2u + 1u];
+            let to_light = source.xyz - s.p;
+            let distance_squared = dot(to_light, to_light);
+            let range = color_range.w;
+            if (source.w > 0.0 && range > 0.0 && distance_squared > 1e-4
+                && distance_squared < range * range)
+            {
+                let light_dir = to_light * inverseSqrt(distance_squared);
+                let nl_point = dot(s.n, light_dir);
+                if (nl_point > 0.0 && dot(s.ng, light_dir) > 0.0) {
+                    let edge = max(1.0 - distance_squared / (range * range), 0.0);
+                    let attenuation = edge * edge / distance_squared;
+                    radiance += throughput * brdf(s.m, s.n, v, light_dir)
+                        * nl_point * color_range.rgb * source.w * attenuation;
+                }
             }
         }
 

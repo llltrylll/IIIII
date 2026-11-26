@@ -162,7 +162,7 @@ impl PainterApp {
         // raycast on every mouse update. This keeps movement responsive and
         // prevents the drag gesture from ever reaching the paint tool.
         if kind == ViewKind::V3d
-            && let Some((index, plane_point, plane_normal)) = self.drag_point_light
+            && let Some((index, plane_point, plane_normal, drag_offset)) = self.drag_point_light
         {
             if !down {
                 self.drag_point_light = None;
@@ -176,7 +176,7 @@ impl PainterApp {
                 if let Some(position) = ray_plane_intersection(origin, direction, plane_point, plane_normal)
                     && let Some(light) = self.view.point_lights.get_mut(index)
                 {
-                    light.position = position;
+                    light.position = position + drag_offset;
                     self.view.point_light_preview = Some(index);
                     ui.ctx().request_repaint();
                 }
@@ -256,7 +256,12 @@ impl PainterApp {
                         self.status = format!("Point light {} turned {}.", index + 1, if light.on { "on" } else { "off" });
                     } else {
                         let forward = (self.cam.target - self.cam.eye()).normalize_or_zero();
-                        self.drag_point_light = Some((index, position, forward));
+                        let size = Vec2::new(rect.width() * ppp, rect.height() * ppp);
+                        let (origin, direction) = self.cam.ray(local(pointer), size);
+                        let offset = ray_plane_intersection(origin, direction, position, forward)
+                            .map(|cursor_hit| position - cursor_hit)
+                            .unwrap_or(Vec3::ZERO);
+                        self.drag_point_light = Some((index, position, forward, offset));
                         self.view.point_light_preview = Some(index);
                         self.status = format!("Dragging Point {}. Release to place; right-click toggles it.", index + 1);
                     }

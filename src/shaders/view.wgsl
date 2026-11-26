@@ -329,6 +329,9 @@ fn point_direct_light(
 fn point_lighting(s: Surface, n: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
     var total = vec3<f32>(0.0);
     let count = u32(clamp(g.clip.z, 0.0, 8.0));
+    if (count == 0u) {
+        return total;
+    }
     for (var i = 0u; i < 8u; i += 1u) {
         if (i >= count) {
             break;

@@ -922,8 +922,8 @@ pub struct PainterApp {
     show_point_light_markers: bool,
     move_point_light: bool,
     point_light_pointer_capture: bool,
-    /// Active direct-manipulation drag: light index, camera-facing plane point and normal.
-    drag_point_light: Option<(usize, Vec3, Vec3)>,
+    /// Active marker drag: light index, camera-facing plane and initial cursor offset.
+    drag_point_light: Option<(usize, Vec3, Vec3, Vec3)>,
     /// Blender-style first-person navigation, active only over the 3D viewport.
     walk_navigation: bool,
     /// Discard the stale/warp motion that can arrive immediately after cursor lock.

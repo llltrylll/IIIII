@@ -160,7 +160,9 @@ impl OrbitCam {
         let near = (distance * 0.005).clamp(0.0001, CAMERA_MAX_DISTANCE * 0.0005);
         // Keep the ordinary scene's far plane at the historical FAR value;
         // only extend it when the camera actually needs a longer view.
-        let far = (distance * 4.0).clamp(FAR, CAMERA_MAX_DISTANCE * 4.0);
+        // Preserve the old 100-unit view at normal distances, but shorten
+        // the far plane for extreme close-ups so far/near stays bounded.
+        let far = (distance * 4.0).max(FAR).min(near * 10_000.0);
         (near, far.max(near + 1.0))
     }
 
@@ -2441,7 +2443,8 @@ mod camera_frame_tests {
         let (near, far) = cam.clip_planes();
         assert!(near >= 0.0001);
         assert!(far > near);
-        assert!(far / near <= 1_000_000.0, "depth ratio unexpectedly wide: {}", far / near);
+        assert!(far / near <= 10_001.0, "close-up depth ratio unexpectedly wide: {}", far / near);
+        assert!(far < 2.0, "extreme close-up should not retain the 100-unit far plane: {far}");
     }
 
     #[test]

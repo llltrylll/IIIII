@@ -166,29 +166,29 @@ fn valid(tree: &Tree<Pane>, ws: Workspace) -> bool {
         && tree.tiles.tiles().filter(|t| matches!(t, Tile::Pane(_))).count() == panes(ws).len()
 }
 
-/// Keep the Lighting panel beside Shelf on the left, even for layouts saved
-/// before that placement was standardized. Move only this pane and preserve
-/// every other user split, tab order and size.
-fn move_lighting_to_left(tree: &mut Tree<Pane>) -> bool {
-    let (Some(lighting), Some(shelf)) = (
-        tree.tiles.find_pane(&Pane::Lighting),
-        tree.tiles.find_pane(&Pane::Shelf),
-    ) else {
+/// Accept a Paint layout saved before the Lighting pane existed.
+fn valid_legacy_paint(tree: &Tree<Pane>) -> bool {
+    let legacy_panes = [
+        Pane::View3d, Pane::View2d, Pane::Layers, Pane::Properties,
+        Pane::MeshMaps, Pane::TextureSet, Pane::Preview, Pane::Shelf,
+    ];
+    legacy_panes.iter().all(|pane| tree.tiles.find_pane(pane).is_some())
+        && tree.tiles.tiles().filter(|tile| matches!(tile, Tile::Pane(_))).count() == legacy_panes.len()
+}
+
+/// Insert or relocate only Lighting; preserve custom splits and the active tab.
+fn ensure_lighting_beside_shelf(tree: &mut Tree<Pane>) -> bool {
+    let Some(shelf) = tree.tiles.find_pane(&Pane::Shelf) else { return false };
+    let Some(shelf_tabs) = tree.tiles.parent_of(shelf) else { return false };
+    if !matches!(tree.tiles.get(shelf_tabs), Some(Tile::Container(Container::Tabs(_)))) {
         return false;
-    };
-    let (Some(lighting_tabs), Some(shelf_tabs)) = (
-        tree.tiles.parent_of(lighting),
-        tree.tiles.parent_of(shelf),
-    ) else {
-        return false;
-    };
-    if lighting_tabs == shelf_tabs
-        || !matches!(tree.tiles.get(shelf_tabs), Some(Tile::Container(Container::Tabs(_))))
-    {
+    }
+    let lighting = tree.tiles.find_pane(&Pane::Lighting)
+        .unwrap_or_else(|| tree.tiles.insert_pane(Pane::Lighting));
+    if tree.tiles.parent_of(lighting) == Some(shelf_tabs) {
         return false;
     }
     tree.move_tile_to_container(lighting, shelf_tabs, usize::MAX, false);
-    tree.make_active(|id, tile| id == lighting && matches!(tile, Tile::Pane(Pane::Lighting)));
     true
 }
 
@@ -198,12 +198,26 @@ impl Docks {
             layout_path().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok());
         let mut dirty = false;
         let trees = Workspace::ALL.map(|ws| {
-            let mut tree = saved.as_ref().and_then(|s| s.get(index(ws)).cloned())
-                .filter(|t| valid(t, ws)).unwrap_or_else(|| default_tree(ws));
-            if ws == Workspace::Paint && move_lighting_to_left(&mut tree) {
-                dirty = true;
+            let saved_tree = saved.as_ref().and_then(|layouts| layouts.get(index(ws))).cloned();
+            if ws == Workspace::Paint {
+                match saved_tree {
+                    Some(mut tree) if valid(&tree, ws) => {
+                        dirty |= ensure_lighting_beside_shelf(&mut tree);
+                        tree
+                    }
+                    Some(mut tree) if valid_legacy_paint(&tree) => {
+                        if ensure_lighting_beside_shelf(&mut tree) {
+                            dirty = true;
+                            tree
+                        } else {
+                            default_tree(ws)
+                        }
+                    }
+                    _ => default_tree(ws),
+                }
+            } else {
+                saved_tree.filter(|tree| valid(tree, ws)).unwrap_or_else(|| default_tree(ws))
             }
-            tree
         });
         Docks { trees, dirty }
     }
@@ -376,8 +390,53 @@ impl PainterApp {
 mod tests {
     use super::*;
 
+    fn legacy_default_paint_tree() -> Tree<Pane> {
+        let mut tiles = Tiles::default();
+        let view3d = tiles.insert_pane(Pane::View3d);
+        let view2d = tiles.insert_pane(Pane::View2d);
+        let view3d = tiles.insert_tab_tile(vec![view3d]);
+        let view2d = tiles.insert_tab_tile(vec![view2d]);
+        let views = tiles.insert_horizontal_tile(vec![view3d, view2d]);
+        let shelf = tiles.insert_pane(Pane::Shelf);
+        let shelf = tiles.insert_tab_tile(vec![shelf]);
+        let left = tiles.insert_vertical_tile(vec![views, shelf]);
+        share(&mut tiles, left, views, 4.0);
+        share(&mut tiles, left, shelf, 1.0);
+        let stack = [Pane::Layers, Pane::MeshMaps, Pane::TextureSet, Pane::Preview]
+            .map(|pane| tiles.insert_pane(pane));
+        let stack = tiles.insert_tab_tile(stack.to_vec());
+        let properties = tiles.insert_pane(Pane::Properties);
+        let properties = tiles.insert_tab_tile(vec![properties]);
+        let right = tiles.insert_vertical_tile(vec![stack, properties]);
+        share(&mut tiles, right, stack, 1.0);
+        share(&mut tiles, right, properties, 1.4);
+        let root = tiles.insert_horizontal_tile(vec![left, right]);
+        share(&mut tiles, root, left, 3.2);
+        share(&mut tiles, root, right, 1.0);
+        Tree::new(egui::Id::unique("legacy_paint_layout"), root, tiles)
+    }
+
     #[test]
-    fn saved_lighting_tab_is_moved_beside_shelf_without_resetting_layout() {
+    fn legacy_paint_layout_migrates_only_the_missing_lighting_tab() {
+        let mut tree = legacy_default_paint_tree();
+        let shelf = tree.tiles.find_pane(&Pane::Shelf).unwrap();
+        let view3d = tree.tiles.find_pane(&Pane::View3d).unwrap();
+        let shelf_parent = tree.tiles.parent_of(shelf).unwrap();
+        let view_parent = tree.tiles.parent_of(view3d).unwrap();
+
+        assert!(valid_legacy_paint(&tree));
+        assert!(!valid(&tree, Workspace::Paint));
+        assert!(ensure_lighting_beside_shelf(&mut tree));
+
+        let lighting = tree.tiles.find_pane(&Pane::Lighting).unwrap();
+        assert_eq!(tree.tiles.parent_of(lighting), Some(shelf_parent));
+        assert_eq!(tree.tiles.parent_of(shelf), Some(shelf_parent));
+        assert_eq!(tree.tiles.parent_of(view3d), Some(view_parent));
+        assert!(valid(&tree, Workspace::Paint));
+    }
+
+    #[test]
+    fn saved_lighting_tab_moves_beside_shelf() {
         let mut tree = default_tree(Workspace::Paint);
         let lighting = tree.tiles.find_pane(&Pane::Lighting).unwrap();
         let shelf = tree.tiles.find_pane(&Pane::Shelf).unwrap();
@@ -386,7 +445,7 @@ mod tests {
         tree.move_tile_to_container(lighting, right_tabs, usize::MAX, false);
         assert_ne!(tree.tiles.parent_of(lighting), tree.tiles.parent_of(shelf));
 
-        assert!(move_lighting_to_left(&mut tree));
+        assert!(ensure_lighting_beside_shelf(&mut tree));
         assert_eq!(tree.tiles.parent_of(lighting), tree.tiles.parent_of(shelf));
         assert!(valid(&tree, Workspace::Paint));
     }
