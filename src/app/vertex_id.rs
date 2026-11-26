@@ -130,7 +130,7 @@ pub fn colors_from_file(mesh: &Mesh, file: &std::path::Path) -> Result<Vec<[[u8;
     let other = Mesh::load_file(file)?;
     if !same_mesh_order(mesh, &other) {
         return Err(format!(
-            "'{}' has the same/different triangle count but its vertex or triangle order does not match the loaded mesh. Choose the exact FBX/OBJ used to create this project.",
+            "'{}' does not match the loaded mesh's vertex positions or triangle order. Choose the exact FBX/OBJ used to create this project.",
             file.file_name().and_then(|n| n.to_str()).unwrap_or("file")
         ));
     }
@@ -373,7 +373,7 @@ mod tests {
         let mut mesh = Primitive::Plane.build();
         let colors = [[255, 0, 0], [0, 255, 0], [0, 0, 255]];
         mesh.tri_vertex_color = Some(vec![[colors[0], colors[1], colors[2]]; mesh.triangle_count()]);
-        let shown = Shown::Mask(vec![colors[0].map(f32::to_bits)], 0.15f32.to_bits());
+        let shown = Shown::Mask(vec![[1.0, 0.0, 0.0].map(f32::to_bits)], 0.15f32.to_bits());
         let overlay = super::overlay(&mesh, &shown, &[]);
 
         assert_eq!(overlay.len(), mesh.indices.len());

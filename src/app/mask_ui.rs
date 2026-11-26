@@ -291,7 +291,18 @@ impl PainterApp {
             match vertex_id::colors_from_file(&self.mesh, &path) {
                 Ok(colors) => {
                     let found = vertex_id::palette(&colors).distinct;
+                    // Keep the legacy per-triangle ID summary in sync with the
+                    // authoritative per-corner attribute. Baking and preview
+                    // use the corner values; bake reports and palette metadata
+                    // still consume the average color per triangle.
+                    let tri_colors = colors.iter().map(|corners| {
+                        std::array::from_fn(|channel| {
+                            let sum: u32 = corners.iter().map(|rgb| rgb[channel] as u32).sum();
+                            (sum as f32 / 3.0).round() as u8
+                        })
+                    }).collect();
                     let mut mesh = (*self.mesh).clone();
+                    mesh.tri_color = Some(tri_colors);
                     mesh.tri_vertex_color = Some(colors);
                     self.mesh = Arc::new(mesh);
                     self.vertex_id.shown = None;
