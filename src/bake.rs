@@ -526,6 +526,8 @@ pub struct PreparedScene {
     nodes: Vec<[f32; 4]>,
     tri_pos: Vec<[f32; 4]>,
     tri_nrm: Vec<[f32; 4]>,
+    /// Per-corner sRGB vertex colors, or the selected flat ID color.
+    tri_vcolor: Vec<[f32; 4]>,
     parts: Vec<[f32; 4]>,
     ids: Vec<[f32; 4]>,
     /// Hard-edge segments (two entries each) and their BVH: convex edges, then concave creases.
@@ -618,7 +620,7 @@ fn hash01(x: u32) -> f32 {
 }
 
 /// Evenly spread, saturated ID colors (golden-ratio hue walk).
-fn id_color(i: u32) -> [f32; 4] {
+pub(crate) fn id_color(i: u32) -> [f32; 4] {
     let h = (i as f32 * 0.618_034).fract() * 6.0;
     let s = 0.75;
     let v = 0.95 - 0.25 * ((i / 7) % 2) as f32;
@@ -1017,15 +1019,18 @@ fn denoise_passes(ao_rays: u32) -> u32 {
 pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<PreparedScene, String> {
     let start = Instant::now();
     let low_tris = low.indices.len() / 3;
+    if settings.id_source == IdSource::VertexColors && settings.high_poly.is_some() {
+        return Err("Vertex Color ID masks use the active Low Poly mesh. Disable the separate High Poly source before baking this ID map.".into());
+    }
     let raster = low.sets.get(set).map_or(0..low_tris as u32, |s| s.tris.clone());
-    let (positions, normals, indices, tri_material, material_count, source, src_objects, tri_color) = match &settings.high_poly {
+    let (positions, normals, indices, tri_material, material_count, source, src_objects, tri_color, tri_vertex_color) = match &settings.high_poly {
         Some(path) => {
             let hp = HighPoly::load(path, low.center, low.scale)?;
             let objects = (hp.tri_object, hp.objects);
             // Imported normals need not be unit length; `vertex_curvature`
             // measures how fast they turn, which only means curvature for unit ones.
             let normals: Vec<Vec3> = hp.normals.iter().map(|n| n.normalize_or_zero()).collect();
-            (hp.positions, normals, hp.indices, hp.tri_material, hp.material_count, format!("{} (high poly)", hp.name), Some(objects), hp.tri_color)
+            (hp.positions, normals, hp.indices, hp.tri_material, hp.material_count, format!("{} (high poly)", hp.name), Some(objects), hp.tri_color, None)
         }
         None => {
             let positions: Vec<Vec3> = low.vertices.iter().map(|v| Vec3::from_array(v.pos)).collect();
@@ -1036,9 +1041,18 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
                 tri_material[s.tris.start as usize..s.tris.end as usize].fill(k as u32);
             }
             let count = low.sets.len().max(1) as u32;
-            (positions, normals, low.indices.clone(), tri_material, count, format!("{} (low poly)", low.name), None, low.tri_color.clone())
+            (positions, normals, low.indices.clone(), tri_material, count, format!("{} (low poly)", low.name), None, low.tri_color.clone(), low.tri_vertex_color.clone())
         }
     };
+
+    if settings.id_source == IdSource::VertexColors
+        && tri_vertex_color.as_ref().is_none_or(|colors| colors.len() != indices.len() / 3)
+    {
+        return Err(
+            "Vertex Colors is selected for the ID map, but the Low Poly mesh has no valid per-corner vertex colors. Add a color attribute in Blender, reimport the Low Poly mesh, or choose Mesh parts / Materials."
+                .into(),
+        );
+    }
 
     // Name groups: 1-based per distinct low-poly base name; 0 = unmatched
     // (an unmatched low part sees everything, an unmatched high part is seen
@@ -1134,7 +1148,9 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
     let parts: Vec<[f32; 4]> = (0..part_count as usize)
         .map(|p| [hash01(p as u32 + 1), part_lo[p], (part_hi[p] - part_lo[p]).max(1e-5), 0.0])
         .collect();
-    let use_materials = settings.id_source == IdSource::Materials && material_count > 1;
+    // A single-material mesh still has one valid material ID region. Keeping
+    // the source active avoids silently substituting connected mesh parts.
+    let use_materials = settings.id_source == IdSource::Materials;
     // Vertex colors: one ID per distinct color, shown as that color.
     let color_ids: Option<(Vec<u32>, Vec<[f32; 4]>)> = match (&tri_color, settings.id_source) {
         (Some(colors), IdSource::VertexColors) if colors.len() == indices.len() / 3 => {
@@ -1187,16 +1203,24 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
     let curvature = vertex_curvature(&positions, &normals, &indices, 1.0 / settings.curvature_scale_for(low).max(1e-6));
     let mut tri_pos = Vec::with_capacity(bvh.order.len() * 3);
     let mut tri_nrm = Vec::with_capacity(bvh.order.len() * 3);
+    let mut tri_vcolor = Vec::with_capacity(bvh.order.len() * 3);
     for &t in &bvh.order {
         let t = t as usize;
         // Per-triangle attributes ride in the w components: part index, ID
         // index, name group.
         let w = [f32::from_bits(tri_part[t]), f32::from_bits(tri_id[t]), f32::from_bits(src_group[t])];
+        let flat_id = ids.get(tri_id[t] as usize).copied().unwrap_or([0.5, 0.5, 0.5, 1.0]);
         for (k, &v) in indices[t * 3..t * 3 + 3].iter().enumerate() {
             let p = positions[v as usize];
             let n = normals[v as usize];
             tri_pos.push([p.x, p.y, p.z, w[k]]);
             tri_nrm.push([n.x, n.y, n.z, curvature.get(v as usize).copied().unwrap_or(0.0)]);
+            let color = if settings.id_source == IdSource::VertexColors {
+                tri_vertex_color.as_ref().and_then(|colors| colors.get(t)).map(|tri| tri[k])
+                    .map(|rgb| [rgb[0] as f32 / 255.0, rgb[1] as f32 / 255.0, rgb[2] as f32 / 255.0, 1.0])
+                    .unwrap_or(flat_id)
+            } else { flat_id };
+            tri_vcolor.push(color);
         }
     }
     // A low poly's interpolated normals give unreliable texel curvature, so
@@ -1246,6 +1270,7 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
         nodes,
         tri_pos,
         tri_nrm,
+        tri_vcolor,
         parts,
         ids,
         seg_nodes,
@@ -1576,6 +1601,7 @@ impl GpuBaker {
                 (5, Storage(false)),
                 (6, Storage(false)),
                 (7, Storage(false)),
+                (39, Storage(false)),
                 (8, Storage(false)),
                 (9, StorageTex(F::Rgba32Float)),
                 (10, StorageTex(F::Rgba16Float)),
@@ -1893,6 +1919,7 @@ impl GpuBaker {
         let nodes = Self::storage(device, "bvh nodes", &scene.nodes);
         let tri_pos = Self::storage(device, "tri positions", &scene.tri_pos);
         let tri_nrm = Self::storage(device, "tri normals", &scene.tri_nrm);
+        let tri_vcolor = Self::storage(device, "tri vertex colors", &scene.tri_vcolor);
         let parts = Self::storage(device, "parts", &scene.parts);
         let ids = Self::storage(device, "ids", &scene.ids);
         let seg_nodes = Self::storage(device, "edge bvh nodes", &scene.seg_nodes);
@@ -1928,6 +1955,7 @@ impl GpuBaker {
                 (5, tri_pos.as_entire_binding()),
                 (6, tri_nrm.as_entire_binding()),
                 (7, parts.as_entire_binding()),
+                (39, tri_vcolor.as_entire_binding()),
                 (8, ids.as_entire_binding()),
                 (9, v(&surf_pos)),
                 (10, v(&surf_nrm)),
