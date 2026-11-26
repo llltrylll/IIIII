@@ -119,7 +119,8 @@ impl PainterApp {
                 );
                 let light = &mut self.view.point_lights[selected];
                 labeled(ui, "Enabled", |ui| ui.checkbox(&mut light.on, ""));
-                labeled(ui, "Color", |ui| color_edit(ui, &mut light.color));
+                let color_changed = labeled(ui, "Color", |ui| color_edit(ui, &mut light.color));
+                selected_light_dragging |= color_changed && ui.input(|i| i.pointer.any_down());
                 let intensity = labeled(ui, "Intensity", |ui| {
                     ui.add(egui::Slider::new(&mut light.intensity, 0.0..=200.0).max_decimals(2))
                 });
