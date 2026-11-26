@@ -1046,10 +1046,11 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
     };
 
     if settings.id_source == IdSource::VertexColors
-        && tri_vertex_color.as_ref().is_none_or(|colors| colors.len() != indices.len() / 3)
+        && (tri_vertex_color.as_ref().is_none_or(|colors| colors.len() != indices.len() / 3)
+            || tri_color.as_ref().is_none_or(|colors| colors.len() != indices.len() / 3))
     {
         return Err(
-            "Vertex Colors is selected for the ID map, but the Low Poly mesh has no valid per-corner vertex colors. Add a color attribute in Blender, reimport the Low Poly mesh, or choose Mesh parts / Materials."
+            "Vertex Colors is selected for the ID map, but the Low Poly mesh has no valid imported per-corner color data. Add a color attribute in Blender, reimport the Low Poly mesh, or choose Mesh parts / Materials."
                 .into(),
         );
     }
@@ -1216,10 +1217,11 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
             tri_pos.push([p.x, p.y, p.z, w[k]]);
             tri_nrm.push([n.x, n.y, n.z, curvature.get(v as usize).copied().unwrap_or(0.0)]);
             let color = if settings.id_source == IdSource::VertexColors {
-                tri_vertex_color.as_ref().and_then(|colors| colors.get(t)).map(|tri| tri[k])
-                    .map(|rgb| [rgb[0] as f32 / 255.0, rgb[1] as f32 / 255.0, rgb[2] as f32 / 255.0, 1.0])
-                    .unwrap_or(flat_id)
-            } else { flat_id };
+                let rgb = tri_vertex_color.as_ref().expect("validated Low Poly vertex colors")[t][k];
+                [rgb[0] as f32 / 255.0, rgb[1] as f32 / 255.0, rgb[2] as f32 / 255.0, 1.0]
+            } else {
+                flat_id
+            };
             tri_vcolor.push(color);
         }
     }
@@ -2970,5 +2972,58 @@ pub(crate) mod tests {
         let mean = agree.iter().sum::<f32>() / agree.len().max(1) as f32;
         println!("  bulge normals, filled vs fitted cage: {mean:.3}");
         assert!(mean > 0.9, "the nearest surface is the bulge itself ({mean})");
+    }
+}
+
+#[cfg(test)]
+mod low_poly_vertex_id_tests {
+    use super::*;
+    use crate::mesh::Mesh;
+
+    fn colored_triangle() -> Mesh {
+        let positions = vec![Vec3::ZERO, Vec3::X, Vec3::Y];
+        let normals = Some(vec![Vec3::Z; 3]);
+        let uvs = vec![Vec2::ZERO, Vec2::X, Vec2::Y];
+        let mut mesh = Mesh::from_parts("vertex ID test".into(), positions, normals, uvs, vec![0, 1, 2]);
+        mesh.tri_color = Some(vec![[85, 85, 85]]);
+        mesh.tri_vertex_color = Some(vec![[
+            [255, 0, 0],
+            [0, 255, 0],
+            [0, 0, 255],
+        ]]);
+        mesh
+    }
+
+    #[test]
+    fn low_poly_bake_keeps_each_imported_vertex_color() {
+        let mesh = colored_triangle();
+        let settings = BakeSettings { id_source: IdSource::VertexColors, ..BakeSettings::default() };
+        let scene = prepare(&mesh, &settings, 0).expect("Low Poly vertex ID bake prepares");
+        assert_eq!(scene.tri_vcolor, vec![
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0],
+        ]);
+    }
+
+    #[test]
+    fn low_poly_vertex_id_bake_rejects_missing_corner_colors() {
+        let mut mesh = colored_triangle();
+        mesh.tri_vertex_color = None;
+        let settings = BakeSettings { id_source: IdSource::VertexColors, ..BakeSettings::default() };
+        let error = prepare(&mesh, &settings, 0).err().expect("missing colors must fail clearly");
+        assert!(error.contains("per-corner color data"));
+    }
+
+    #[test]
+    fn vertex_color_id_bake_rejects_a_separate_high_poly_source() {
+        let mesh = colored_triangle();
+        let settings = BakeSettings {
+            id_source: IdSource::VertexColors,
+            high_poly: Some(PathBuf::from("intentionally-not-loaded.obj")),
+            ..BakeSettings::default()
+        };
+        let error = prepare(&mesh, &settings, 0).err().expect("High Poly ID sampling is outside this path");
+        assert!(error.contains("Low Poly mesh"));
     }
 }
