@@ -96,8 +96,23 @@ impl PainterApp {
                 });
 
                 let selected = self.selected_point_light;
-                let light = &mut self.view.point_lights[selected];
                 section(ui, &format!("Point light {}", selected + 1));
+                ui.horizontal(|ui| {
+                    let move_button = egui::Button::new(if self.move_point_light { "Cancel placement" } else { "Move in 3D view" })
+                        .min_size(vec2(150.0, 26.0));
+                    if ui.add(move_button).clicked() {
+                        self.toggle_point_light_move();
+                    }
+                    if ui.button(if self.view.point_lights[selected].on { "Turn off" } else { "Turn on" }).clicked() {
+                        self.view.point_lights[selected].on = !self.view.point_lights[selected].on;
+                    }
+                });
+                ui.label(
+                    egui::RichText::new("Viewport marker: left-click to select, right-click to toggle this light.")
+                        .small()
+                        .color(theme::TEXT_DIM),
+                );
+                let light = &mut self.view.point_lights[selected];
                 labeled(ui, "Enabled", |ui| ui.checkbox(&mut light.on, ""));
                 labeled(ui, "Color", |ui| color_edit(ui, &mut light.color));
                 slider(ui, "Intensity", &mut light.intensity, 0.0..=200.0);
