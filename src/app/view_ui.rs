@@ -687,7 +687,12 @@ impl PainterApp {
                 // the map display modes use the raster view, which reacts instantly.
                 // Keep the raster viewport responsive while editing a local
                 // light. Ray tracing is resumed automatically on release.
-                if self.rt.enabled && self.drag_point_light.is_none() && self.view.point_light_preview.is_none()
+                let local_point_lights_active = self.view.point_lights
+                    .iter()
+                    .take(self.view.point_light_count.min(crate::viewport::MAX_POINT_LIGHTS))
+                    .any(|light| light.on);
+                if self.rt.enabled && !local_point_lights_active
+                    && self.drag_point_light.is_none() && self.view.point_light_preview.is_none()
                     && self.stroke.is_none() && self.view.mode == ViewMode::Material && self.preview_update_at.is_none()
                 {
                     if self.raytracer.is_none() {

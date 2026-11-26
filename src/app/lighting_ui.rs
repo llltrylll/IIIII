@@ -113,7 +113,7 @@ impl PainterApp {
                     }
                 });
                 ui.label(
-                    egui::RichText::new("Drag the marker to move it. While editing, only this light is previewed for speed; all lights return on release. Right-click toggles it.")
+                    egui::RichText::new("Drag the marker to move it. While editing, only this light is previewed for speed; all lights return on release. Right-click toggles it. Any enabled point light keeps the viewport in raster mode; turn all point lights off to resume ray tracing.")
                         .small()
                         .color(theme::TEXT_DIM),
                 );

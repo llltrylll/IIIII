@@ -26,9 +26,6 @@ struct RtUniform {
     bg: [f32; 4],
     sun: [f32; 4],
     sun_c: [f32; 4],
-    /// Two vec4 slots per point light: position/intensity and color/range.
-    point_lights: [[f32; 4]; crate::viewport::MAX_POINT_LIGHTS * 2],
-    point_light_meta: [f32; 4],
 }
 
 pub struct RtSettings {
@@ -349,11 +346,6 @@ impl RayTracer {
         self.samples >= settings.max_samples
     }
 
-    #[cfg(test)]
-    pub(crate) fn test_display(&self) -> Option<&Tex> {
-        self.target.as_ref().map(|target| &target.display)
-    }
-
     /// Adds one sample per pixel unless converged. Returns true if work was submitted.
     pub fn render(
         &mut self,
@@ -375,7 +367,7 @@ impl RayTracer {
         let use_baked = view.use_baked_normal && engines.iter().any(|e| e.has_bake);
         // Several sets are read from copies at one size (see `update_copies`).
         let res = if engines.len() > 1 { engines.iter().map(|e| e.res).max().unwrap_or(1).min(MAX_SET_COPY) } else { engine.res } as f32;
-        let mut key: Vec<u32> = vp
+        let key: Vec<u32> = vp
             .to_cols_array()
             .iter()
             .chain(&[
@@ -405,20 +397,6 @@ impl RayTracer {
             .chain(engines.iter().flat_map(|e| [e.generation as u32, (e.generation >> 32) as u32, e.maps_version as u32]))
             .chain([env.id as u32, (env.id >> 32) as u32])
             .collect();
-        key.push(view.point_light_count.min(crate::viewport::MAX_POINT_LIGHTS) as u32);
-        for light in &view.point_lights {
-            key.extend([
-                if light.on { 1.0 } else { 0.0 },
-                light.position.x,
-                light.position.y,
-                light.position.z,
-                light.color[0],
-                light.color[1],
-                light.color[2],
-                light.intensity,
-                light.range,
-            ].map(f32::to_bits));
-        }
         if key != self.key {
             self.key = key;
             self.samples = 0;
@@ -447,22 +425,6 @@ impl RayTracer {
             bg: [view.bg_color[0], view.bg_color[1], view.bg_color[2], view.bg_intensity],
             sun: view.key.direction(view.env_rotation).extend(view.key.intensity).to_array(),
             sun_c: [view.key.color[0], view.key.color[1], view.key.color[2], if view.key.on { 1.0 } else { 0.0 }],
-            point_lights: std::array::from_fn(|slot| {
-                let index = slot / 2;
-                let light = view.point_lights[index];
-                if slot % 2 == 0 {
-                    let enabled = index < view.point_light_count.min(crate::viewport::MAX_POINT_LIGHTS) && light.on;
-                    [
-                        light.position.x,
-                        light.position.y,
-                        light.position.z,
-                        if enabled { light.intensity.max(0.0) } else { 0.0 },
-                    ]
-                } else {
-                    [light.color[0], light.color[1], light.color[2], light.range.max(0.0)]
-                }
-            }),
-            point_light_meta: [view.point_light_count.min(crate::viewport::MAX_POINT_LIGHTS) as f32, 0.0, 0.0, 0.0],
         };
         self.update_copies(&rs.device, &rs.queue, engines);
         let Some(scene) = &self.scene else { return false };
