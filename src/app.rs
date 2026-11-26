@@ -5004,8 +5004,7 @@ impl PainterApp {
         let show = self.bake_settings.id_source == IdSource::VertexColors
             && self.bake_settings.high_poly.is_none()
             && has_colors;
-        let hidden = self.sets.hidden.clone();
-        let visibility_changed = show && hidden != self.vertex_color_preview_hidden;
+        let visibility_changed = show && self.sets.hidden != self.vertex_color_preview_hidden;
         if show == self.vertex_color_preview_active && !visibility_changed {
             return;
         }
@@ -5015,7 +5014,7 @@ impl PainterApp {
                 // Overlays are rendered after the visible texture sets; omit
                 // hidden sets explicitly so their colors don't float over them.
                 for (set_index, set) in self.mesh.sets.iter().enumerate() {
-                    if hidden.get(set_index).copied().unwrap_or(false) {
+                    if self.sets.hidden.get(set_index).copied().unwrap_or(false) {
                         continue;
                     }
                     for tri_index in set.tris.clone() {
@@ -5034,7 +5033,7 @@ impl PainterApp {
                 }
             }
             self.overlays.set(&self.rs.device, OverlaySlot::VertexColors, &triangles, &[]);
-            self.vertex_color_preview_hidden = hidden;
+            self.vertex_color_preview_hidden.clone_from(&self.sets.hidden);
         } else {
             self.overlays.clear(OverlaySlot::VertexColors);
             self.vertex_color_preview_hidden.clear();
