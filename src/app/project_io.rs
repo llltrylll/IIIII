@@ -328,7 +328,13 @@ const LEGACY_INPUTS: usize = 19;
 
 pub(super) fn generator_from(v: &Value) -> Result<Generator, String> {
     let name = s(v, "kind").ok_or("generator without a kind")?;
-    let kind = GenKind::ALL.into_iter().find(|k| k.name() == name).ok_or(format!("unknown generator '{name}'"))?;
+    let kind = GenKind::ALL
+        .into_iter()
+        .find(|k| k.name() == name)
+        // Projects made before the explicit Vertex Color ID naming used
+        // "ID Mask"; keep that serialized name readable.
+        .or_else(|| (name == "ID Mask").then_some(GenKind::IdMask))
+        .ok_or(format!("unknown generator '{name}'"))?;
     let d = kind.default_generator();
     let mut weights = [0.0; crate::engine::GEN_INPUT_COUNT];
     let mut custom = [crate::engine::CustomInput::default(); crate::engine::MAX_CUSTOM_INPUTS];
@@ -943,5 +949,20 @@ mod tests {
         // And the new format round-trips.
         let back = generator_from(&generator_json(&g)).unwrap();
         assert_eq!(back, g);
+    }
+
+    #[test]
+    fn legacy_id_mask_generator_name_still_loads() {
+        let old_project_generator = json!({
+            "kind": "ID Mask",
+            "weights": [0.0; crate::engine::GEN_INPUT_COUNT],
+            "id_color": [0.2, 0.4, 0.6],
+            "id_tolerance": 0.12
+        });
+        let loaded = generator_from(&old_project_generator).expect("legacy ID Mask name is supported");
+        assert_eq!(loaded.kind, GenKind::IdMask);
+        assert_eq!(loaded.id_color, [0.2, 0.4, 0.6]);
+        assert_eq!(loaded.id_tolerance, 0.12);
+    }
     }
 }
