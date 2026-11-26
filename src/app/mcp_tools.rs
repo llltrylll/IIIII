@@ -47,6 +47,13 @@ fn eq(a: &str, b: &str) -> bool {
     a.trim().eq_ignore_ascii_case(b.trim())
 }
 
+fn generator_kind(name: &str) -> Option<GenKind> {
+    GenKind::ALL
+        .into_iter()
+        .find(|kind| eq(kind.name(), name))
+        .or_else(|| eq("ID Mask", name).then_some(GenKind::IdMask))
+}
+
 fn f32_arg(args: &Value, key: &str) -> Option<f32> {
     args.get(key).and_then(Value::as_f64).map(|v| v as f32)
 }
@@ -422,11 +429,7 @@ impl PainterApp {
                     return Ok(text("Mask removed."));
                 }
                 if let Some(g) = str_arg(args, "generator") {
-                    let kind = GenKind::ALL
-                        .into_iter()
-                        .find(|k| eq(k.name(), g))
-                        .or_else(|| eq("ID Mask", g).then_some(GenKind::IdMask))
-                        .ok_or(format!("unknown generator '{g}'"))?;
+                    let kind = generator_kind(g).ok_or(format!("unknown generator '{g}'"))?;
                     let mut generator = kind.default_generator();
                     self.tune_generator(&mut generator, args)?;
                     match &mut self.engine.layers[i].mask {
@@ -1107,11 +1110,8 @@ mod generator_name_tests {
 
     #[test]
     fn legacy_id_mask_name_resolves_to_vertex_color_id_mask() {
-        let legacy = GenKind::ALL
-            .into_iter()
-            .find(|kind| eq(kind.name(), "ID Mask"))
-            .or_else(|| eq("ID Mask", "ID Mask").then_some(GenKind::IdMask));
-        assert_eq!(legacy, Some(GenKind::IdMask));
-        assert_eq!(GenKind::IdMask.name(), "Vertex Color ID Mask");
+        assert_eq!(generator_kind("ID Mask"), Some(GenKind::IdMask));
+        assert_eq!(generator_kind("Vertex Color ID Mask"), Some(GenKind::IdMask));
+        assert_eq!(generator_kind("not a generator"), None);
     }
 }
