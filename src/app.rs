@@ -432,6 +432,8 @@ pub struct PainterApp {
     id_color_pick_target: Option<(usize, Option<usize>)>,
     /// Whether the imported Low Poly vertex colors are drawn over the 3D mesh.
     vertex_color_preview_active: bool,
+    /// Connected-component IDs for the Low Poly mesh; built once and reused by the eyedropper.
+    mesh_part_ids: Option<Vec<u32>>,
     cam: OrbitCam,
     cam2d: Cam2d,
     layout: Layout,
@@ -1404,6 +1406,7 @@ impl PainterApp {
             brush: Brush::default(),
             id_color_pick_target: None,
             vertex_color_preview_active: false,
+            mesh_part_ids: None,
             cam: OrbitCam::default(),
             cam2d: Cam2d::default(),
             layout: Layout::Split,
@@ -1664,6 +1667,7 @@ impl PainterApp {
         self.mesh = Arc::new(mesh);
         self.id_color_pick_target = None;
         self.vertex_color_preview_active = false;
+        self.mesh_part_ids = None;
         self.overlays.clear(OverlaySlot::VertexColors);
         if self.bake_settings.id_source == IdSource::VertexColors
             && (self.bake_settings.high_poly.is_some()
@@ -5232,9 +5236,11 @@ impl PainterApp {
                 sampled
             }
             IdSource::MeshParts => {
-                let positions: Vec<Vec3> = self.mesh.vertices.iter().map(|v| Vec3::from_array(v.pos)).collect();
-                let (parts, _) = bake::components(&positions, &self.mesh.indices);
-                let Some(&part) = parts.get(hit.tri as usize) else {
+                if self.mesh_part_ids.is_none() {
+                    let positions: Vec<Vec3> = self.mesh.vertices.iter().map(|v| Vec3::from_array(v.pos)).collect();
+                    self.mesh_part_ids = Some(bake::components(&positions, &self.mesh.indices).0);
+                }
+                let Some(&part) = self.mesh_part_ids.as_ref().and_then(|parts| parts.get(hit.tri as usize)) else {
                     self.status = "Could not resolve the clicked Low Poly mesh part.".into();
                     self.id_color_pick_target = None;
                     return;
@@ -5612,7 +5618,9 @@ impl PainterApp {
         if let Some(p) = hover {
             let in_view = rect.contains(p);
             if pressed && in_view && !mods.alt && self.stroke.is_none() && resp.hovered() && self.id_color_pick_target.is_some() {
-                self.pick_id_color(kind, local(p));
+                if kind == ViewKind::V3d {
+                    self.pick_id_color(kind, local(p));
+                }
             } else if pressed && in_view && !mods.alt && self.stroke.is_none() && resp.hovered() && self.tool == Tool::Picker {
                 self.pick_material(kind, local(p));
             } else if pressed && in_view && !mods.alt && self.stroke.is_none() && resp.hovered() {
