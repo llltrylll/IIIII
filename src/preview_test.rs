@@ -262,9 +262,11 @@ fn point_lights_affect_the_material_viewport() {
 
     eprintln!("RT-DIAG 5: begin unlit render");
     assert!(tracer.render(&rs, path_size, &[&engine], &env, &cam, &path_view, &rt));
-    eprintln!("RT-DIAG 6: unlit render submitted; read display");
+    eprintln!("RT-DIAG 6: wait for path-trace dispatch");
+    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    eprintln!("RT-DIAG 7: dispatch complete; read display");
     let unlit_path = read_texture(&rs.device, &rs.queue, tracer.test_display().expect("path tracer display target"));
-    eprintln!("RT-DIAG 7: unlit display read");
+    eprintln!("RT-DIAG 8: unlit display read");
     let unlit_path_energy: u64 = unlit_path.chunks_exact(4)
         .map(|pixel| pixel[0] as u64 + pixel[1] as u64 + pixel[2] as u64).sum();
 
