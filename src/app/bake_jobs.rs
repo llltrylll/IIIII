@@ -69,15 +69,19 @@ impl PainterApp {
         let worker_cancel = Arc::clone(&cancel);
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let key = bake_cache::key(&mesh, &settings, res, set);
-            let prepared = if worker_cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                Err("Bake preparation cancelled".into())
-            } else {
-                match bake_cache::load(&key) {
-                    Some(entry) if !worker_cancel.load(std::sync::atomic::Ordering::Relaxed) => Ok(Prepared::Cached(entry)),
-                    Some(_) => Err("Bake preparation cancelled".into()),
-                    None => bake::prepare_cancellable(&mesh, &settings, set, &worker_cancel)
-                        .map(|scene| Prepared::Scene(scene, key)),
+            let prepared = match bake::validate_settings(&settings) {
+                Err(error) => Err(error),
+                Ok(()) if worker_cancel.load(std::sync::atomic::Ordering::Relaxed) => {
+                    Err("Bake preparation cancelled".into())
+                }
+                Ok(()) => {
+                    let key = bake_cache::key(&mesh, &settings, res, set);
+                    match bake_cache::load(&key) {
+                        Some(entry) if !worker_cancel.load(std::sync::atomic::Ordering::Relaxed) => Ok(Prepared::Cached(entry)),
+                        Some(_) => Err("Bake preparation cancelled".into()),
+                        None => bake::prepare_cancellable(&mesh, &settings, set, &worker_cancel)
+                            .map(|scene| Prepared::Scene(scene, key)),
+                    }
                 }
             };
             let _ = tx.send(prepared);

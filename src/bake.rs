@@ -1124,6 +1124,15 @@ fn check_prepare_cancelled(cancel: &AtomicBool) -> Result<(), String> {
     }
 }
 
+/// Rejects source combinations that cannot produce IDs matching the visible
+/// low-poly palette. This runs before both cache lookup and CPU preparation.
+pub fn validate_settings(settings: &BakeSettings) -> Result<(), String> {
+    if settings.id_source == IdSource::VertexColors && settings.high_poly.is_some() {
+        return Err("Vertex Colors IDs come from the loaded low-poly mesh, while a high-poly projection uses a different triangle topology. Finish the high-poly bake with Mesh parts or Materials, then use the Vertex ID panel to rebake only the ID map from the low-poly colors.".into());
+    }
+    Ok(())
+}
+
 /// Prepares baking texture set `set` of `low` (its triangles get maps; the
 /// whole mesh occludes).
 pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<PreparedScene, String> {
