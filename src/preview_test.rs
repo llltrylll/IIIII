@@ -244,9 +244,13 @@ fn point_lights_affect_the_material_viewport() {
     assert_eq!(interactive_image, selected_only_image, "interactive preview must shade only the selected point light");
 
     // The optional path tracer must consume the same editable point-light data.
+    eprintln!("RT-DIAG 1: build BVH");
     let bvh = crate::bvh::Bvh::from_mesh(&mesh);
+    eprintln!("RT-DIAG 2: construct RayTracer");
     let mut tracer = crate::raytrace::RayTracer::new(&rs);
+    eprintln!("RT-DIAG 3: upload mesh to RayTracer");
     tracer.set_mesh(&rs.device, &mesh, &bvh);
+    eprintln!("RT-DIAG 4: RayTracer ready");
     let mut path_view = ViewSettings::default();
     path_view.key.on = false;
     path_view.env_intensity = 0.0;
@@ -256,15 +260,21 @@ fn point_lights_affect_the_material_viewport() {
     let rt = crate::raytrace::RtSettings { enabled: true, max_samples: 1, bounces: 0, ground: false };
     let path_size = [128, 96];
 
+    eprintln!("RT-DIAG 5: begin unlit render");
     assert!(tracer.render(&rs, path_size, &[&engine], &env, &cam, &path_view, &rt));
+    eprintln!("RT-DIAG 6: unlit render submitted; read display");
     let unlit_path = read_texture(&rs.device, &rs.queue, tracer.test_display().expect("path tracer display target"));
+    eprintln!("RT-DIAG 7: unlit display read");
     let unlit_path_energy: u64 = unlit_path.chunks_exact(4)
         .map(|pixel| pixel[0] as u64 + pixel[1] as u64 + pixel[2] as u64).sum();
 
     path_view.point_lights[0] = point;
     path_view.point_light_count = 1;
+    eprintln!("RT-DIAG 8: begin lit render");
     assert!(tracer.render(&rs, path_size, &[&engine], &env, &cam, &path_view, &rt));
+    eprintln!("RT-DIAG 9: lit render submitted; read display");
     let lit_path = read_texture(&rs.device, &rs.queue, tracer.test_display().expect("path tracer display target"));
+    eprintln!("RT-DIAG 10: lit display read");
     let lit_path_energy: u64 = lit_path.chunks_exact(4)
         .map(|pixel| pixel[0] as u64 + pixel[1] as u64 + pixel[2] as u64).sum();
 
