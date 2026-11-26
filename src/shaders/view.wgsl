@@ -286,9 +286,40 @@ fn key_light(s: Surface, n: vec3<f32>, v: vec3<f32>, shadow: f32) -> vec3<f32> {
     return direct_light(s, n, v, g.sun.xyz, g.sun_c.rgb, g.sun.w, shadow);
 }
 
-// Additional editable point lights. They use inverse-square attenuation with
-// a smooth finite-radius cutoff; unlike the directional key, they do not cast
-// shadows in this viewport pass.
+// Fast local-light BRDF. The environment and directional key retain the
+// full GGX model; point sources use a normalized Blinn lobe so dragging them
+// does not run the full microfacet distribution and visibility terms for
+// every light at every covered pixel.
+fn point_direct_light(
+    s: Surface,
+    n: vec3<f32>,
+    v: vec3<f32>,
+    light_dir: vec3<f32>,
+    light_color: vec3<f32>,
+    intensity: f32,
+) -> vec3<f32> {
+    let nl = max(dot(n, light_dir), 0.0);
+    if (nl <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let half_vector = light_dir + v;
+    let half_length_squared = dot(half_vector, half_vector);
+    var specular_lobe = 0.0;
+    if (half_length_squared > 1e-8) {
+        let h = half_vector * inverseSqrt(half_length_squared);
+        let nh = max(dot(n, h), 0.0);
+        let rough = clamp(s.rough, 0.03, 1.0);
+        let exponent = mix(128.0, 2.0, rough * rough);
+        specular_lobe = pow(nh, exponent) * (exponent + 2.0) * (0.5 / PI);
+    }
+    let f0 = mix(vec3<f32>(0.08 * s.spec), s.albedo, s.metal);
+    let diffuse = s.albedo * (1.0 - s.metal) / PI;
+    return (diffuse + f0 * specular_lobe) * light_color * intensity * nl;
+}
+
+// Additional editable point lights use inverse-square attenuation with a
+// smooth finite-radius cutoff. Their lower-cost local BRDF keeps viewport
+// interaction responsive; unlike the directional key, they cast no shadows.
 fn point_lighting(s: Surface, n: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
     var total = vec3<f32>(0.0);
     let count = u32(clamp(g.clip.z, 0.0, 8.0));
@@ -301,14 +332,15 @@ fn point_lighting(s: Surface, n: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
         let to_light = source.xyz - s.wpos;
         let distance_squared = dot(to_light, to_light);
         let range = color_range.w;
-        // Avoid normalizing a zero-length direction when a light sits directly
-        // on a surface, and keep the inverse-square term finite at close range.
         if (source.w > 0.0 && range > 0.0 && distance_squared > 1e-4) {
-            let distance = sqrt(distance_squared);
-            if (distance < range) {
-                let edge = max(1.0 - pow(distance / range, 4.0), 0.0);
+            let range_squared = range * range;
+            if (distance_squared < range_squared) {
+                // Work in squared distance for the cutoff, avoiding an extra
+                // square root and fourth-power attenuation for every fragment.
+                let edge = max(1.0 - distance_squared / range_squared, 0.0);
                 let attenuation = edge * edge / distance_squared;
-                total += direct_light(s, n, v, to_light, color_range.rgb, source.w * attenuation, 1.0);
+                let light_dir = to_light * inverseSqrt(distance_squared);
+                total += point_direct_light(s, n, v, light_dir, color_range.rgb, source.w * attenuation);
             }
         }
     }
