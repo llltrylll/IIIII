@@ -155,7 +155,7 @@ impl PainterApp {
         // Keep the selected source in a low-cost single-light preview while
         // one of its numeric controls is being dragged. This also handles the
         // panel interaction path, not only direct marker drags.
-        self.view.point_light_preview = if let Some((index, _, _)) = self.drag_point_light {
+        self.view.point_light_preview = if let Some((index, _, _, _)) = self.drag_point_light {
             Some(index)
         } else if selected_light_dragging {
             Some(self.selected_point_light.min(self.view.point_light_count.saturating_sub(1)))
