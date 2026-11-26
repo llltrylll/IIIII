@@ -1905,7 +1905,7 @@ impl GpuBaker {
             c: [s.thickness_distance, if s.bakes(4) { s.sky_rays as f32 } else { 0.0 }, s.sky_cone_deg.to_radians().cos(), s.curvature_radius],
             d: [s.edge_threshold, scene.edge_max_distance, scene.curvature_scale, if s.high_poly.is_none() { 1.0 } else { 0.0 }],
             // e.w selects interpolated per-corner colors vs the compact flat-ID palette.
-            e: [0.0, 0.0, 0.0, f32::from(s.id_source == IdSource::VertexColors)],
+            e: [0.0, 0.0, 0.0, if s.id_source == IdSource::VertexColors { 1.0 } else { 0.0 }],
             f: [scene.edge_roots[0], scene.edge_roots[1], if cage.is_some() { 1.0 } else { 0.0 }, scene.edge_seed_curvature],
             // Random ray sets are picked per world cell of about two texels
             // (see `world_seed` in bake.wgsl).
