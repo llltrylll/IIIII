@@ -84,7 +84,7 @@ impl HighPoly {
     /// Loads an OBJ or FBX in the low poly's original space and applies the
     /// same normalization, so both meshes line up.
     pub fn load(path: &std::path::Path, center: Vec3, scale: f32) -> Result<HighPoly, String> {
-        let raw = crate::import::load(path)?;
+        let raw = crate::import::load_high_poly(path)?;
         let positions: Vec<Vec3> = raw.positions.iter().map(|p| (*p - center) * scale).collect();
         let normals = raw.normals.unwrap_or_else(|| smooth_normals(&positions, &raw.indices));
         Ok(HighPoly {
