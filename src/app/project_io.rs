@@ -122,6 +122,18 @@ impl Reader {
     }
 }
 
+/// Decodes the compact RGB bytes stored for three corners per triangle.
+fn decode_triangle_vertex_colors(bytes: &[u8], triangles: usize) -> Option<Vec<[[u8; 3]; 3]>> {
+    if bytes.len() != triangles.checked_mul(9)? {
+        return None;
+    }
+    Some(bytes.chunks_exact(9).map(|c| [
+        [c[0], c[1], c[2]],
+        [c[3], c[4], c[5]],
+        [c[6], c[7], c[8]],
+    ]).collect())
+}
+
 fn f(v: &Value, key: &str, default: f32) -> f32 {
     v.get(key).and_then(Value::as_f64).map_or(default, |x| x as f32)
 }
@@ -471,6 +483,7 @@ impl PainterApp {
             "objects": mesh.objects,
             "tri_object": w.blob(bytemuck::cast_slice(&mesh.tri_object)),
             "tri_color": mesh.tri_color.as_ref().map(|c| w.blob(bytemuck::cast_slice(c))),
+            "tri_vertex_color": mesh.tri_vertex_color.as_ref().map(|c| w.blob(bytemuck::cast_slice(c))),
         });
         // Every texture set: its layers, size and mesh-map corrections.
         let engines = super::texture_sets::engines(&self.engine, &self.sets, self.mesh.sets.len());
@@ -621,6 +634,17 @@ impl PainterApp {
             let colors: Vec<[u8; 3]> = r.blob(&m["tri_color"])?.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
             if colors.len() == tris {
                 mesh.tri_color = Some(colors);
+            }
+        }
+        if !m["tri_vertex_color"].is_null() {
+            let bytes = r.blob(&m["tri_vertex_color"])?;
+            mesh.tri_vertex_color = decode_triangle_vertex_colors(&bytes, tris);
+        }
+        // Legacy .mpp projects contain only the average color per triangle.
+        // Preserve their old flat-ID behavior rather than silently dropping it.
+        if mesh.tri_vertex_color.is_none() {
+            if let Some(colors) = mesh.tri_color.as_ref().filter(|c| c.len() == tris) {
+                mesh.tri_vertex_color = Some(colors.iter().map(|&color| [color; 3]).collect());
             }
         }
         let bv = &manifest["bake"];
@@ -886,6 +910,18 @@ impl PainterApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vertex_color_blob_round_trips_each_corner_and_rejects_bad_lengths() {
+        let colors = vec![
+            [[1, 2, 3], [4, 5, 6], [7, 8, 9]],
+            [[10, 11, 12], [13, 14, 15], [16, 17, 18]],
+        ];
+        let bytes = bytemuck::cast_slice(&colors);
+        assert_eq!(decode_triangle_vertex_colors(bytes, 2), Some(colors));
+        assert!(decode_triangle_vertex_colors(bytes, 1).is_none());
+        assert!(decode_triangle_vertex_colors(&bytes[..bytes.len() - 1], 2).is_none());
+    }
 
     /// Projects from the four fixed custom slots load as maps with ids 1-4
     /// (empty slots skipped), and their masks' extra weights as inputs on
