@@ -2869,7 +2869,6 @@ pub(crate) mod tests {
     use crate::gpu::{GpuMesh, f16_to_f32, read_texture};
     use crate::mesh::Primitive;
     use glam::Vec2;
-    use std::collections::HashMap;
     use std::path::Path;
 
     #[test]
@@ -3661,8 +3660,9 @@ pub(crate) mod tests {
 
 #[cfg(test)]
 mod vertex_color_id_source_tests {
-    use super::{prepare, BakeSettings, IdSource};
+    use super::{prepare, BakeSettings, IdSource, MAX_VERTEX_COLOR_ID_REGIONS};
     use crate::mesh::Primitive;
+    use std::collections::HashMap;
 
     #[test]
     fn vertex_color_id_source_rejects_high_poly_projection_before_loading_it() {
