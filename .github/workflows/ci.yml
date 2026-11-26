@@ -22,7 +22,6 @@ jobs:
       # Hosted Windows runners may expose a Direct3D adapter; keep this
       # end-to-end GPU check informative without requiring a GPU on every runner.
       - name: GPU regression - Low Poly Vertex ID interpolation
-        continue-on-error: true
         run: cargo test --locked --bin material_painter bake::tests::low_poly_vertex_color_id_map_interpolates_each_corner -- --ignored --exact --nocapture --test-threads 1
         env:
           WGPU_BACKEND: dx12
