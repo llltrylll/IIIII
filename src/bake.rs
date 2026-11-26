@@ -3637,7 +3637,10 @@ mod vertex_color_id_source_tests {
             high_poly: Some(std::path::PathBuf::from("this-file-does-not-need-to-exist.fbx")),
             ..Default::default()
         };
-        let error = prepare(&mesh, &settings, 0).expect_err("low-poly vertex colors cannot index high-poly triangles");
+        let error = match prepare(&mesh, &settings, 0) {
+            Ok(_) => panic!("low-poly vertex colors must not index high-poly triangles"),
+            Err(error) => error,
+        };
         assert!(error.contains("different triangle topology"), "{error}");
         assert!(error.contains("rebake only the ID map"), "{error}");
     }
