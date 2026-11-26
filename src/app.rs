@@ -5454,6 +5454,9 @@ impl PainterApp {
     }
 
     fn view_input(&mut self, ui: &egui::Ui, kind: ViewKind, rect: Rect, resp: &egui::Response) {
+        if self.id_color_pick_target.is_some_and(|(layer, _)| layer != self.selected) {
+            self.id_color_pick_target = None;
+        }
         let (hover, pressed, down, mods, delta, scroll, x_down, z_down) = ui.input(|i| {
             (
                 i.pointer.hover_pos(),
