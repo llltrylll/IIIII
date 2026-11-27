@@ -163,17 +163,21 @@ impl PainterApp {
                 }
             };
             let already_queued_in_id_batch = self.bake_id_only && self.sets.bake_queue.contains(&set);
+            let already_planned_as_high_poly_followup = self.bake_batch_followup_id_sets.contains(&set);
             if already_queued_in_id_batch {
                 if let Some(source) = self.bake_batch_id_sources.as_mut().and_then(|sources| sources.get_mut(set)) {
                     *source = IdSource::VertexColors;
                 }
             }
+            let already_scheduled = already_running
+                || already_queued_in_id_batch
+                || already_planned_as_high_poly_followup;
             let queued = queue_deferred_id_rebake(
                 &mut self.deferred_id_rebake_sets,
                 set,
-                already_running || already_queued_in_id_batch,
+                already_scheduled,
             );
-            self.status = if already_running || already_queued_in_id_batch || !queued {
+            self.status = if already_scheduled || !queued {
                 "This Texture Set already has a Vertex Color ID bake running or queued.".into()
             } else {
                 "Vertex ID rebake queued for this Texture Set; the current bake will finish first.".into()
