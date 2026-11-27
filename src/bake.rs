@@ -11,7 +11,8 @@ use crate::mesh::{HighPoly, Mesh, smooth_normals, weld_positions};
 use eframe::{egui, wgpu};
 use glam::Vec3;
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
@@ -1143,34 +1144,124 @@ pub fn validate_settings(settings: &BakeSettings) -> Result<(), String> {
     Ok(())
 }
 
-/// Counts vertex colors, keeps only the same most-used palette entries shown
-/// by the ID panel, and calculates their region bounds. The baked texture still
-/// receives every raw corner color; only the report/MCP index is bounded.
+/// Counts the mesh's original per-corner vertex colors and returns the exact
+/// top palette used by both the Vertex ID panel and the bake report. The common
+/// path is optimized for authored palettes; high-cardinality meshes switch to
+/// compact sorted RGB keys and retain only the top entries.
+pub fn vertex_color_palette(colors: &[[[u8; 3]; 3]]) -> (Vec<([u8; 3], u32)>, usize) {
+    vertex_color_palette_impl(colors, None).expect("uncancellable palette scan")
+}
+
+/// Cancellable palette scan used by CPU bake preparation.
+fn vertex_color_palette_cancellable(
+    colors: &[[[u8; 3]; 3]],
+    cancel: &AtomicBool,
+) -> Result<(Vec<([u8; 3], u32)>, usize), String> {
+    vertex_color_palette_impl(colors, Some(cancel))
+}
+
+fn vertex_color_palette_impl(
+    colors: &[[[u8; 3]; 3]],
+    cancel: Option<&AtomicBool>,
+) -> Result<(Vec<([u8; 3], u32)>, usize), String> {
+    const HASH_DISTINCT_LIMIT: usize = MAX_VERTEX_COLOR_ID_REGIONS * 8;
+    let check_cancelled = || cancel.map_or(Ok(()), check_prepare_cancelled);
+    let order = |a: &([u8; 3], u32), b: &([u8; 3], u32)| b.1.cmp(&a.1).then(a.0.cmp(&b.0));
+    let mut counts: HashMap<[u8; 3], u32> = HashMap::with_capacity(HASH_DISTINCT_LIMIT);
+    for (triangle, corners) in colors.iter().enumerate() {
+        if triangle.is_multiple_of(8192) {
+            check_cancelled()?;
+        }
+        for color in corners {
+            let count = counts.entry(*color).or_default();
+            *count = count.saturating_add(1);
+            if counts.len() > HASH_DISTINCT_LIMIT {
+                drop(counts);
+                return vertex_color_palette_sorted(colors, cancel);
+            }
+        }
+    }
+
+    let distinct = counts.len();
+    let mut palette: Vec<_> = counts.into_iter().collect();
+    if palette.len() > MAX_VERTEX_COLOR_ID_REGIONS {
+        palette.select_nth_unstable_by(MAX_VERTEX_COLOR_ID_REGIONS, order);
+        palette.truncate(MAX_VERTEX_COLOR_ID_REGIONS);
+    }
+    palette.sort_unstable_by(order);
+    Ok((palette, distinct))
+}
+
+/// High-cardinality fallback. RGB is packed into one u32, sorted in place and
+/// counted by runs; a bounded heap retains only the 48 most-used labels.
+fn vertex_color_palette_sorted(
+    colors: &[[[u8; 3]; 3]],
+    cancel: Option<&AtomicBool>,
+) -> Result<(Vec<([u8; 3], u32)>, usize), String> {
+    let check_cancelled = || cancel.map_or(Ok(()), check_prepare_cancelled);
+    let mut packed = Vec::with_capacity(colors.len().saturating_mul(3));
+    for (triangle, corners) in colors.iter().enumerate() {
+        if triangle.is_multiple_of(8192) {
+            check_cancelled()?;
+        }
+        for rgb in corners {
+            packed.push(((rgb[0] as u32) << 16) | ((rgb[1] as u32) << 8) | rgb[2] as u32);
+        }
+    }
+    check_cancelled()?;
+    packed.sort_unstable();
+    check_cancelled()?;
+
+    // Heap key is (frequency, inverted RGB). Higher frequency wins; for ties,
+    // the smaller original RGB value wins deterministically. Reverse keeps the
+    // worst retained entry at the root for O(log MAX_VERTEX_COLOR_ID_REGIONS) replacement.
+    let mut top: BinaryHeap<Reverse<(u32, [u8; 3])>> =
+        BinaryHeap::with_capacity(MAX_VERTEX_COLOR_ID_REGIONS + 1);
+    let mut distinct = 0usize;
+    let mut start = 0usize;
+    while start < packed.len() {
+        if distinct.is_multiple_of(8192) {
+            check_cancelled()?;
+        }
+        let key = packed[start];
+        let mut end = start + 1;
+        while end < packed.len() && packed[end] == key {
+            end += 1;
+        }
+        distinct += 1;
+        let rgb = [(key >> 16) as u8, (key >> 8) as u8, key as u8];
+        let corners = u32::try_from(end - start).unwrap_or(u32::MAX);
+        let inverse_rgb = rgb.map(|channel| 255 - channel);
+        let candidate = (corners, inverse_rgb);
+        if top.len() < MAX_VERTEX_COLOR_ID_REGIONS {
+            top.push(Reverse(candidate));
+        } else if top.peek().is_some_and(|Reverse(worst)| candidate > *worst) {
+            top.pop();
+            top.push(Reverse(candidate));
+        }
+        start = end;
+    }
+
+    let mut palette: Vec<_> = top
+        .into_iter()
+        .map(|Reverse((corners, inverse_rgb))| {
+            (inverse_rgb.map(|channel| 255 - channel), corners)
+        })
+        .collect();
+    palette.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    Ok((palette, distinct))
+}
+
+/// Keeps only the shared top palette entries and calculates their region bounds.
+/// The baked texture still receives every raw corner color; only the report/MCP
+/// index is bounded.
 fn vertex_color_id_data(
     colors: &[[[u8; 3]; 3]],
     indices: &[u32],
     positions: &[Vec3],
     cancel: &AtomicBool,
 ) -> Result<(Vec<[f32; 4]>, Vec<IdRegion>), String> {
-    let mut counts: HashMap<[u8; 3], u32> = HashMap::new();
-    for (triangle, corners) in colors.iter().enumerate() {
-        if triangle.is_multiple_of(8192) {
-            check_prepare_cancelled(cancel)?;
-        }
-        for color in corners {
-            *counts.entry(*color).or_default() += 1;
-        }
-    }
-
-    let mut palette: Vec<_> = counts.into_iter().collect();
-    let order = |a: &([u8; 3], u32), b: &([u8; 3], u32)| b.1.cmp(&a.1).then(a.0.cmp(&b.0));
-    if palette.len() > MAX_VERTEX_COLOR_ID_REGIONS {
-        palette.select_nth_unstable_by(MAX_VERTEX_COLOR_ID_REGIONS, order);
-        palette.truncate(MAX_VERTEX_COLOR_ID_REGIONS);
-    }
-    palette.sort_unstable_by(order);
-    palette.shrink_to_fit();
-
+    let (palette, _) = vertex_color_palette_cancellable(colors, cancel)?;
     let ids: Vec<[f32; 4]> = palette.iter().map(|(rgb, _)| {
         [rgb[0] as f32 / 255.0, rgb[1] as f32 / 255.0, rgb[2] as f32 / 255.0, 1.0]
     }).collect();
