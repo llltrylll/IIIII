@@ -446,7 +446,7 @@ mod project_bake_source_plan_tests {
         let (sources, followups) = project_bake_source_plan(
             &saved, 3, 1, false, true, IdSource::MeshParts,
         );
-        assert_eq!(sources, saved);
+        assert_eq!(sources, saved.to_vec());
         assert!(followups.is_empty());
     }
 
@@ -463,7 +463,7 @@ mod project_bake_source_plan_tests {
         );
         assert_eq!(
             sources,
-            [
+            vec![
                 IdSource::Materials,
                 IdSource::Materials,
                 IdSource::Materials,
@@ -504,7 +504,7 @@ mod project_bake_source_plan_tests {
         );
         assert_eq!(
             sources,
-            [
+            vec![
                 IdSource::MeshParts,
                 IdSource::Materials,
                 IdSource::MeshParts,
