@@ -1034,7 +1034,9 @@ impl PainterApp {
                 v["tris"] = json!([set.tris.start, set.tris.end]);
                 v["selected"] = json!(selected);
                 let baked_id_source = self.sets.baked_id_sources.get(k).copied().unwrap_or(self.baked_id_source);
+                let id_source_preference = self.sets.id_source_preferences.get(k).copied().unwrap_or(baked_id_source);
                 v["baked_id_source"] = json!(format!("{baked_id_source:?}"));
+                v["id_source_preference"] = json!(format!("{id_source_preference:?}"));
                 v
             })
             .collect();
@@ -1088,7 +1090,8 @@ impl PainterApp {
             // 3: texture sets (layers, size and map fixes per set).
             // 4: project channel selection and per-object visibility.
             // 5: the baked ID source is stored independently for each Texture Set.
-            "version": 5,
+            // 6: retain the preferred source separately from a temporary high-poly fallback.
+            "version": 6,
             "active_channels": self.active_channels,
             "mesh": mesh_json,
             "texture_sets": sets,
@@ -1295,13 +1298,21 @@ impl PainterApp {
         }
         let legacy_baked_id_source = self.baked_id_source;
         self.sets.baked_id_sources.resize(set_count, legacy_baked_id_source);
+        self.sets.id_source_preferences.resize(set_count, legacy_baked_id_source);
         for (k, sv) in set_values.iter().enumerate().take(set_count) {
             self.switch_set(k);
-            self.sets.baked_id_sources[k] = match s(sv, "baked_id_source") {
+            let baked_id_source = match s(sv, "baked_id_source") {
                 Some("Materials") => IdSource::Materials,
                 Some("VertexColors") => IdSource::VertexColors,
                 Some("MeshParts") => IdSource::MeshParts,
                 _ => legacy_baked_id_source,
+            };
+            self.sets.baked_id_sources[k] = baked_id_source;
+            self.sets.id_source_preferences[k] = match s(sv, "id_source_preference") {
+                Some("Materials") => IdSource::Materials,
+                Some("VertexColors") => IdSource::VertexColors,
+                Some("MeshParts") => IdSource::MeshParts,
+                _ => baked_id_source,
             };
             // Replacing a document must drop old layer textures, not retain them in Undo.
             self.engine.restore_layers(Vec::new());
