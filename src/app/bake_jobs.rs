@@ -114,6 +114,21 @@ impl PainterApp {
         self.start_bake_set(self.sets.active, ctx);
     }
 
+    /// An explicit ID source selection in the Bake window applies to every
+    /// Texture Set for subsequent full bakes. The source actually baked stays
+    /// per-set and is updated only when a bake completes.
+    pub(super) fn prefer_id_source_for_all_sets(&mut self, source: IdSource) -> bool {
+        self.sets.id_source_preferences.resize(self.mesh.sets.len(), self.baked_id_source);
+        let mut changed = false;
+        for preference in &mut self.sets.id_source_preferences {
+            if *preference != source {
+                *preference = source;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// Records the requested Vertex Color source for a set list. A currently
     /// running full bake can finish after a request and write its older source
     /// back, so deferred targets are reasserted immediately before their batch.
