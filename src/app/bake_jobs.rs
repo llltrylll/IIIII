@@ -354,7 +354,7 @@ impl PainterApp {
             }
         }
         self.sets.baked_id_sources.resize(self.mesh.sets.len(), self.baked_id_source);
-        let source_changed = self.sets.baked_id_sources[set] != id_source;
+        let mut metadata_changed = self.sets.baked_id_sources[set] != id_source;
         self.sets.baked_id_sources[set] = id_source;
         // A project-restore batch can temporarily use Mesh Parts/Materials
         // for the full high-poly pass, then replace only the ID map from the
@@ -362,14 +362,15 @@ impl PainterApp {
         // until an ordinary user-requested bake commits a new choice.
         if self.bake_batch_id_sources.is_none() {
             self.sets.id_source_preferences.resize(self.mesh.sets.len(), self.baked_id_source);
+            metadata_changed |= self.sets.id_source_preferences[set] != id_source;
             self.sets.id_source_preferences[set] = id_source;
         }
         if set == self.sets.active {
             self.baked_id_source = id_source;
         }
-        // Only the per-set source is serialized; the transient GPU map itself
-        // is regenerated from the project cache when the document is reopened.
-        if source_changed {
+        // Only the per-set source metadata is serialized; the transient GPU
+        // textures are regenerated from the project bake cache when reopened.
+        if metadata_changed {
             self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
         }
         true
