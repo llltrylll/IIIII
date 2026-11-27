@@ -5036,6 +5036,7 @@ impl PainterApp {
     fn bake_window(&mut self, ctx: &egui::Context) {
         const BAKE_WIDTH: f32 = 520.0;
         let id_source_before = self.bake_settings.id_source;
+        let mut id_source_user_changed = false;
         let mut open = self.show_bake;
         // Against the right edge, so the 3D view (and the gizmos in it) stays visible.
         let screen = ctx.content_rect();
@@ -5157,12 +5158,14 @@ impl PainterApp {
                 ui.label(egui::RichText::new("Red: the cage misses the high poly, raise Front/Rear. Amber: close to the limit. Magenta: another part is reached first and bleeds in; lower Front, load a cage or match by name.").small().color(theme::TEXT_DIM));
             }
             labeled(ui, "ID from", |ui| {
+                let source_before_controls = s.id_source;
                 ui.radio_value(&mut s.id_source, IdSource::MeshParts, "Mesh parts");
                 ui.radio_value(&mut s.id_source, IdSource::Materials, "Materials");
                 ui.add_enabled_ui(s.high_poly.is_none(), |ui| {
                     ui.radio_value(&mut s.id_source, IdSource::VertexColors, "Vertex colors")
                         .on_hover_text("Vertex colors belong to the loaded low-poly mesh. With a high-poly projection, bake the other maps first, then rebake only the ID map from the Vertex ID panel.");
                 });
+                id_source_user_changed |= s.id_source != source_before_controls;
             });
             if s.id_source == IdSource::VertexColors && s.high_poly.is_some() {
                 ui.label(egui::RichText::new("Vertex colors are a low-poly ID source. For high-poly bakes, use Mesh parts or Materials, then use the Vertex ID panel to rebake only the ID map from the loaded mesh.")
@@ -5283,7 +5286,9 @@ impl PainterApp {
                 }
             });
         });
-        if self.bake_settings.id_source != id_source_before {
+        let preferences_changed = id_source_user_changed
+            && self.prefer_id_source_for_all_sets(self.bake_settings.id_source);
+        if self.bake_settings.id_source != id_source_before || preferences_changed {
             self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
         }
         self.show_bake = open;
