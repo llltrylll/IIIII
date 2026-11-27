@@ -7,6 +7,7 @@ fn project_bake_source_plan(
     set_count: usize,
     active: usize,
     high_poly: bool,
+    has_vertex_colors: bool,
     fallback: IdSource,
 ) -> (Vec<IdSource>, std::collections::VecDeque<usize>) {
     let mut sources = saved.iter().copied().take(set_count).collect::<Vec<_>>();
@@ -18,9 +19,20 @@ fn project_bake_source_plan(
         for set in ordered_sets {
             if sources[set] == IdSource::VertexColors {
                 sources[set] = fallback;
-                followups.push_back(set);
+                if has_vertex_colors {
+                    followups.push_back(set);
+                }
             }
         }
+    } else if !has_vertex_colors {
+        // Legacy projects may remember Vertex Colors without having serialized
+        // that attribute. Keep the rest of the maps bakeable until the user
+        // reimports the original FBX/OBJ through the Vertex ID panel.
+        sources.iter_mut().for_each(|source| {
+            if *source == IdSource::VertexColors {
+                *source = fallback;
+            }
+        });
     }
     (sources, followups)
 }
@@ -112,17 +124,19 @@ impl PainterApp {
         let active = self.sets.active;
         self.sets.bake_queue = (0..self.mesh.sets.len()).filter(|&k| k != active).collect();
         let high_poly = self.bake_settings.high_poly.is_some();
-        let fallback = if high_poly && self.bake_settings.id_source == IdSource::VertexColors {
+        let fallback = if self.bake_settings.id_source == IdSource::VertexColors {
             IdSource::MeshParts
         } else {
             self.bake_settings.id_source
         };
+        let has_vertex_colors = vertex_id::has_colors(&self.mesh);
         self.bake_batch_settings = Some(self.job_bake_settings());
         let (sources, followups) = project_bake_source_plan(
             &self.sets.baked_id_sources,
             self.mesh.sets.len(),
             active,
             high_poly,
+            has_vertex_colors,
             fallback,
         );
         self.bake_batch_id_sources = Some(sources);
@@ -411,7 +425,7 @@ mod project_bake_source_plan_tests {
     fn low_poly_project_restores_each_saved_id_source_without_extra_passes() {
         let saved = [IdSource::VertexColors, IdSource::Materials, IdSource::MeshParts];
         let (sources, followups) = project_bake_source_plan(
-            &saved, 3, 1, false, IdSource::MeshParts,
+            &saved, 3, 1, false, true, IdSource::MeshParts,
         );
         assert_eq!(sources, saved);
         assert!(followups.is_empty());
@@ -426,7 +440,7 @@ mod project_bake_source_plan_tests {
             IdSource::MeshParts,
         ];
         let (sources, followups) = project_bake_source_plan(
-            &saved, 4, 2, true, IdSource::Materials,
+            &saved, 4, 2, true, true, IdSource::Materials,
         );
         assert_eq!(
             sources,
@@ -441,11 +455,26 @@ mod project_bake_source_plan_tests {
     }
 
     #[test]
+    fn missing_legacy_vertex_colors_fall_back_without_aborting_other_texture_sets() {
+        let (sources, followups) = project_bake_source_plan(
+            &[IdSource::VertexColors, IdSource::Materials],
+            2,
+            0,
+            false,
+            false,
+            IdSource::MeshParts,
+        );
+        assert_eq!(sources, vec![IdSource::MeshParts, IdSource::Materials]);
+        assert!(followups.is_empty());
+    }
+
+    #[test]
     fn legacy_short_source_lists_are_padded_to_the_texture_set_count() {
         let (sources, followups) = project_bake_source_plan(
             &[IdSource::VertexColors],
             3,
             0,
+            true,
             true,
             IdSource::MeshParts,
         );
