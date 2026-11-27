@@ -39,6 +39,20 @@ fn project_bake_source_plan(
 
 use super::*;
 
+/// Adds a deferred per-set ID pass once. Requests for the set already running
+/// or already queued in the current ID-only batch do not need another pass.
+fn queue_deferred_id_rebake(
+    queue: &mut std::collections::VecDeque<usize>,
+    set: usize,
+    already_scheduled: bool,
+) -> bool {
+    if already_scheduled || queue.contains(&set) {
+        return false;
+    }
+    queue.push_back(set);
+    true
+}
+
 impl PainterApp {
     /// Builds the GPU bake pipeline only when a bake is requested.
     pub(super) fn ensure_baker(&mut self) {
@@ -103,14 +117,13 @@ impl PainterApp {
                 }
             };
             let already_queued_in_id_batch = self.bake_id_only && self.sets.bake_queue.contains(&set);
-            if !already_running
-                && !already_queued_in_id_batch
-                && !self.deferred_id_rebake_sets.contains(&set)
-            {
-                self.deferred_id_rebake_sets.push_back(set);
-            }
-            self.status = if already_running {
-                "This Texture Set is already baking its Vertex Color ID map.".into()
+            let queued = queue_deferred_id_rebake(
+                &mut self.deferred_id_rebake_sets,
+                set,
+                already_running || already_queued_in_id_batch,
+            );
+            self.status = if already_running || already_queued_in_id_batch || !queued {
+                "This Texture Set already has a Vertex Color ID bake running or queued.".into()
             } else {
                 "Vertex ID rebake queued for this Texture Set; the current bake will finish first.".into()
             };
@@ -458,8 +471,19 @@ impl PainterApp {
 
 #[cfg(test)]
 mod project_bake_source_plan_tests {
-    use super::project_bake_source_plan;
+    use super::{project_bake_source_plan, queue_deferred_id_rebake};
     use crate::bake::IdSource;
+    use std::collections::VecDeque;
+
+    #[test]
+    fn deferred_vertex_id_queue_deduplicates_per_set_without_merging_targets() {
+        let mut queue = VecDeque::from([2, 0]);
+        assert!(!queue_deferred_id_rebake(&mut queue, 2, false));
+        assert!(!queue_deferred_id_rebake(&mut queue, 1, true));
+        assert!(queue_deferred_id_rebake(&mut queue, 3, false));
+        assert_eq!(queue.into_iter().collect::<Vec<_>>(), vec![2, 0, 3]);
+    }
+
 
     #[test]
     fn low_poly_project_restores_each_saved_id_source_without_extra_passes() {
