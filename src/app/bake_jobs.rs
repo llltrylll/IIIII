@@ -72,6 +72,15 @@ fn set_id_source_preferences(
 
 /// Adds a deferred per-set ID pass once. Requests for the set already running
 /// or already queued in the current ID-only batch do not need another pass.
+fn vertex_id_rebake_already_scheduled(
+    force_running: bool,
+    already_running: bool,
+    already_queued: bool,
+    already_planned_followup: bool,
+) -> bool {
+    (!force_running && already_running) || already_queued || already_planned_followup
+}
+
 pub(super) fn vertex_color_rebake_targets(
     active: usize,
     set_count: usize,
@@ -240,9 +249,12 @@ impl PainterApp {
                         *source = IdSource::VertexColors;
                     }
                 }
-                let already_scheduled = (!force_running && already_running)
-                    || already_queued_in_id_batch
-                    || already_planned_as_high_poly_followup;
+                let already_scheduled = vertex_id_rebake_already_scheduled(
+                    force_running,
+                    already_running,
+                    already_queued_in_id_batch,
+                    already_planned_as_high_poly_followup,
+                );
                 if queue_deferred_id_rebake(
                     &mut self.deferred_id_rebake_sets,
                     set,
@@ -623,7 +635,7 @@ impl PainterApp {
 mod project_bake_source_plan_tests {
     use super::{
         next_full_bake_id_source, project_bake_source_plan, queue_deferred_id_rebake,
-        set_id_source_preferences, vertex_color_rebake_targets,
+        set_id_source_preferences, vertex_color_rebake_targets, vertex_id_rebake_already_scheduled,
     };
     use crate::bake::IdSource;
     use std::collections::VecDeque;
@@ -676,6 +688,14 @@ mod project_bake_source_plan_tests {
             next_full_bake_id_source(IdSource::VertexColors, false, false),
             IdSource::MeshParts,
         );
+    }
+
+    #[test]
+    fn forced_color_reimport_requeues_only_a_running_snapshot() {
+        assert!(vertex_id_rebake_already_scheduled(false, true, false, false));
+        assert!(!vertex_id_rebake_already_scheduled(true, true, false, false));
+        assert!(vertex_id_rebake_already_scheduled(true, true, true, false));
+        assert!(vertex_id_rebake_already_scheduled(true, false, false, true));
     }
 
     #[test]
