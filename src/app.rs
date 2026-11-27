@@ -932,8 +932,9 @@ pub struct PainterApp {
     bake_batch_id_sources: Option<Vec<IdSource>>,
     /// Saved Vertex Color sources that need a low-poly ID-only pass after a high-poly bake.
     bake_batch_followup_id_sets: std::collections::VecDeque<usize>,
-    /// An ID-only rebake requested during another bake; run it after that batch.
-    deferred_id_rebake: bool,
+    /// Texture Sets with queued Vertex Color ID-only rebakes. Keep their indices
+    /// so switching the active set during another bake cannot redirect a request.
+    deferred_id_rebake_sets: std::collections::VecDeque<usize>,
     cam: OrbitCam,
     selected_point_light: usize,
     show_point_light_markers: bool,
@@ -2533,7 +2534,7 @@ impl PainterApp {
             bake_batch_settings: None,
             bake_batch_id_sources: None,
             bake_batch_followup_id_sets: std::collections::VecDeque::new(),
-            deferred_id_rebake: false,
+            deferred_id_rebake_sets: std::collections::VecDeque::new(),
             cam: OrbitCam::default(),
             selected_point_light: 0,
             show_point_light_markers: true,
@@ -2682,7 +2683,7 @@ impl PainterApp {
         self.bake_batch_settings = None;
         self.bake_batch_id_sources = None;
         self.bake_batch_followup_id_sets.clear();
-        self.deferred_id_rebake = false;
+        self.deferred_id_rebake_sets.clear();
         self.bake_id_only = false;
         self.id_color_pick_target = None;
         self.vertex_id.palette = None;
