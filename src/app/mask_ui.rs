@@ -21,7 +21,13 @@ impl PainterApp {
             egui::ComboBox::from_id_salt(("gen", salt)).selected_text(g.kind.name()).show_ui(ui, |ui| {
                 for k in GenKind::ALL {
                     if ui.selectable_label(g.kind == k, k.name()).clicked() && g.kind != k {
-                        let source = if info.has_bake { info.baked_source } else { info.next_source };
+                        let source = if info.has_colors {
+                            IdSource::VertexColors
+                        } else if info.has_bake {
+                            info.baked_source
+                        } else {
+                            info.next_source
+                        };
                         let palette = (k == GenKind::IdMask).then(|| vertex_id.palette_for(mesh).clone());
                         *g = new_generator(k, custom, source, palette.as_ref());
                         *pick_target = None;
@@ -169,7 +175,13 @@ impl PainterApp {
                 if ui.button(k.name()).clicked() {
                     // On a black mask nothing shows through Multiply: reveal with Add instead.
                     let blend = if mask.black_base && mask.layers.is_empty() { MaskBlend::Add } else { MaskBlend::Multiply };
-                    let source = if id_info.has_bake { id_info.baked_source } else { id_info.next_source };
+                    let source = if id_info.has_colors {
+                        IdSource::VertexColors
+                    } else if id_info.has_bake {
+                        id_info.baked_source
+                    } else {
+                        id_info.next_source
+                    };
                     let palette = (k == GenKind::IdMask).then(|| self.vertex_id.palette_for(&self.mesh).clone());
                     let generator = new_generator(k, &custom, source, palette.as_ref());
                     mask.layers.push(MaskLayer { source: MaskSource::Generator(generator), blend, opacity: 1.0, enabled: true });
