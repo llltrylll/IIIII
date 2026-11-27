@@ -3774,6 +3774,53 @@ mod vertex_color_id_source_tests {
     use std::collections::HashMap;
 
     #[test]
+    fn bake_id_regions_use_the_shared_high_cardinality_vertex_palette() {
+        let triangle_count = 150usize;
+        let colors: Vec<[[u8; 3]; 3]> = (0..triangle_count)
+            .map(|triangle| {
+                std::array::from_fn(|corner| {
+                    let value = (triangle * 3 + corner) as u32;
+                    [
+                        (value >> 16) as u8,
+                        (value >> 8) as u8,
+                        value as u8,
+                    ]
+                })
+            })
+            .collect();
+        let indices: Vec<u32> = (0..triangle_count)
+            .flat_map(|_| [0, 1, 2])
+            .collect();
+        let positions = [Vec3::ZERO, Vec3::X, Vec3::Y];
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+
+        let (palette, distinct) = super::vertex_color_palette(&colors);
+        let (ids, regions) = super::vertex_color_id_data(&colors, &indices, &positions, &cancel)
+            .expect("high-cardinality ID regions");
+
+        assert_eq!(distinct, triangle_count * 3);
+        assert_eq!(palette.len(), MAX_VERTEX_COLOR_ID_REGIONS);
+        assert_eq!(ids.len(), palette.len());
+        assert_eq!(regions.len(), palette.len());
+        let expected: Vec<[f32; 4]> = palette.iter().map(|(rgb, _)| [
+            rgb[0] as f32 / 255.0,
+            rgb[1] as f32 / 255.0,
+            rgb[2] as f32 / 255.0,
+            1.0,
+        ]).collect();
+        assert_eq!(ids, expected, "bake and panel must consume identical top-color ordering");
+    }
+
+    #[test]
+    fn cancelled_vertex_palette_scan_stops_before_counting() {
+        let colors = vec![[[255, 0, 0]; 3]; 4];
+        let cancel = std::sync::atomic::AtomicBool::new(true);
+        let error = super::vertex_color_palette_cancellable(&colors, &cancel)
+            .expect_err("a cancelled palette scan must stop");
+        assert!(error.contains("cancelled"), "{error}");
+    }
+
+    #[test]
     fn vertex_color_id_source_rejects_high_poly_projection_before_loading_it() {
         let mesh = Primitive::Plane.build();
         let settings = BakeSettings {
