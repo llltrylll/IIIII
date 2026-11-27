@@ -250,7 +250,9 @@ impl PainterApp {
             self.status = "A bake is already running; the saved-source bake was not started.".into();
             return;
         }
-        self.ensure_valid_full_bake_id_source();
+        // This batch applies each saved per-set source explicitly. Keep the
+        // project's global next-bake preference unchanged during restoration;
+        // manual full bakes normalize it when a real job is requested.
         self.bake_id_only = false;
         let active = self.sets.active;
         self.sets.bake_queue = (0..self.mesh.sets.len()).filter(|&k| k != active).collect();
