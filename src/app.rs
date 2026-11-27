@@ -2822,13 +2822,12 @@ impl PainterApp {
                         }
                         use crate::engine::{MaskBlend, MaskLayer, MaskSource};
                         let palette = (kind == GenKind::IdMask).then(|| self.vertex_id.palette_for(&self.mesh).clone());
-                        let id_source = if palette.as_ref().is_some_and(|p| !p.entries.is_empty()) {
-                            IdSource::VertexColors
-                        } else if self.engine.has_bake {
-                            self.sets.baked_id_sources.get(self.sets.active).copied().unwrap_or(self.baked_id_source)
-                        } else {
-                            self.bake_settings.id_source
-                        };
+                        let id_source = vertex_id::default_generator_source(
+                            palette.as_ref().is_some_and(|p| !p.entries.is_empty()),
+                            self.engine.has_bake,
+                            self.sets.baked_id_sources.get(self.sets.active).copied().unwrap_or(self.baked_id_source),
+                            self.bake_settings.id_source,
+                        );
                         let g = new_generator(kind, &self.bake_settings.custom, id_source, palette.as_ref());
                         if let Some(mask) = self.engine.layers[self.selected].mask.as_mut() {
                             let blend = if mask.black_base && mask.layers.is_empty() { MaskBlend::Add } else { MaskBlend::Multiply };
@@ -2840,13 +2839,12 @@ impl PainterApp {
                 }
                 Action::AddGenerator(kind) => {
                     let palette = (kind == GenKind::IdMask).then(|| self.vertex_id.palette_for(&self.mesh).clone());
-                    let id_source = if palette.as_ref().is_some_and(|p| !p.entries.is_empty()) {
-                        IdSource::VertexColors
-                    } else if self.engine.has_bake {
-                        self.sets.baked_id_sources.get(self.sets.active).copied().unwrap_or(self.baked_id_source)
-                    } else {
-                        self.bake_settings.id_source
-                    };
+                    let id_source = vertex_id::default_generator_source(
+                        palette.as_ref().is_some_and(|p| !p.entries.is_empty()),
+                        self.engine.has_bake,
+                        self.sets.baked_id_sources.get(self.sets.active).copied().unwrap_or(self.baked_id_source),
+                        self.bake_settings.id_source,
+                    );
                     let g = new_generator(kind, &self.bake_settings.custom, id_source, palette.as_ref());
                     if let Some(layer) = self.engine.layers.get_mut(self.selected) {
                         match &mut layer.mask {
