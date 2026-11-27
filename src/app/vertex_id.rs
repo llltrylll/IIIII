@@ -114,6 +114,16 @@ pub fn to_f32(rgb: [u8; 3]) -> [f32; 3] {
     rgb.map(|v| v as f32 / 255.0)
 }
 
+/// Source-aware default for a newly created Vertex ID mask generator.
+pub fn default_mask_color(source: IdSource, palette: &Palette) -> [f32; 3] {
+    match source {
+        IdSource::VertexColors => palette.entries.first()
+            .map(|entry| to_f32(entry.rgb))
+            .unwrap_or([1.0, 0.0, 0.0]),
+        IdSource::MeshParts | IdSource::Materials => crate::bake::first_id_color(),
+    }
+}
+
 fn to_u8(c: [f32; 3]) -> [u8; 3] {
     c.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
 }
@@ -517,6 +527,33 @@ mod tests {
             .map(|entry| ((entry.rgb[0] as u32) << 16) | ((entry.rgb[1] as u32) << 8) | entry.rgb[2] as u32)
             .collect();
         assert_eq!(selected, (0..PALETTE_MAX as u32).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn new_id_mask_default_tracks_the_active_source() {
+        let colors = Palette {
+            entries: vec![
+                PaletteEntry { rgb: [0, 255, 0], corners: 12 },
+                PaletteEntry { rgb: [255, 0, 0], corners: 8 },
+            ],
+            distinct: 2,
+        };
+        assert_eq!(
+            default_mask_color(IdSource::VertexColors, &colors),
+            [0.0, 1.0, 0.0],
+        );
+        assert_eq!(
+            default_mask_color(IdSource::MeshParts, &colors),
+            crate::bake::first_id_color(),
+        );
+        assert_eq!(
+            default_mask_color(IdSource::Materials, &colors),
+            crate::bake::first_id_color(),
+        );
+        assert_eq!(
+            default_mask_color(IdSource::VertexColors, &Palette::default()),
+            [1.0, 0.0, 0.0],
+        );
     }
 
     #[test]
