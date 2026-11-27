@@ -3704,14 +3704,42 @@ mod vertex_color_id_source_tests {
     }
 
     #[test]
-    fn vertex_color_id_source_keeps_the_per_corner_payload() {
-        let mut mesh = Primitive::Plane.build();
+    fn vertex_color_id_source_keeps_corner_colors_aligned_after_bvh_reorder() {
+        let mut mesh = Primitive::Sphere.build();
         let triangles = mesh.triangle_count();
-        mesh.tri_color = Some(vec![[255, 0, 0]; triangles]);
-        mesh.tri_vertex_color = Some(vec![[[255, 0, 0]; 3]; triangles]);
+        let colors: Vec<[[u8; 3]; 3]> = (0..triangles).map(|triangle| {
+            std::array::from_fn(|corner| [
+                (triangle % 251) as u8,
+                (corner * 83) as u8,
+                ((triangle * 7 + corner * 29) % 253) as u8,
+            ])
+        }).collect();
+        mesh.tri_color = Some(colors.iter().map(|corners| {
+            std::array::from_fn(|channel| {
+                (corners.iter().map(|rgb| rgb[channel] as u32).sum::<u32>() / 3) as u8
+            })
+        }).collect());
+        mesh.tri_vertex_color = Some(colors.clone());
         let settings = BakeSettings { id_source: IdSource::VertexColors, ..Default::default() };
+
         let prepared = prepare(&mesh, &settings, 0).expect("complete vertex-color source");
+
         assert_eq!(prepared.tri_vcolor.len(), mesh.indices.len());
+        assert_eq!(prepared.bake_triangles.len(), triangles);
+        for (bake_triangle, baked_corners) in prepared.bake_triangles.iter()
+            .zip(prepared.tri_vcolor.chunks_exact(3))
+        {
+            let source_triangle = mesh.indices.chunks_exact(3).position(|source| {
+                source[0] == bake_triangle.indices[0]
+                    && source[1] == bake_triangle.indices[1]
+                    && source[2] == bake_triangle.indices[2]
+            }).expect("every BVH-ordered triangle must correspond to one source triangle");
+            for corner in 0..3 {
+                let expected = colors[source_triangle][corner].map(|channel| channel as f32 / 255.0);
+                assert_eq!(&baked_corners[corner][..3], &expected);
+                assert_eq!(baked_corners[corner][3], 1.0);
+            }
+        }
     }
 
     #[test]
