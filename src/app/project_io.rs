@@ -1484,7 +1484,7 @@ impl PainterApp {
             self.status = format!("Opened {}.", path.display());
         }
         if self.prefs.bake_on_load {
-            self.start_bake_all(ctx);
+            self.start_bake_all_preserving_sources(ctx);
         }
         Ok(())
     }
