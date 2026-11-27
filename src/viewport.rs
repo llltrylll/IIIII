@@ -2536,4 +2536,10 @@ mod vertex_id_overlay_shader_tests {
         assert!(SHADER.contains("distance(in.color.rgb, g.id_more[k].xyz)"));
         assert!(SHADER.contains("let tolerance = max(g.id_color.w, 1e-3)"));
     }
+
+    #[test]
+    fn categorical_id_view_uses_exact_texels() {
+        assert!(SHADER.contains("s.e = textureLoad(map_e, coord, 0)"));
+        assert!(!SHADER.contains("s.e = textureSampleLevel(map_e, samp, uv, 0.0)"));
+    }
 }
