@@ -1277,6 +1277,7 @@ impl PainterApp {
         // The per-set fields in version 5 are authoritative; the old global
         // value above remains the fallback for projects saved by earlier builds.
         self.sets.baked_id_sources.clear();
+        self.sets.id_source_preferences.clear();
         let sizes: Vec<u32> = set_values.iter().map(|sv| sv["resolution"].as_u64().unwrap_or(2048) as u32).collect();
         // Release the previous document's snapshots before allocating the new one.
         self.undo.clear();
