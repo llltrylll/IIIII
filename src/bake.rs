@@ -3771,6 +3771,7 @@ pub(crate) mod tests {
 mod vertex_color_id_source_tests {
     use super::{prepare, BakeSettings, IdSource, MAX_VERTEX_COLOR_ID_REGIONS};
     use crate::mesh::Primitive;
+    use glam::Vec3;
     use std::collections::HashMap;
 
     #[test]
