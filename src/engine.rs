@@ -439,7 +439,7 @@ impl GenKind {
             invert: false,
             seed: 0.0,
             edge_width: 0.04,
-            id_color: [1.0, 0.0, 0.0],
+            id_color: [0.95, 0.2375, 0.2375],
             id_tolerance: 0.15,
             id_more: [[0.0; 3]; MAX_ID_COLORS - 1],
             id_count: 1,
@@ -7294,9 +7294,9 @@ mod vertex_id_generator_regressions {
     }
 
     #[test]
-    fn default_id_mask_keeps_the_vertex_color_fallback() {
+    fn default_id_mask_matches_the_first_mesh_part_id() {
         let generator = GenKind::IdMask.default_generator();
-        assert_eq!(generator.id_colors(), vec![[1.0, 0.0, 0.0]]);
+        assert_eq!(generator.id_colors(), vec![[0.95, 0.2375, 0.2375]]);
         assert_eq!(generator.weights[gin::ID], 1.0);
     }
 }
