@@ -5084,7 +5084,8 @@ impl PainterApp {
                     s.high_poly = rfd::FileDialog::new().add_filter("Mesh (FBX, OBJ)", &crate::import::EXTENSIONS).pick_file();
                 }
             });
-            if (s.high_poly.is_some() || !vertex_id::has_colors(&self.mesh))
+            if self.bake_job.is_none()
+                && (s.high_poly.is_some() || !vertex_id::has_colors(&self.mesh))
                 && s.id_source == IdSource::VertexColors
             {
                 // Vertex Colors are baked from the low-poly topology in a
