@@ -182,6 +182,12 @@ impl PainterApp {
             self.views.invalidate_texture_set_binding(previous_active);
         }
         self.engine_epoch = self.engine_epoch.wrapping_add(1);
+        // Auto-bake is tracked per loaded mesh and active set: a newly selected
+        // Texture Set may still have an ID map from Mesh Parts or Materials.
+        self.vertex_id.auto_baked = false;
+        self.vertex_id.panel = None;
+        self.vertex_id.shown = None;
+        self.overlays.clear(OverlaySlot::VertexColors);
         std::mem::swap(&mut self.selected, &mut p.selected);
         std::mem::swap(&mut self.target, &mut p.target);
         self.sets.parked[self.sets.active] = Some(p);
