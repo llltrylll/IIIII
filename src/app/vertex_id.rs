@@ -260,7 +260,10 @@ pub struct Info<'a> {
     pub palette: &'a Palette,
     pub has_colors: bool,
     pub has_bake: bool,
+    /// Source currently represented by the active Texture Set's ID map.
     pub baked_source: IdSource,
+    /// Source selected for the next bake when the set has no baked maps yet.
+    pub next_source: IdSource,
 }
 
 fn swatch(ui: &mut egui::Ui, rgb: [u8; 3], selected: bool, tip: &str) -> egui::Response {
