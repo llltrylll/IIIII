@@ -7281,3 +7281,22 @@ mod id_map_resample_tests {
         }
     }
 }
+
+
+#[cfg(test)]
+mod vertex_id_generator_regressions {
+    use super::{GenKind, gin};
+
+    #[test]
+    fn default_id_mask_reads_the_id_map() {
+        let generator = GenKind::IdMask.default_generator();
+        assert_ne!(generator.needs_maps() & (1 << 12), 0, "Vertex ID masks need the baked ID map");
+    }
+
+    #[test]
+    fn default_id_mask_matches_first_generated_id_color() {
+        let generator = GenKind::IdMask.default_generator();
+        assert_eq!(generator.id_colors(), vec![[0.95, 0.2375, 0.2375]]);
+        assert_eq!(generator.weights[gin::ID], 1.0);
+    }
+}
