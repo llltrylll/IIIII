@@ -5176,12 +5176,18 @@ impl PainterApp {
             }
             labeled(ui, "ID from", |ui| {
                 let source_before_controls = s.id_source;
-                ui.radio_value(&mut s.id_source, IdSource::MeshParts, "Mesh parts");
-                ui.radio_value(&mut s.id_source, IdSource::Materials, "Materials");
-                ui.add_enabled_ui(s.high_poly.is_none(), |ui| {
-                    ui.radio_value(&mut s.id_source, IdSource::VertexColors, "Vertex colors")
-                        .on_hover_text("Vertex colors belong to the loaded low-poly mesh. With a high-poly projection, bake the other maps first, then rebake only the ID map from the Vertex ID panel.");
+                let source_enabled = self.bake_job.is_none();
+                ui.add_enabled_ui(source_enabled, |ui| {
+                    ui.radio_value(&mut s.id_source, IdSource::MeshParts, "Mesh parts");
+                    ui.radio_value(&mut s.id_source, IdSource::Materials, "Materials");
+                    ui.add_enabled_ui(s.high_poly.is_none(), |ui| {
+                        ui.radio_value(&mut s.id_source, IdSource::VertexColors, "Vertex colors")
+                            .on_hover_text("Vertex colors belong to the loaded low-poly mesh. With a high-poly projection, bake the other maps first, then rebake only the ID map from the Vertex ID panel.");
+                    });
                 });
+                if !source_enabled {
+                    ui.label(egui::RichText::new("ID source locked until the current bake finishes.").small().color(theme::TEXT_DIM));
+                }
                 id_source_user_changed |= s.id_source != source_before_controls;
             });
             if s.id_source == IdSource::VertexColors && s.high_poly.is_some() {
