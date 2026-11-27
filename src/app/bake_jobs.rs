@@ -683,7 +683,7 @@ mod project_bake_source_plan_tests {
         };
         snapshot.ao_rays = 73;
         snapshot.ao_distance = 0.41;
-        snapshot.custom.push(crate::bake::CustomMap::default());
+        snapshot.custom.push(crate::bake::CustomKind::Flow.default_map());
 
         let followup = id_only_settings(snapshot.clone());
 
