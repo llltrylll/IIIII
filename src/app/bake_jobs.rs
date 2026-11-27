@@ -76,36 +76,51 @@ impl PainterApp {
         self.start_bake_set(self.sets.active, ctx);
     }
 
-    /// Starts an ID-only batch. If another bake is active, defer this request
-    /// until its entire queue finishes; never drop an in-flight GPU run.
+    /// Rebuilds only the active Texture Set's ID map from the loaded low-poly
+    /// vertex colors. Other sets keep their own saved ID source and map.
+    /// If another bake is active, remember this set's index and run it afterward.
     pub(super) fn start_bake_id_only(&mut self, ctx: &egui::Context) {
+        let set = self.sets.active;
         let mut project_settings_changed = false;
         if self.bake_settings.id_source != IdSource::VertexColors {
             self.bake_settings.id_source = IdSource::VertexColors;
             project_settings_changed = true;
         }
         self.sets.id_source_preferences.resize(self.mesh.sets.len(), self.baked_id_source);
-        for source in &mut self.sets.id_source_preferences {
-            if *source != IdSource::VertexColors {
-                *source = IdSource::VertexColors;
-                project_settings_changed = true;
-            }
+        if self.sets.id_source_preferences.get(set).copied() != Some(IdSource::VertexColors) {
+            self.sets.id_source_preferences[set] = IdSource::VertexColors;
+            project_settings_changed = true;
         }
         if project_settings_changed {
             self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
         }
-        if self.bake_job.is_some() {
-            self.deferred_id_rebake = true;
-            self.status = "Vertex ID rebake queued; the current bake will finish first.".into();
+
+        if let Some(job) = &self.bake_job {
+            let already_running = match job {
+                BakeJob::Preparing { set: running_set, id_only, settings, .. }
+                | BakeJob::Running { set: running_set, id_only, settings, .. } => {
+                    *running_set == set && *id_only && settings.id_source == IdSource::VertexColors
+                }
+            };
+            if !already_running && !self.deferred_id_rebake_sets.contains(&set) {
+                self.deferred_id_rebake_sets.push_back(set);
+            }
+            self.status = if already_running {
+                "This Texture Set is already baking its Vertex Color ID map.".into()
+            } else {
+                "Vertex ID rebake queued for this Texture Set; the current bake will finish first.".into()
+            };
             return;
         }
+
         self.bake_id_only = true;
-        let active = self.sets.active;
-        self.sets.bake_queue = (0..self.mesh.sets.len()).filter(|&k| k != active).collect();
+        let mut queued = std::mem::take(&mut self.deferred_id_rebake_sets);
+        queued.retain(|&queued_set| queued_set != set);
+        self.sets.bake_queue = queued;
         self.bake_batch_settings = Some(self.job_bake_settings());
-        self.bake_batch_id_sources = None;
+        self.bake_batch_id_sources = Some(self.sets.id_source_preferences.clone());
         self.bake_batch_followup_id_sets.clear();
-        self.start_bake_set(active, ctx);
+        self.start_bake_set(set, ctx);
     }
 
     /// Bakes every Texture Set, the edited one first.
@@ -156,18 +171,17 @@ impl PainterApp {
     }
 
     fn start_deferred_id_rebake(&mut self, ctx: &egui::Context) {
-        if !self.deferred_id_rebake || self.bake_job.is_some() {
+        if self.bake_job.is_some() {
             return;
         }
-        self.deferred_id_rebake = false;
+        let Some(set) = self.deferred_id_rebake_sets.pop_front() else { return };
         self.bake_settings.id_source = IdSource::VertexColors;
         self.bake_id_only = true;
-        let active = self.sets.active;
-        self.sets.bake_queue = (0..self.mesh.sets.len()).filter(|&k| k != active).collect();
+        self.sets.bake_queue = std::mem::take(&mut self.deferred_id_rebake_sets);
         self.bake_batch_settings = Some(self.job_bake_settings());
-        self.bake_batch_id_sources = None;
+        self.bake_batch_id_sources = Some(self.sets.id_source_preferences.clone());
         self.bake_batch_followup_id_sets.clear();
-        self.start_bake_set(active, ctx);
+        self.start_bake_set(set, ctx);
     }
 
     /// Cancels the remaining sets after a failed batch member, preserving the
