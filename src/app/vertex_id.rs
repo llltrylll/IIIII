@@ -549,7 +549,7 @@ mod tests {
     #[test]
     fn generator_keeps_up_to_eight_id_colors() {
         let mut g = crate::engine::GenKind::IdMask.default_generator();
-        assert_eq!(g.id_colors(), vec![[0.95, 0.2375, 0.2375]]);
+        assert_eq!(g.id_colors(), vec![[1.0, 0.0, 0.0]]);
         let many: Vec<[f32; 3]> = (0..12).map(|i| [i as f32 / 12.0, 0.0, 0.0]).collect();
         g.set_id_colors(&many);
         assert_eq!(g.id_colors(), many[..MAX_ID_COLORS].to_vec());
