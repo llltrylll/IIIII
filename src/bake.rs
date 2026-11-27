@@ -3774,6 +3774,39 @@ mod vertex_color_id_source_tests {
     }
 
     #[test]
+    fn materials_id_source_keeps_one_label_for_disconnected_faces() {
+        use crate::mesh::Mesh;
+        use glam::{Vec2, Vec3};
+
+        let positions = vec![
+            Vec3::new(-1.0, -1.0, 0.0),
+            Vec3::new(-0.2, -1.0, 0.0),
+            Vec3::new(-1.0, -0.2, 0.0),
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::new(0.2, 1.0, 0.0),
+            Vec3::new(1.0, 0.2, 0.0),
+        ];
+        let normals = Some(vec![Vec3::Z; positions.len()]);
+        let uvs = vec![
+            Vec2::new(0.0, 0.0), Vec2::new(0.4, 0.0), Vec2::new(0.0, 0.4),
+            Vec2::new(0.6, 0.6), Vec2::new(1.0, 0.6), Vec2::new(0.6, 1.0),
+        ];
+        let mesh = Mesh::from_parts(
+            "one material, disconnected parts".into(),
+            positions,
+            normals,
+            uvs,
+            vec![0, 1, 2, 3, 4, 5],
+        );
+        assert_eq!(mesh.sets.len(), 1);
+        let settings = BakeSettings { id_source: IdSource::Materials, ..Default::default() };
+
+        let prepared = prepare(&mesh, &settings, 0).expect("prepare one-material mesh");
+        assert_eq!(prepared.id_regions.len(), 1, "all disconnected faces share the one material ID");
+        assert_eq!(prepared.id_regions[0].triangles, 2);
+    }
+
+    #[test]
     fn merging_id_regions_preserves_the_full_bake_report() {
         use super::{BakeReport, IdRegion};
         use std::sync::atomic::{AtomicBool, AtomicU32};
