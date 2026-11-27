@@ -1293,14 +1293,15 @@ impl PainterApp {
                 Err(e) => self.status = format!("A material graph didn't load: {e}"),
             }
         }
-        self.sets.baked_id_sources.resize(set_count, self.baked_id_source);
+        let legacy_baked_id_source = self.baked_id_source;
+        self.sets.baked_id_sources.resize(set_count, legacy_baked_id_source);
         for (k, sv) in set_values.iter().enumerate().take(set_count) {
             self.switch_set(k);
             self.sets.baked_id_sources[k] = match s(sv, "baked_id_source") {
                 Some("Materials") => IdSource::Materials,
                 Some("VertexColors") => IdSource::VertexColors,
                 Some("MeshParts") => IdSource::MeshParts,
-                _ => self.baked_id_source,
+                _ => legacy_baked_id_source,
             };
             // Replacing a document must drop old layer textures, not retain them in Undo.
             self.engine.restore_layers(Vec::new());
