@@ -439,7 +439,9 @@ impl GenKind {
             invert: false,
             seed: 0.0,
             edge_width: 0.04,
-            id_color: [0.95, 0.2375, 0.2375],
+            // Compatibility fallback for projects without a persisted ID color.
+            // New ID masks are initialized from their active source in app::new_generator.
+            id_color: [1.0, 0.0, 0.0],
             id_tolerance: 0.15,
             id_more: [[0.0; 3]; MAX_ID_COLORS - 1],
             id_count: 1,
