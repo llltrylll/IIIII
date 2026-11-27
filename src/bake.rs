@@ -662,6 +662,12 @@ fn id_color(i: u32) -> [f32; 4] {
     [r + m, g + m, b + m, 1.0]
 }
 
+/// First categorical color used by Mesh Parts and Materials ID maps.
+pub fn first_id_color() -> [f32; 3] {
+    let color = id_color(0);
+    [color[0], color[1], color[2]]
+}
+
 /// Connected components over welded positions; returns the part of each triangle.
 pub(crate) fn components(positions: &[Vec3], indices: &[u32]) -> (Vec<u32>, u32) {
     components_cancellable(positions, indices, &AtomicBool::new(false))
