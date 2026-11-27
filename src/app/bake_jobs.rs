@@ -34,6 +34,7 @@ impl PainterApp {
         self.sets.bake_queue.clear();
         self.bake_batch_settings = Some(self.job_bake_settings());
         self.bake_batch_id_sources = None;
+        self.bake_batch_followup_id_sets.clear();
         self.start_bake_set(self.sets.active, ctx);
     }
 
@@ -51,6 +52,7 @@ impl PainterApp {
         self.sets.bake_queue = (0..self.mesh.sets.len()).filter(|&k| k != active).collect();
         self.bake_batch_settings = Some(self.job_bake_settings());
         self.bake_batch_id_sources = None;
+        self.bake_batch_followup_id_sets.clear();
         self.start_bake_set(active, ctx);
     }
 
@@ -65,6 +67,7 @@ impl PainterApp {
         self.sets.bake_queue = (0..self.mesh.sets.len()).filter(|&k| k != active).collect();
         self.bake_batch_settings = Some(self.job_bake_settings());
         self.bake_batch_id_sources = None;
+        self.bake_batch_followup_id_sets.clear();
         self.start_bake_set(active, ctx);
     }
 
@@ -80,7 +83,27 @@ impl PainterApp {
         let active = self.sets.active;
         self.sets.bake_queue = (0..self.mesh.sets.len()).filter(|&k| k != active).collect();
         self.bake_batch_settings = Some(self.job_bake_settings());
-        self.bake_batch_id_sources = Some(self.sets.baked_id_sources.clone());
+        self.bake_batch_followup_id_sets.clear();
+        let mut sources = self.sets.baked_id_sources.clone();
+        if self.bake_settings.high_poly.is_some() {
+            // A Vertex Color ID map belongs to the low-poly mesh and cannot be
+            // generated in the same pass as a high-poly projection. First bake
+            // the full maps from Mesh Parts/Materials, then replace only the ID
+            // map for each saved Vertex Color set.
+            let fallback = match self.bake_settings.id_source {
+                IdSource::VertexColors => IdSource::MeshParts,
+                source => source,
+            };
+            let ordered_sets = std::iter::once(active)
+                .chain((0..self.mesh.sets.len()).filter(|&k| k != active));
+            for set in ordered_sets {
+                if sources.get(set).copied() == Some(IdSource::VertexColors) {
+                    sources[set] = fallback;
+                    self.bake_batch_followup_id_sets.push_back(set);
+                }
+            }
+        }
+        self.bake_batch_id_sources = Some(sources);
         self.start_bake_set(active, ctx);
     }
 
@@ -95,6 +118,7 @@ impl PainterApp {
         self.sets.bake_queue = (0..self.mesh.sets.len()).filter(|&k| k != active).collect();
         self.bake_batch_settings = Some(self.job_bake_settings());
         self.bake_batch_id_sources = None;
+        self.bake_batch_followup_id_sets.clear();
         self.start_bake_set(active, ctx);
     }
 
@@ -105,6 +129,7 @@ impl PainterApp {
         self.sets.bake_queue.clear();
         self.bake_batch_settings = None;
         self.bake_batch_id_sources = None;
+        self.bake_batch_followup_id_sets.clear();
         self.bake_id_only = false;
         self.start_deferred_id_rebake(ctx);
     }
@@ -195,6 +220,15 @@ impl PainterApp {
     pub(super) fn bake_next(&mut self, ctx: &egui::Context) {
         self.bake_job = None;
         if let Some(set) = self.sets.bake_queue.pop_front() {
+            self.start_bake_set(set, ctx);
+        } else if let Some(set) = self.bake_batch_followup_id_sets.pop_front() {
+            // The full high-poly pass is done. Rebuild only the ID map for the
+            // saved Vertex Color sets, keeping AO/normal/height and all other
+            // high-poly maps from the just-completed pass.
+            self.bake_id_only = true;
+            self.bake_batch_settings = Some(self.job_bake_settings());
+            self.bake_batch_id_sources = Some(vec![IdSource::VertexColors; self.mesh.sets.len()]);
+            self.sets.bake_queue = std::mem::take(&mut self.bake_batch_followup_id_sets);
             self.start_bake_set(set, ctx);
         } else {
             self.bake_batch_settings = None;
