@@ -1173,10 +1173,11 @@ fn vertex_color_palette_impl(
             check_cancelled()?;
         }
         for color in corners {
-            let count = counts.entry(*color).or_default();
-            *count = count.saturating_add(1);
+            {
+                let count = counts.entry(*color).or_default();
+                *count = count.saturating_add(1);
+            }
             if counts.len() > HASH_DISTINCT_LIMIT {
-                drop(counts);
                 return vertex_color_palette_sorted(colors, cancel);
             }
         }
