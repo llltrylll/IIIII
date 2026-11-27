@@ -4985,6 +4985,7 @@ impl PainterApp {
 
     fn bake_window(&mut self, ctx: &egui::Context) {
         const BAKE_WIDTH: f32 = 520.0;
+        let id_source_before = self.bake_settings.id_source;
         let mut open = self.show_bake;
         // Against the right edge, so the 3D view (and the gizmos in it) stays visible.
         let screen = ctx.content_rect();
@@ -5224,6 +5225,9 @@ impl PainterApp {
                 }
             });
         });
+        if self.bake_settings.id_source != id_source_before {
+            self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
+        }
         self.show_bake = open;
     }
 
