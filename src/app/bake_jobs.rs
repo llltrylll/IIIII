@@ -51,6 +51,25 @@ fn next_full_bake_id_source(current: IdSource, high_poly: bool, has_vertex_color
     }
 }
 
+/// Applies an explicit source selection to all Texture Sets, filling any
+/// missing legacy entries from the supplied active-set fallback.
+fn set_id_source_preferences(
+    preferences: &mut Vec<IdSource>,
+    set_count: usize,
+    fallback: IdSource,
+    source: IdSource,
+) -> bool {
+    preferences.resize(set_count, fallback);
+    let mut changed = false;
+    for preference in preferences {
+        if *preference != source {
+            *preference = source;
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Adds a deferred per-set ID pass once. Requests for the set already running
 /// or already queued in the current ID-only batch do not need another pass.
 fn queue_deferred_id_rebake(
@@ -118,15 +137,12 @@ impl PainterApp {
     /// Texture Set for subsequent full bakes. The source actually baked stays
     /// per-set and is updated only when a bake completes.
     pub(super) fn prefer_id_source_for_all_sets(&mut self, source: IdSource) -> bool {
-        self.sets.id_source_preferences.resize(self.mesh.sets.len(), self.baked_id_source);
-        let mut changed = false;
-        for preference in &mut self.sets.id_source_preferences {
-            if *preference != source {
-                *preference = source;
-                changed = true;
-            }
-        }
-        changed
+        set_id_source_preferences(
+            &mut self.sets.id_source_preferences,
+            self.mesh.sets.len(),
+            self.baked_id_source,
+            source,
+        )
     }
 
     /// Records the requested Vertex Color source for a set list. A currently
@@ -556,9 +572,31 @@ impl PainterApp {
 
 #[cfg(test)]
 mod project_bake_source_plan_tests {
-    use super::{next_full_bake_id_source, project_bake_source_plan, queue_deferred_id_rebake};
+    use super::{next_full_bake_id_source, project_bake_source_plan, queue_deferred_id_rebake, set_id_source_preferences};
     use crate::bake::IdSource;
     use std::collections::VecDeque;
+
+    #[test]
+    fn explicit_id_source_selection_updates_all_texture_set_preferences_once() {
+        let mut preferences = vec![
+            IdSource::Materials,
+            IdSource::VertexColors,
+            IdSource::MeshParts,
+        ];
+        assert!(set_id_source_preferences(
+            &mut preferences,
+            4,
+            IdSource::Materials,
+            IdSource::VertexColors,
+        ));
+        assert_eq!(preferences, vec![IdSource::VertexColors; 4]);
+        assert!(!set_id_source_preferences(
+            &mut preferences,
+            4,
+            IdSource::Materials,
+            IdSource::VertexColors,
+        ));
+    }
 
     #[test]
     fn id_only_vertex_color_pass_keeps_the_next_full_bake_source_valid() {
