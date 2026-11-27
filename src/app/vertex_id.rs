@@ -484,6 +484,27 @@ mod tests {
             .map(|entry| ((entry.rgb[0] as u32) << 16) | ((entry.rgb[1] as u32) << 8) | entry.rgb[2] as u32)
             .collect();
         assert_eq!(selected, (0..PALETTE_MAX as u32).collect::<Vec<_>>());
+
+        // The panel and CPU baker must expose precisely the same ordered labels,
+        // including the stable RGB tie-breaker on the high-cardinality path.
+        let (baked, baked_distinct) = crate::bake::vertex_color_palette(&colors);
+        assert_eq!(baked_distinct, p.distinct);
+        assert_eq!(
+            baked,
+            p.entries.iter().map(|entry| (entry.rgb, entry.corners)).collect::<Vec<_>>(),
+        );
+
+        let low_cardinality = vec![
+            [[240, 10, 20], [0, 200, 30], [240, 10, 20]],
+            [[0, 200, 30], [240, 10, 20], [0, 200, 30]],
+        ];
+        let ui_low = palette(&low_cardinality);
+        let (bake_low, bake_low_distinct) = crate::bake::vertex_color_palette(&low_cardinality);
+        assert_eq!(bake_low_distinct, ui_low.distinct);
+        assert_eq!(
+            bake_low,
+            ui_low.entries.iter().map(|entry| (entry.rgb, entry.corners)).collect::<Vec<_>>(),
+        );
     }
 
     #[test]
