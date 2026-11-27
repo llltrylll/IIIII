@@ -2822,7 +2822,9 @@ impl PainterApp {
                         }
                         use crate::engine::{MaskBlend, MaskLayer, MaskSource};
                         let palette = (kind == GenKind::IdMask).then(|| self.vertex_id.palette_for(&self.mesh).clone());
-                        let id_source = if self.engine.has_bake {
+                        let id_source = if palette.as_ref().is_some_and(|p| !p.entries.is_empty()) {
+                            IdSource::VertexColors
+                        } else if self.engine.has_bake {
                             self.sets.baked_id_sources.get(self.sets.active).copied().unwrap_or(self.baked_id_source)
                         } else {
                             self.bake_settings.id_source
@@ -2838,7 +2840,9 @@ impl PainterApp {
                 }
                 Action::AddGenerator(kind) => {
                     let palette = (kind == GenKind::IdMask).then(|| self.vertex_id.palette_for(&self.mesh).clone());
-                    let id_source = if self.engine.has_bake {
+                    let id_source = if palette.as_ref().is_some_and(|p| !p.entries.is_empty()) {
+                        IdSource::VertexColors
+                    } else if self.engine.has_bake {
                         self.sets.baked_id_sources.get(self.sets.active).copied().unwrap_or(self.baked_id_source)
                     } else {
                         self.bake_settings.id_source
