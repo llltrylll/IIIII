@@ -39,6 +39,19 @@ fn project_bake_source_plan(
 
 use super::*;
 
+/// Settings for a categorical ID-only pass. When used as a high-poly follow-up,
+/// the caller supplies the immutable full-bake snapshot so changes made in the
+/// Bake window while the full pass runs cannot leak into the follow-up cache key.
+fn id_only_settings(mut settings: bake::BakeSettings) -> bake::BakeSettings {
+    settings.id_source = IdSource::VertexColors;
+    settings.maps = 0;
+    settings.custom.clear();
+    settings.high_poly = None;
+    settings.cage = None;
+    settings.cage_paint = None;
+    settings
+}
+
 /// The regular bake source must remain valid for the selected projection.
 /// Vertex Colors is applied only as the ID-only job's per-set override when a
 /// high-poly source is selected; after that job, the next full bake still uses
@@ -137,16 +150,12 @@ impl PainterApp {
 
     /// Settings for the next bake. ID-only jobs retain only the categorical ID map.
     pub(super) fn job_bake_settings(&self) -> bake::BakeSettings {
-        let mut settings = self.bake_settings.clone();
+        let settings = self.bake_settings.clone();
         if self.bake_id_only {
-            settings.maps = 0;
-            settings.custom.clear();
-            // ID masks and the eyedropper always read the loaded low-poly mesh.
-            settings.high_poly = None;
-            settings.cage = None;
-            settings.cage_paint = None;
+            id_only_settings(settings)
+        } else {
+            settings
         }
-        settings
     }
 
     /// Starts a full bake of the active Texture Set.
@@ -482,7 +491,8 @@ impl PainterApp {
             // saved Vertex Color sets, keeping AO/normal/height and all other
             // high-poly maps from the just-completed pass.
             self.bake_id_only = true;
-            self.bake_batch_settings = Some(self.job_bake_settings());
+            let base_settings = self.bake_batch_settings.clone().unwrap_or_else(|| self.bake_settings.clone());
+            self.bake_batch_settings = Some(id_only_settings(base_settings));
             self.bake_batch_id_sources = Some(vec![IdSource::VertexColors; self.mesh.sets.len()]);
             self.sets.bake_queue = std::mem::take(&mut self.bake_batch_followup_id_sets);
             self.start_bake_set(set, ctx);
@@ -634,7 +644,7 @@ impl PainterApp {
 #[cfg(test)]
 mod project_bake_source_plan_tests {
     use super::{
-        next_full_bake_id_source, project_bake_source_plan, queue_deferred_id_rebake,
+        id_only_settings, next_full_bake_id_source, project_bake_source_plan, queue_deferred_id_rebake,
         set_id_source_preferences, vertex_color_rebake_targets, vertex_id_rebake_already_scheduled,
     };
     use crate::bake::IdSource;
@@ -660,6 +670,32 @@ mod project_bake_source_plan_tests {
             IdSource::Materials,
             IdSource::VertexColors,
         ));
+    }
+
+    #[test]
+    fn high_poly_vertex_color_followup_changes_only_id_only_fields_on_snapshot() {
+        let mut snapshot = crate::bake::BakeSettings {
+            quality: crate::bake::Quality::High,
+            maps: crate::bake::ALL_MAPS,
+            high_poly: Some(std::path::PathBuf::from("project-high.fbx")),
+            cage: Some(std::path::PathBuf::from("project-cage.fbx")),
+            ..Default::default()
+        };
+        snapshot.ao_rays = 73;
+        snapshot.ao_distance = 0.41;
+        snapshot.custom.push(crate::bake::CustomMap::default());
+
+        let followup = id_only_settings(snapshot.clone());
+
+        assert_eq!(followup.id_source, IdSource::VertexColors);
+        assert_eq!(followup.maps, 0);
+        assert!(followup.custom.is_empty());
+        assert!(followup.high_poly.is_none());
+        assert!(followup.cage.is_none());
+        assert!(followup.cage_paint.is_none());
+        assert_eq!(followup.quality, snapshot.quality);
+        assert_eq!(followup.ao_rays, snapshot.ao_rays);
+        assert_eq!(followup.ao_distance, snapshot.ao_distance);
     }
 
     #[test]
