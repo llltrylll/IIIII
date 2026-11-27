@@ -114,6 +114,25 @@ impl PainterApp {
         self.start_bake_set(self.sets.active, ctx);
     }
 
+    /// Records the requested Vertex Color source for a set list. A currently
+    /// running full bake can finish after a request and write its older source
+    /// back, so deferred targets are reasserted immediately before their batch.
+    fn prefer_vertex_colors_for_id_sets(&mut self, sets: &[usize]) {
+        self.sets.id_source_preferences.resize(self.mesh.sets.len(), self.baked_id_source);
+        let mut changed = false;
+        for &set in sets {
+            if let Some(source) = self.sets.id_source_preferences.get_mut(set) {
+                if *source != IdSource::VertexColors {
+                    *source = IdSource::VertexColors;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
+        }
+    }
+
     /// Rebuilds only the active Texture Set's ID map from the loaded low-poly
     /// vertex colors. Other sets keep their own saved ID source and map.
     /// If another bake is active, remember this set's index and run it afterward.
@@ -133,11 +152,9 @@ impl PainterApp {
             self.bake_settings.id_source = next_source;
             project_settings_changed = true;
         }
-        self.sets.id_source_preferences.resize(self.mesh.sets.len(), self.baked_id_source);
-        if self.sets.id_source_preferences.get(set).copied() != Some(IdSource::VertexColors) {
-            self.sets.id_source_preferences[set] = IdSource::VertexColors;
-            project_settings_changed = true;
-        }
+        let previous_preference = self.sets.id_source_preferences.get(set).copied();
+        self.prefer_vertex_colors_for_id_sets(&[set]);
+        project_settings_changed |= previous_preference != Some(IdSource::VertexColors);
         if project_settings_changed {
             self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
         }
@@ -227,6 +244,10 @@ impl PainterApp {
             return;
         }
         let Some(set) = self.deferred_id_rebake_sets.pop_front() else { return };
+        let mut requested_sets = Vec::with_capacity(self.deferred_id_rebake_sets.len() + 1);
+        requested_sets.push(set);
+        requested_sets.extend(self.deferred_id_rebake_sets.iter().copied());
+        self.prefer_vertex_colors_for_id_sets(&requested_sets);
         let next_source = next_full_bake_id_source(
             self.bake_settings.id_source,
             self.bake_settings.high_poly.is_some(),
