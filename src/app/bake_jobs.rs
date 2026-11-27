@@ -72,6 +72,28 @@ fn set_id_source_preferences(
 
 /// Adds a deferred per-set ID pass once. Requests for the set already running
 /// or already queued in the current ID-only batch do not need another pass.
+fn vertex_color_rebake_targets(
+    active: usize,
+    set_count: usize,
+    baked_sources: &[IdSource],
+    preferences: &[IdSource],
+) -> Vec<usize> {
+    let mut targets = Vec::new();
+    if active < set_count {
+        targets.push(active);
+    }
+    for set in 0..set_count {
+        if baked_sources.get(set) == Some(&IdSource::VertexColors)
+            || preferences.get(set) == Some(&IdSource::VertexColors)
+        {
+            if !targets.contains(&set) {
+                targets.push(set);
+            }
+        }
+    }
+    targets
+}
+
 fn queue_deferred_id_rebake(
     queue: &mut std::collections::VecDeque<usize>,
     set: usize,
@@ -162,68 +184,91 @@ impl PainterApp {
         changed
     }
 
-    /// Rebuilds only the active Texture Set's ID map from the loaded low-poly
-    /// vertex colors. Other sets keep their own saved ID source and map.
-    /// If another bake is active, remember this set's index and run it afterward.
+    /// Rebuilds the active Texture Set's ID map from the loaded low-poly colors.
     pub(super) fn start_bake_id_only(&mut self, ctx: &egui::Context) {
-        let set = self.sets.active;
+        let active = self.sets.active;
+        self.start_bake_id_only_for_sets(&[active], ctx);
+    }
+
+    /// Rebuilds only the ID maps for the requested sets. A global vertex-color
+    /// reimport uses this to refresh every set whose current or preferred source
+    /// is Vertex Colors, while a normal panel action passes only the active set.
+    pub(super) fn start_bake_id_only_for_sets(&mut self, requested: &[usize], ctx: &egui::Context) {
         if !vertex_id::has_colors(&self.mesh) {
             self.status = "Vertex ID rebake requires per-corner vertex colors. Import them from the original FBX/OBJ first.".into();
             return;
         }
-        let mut project_settings_changed = false;
+
+        let mut targets = Vec::new();
+        for &set in requested {
+            if set < self.mesh.sets.len() && !targets.contains(&set) {
+                targets.push(set);
+            }
+        }
+        if targets.is_empty() {
+            self.status = "No Texture Sets were selected for the Vertex ID rebake.".into();
+            return;
+        }
+
         let next_source = next_full_bake_id_source(
             self.bake_settings.id_source,
             self.bake_settings.high_poly.is_some(),
             vertex_id::has_colors(&self.mesh),
         );
-        if self.bake_settings.id_source != next_source {
-            self.bake_settings.id_source = next_source;
-            project_settings_changed = true;
-        }
-        project_settings_changed |= self.prefer_vertex_colors_for_id_sets(&[set]);
+        let mut project_settings_changed = self.bake_settings.id_source != next_source;
+        self.bake_settings.id_source = next_source;
+        project_settings_changed |= self.prefer_vertex_colors_for_id_sets(&targets);
         if project_settings_changed {
             self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
         }
 
         if let Some(job) = &self.bake_job {
-            let already_running = match job {
-                BakeJob::Preparing { set: running_set, id_only, settings, .. }
-                | BakeJob::Running { set: running_set, id_only, settings, .. } => {
-                    *running_set == set && *id_only && settings.id_source == IdSource::VertexColors
+            let mut added = 0usize;
+            for &set in &targets {
+                let already_running = match job {
+                    BakeJob::Preparing { set: running_set, id_only, settings, .. }
+                    | BakeJob::Running { set: running_set, id_only, settings, .. } => {
+                        *running_set == set && *id_only && settings.id_source == IdSource::VertexColors
+                    }
+                };
+                let already_queued_in_id_batch = self.bake_id_only && self.sets.bake_queue.contains(&set);
+                let already_planned_as_high_poly_followup = self.bake_batch_followup_id_sets.contains(&set);
+                if already_queued_in_id_batch {
+                    if let Some(source) = self.bake_batch_id_sources.as_mut().and_then(|sources| sources.get_mut(set)) {
+                        *source = IdSource::VertexColors;
+                    }
                 }
-            };
-            let already_queued_in_id_batch = self.bake_id_only && self.sets.bake_queue.contains(&set);
-            let already_planned_as_high_poly_followup = self.bake_batch_followup_id_sets.contains(&set);
-            if already_queued_in_id_batch {
-                if let Some(source) = self.bake_batch_id_sources.as_mut().and_then(|sources| sources.get_mut(set)) {
-                    *source = IdSource::VertexColors;
+                let already_scheduled = already_running
+                    || already_queued_in_id_batch
+                    || already_planned_as_high_poly_followup;
+                if queue_deferred_id_rebake(
+                    &mut self.deferred_id_rebake_sets,
+                    set,
+                    already_scheduled,
+                ) {
+                    added += 1;
                 }
             }
-            let already_scheduled = already_running
-                || already_queued_in_id_batch
-                || already_planned_as_high_poly_followup;
-            let queued = queue_deferred_id_rebake(
-                &mut self.deferred_id_rebake_sets,
-                set,
-                already_scheduled,
-            );
-            self.status = if already_scheduled || !queued {
-                "This Texture Set already has a Vertex Color ID bake running or queued.".into()
+            self.status = if added == 0 {
+                "The requested Texture Sets already have Vertex Color ID bakes running or queued.".into()
             } else {
-                "Vertex ID rebake queued for this Texture Set; the current bake will finish first.".into()
+                format!("Queued Vertex Color ID rebakes for {added} Texture Set(s); the current bake will finish first.")
             };
             return;
         }
 
+        let first = targets[0];
         self.bake_id_only = true;
         let mut queued = std::mem::take(&mut self.deferred_id_rebake_sets);
-        queued.retain(|&queued_set| queued_set != set);
+        for &set in targets.iter().skip(1) {
+            queue_deferred_id_rebake(&mut queued, set, false);
+        }
+        queued.retain(|&queued_set| queued_set != first);
         self.sets.bake_queue = queued;
         self.bake_batch_settings = Some(self.job_bake_settings());
         self.bake_batch_id_sources = Some(self.sets.id_source_preferences.clone());
         self.bake_batch_followup_id_sets.clear();
-        self.start_bake_set(set, ctx);
+        self.start_bake_set(first, ctx);
     }
 
     /// Bakes every Texture Set, the edited one first.
@@ -574,7 +619,10 @@ impl PainterApp {
 
 #[cfg(test)]
 mod project_bake_source_plan_tests {
-    use super::{next_full_bake_id_source, project_bake_source_plan, queue_deferred_id_rebake, set_id_source_preferences};
+    use super::{
+        next_full_bake_id_source, project_bake_source_plan, queue_deferred_id_rebake,
+        set_id_source_preferences, vertex_color_rebake_targets,
+    };
     use crate::bake::IdSource;
     use std::collections::VecDeque;
 
@@ -625,6 +673,26 @@ mod project_bake_source_plan_tests {
         assert_eq!(
             next_full_bake_id_source(IdSource::VertexColors, false, false),
             IdSource::MeshParts,
+        );
+    }
+
+    #[test]
+    fn global_vertex_color_reimport_targets_only_active_and_vertex_color_sets() {
+        let baked = [
+            IdSource::MeshParts,
+            IdSource::VertexColors,
+            IdSource::Materials,
+            IdSource::MeshParts,
+        ];
+        let preferred = [
+            IdSource::Materials,
+            IdSource::Materials,
+            IdSource::VertexColors,
+            IdSource::MeshParts,
+        ];
+        assert_eq!(
+            vertex_color_rebake_targets(0, 4, &baked, &preferred),
+            vec![0, 1, 2],
         );
     }
 
