@@ -20,7 +20,8 @@ impl PainterApp {
             egui::ComboBox::from_id_salt(("gen", salt)).selected_text(g.kind.name()).show_ui(ui, |ui| {
                 for k in GenKind::ALL {
                     if ui.selectable_label(g.kind == k, k.name()).clicked() && g.kind != k {
-                        *g = new_generator(k, custom);
+                        let source = if info.has_bake { info.baked_source } else { info.next_source };
+                        *g = new_generator(k, custom, source, info.palette);
                         *pick_target = None;
                         dirty = true;
                     }
@@ -55,6 +56,7 @@ impl PainterApp {
             has_colors: vertex_id::has_colors(&self.mesh),
             has_bake: self.engine.has_bake,
             baked_source: self.sets.baked_id_sources.get(self.sets.active).copied().unwrap_or(self.baked_id_source),
+            next_source: self.bake_settings.id_source,
         };
         section(ui, "Mask");
         self.missing_maps_note(ui, idx);
@@ -109,6 +111,7 @@ impl PainterApp {
             has_colors: vertex_id::has_colors(&self.mesh),
             has_bake: self.engine.has_bake,
             baked_source: self.sets.baked_id_sources.get(self.sets.active).copied().unwrap_or(self.baked_id_source),
+            next_source: self.bake_settings.id_source,
         };
         let (mut remove, mut swap) = (None, None);
         let mut structure_changed = false;
@@ -168,7 +171,9 @@ impl PainterApp {
                 if ui.button(k.name()).clicked() {
                     // On a black mask nothing shows through Multiply: reveal with Add instead.
                     let blend = if mask.black_base && mask.layers.is_empty() { MaskBlend::Add } else { MaskBlend::Multiply };
-                    mask.layers.push(MaskLayer { source: MaskSource::Generator(new_generator(k, &custom)), blend, opacity: 1.0, enabled: true });
+                    let source = if id_info.has_bake { id_info.baked_source } else { id_info.next_source };
+                    let generator = new_generator(k, &custom, source, id_info.palette);
+                    mask.layers.push(MaskLayer { source: MaskSource::Generator(generator), blend, opacity: 1.0, enabled: true });
                     dirty = true;
                     structure_changed = true;
                     ui.close();
