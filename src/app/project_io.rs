@@ -1274,8 +1274,9 @@ impl PainterApp {
         // The worker already built the CPU mesh, UV edges and visible BVH.
         // Only GPU mesh/engine creation remains on the device-owning thread.
         self.bake_settings = bs;
-        // The per-set fields in version 5 are authoritative; the old global
-        // value above remains the fallback for projects saved by earlier builds.
+        // The per-set fields were introduced in version 5. Version 6 also
+        // stores each set's preferred future ID source separately from its
+        // currently baked source, which may differ during high-poly restoration.
         self.sets.baked_id_sources.clear();
         self.sets.id_source_preferences.clear();
         let sizes: Vec<u32> = set_values.iter().map(|sv| sv["resolution"].as_u64().unwrap_or(2048) as u32).collect();
