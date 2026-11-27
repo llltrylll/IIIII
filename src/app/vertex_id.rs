@@ -114,6 +114,24 @@ pub fn to_f32(rgb: [u8; 3]) -> [f32; 3] {
     rgb.map(|v| v as f32 / 255.0)
 }
 
+/// Which ID palette a newly created ID generator should match.
+/// Vertex colors take priority when present because the panel will rebake this
+/// set's ID map from that palette; otherwise match the current map or next bake.
+pub fn default_generator_source(
+    has_vertex_colors: bool,
+    has_bake: bool,
+    baked_source: IdSource,
+    next_source: IdSource,
+) -> IdSource {
+    if has_vertex_colors {
+        IdSource::VertexColors
+    } else if has_bake {
+        baked_source
+    } else {
+        next_source
+    }
+}
+
 /// Source-aware default for a newly created Vertex ID mask generator.
 pub fn default_mask_color(source: IdSource, palette: Option<&Palette>) -> [f32; 3] {
     match source {
@@ -533,6 +551,22 @@ mod tests {
             .map(|entry| ((entry.rgb[0] as u32) << 16) | ((entry.rgb[1] as u32) << 8) | entry.rgb[2] as u32)
             .collect();
         assert_eq!(selected, (0..PALETTE_MAX as u32).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn new_id_generator_prefers_vertex_colors_when_the_mesh_has_them() {
+        assert_eq!(
+            default_generator_source(true, true, IdSource::Materials, IdSource::MeshParts),
+            IdSource::VertexColors,
+        );
+        assert_eq!(
+            default_generator_source(false, true, IdSource::Materials, IdSource::MeshParts),
+            IdSource::Materials,
+        );
+        assert_eq!(
+            default_generator_source(false, false, IdSource::Materials, IdSource::MeshParts),
+            IdSource::MeshParts,
+        );
     }
 
     #[test]
