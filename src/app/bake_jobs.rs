@@ -39,6 +39,18 @@ fn project_bake_source_plan(
 
 use super::*;
 
+/// The regular bake source must remain valid for the selected projection.
+/// Vertex Colors is applied only as the ID-only job's per-set override when a
+/// high-poly source is selected; after that job, the next full bake still uses
+/// Mesh Parts or Materials.
+fn next_full_bake_id_source(current: IdSource, high_poly: bool) -> IdSource {
+    if high_poly {
+        if current == IdSource::VertexColors { IdSource::MeshParts } else { current }
+    } else {
+        IdSource::VertexColors
+    }
+}
+
 /// Adds a deferred per-set ID pass once. Requests for the set already running
 /// or already queued in the current ID-only batch do not need another pass.
 fn queue_deferred_id_rebake(
@@ -96,8 +108,12 @@ impl PainterApp {
     pub(super) fn start_bake_id_only(&mut self, ctx: &egui::Context) {
         let set = self.sets.active;
         let mut project_settings_changed = false;
-        if self.bake_settings.id_source != IdSource::VertexColors {
-            self.bake_settings.id_source = IdSource::VertexColors;
+        let next_source = next_full_bake_id_source(
+            self.bake_settings.id_source,
+            self.bake_settings.high_poly.is_some(),
+        );
+        if self.bake_settings.id_source != next_source {
+            self.bake_settings.id_source = next_source;
             project_settings_changed = true;
         }
         self.sets.id_source_preferences.resize(self.mesh.sets.len(), self.baked_id_source);
@@ -192,8 +208,12 @@ impl PainterApp {
             return;
         }
         let Some(set) = self.deferred_id_rebake_sets.pop_front() else { return };
-        if self.bake_settings.id_source != IdSource::VertexColors {
-            self.bake_settings.id_source = IdSource::VertexColors;
+        let next_source = next_full_bake_id_source(
+            self.bake_settings.id_source,
+            self.bake_settings.high_poly.is_some(),
+        );
+        if self.bake_settings.id_source != next_source {
+            self.bake_settings.id_source = next_source;
             self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
         }
         self.bake_id_only = true;
@@ -474,6 +494,30 @@ mod project_bake_source_plan_tests {
     use super::{project_bake_source_plan, queue_deferred_id_rebake};
     use crate::bake::IdSource;
     use std::collections::VecDeque;
+
+    #[test]
+    fn ID_only_vertex_color_pass_keeps_the_next_full_bake_source_valid() {
+        assert_eq!(
+            next_full_bake_id_source(IdSource::MeshParts, false),
+            IdSource::VertexColors,
+        );
+        assert_eq!(
+            next_full_bake_id_source(IdSource::Materials, false),
+            IdSource::VertexColors,
+        );
+        assert_eq!(
+            next_full_bake_id_source(IdSource::MeshParts, true),
+            IdSource::MeshParts,
+        );
+        assert_eq!(
+            next_full_bake_id_source(IdSource::Materials, true),
+            IdSource::Materials,
+        );
+        assert_eq!(
+            next_full_bake_id_source(IdSource::VertexColors, true),
+            IdSource::MeshParts,
+        );
+    }
 
     #[test]
     fn deferred_vertex_id_queue_deduplicates_per_set_without_merging_targets() {
