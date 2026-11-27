@@ -66,6 +66,15 @@ fn queue_deferred_id_rebake(
 }
 
 impl PainterApp {
+    /// Keep the full-bake source valid for the selected projection.
+    /// Vertex Colors is applied later as a per-set ID-only override.
+    fn ensure_valid_full_bake_id_source(&mut self) {
+        if self.bake_settings.high_poly.is_some() && self.bake_settings.id_source == IdSource::VertexColors {
+            self.bake_settings.id_source = IdSource::MeshParts;
+            self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
+        }
+    }
+
     /// Builds the GPU bake pipeline only when a bake is requested.
     pub(super) fn ensure_baker(&mut self) {
         if self.baker.is_none() {
@@ -94,6 +103,7 @@ impl PainterApp {
             self.status = "A bake is already running; the new request was not started.".into();
             return;
         }
+        self.ensure_valid_full_bake_id_source();
         self.bake_id_only = false;
         self.sets.bake_queue.clear();
         self.bake_batch_settings = Some(self.job_bake_settings());
@@ -162,6 +172,7 @@ impl PainterApp {
             self.status = "A bake is already running; the new request was not started.".into();
             return;
         }
+        self.ensure_valid_full_bake_id_source();
         self.bake_id_only = false;
         let active = self.sets.active;
         self.sets.bake_queue = (0..self.mesh.sets.len()).filter(|&k| k != active).collect();
@@ -179,6 +190,7 @@ impl PainterApp {
             self.status = "A bake is already running; the saved-source bake was not started.".into();
             return;
         }
+        self.ensure_valid_full_bake_id_source();
         self.bake_id_only = false;
         let active = self.sets.active;
         self.sets.bake_queue = (0..self.mesh.sets.len()).filter(|&k| k != active).collect();
