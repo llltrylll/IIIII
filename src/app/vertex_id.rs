@@ -11,8 +11,6 @@ use crate::theme;
 use crate::viewport::OverlayVertex;
 use eframe::egui;
 use egui::{Color32, Sense, Stroke, vec2};
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
 
 /// Colors listed in the palette (the most used ones).
 pub const PALETTE_MAX: usize = crate::bake::MAX_VERTEX_COLOR_ID_REGIONS;
@@ -31,83 +29,17 @@ pub struct Palette {
     pub distinct: usize,
 }
 
-/// The distinct vertex colors of a mesh, most used first.
-///
-/// Most authored meshes use a small palette, so count those directly in a
-/// bounded HashMap. If the attribute exceeds that cardinality, switch to
-/// compact sorted 24-bit keys and retain only the most-used entries; a mesh
-/// with millions of unique colors never creates millions of hash buckets.
+/// The distinct vertex colors of a mesh, most used first. The baker and
+/// this panel share one implementation so top-color ordering and tie-breaks
+/// cannot drift between the displayed swatches and the baked ID report.
 pub fn palette(colors: &[[[u8; 3]; 3]]) -> Palette {
-    const HASH_DISTINCT_LIMIT: usize = PALETTE_MAX * 8;
-    let mut counts: HashMap<[u8; 3], u32> = HashMap::with_capacity(HASH_DISTINCT_LIMIT);
-    for tri in colors {
-        for rgb in tri {
-            let count = counts.entry(*rgb).or_default();
-            *count = count.saturating_add(1);
-            if counts.len() > HASH_DISTINCT_LIMIT {
-                return palette_sorted(colors);
-            }
-        }
+    let (entries, distinct) = crate::bake::vertex_color_palette(colors);
+    Palette {
+        entries: entries.into_iter()
+            .map(|(rgb, corners)| PaletteEntry { rgb, corners })
+            .collect(),
+        distinct,
     }
-
-    let distinct = counts.len();
-    let mut entries: Vec<PaletteEntry> = counts
-        .into_iter()
-        .map(|(rgb, corners)| PaletteEntry { rgb, corners })
-        .collect();
-    let order = |a: &PaletteEntry, b: &PaletteEntry| b.corners.cmp(&a.corners).then(a.rgb.cmp(&b.rgb));
-    if entries.len() > PALETTE_MAX {
-        entries.select_nth_unstable_by(PALETTE_MAX, order);
-        entries.truncate(PALETTE_MAX);
-    }
-    entries.sort_unstable_by(order);
-    Palette { entries, distinct }
-}
-
-/// Exact high-cardinality path. Pack RGB into one u32, sort in place and
-/// count runs; the bounded heap retains only the top palette colors.
-fn palette_sorted(colors: &[[[u8; 3]; 3]]) -> Palette {
-    let mut packed = Vec::with_capacity(colors.len().saturating_mul(3));
-    packed.extend(colors.iter().flat_map(|tri| tri.iter()).map(|rgb| {
-        ((rgb[0] as u32) << 16) | ((rgb[1] as u32) << 8) | rgb[2] as u32
-    }));
-    packed.sort_unstable();
-
-    // Heap key is (frequency, inverted RGB). Higher frequency wins; for ties,
-    // the smaller original RGB value wins deterministically. Reverse keeps the
-    // worst retained entry at the root for O(log PALETTE_MAX) replacement.
-    let mut top: BinaryHeap<Reverse<(u32, [u8; 3])>> = BinaryHeap::with_capacity(PALETTE_MAX + 1);
-    let mut distinct = 0usize;
-    let mut start = 0usize;
-    while start < packed.len() {
-        let key = packed[start];
-        let mut end = start + 1;
-        while end < packed.len() && packed[end] == key {
-            end += 1;
-        }
-        distinct += 1;
-        let rgb = [(key >> 16) as u8, (key >> 8) as u8, key as u8];
-        let corners = u32::try_from(end - start).unwrap_or(u32::MAX);
-        let inverse_rgb = rgb.map(|channel| 255 - channel);
-        let candidate = (corners, inverse_rgb);
-        if top.len() < PALETTE_MAX {
-            top.push(Reverse(candidate));
-        } else if top.peek().is_some_and(|Reverse(worst)| candidate > *worst) {
-            top.pop();
-            top.push(Reverse(candidate));
-        }
-        start = end;
-    }
-
-    let mut entries: Vec<PaletteEntry> = top
-        .into_iter()
-        .map(|Reverse((corners, inverse_rgb))| PaletteEntry {
-            rgb: inverse_rgb.map(|channel| 255 - channel),
-            corners,
-        })
-        .collect();
-    entries.sort_unstable_by(|a, b| b.corners.cmp(&a.corners).then(a.rgb.cmp(&b.rgb)));
-    Palette { entries, distinct }
 }
 
 pub fn to_f32(rgb: [u8; 3]) -> [f32; 3] {
