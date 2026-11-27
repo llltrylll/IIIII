@@ -1516,41 +1516,39 @@ impl PainterApp {
 mod tests {
     use super::*;
     #[test]
-        fn id_source_metadata_migrates_legacy_and_preserves_per_set_preference() {
-            let legacy = json!({"baked_id_source": "VertexColors"});
-            let actual = id_source(&legacy, "baked_id_source", IdSource::MeshParts);
-            let preferred = id_source(&legacy, "id_source_preference", actual);
-            assert_eq!(actual, IdSource::VertexColors);
-            assert_eq!(preferred, IdSource::VertexColors);
-    
-            let current = json!({
-                "baked_id_source": "Materials",
-                "id_source_preference": "VertexColors"
-            });
-            assert_eq!(
-                id_source(&current, "baked_id_source", IdSource::MeshParts),
-                IdSource::Materials
-            );
-            assert_eq!(
-                id_source(&current, "id_source_preference", IdSource::MeshParts),
-                IdSource::VertexColors
-            );
-        }
-    
-        #[test]
-        fn id_source_metadata_uses_fallback_for_missing_or_unknown_values() {
-            let value = json!({
-                "old": "not-a-source",
-                "unknown": "HighPoly",
-                "valid": "MeshParts"
-            });
-            assert_eq!(id_source(&value, "missing", IdSource::Materials), IdSource::Materials);
-            assert_eq!(id_source(&value, "old", IdSource::VertexColors), IdSource::VertexColors);
-            assert_eq!(id_source(&value, "unknown", IdSource::MeshParts), IdSource::MeshParts);
-            assert_eq!(id_source(&value, "valid", IdSource::Materials), IdSource::MeshParts);
-        }
-    
-    
+    fn id_source_metadata_migrates_legacy_and_preserves_per_set_preference() {
+        let legacy = json!({"baked_id_source": "VertexColors"});
+        let actual = id_source(&legacy, "baked_id_source", IdSource::MeshParts);
+        let preferred = id_source(&legacy, "id_source_preference", actual);
+        assert_eq!(actual, IdSource::VertexColors);
+        assert_eq!(preferred, IdSource::VertexColors);
+
+        let current = json!({
+            "baked_id_source": "Materials",
+            "id_source_preference": "VertexColors"
+        });
+        assert_eq!(
+            id_source(&current, "baked_id_source", IdSource::MeshParts),
+            IdSource::Materials
+        );
+        assert_eq!(
+            id_source(&current, "id_source_preference", IdSource::MeshParts),
+            IdSource::VertexColors
+        );
+    }
+
+    #[test]
+    fn id_source_metadata_uses_fallback_for_missing_or_unknown_values() {
+        let value = json!({
+            "old": "not-a-source",
+            "unknown": "HighPoly",
+            "valid": "MeshParts"
+        });
+        assert_eq!(id_source(&value, "missing", IdSource::Materials), IdSource::Materials);
+        assert_eq!(id_source(&value, "old", IdSource::VertexColors), IdSource::VertexColors);
+        assert_eq!(id_source(&value, "unknown", IdSource::MeshParts), IdSource::MeshParts);
+        assert_eq!(id_source(&value, "valid", IdSource::Materials), IdSource::MeshParts);
+    }
 
     /// Projects from the four fixed custom slots load as maps with ids 1-4
     /// (empty slots skipped), and their masks' extra weights as inputs on
