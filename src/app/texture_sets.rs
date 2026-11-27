@@ -355,8 +355,11 @@ impl PainterApp {
         // source and the global mirror stays synchronized.
         let (baked_id_sources, active_baked_id_source) =
             remap_id_sources(&assign, &old_baked_id_sources, active, self.baked_id_source);
-        let (id_source_preferences, _) =
-            remap_id_sources(&assign, &old_id_source_preferences, active, active_baked_id_source);
+        let (id_source_preferences, active_id_source_preference) =
+            remap_id_sources(&assign, &old_id_source_preferences, active, self.bake_settings.id_source);
+        // Keep the active preference mirror global; a newly created set
+        // inherits the intended next source, not a temporary high-poly fallback.
+        self.bake_settings.id_source = active_id_source_preference;
         self.baked_id_source = active_baked_id_source;
         self.sets.parked = parked;
         self.sets.active = active;
@@ -569,6 +572,28 @@ mod id_source_remap_tests {
                 IdSource::VertexColors,
                 IdSource::MeshParts,
                 IdSource::VertexColors,
+            ],
+        );
+    }
+
+    #[test]
+    fn new_sets_inherit_active_preference_not_active_baked_fallback() {
+        let baked_sources = [IdSource::MeshParts, IdSource::Materials];
+        let preferred_sources = [IdSource::VertexColors, IdSource::Materials];
+        let assign = [Some(1), Some(0), None];
+
+        let (_, active_baked) = remap_id_sources(&assign, &baked_sources, 0, IdSource::MeshParts);
+        let (preferences, active_preference) =
+            remap_id_sources(&assign, &preferred_sources, 0, IdSource::Materials);
+
+        assert_eq!(active_baked, IdSource::Materials);
+        assert_eq!(active_preference, IdSource::Materials);
+        assert_eq!(
+            preferences,
+            vec![
+                IdSource::Materials,
+                IdSource::VertexColors,
+                IdSource::Materials,
             ],
         );
     }
