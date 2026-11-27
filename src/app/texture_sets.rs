@@ -192,6 +192,7 @@ impl PainterApp {
         std::mem::swap(&mut self.target, &mut p.target);
         self.sets.parked[self.sets.active] = Some(p);
         self.sets.active = k;
+        self.baked_id_source = self.sets.baked_id_sources.get(k).copied().unwrap_or(self.baked_id_source);
         self.undo.set = k;
         // Polygon fill selections are triangles of the set that was edited.
         self.poly.shown = None;
