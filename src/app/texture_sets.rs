@@ -31,7 +31,7 @@ fn remap_id_sources(
         .and_then(|old_set| *old_set)
         .and_then(|index| previous.get(index).copied())
         .unwrap_or(fallback);
-    let sources = assign.iter().map(|old_set| {
+    let sources: Vec<IdSource> = assign.iter().map(|old_set| {
         (*old_set).and_then(|index| previous.get(index).copied()).unwrap_or(active_source)
     }).collect();
     (sources, active_source)
