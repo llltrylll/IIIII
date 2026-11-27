@@ -188,6 +188,7 @@ impl VertexIdState {
 pub struct Info<'a> {
     pub palette: &'a Palette,
     pub has_colors: bool,
+    pub has_bake: bool,
     pub baked_source: IdSource,
 }
 
@@ -315,15 +316,22 @@ pub fn panel(
         changed
     });
 
-    if info.baked_source != IdSource::VertexColors {
-        // The mask can't see the colors until the maps are baked from them: do it once on its own.
+    if !info.has_bake || info.baked_source != IdSource::VertexColors {
+        // The mask can't read the selected labels until this Texture Set has
+        // a baked ID map from vertex colors. An unopened/uncached map also
+        // counts as missing, even when its last saved source was VertexColors.
         if info.has_colors && !vs.auto_baked {
             vs.auto_baked = true;
             vs.want_rebake = true;
         }
         ui.add_space(2.0);
+        let message = if info.has_bake {
+            "The baked ID map was made from mesh parts or materials, so the mask on the texture ignores these colors until it is baked from vertex colors."
+        } else {
+            "This Texture Set has no baked mesh maps yet. Bake its ID map from the imported vertex colors to use this mask."
+        };
         ui.label(
-            egui::RichText::new("The baked ID map was made from mesh parts or materials, so the mask on the texture ignores these colors until it is baked from vertex colors.")
+            egui::RichText::new(message)
                 .small()
                 .color(Color32::from_rgb(0xe8, 0x80, 0x5a)),
         );
