@@ -15,7 +15,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, OnceLock};
 
 const MAGIC: &[u8; 4] = b"MPBC";
