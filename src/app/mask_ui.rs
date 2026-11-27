@@ -317,7 +317,6 @@ impl PainterApp {
             // job. The global source remains valid for any configured high-poly
             // projection and the next full bake.
             self.start_bake_id_only(ctx);
-            self.status = "Baking the ID map from the vertex colors (the other maps stay as they are).".into();
         }
         if std::mem::take(&mut self.vertex_id.want_import) {
             let Some(path) = rfd::FileDialog::new().add_filter("Mesh (FBX, OBJ)", &crate::import::EXTENSIONS).set_title("The mesh file this project was made from").pick_file() else {
