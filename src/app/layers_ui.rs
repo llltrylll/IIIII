@@ -246,6 +246,8 @@ impl PainterApp {
         let resp = if name_cut { resp.on_hover_text(&name) } else { resp };
 
         // Interaction.
+        let previous_selected = self.selected;
+        let previous_target = self.target;
         if eye.clicked() {
             self.engine.layers[idx].visible = !visible;
             self.engine.mark_dirty();
@@ -267,6 +269,11 @@ impl PainterApp {
                 self.target = StrokeTarget::Content;
             }
             self.selected = idx;
+        }
+        if self.selected != previous_selected || self.target != previous_target {
+            // The picker stores positional layer/mask-layer indices. A new
+            // selection must not leave it armed against a different panel.
+            self.id_color_pick_target = None;
         }
 
         // Drag to reorder: the top or bottom part of a row drops above or below
