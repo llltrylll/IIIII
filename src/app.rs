@@ -2783,11 +2783,13 @@ impl PainterApp {
                 }
                 Action::AddPaint => {
                     self.id_color_pick_target = None;
+                    self.vertex_id.panel = None;
                     self.selected = self.engine.add_paint_layer(at, parent, None, &mut self.undo);
                     self.target = StrokeTarget::Content;
                 }
                 Action::AddFill(fill, name) => {
                     self.id_color_pick_target = None;
+                    self.vertex_id.panel = None;
                     let disabled = project_settings_ui::disabled_fill_channels(&fill, &self.active_channels);
                     self.selected = self.engine.add_fill_layer(at, parent, name, fill, &mut self.undo);
                     self.engine.layers[self.selected].disabled_channels = disabled;
@@ -2795,12 +2797,14 @@ impl PainterApp {
                 }
                 Action::AddFolder => {
                     self.id_color_pick_target = None;
+                    self.vertex_id.panel = None;
                     let n = self.engine.layers.iter().filter(|l| l.is_folder()).count() + 1;
                     self.selected = self.engine.add_folder(at, parent, format!("Folder {n}"), &mut self.undo);
                     self.target = StrokeTarget::Content;
                 }
                 Action::GroupIntoFolder => {
                     self.id_color_pick_target = None;
+                    self.vertex_id.panel = None;
                     if let Some(layer) = self.engine.layers.get(self.selected) {
                         let (parent, label) = (layer.parent, format!("Group {}", layer.name));
                         self.undo.begin_group(label);
@@ -2815,6 +2819,7 @@ impl PainterApp {
                 }
                 Action::AddMask { white } => {
                     self.id_color_pick_target = None;
+                    self.vertex_id.panel = None;
                     if self.selected < self.engine.layers.len() {
                         self.engine.add_mask(self.selected, white, None, &mut self.undo);
                         self.target = StrokeTarget::Mask;
@@ -2822,6 +2827,7 @@ impl PainterApp {
                 }
                 Action::AddMaskLayer(kind) => {
                     self.id_color_pick_target = None;
+                    self.vertex_id.panel = None;
                     if self.selected < self.engine.layers.len() {
                         if self.engine.layers[self.selected].mask.is_none() {
                             self.engine.add_mask(self.selected, false, None, &mut self.undo);
@@ -2845,6 +2851,7 @@ impl PainterApp {
                 }
                 Action::AddGenerator(kind) => {
                     self.id_color_pick_target = None;
+                    self.vertex_id.panel = None;
                     let palette = (kind == GenKind::IdMask).then(|| self.vertex_id.palette_for(&self.mesh).clone());
                     let id_source = vertex_id::default_generator_source(
                         palette.as_ref().is_some_and(|p| !p.entries.is_empty()),
@@ -2868,12 +2875,14 @@ impl PainterApp {
                 }
                 Action::RemoveMask => {
                     self.id_color_pick_target = None;
+                    self.vertex_id.panel = None;
                     self.engine.remove_mask(self.selected, &mut self.undo);
                     self.target = StrokeTarget::Content;
                 }
                 Action::SaveSmart => self.save_smart_material(ctx),
                 Action::Duplicate => {
                     self.id_color_pick_target = None;
+                    self.vertex_id.panel = None;
                     if let Some(i) = self.engine.duplicate_layer(self.selected, &mut self.undo) {
                         self.selected = i;
                     }
@@ -2890,6 +2899,7 @@ impl PainterApp {
                 }
                 Action::PasteLayer => {
                     self.id_color_pick_target = None;
+                    self.vertex_id.panel = None;
                     if let Some(mut layers) = self.layer_clipboard.take() {
                         project_settings_ui::mark_inactive_layer_channels(&mut layers, &self.active_channels);
                         if layers.is_empty() {
@@ -2912,6 +2922,7 @@ impl PainterApp {
                 }
                 Action::Delete => {
                     self.id_color_pick_target = None;
+                    self.vertex_id.panel = None;
                     self.engine.delete_layer(self.selected, &mut self.undo);
                     self.selected = self.selected.min(self.engine.layers.len().saturating_sub(1));
                     self.target = StrokeTarget::Content;
@@ -2924,6 +2935,7 @@ impl PainterApp {
                 }
                 Action::ShelfDrop { item, at, parent } => {
                     self.id_color_pick_target = None;
+                    self.vertex_id.panel = None;
                     match item {
                     ShelfItem::Smart(i) => {
                         let smart = &presets::SMART_MATERIALS[i];
@@ -2962,16 +2974,19 @@ impl PainterApp {
                 },
                 Action::AddGraphLayer => {
                     self.id_color_pick_target = None;
+                    self.vertex_id.panel = None;
                     self.add_graph_layer(None, at, parent);
                 }
                 Action::AddGraphPreset(i) => {
                     self.id_color_pick_target = None;
+                    self.vertex_id.panel = None;
                     if let Some(p) = crate::graph::presets::PRESETS.get(i) {
                         self.add_graph_layer(Some((p.build)()), at, parent);
                     }
                 }
                 Action::AddGraphMask => {
                     self.id_color_pick_target = None;
+                    self.vertex_id.panel = None;
                     self.add_graph_mask();
                 }
                 Action::EditGraph => self.edit_selected_graph(),
@@ -3027,6 +3042,7 @@ impl PainterApp {
                 },
                 Action::MoveTo { from, drop } => {
                     self.id_color_pick_target = None;
+                    self.vertex_id.panel = None;
                     if let Some(i) = self.engine.move_to(from, drop, &mut self.undo) {
                         self.selected = i;
                     }
@@ -3199,6 +3215,7 @@ impl PainterApp {
         // Undo/redo can replace or reorder those structures, so never keep a
         // positional picker target armed across a history step.
         self.id_color_pick_target = None;
+        self.vertex_id.panel = None;
         if self.selected != NO_LAYER {
             self.selected = self.selected.min(self.engine.layers.len().saturating_sub(1));
         }
