@@ -5038,6 +5038,12 @@ impl PainterApp {
                     s.high_poly = rfd::FileDialog::new().add_filter("Mesh (FBX, OBJ)", &crate::import::EXTENSIONS).pick_file();
                 }
             });
+            if s.high_poly.is_some() && s.id_source == IdSource::VertexColors {
+                // Vertex Colors are baked from the low-poly topology in a
+                // separate ID-only pass; a full high-poly projection needs a
+                // valid material or mesh-part source.
+                s.id_source = IdSource::MeshParts;
+            }
             if let Some(path) = s.high_poly.clone() {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(path.display().to_string()).small().color(theme::TEXT_DIM));
