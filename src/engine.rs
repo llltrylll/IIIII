@@ -7296,9 +7296,9 @@ mod vertex_id_generator_regressions {
     }
 
     #[test]
-    fn default_id_mask_matches_the_first_mesh_part_id() {
+    fn default_id_mask_keeps_the_red_vertex_color_fallback() {
         let generator = GenKind::IdMask.default_generator();
-        assert_eq!(generator.id_colors(), vec![[0.95, 0.2375, 0.2375]]);
+        assert_eq!(generator.id_colors(), vec![[1.0, 0.0, 0.0]]);
         assert_eq!(generator.weights[gin::ID], 1.0);
     }
 }
