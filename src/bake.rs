@@ -2726,6 +2726,15 @@ impl GpuBaker {
         queue: &wgpu::Queue,
         ctx: &egui::Context,
     ) -> Option<BakedMaps> {
+        // WGPU's GLES/WGL backend shares one adapter-context lock with surface
+        // presentation. Polling from detached worker threads can hold that lock
+        // while the UI thread reaches wglSwapLayerBuffers, causing the
+        // "Could not lock adapter context" deadlock timeout on Windows.
+        //
+        // PainterApp polls the device on the UI thread once per frame. Keep
+        // scheduling frames while a bake is active so queue completion callbacks
+        // progress there; never call device.poll from a background thread.
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
         while run.next_tile < run.tiles.len() && run.in_flight.load(Ordering::Acquire) < MAX_IN_FLIGHT {
             let [x, y, pass] = run.tiles[run.next_tile];
             run.next_tile += 1;
@@ -2782,8 +2791,7 @@ impl GpuBaker {
                 done.fetch_add(1, Ordering::AcqRel);
                 ctx.request_repaint();
             });
-            Self::poll_until_done(device);
-        }
+            }
         if run.next_tile < run.tiles.len() || run.maps.is_none() {
             return None;
         }
@@ -2954,19 +2962,9 @@ impl GpuBaker {
             report.finished.store(true, Ordering::Release);
             ctx.request_repaint();
         });
-        Self::poll_until_done(device);
         Some(BakedMaps { maps, custom: run.custom.iter().map(|(t, _)| t.clone()).collect() })
     }
 
-    /// wgpu runs completion callbacks only while the device is polled, which
-    /// the UI does when it draws a frame. A hidden or minimized window draws
-    /// none, so a worker waits on the GPU to deliver the callbacks that wake it.
-    fn poll_until_done(device: &wgpu::Device) {
-        let device = device.clone();
-        std::thread::spawn(move || {
-            let _ = device.poll(wgpu::PollType::wait_indefinitely());
-        });
-    }
 }
 
 #[cfg(test)]
