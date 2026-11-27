@@ -926,8 +926,10 @@ pub struct PainterApp {
     engine_epoch: u64,
     /// The running batch only makes ID maps (from vertex colors).
     bake_id_only: bool,
-    /// Immutable settings shared by every Texture Set in the active bake batch.
+    /// Immutable base settings shared by every Texture Set in the active bake batch.
     bake_batch_settings: Option<crate::bake::BakeSettings>,
+    /// Optional per-set ID-source overrides used when restoring a saved project.
+    bake_batch_id_sources: Option<Vec<IdSource>>,
     /// An ID-only rebake requested during another bake; run it after that batch.
     deferred_id_rebake: bool,
     cam: OrbitCam,
@@ -2519,6 +2521,7 @@ impl PainterApp {
             engine_epoch: 0,
             bake_id_only: false,
             bake_batch_settings: None,
+            bake_batch_id_sources: None,
             deferred_id_rebake: false,
             cam: OrbitCam::default(),
             selected_point_light: 0,
@@ -2666,6 +2669,7 @@ impl PainterApp {
         }
         self.bake_job = None;
         self.bake_batch_settings = None;
+        self.bake_batch_id_sources = None;
         self.deferred_id_rebake = false;
         self.bake_id_only = false;
         self.id_color_pick_target = None;
