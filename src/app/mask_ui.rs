@@ -368,7 +368,7 @@ impl PainterApp {
                         &self.sets.baked_id_sources,
                         &self.sets.id_source_preferences,
                     );
-                    self.start_bake_id_only_for_sets(&targets, ctx);
+                    self.start_bake_id_only_for_sets(&targets, true, ctx);
                     self.status = format!(
                         "Read {found} vertex colors from the file. Refreshing ID maps on {} Texture Set(s).",
                         targets.len(),
