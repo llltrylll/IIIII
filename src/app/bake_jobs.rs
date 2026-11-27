@@ -488,6 +488,32 @@ mod project_bake_source_plan_tests {
     }
 
     #[test]
+    fn high_poly_project_without_vertex_colors_keeps_maps_bakeable_without_followup() {
+        let saved = [
+            IdSource::VertexColors,
+            IdSource::Materials,
+            IdSource::VertexColors,
+        ];
+        let (sources, followups) = project_bake_source_plan(
+            &saved,
+            3,
+            1,
+            true,
+            false,
+            IdSource::MeshParts,
+        );
+        assert_eq!(
+            sources,
+            [
+                IdSource::MeshParts,
+                IdSource::Materials,
+                IdSource::MeshParts,
+            ]
+        );
+        assert!(followups.is_empty());
+    }
+
+    #[test]
     fn legacy_short_source_lists_are_padded_to_the_texture_set_count() {
         let (sources, followups) = project_bake_source_plan(
             &[IdSource::VertexColors],
