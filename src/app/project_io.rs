@@ -1033,6 +1033,8 @@ impl PainterApp {
                 v["name"] = json!(set.name);
                 v["tris"] = json!([set.tris.start, set.tris.end]);
                 v["selected"] = json!(selected);
+                let baked_id_source = self.sets.baked_id_sources.get(k).copied().unwrap_or(self.baked_id_source);
+                v["baked_id_source"] = json!(format!("{baked_id_source:?}"));
                 v
             })
             .collect();
@@ -1041,7 +1043,7 @@ impl PainterApp {
             "quality": format!("{:?}", bs.quality),
             "high_poly": bs.high_poly.as_ref().map(|p| p.display().to_string()),
             "id_source": format!("{:?}", bs.id_source),
-            "baked_id_source": format!("{:?}", self.baked_id_source),
+            "baked_id_source": format!("{:?}", self.sets.baked_id_sources.get(self.sets.active).copied().unwrap_or(self.baked_id_source)),
             "front": bs.front, "rear": bs.rear, "aa": bs.aa,
             "ao_rays": bs.ao_rays, "ao_distance": bs.ao_distance, "cavity_distance": bs.cavity_distance,
             "thickness_rays": bs.thickness_rays, "thickness_distance": bs.thickness_distance,
@@ -1085,7 +1087,8 @@ impl PainterApp {
             // 2: map levels gamma brightens above 1 (version 1 darkened).
             // 3: texture sets (layers, size and map fixes per set).
             // 4: project channel selection and per-object visibility.
-            "version": 4,
+            // 5: the baked ID source is stored independently for each Texture Set.
+            "version": 5,
             "active_channels": self.active_channels,
             "mesh": mesh_json,
             "texture_sets": sets,
@@ -1268,6 +1271,9 @@ impl PainterApp {
         // The worker already built the CPU mesh, UV edges and visible BVH.
         // Only GPU mesh/engine creation remains on the device-owning thread.
         self.bake_settings = bs;
+        // The per-set fields in version 5 are authoritative; the old global
+        // value above remains the fallback for projects saved by earlier builds.
+        self.sets.baked_id_sources.clear();
         let sizes: Vec<u32> = set_values.iter().map(|sv| sv["resolution"].as_u64().unwrap_or(2048) as u32).collect();
         // Release the previous document's snapshots before allocating the new one.
         self.undo.clear();
@@ -1287,8 +1293,15 @@ impl PainterApp {
                 Err(e) => self.status = format!("A material graph didn't load: {e}"),
             }
         }
+        self.sets.baked_id_sources.resize(set_count, self.baked_id_source);
         for (k, sv) in set_values.iter().enumerate().take(set_count) {
             self.switch_set(k);
+            self.sets.baked_id_sources[k] = match s(sv, "baked_id_source") {
+                Some("Materials") => IdSource::Materials,
+                Some("VertexColors") => IdSource::VertexColors,
+                Some("MeshParts") => IdSource::MeshParts,
+                _ => self.baked_id_source,
+            };
             // Replacing a document must drop old layer textures, not retain them in Undo.
             self.engine.restore_layers(Vec::new());
             let res = sv["resolution"].as_u64().unwrap_or(2048) as u32;
@@ -1391,6 +1404,7 @@ impl PainterApp {
             self.selected = sv["selected"].as_u64().map_or(0, |x| x as usize).min(self.engine.layers.len().saturating_sub(1));
         }
         self.switch_set(manifest["active_set"].as_u64().map_or(0, |x| x as usize).min(set_count - 1));
+        self.baked_id_source = self.sets.baked_id_sources.get(self.sets.active).copied().unwrap_or(self.baked_id_source);
         self.repush_graphs();
 
         let v = &manifest["view"];

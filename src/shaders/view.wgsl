@@ -171,7 +171,11 @@ fn sample_surface(uv: vec2<f32>) -> Surface {
     if (need_map_b) { s.b = textureSampleLevel(map_b, samp, uv, 0.0); }
     if (need_map_c) { s.c = textureSampleLevel(map_c, samp, uv, 0.0); }
     if (need_map_d) { s.d = textureSampleLevel(map_d, samp, uv, 0.0); }
-    if (need_map_e) { s.e = textureSampleLevel(map_e, samp, uv, 0.0); }
+    if (need_map_e) {
+        let dimensions = vec2<i32>(textureDimensions(map_e));
+        let coord = clamp(vec2<i32>(uv * vec2<f32>(dimensions)), vec2<i32>(0), dimensions - vec2<i32>(1));
+        s.e = textureLoad(map_e, coord, 0);
+    }
 
     if (custom_preview || mode == 22) {
         let ci = max(i32(g.extra.z), 0);

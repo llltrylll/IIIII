@@ -21,6 +21,7 @@ impl PainterApp {
                 for k in GenKind::ALL {
                     if ui.selectable_label(g.kind == k, k.name()).clicked() && g.kind != k {
                         *g = new_generator(k, custom);
+                        *pick_target = None;
                         dirty = true;
                     }
                 }
@@ -49,7 +50,7 @@ impl PainterApp {
         let mut dirty = false;
         let custom = self.bake_settings.custom.clone();
         let palette = self.vertex_id.palette_for(&self.mesh).clone();
-        let id_info = vertex_id::Info { palette: &palette, has_colors: vertex_id::has_colors(&self.mesh), baked_source: self.baked_id_source };
+        let id_info = vertex_id::Info { palette: &palette, has_colors: vertex_id::has_colors(&self.mesh), baked_source: self.sets.baked_id_sources.get(self.sets.active).copied().unwrap_or(self.baked_id_source) };
         section(ui, "Mask");
         self.missing_maps_note(ui, idx);
         let Some(mask) = self.engine.layers[idx].mask.as_mut() else {
@@ -98,8 +99,9 @@ impl PainterApp {
         let mut dirty = false;
         let custom = self.bake_settings.custom.clone();
         let palette = self.vertex_id.palette_for(&self.mesh).clone();
-        let id_info = vertex_id::Info { palette: &palette, has_colors: vertex_id::has_colors(&self.mesh), baked_source: self.baked_id_source };
+        let id_info = vertex_id::Info { palette: &palette, has_colors: vertex_id::has_colors(&self.mesh), baked_source: self.sets.baked_id_sources.get(self.sets.active).copied().unwrap_or(self.baked_id_source) };
         let (mut remove, mut swap) = (None, None);
+        let mut structure_changed = false;
         let count = mask.layers.len();
         // Top of the stack first, like the layer list.
         for i in (0..count).rev() {
@@ -144,10 +146,12 @@ impl PainterApp {
         if let Some(i) = remove {
             mask.layers.remove(i);
             dirty = true;
+            structure_changed = true;
         }
         if let Some(i) = swap {
             mask.layers.swap(i, i + 1);
             dirty = true;
+            structure_changed = true;
         }
         ui.menu_button(theme::with_icon(icons::STACK, "Add mask layer ▾"), |ui| {
             for k in GenKind::ALL {
@@ -156,6 +160,7 @@ impl PainterApp {
                     let blend = if mask.black_base && mask.layers.is_empty() { MaskBlend::Add } else { MaskBlend::Multiply };
                     mask.layers.push(MaskLayer { source: MaskSource::Generator(new_generator(k, &custom)), blend, opacity: 1.0, enabled: true });
                     dirty = true;
+                    structure_changed = true;
                     ui.close();
                 }
             }
@@ -163,11 +168,15 @@ impl PainterApp {
             if ui.button("Fill (one value)").clicked() {
                 mask.layers.push(MaskLayer { source: MaskSource::Fill(1.0), blend: MaskBlend::Normal, opacity: 1.0, enabled: true });
                 dirty = true;
+                structure_changed = true;
                 ui.close();
             }
         });
         if count == 0 {
             ui.label(egui::RichText::new("Stack more smart masks on this one: each blends over the mask below it (Multiply keeps only where both are, Add joins them, Subtract cuts one out).").small().color(theme::TEXT_DIM));
+        }
+        if structure_changed {
+            self.id_color_pick_target = None;
         }
         dirty
     }
@@ -305,6 +314,7 @@ impl PainterApp {
                     mesh.tri_color = Some(tri_colors);
                     mesh.tri_vertex_color = Some(colors);
                     self.mesh = Arc::new(mesh);
+                    self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
                     self.vertex_id.shown = None;
                     // The ID map has to be baked again from the new colors.
                     self.vertex_id.want_rebake = true;
@@ -354,6 +364,10 @@ impl PainterApp {
             self.status = "The selected mask generator no longer exists.".into();
             return;
         };
+        if generator.weights[crate::engine::gin::ID].abs() <= 1e-4 {
+            self.status = "The eyedropper target is no longer a Vertex ID generator.".into();
+            return;
+        }
         let mut ids = generator.id_colors();
         let rgb = color.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
         if vertex_id::selected_index(&ids, rgb).is_none() {

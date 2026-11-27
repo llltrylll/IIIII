@@ -439,7 +439,7 @@ impl GenKind {
             invert: false,
             seed: 0.0,
             edge_width: 0.04,
-            id_color: [1.0, 0.0, 0.0],
+            id_color: [0.95, 0.2375, 0.2375],
             id_tolerance: 0.15,
             id_more: [[0.0; 3]; MAX_ID_COLORS - 1],
             id_count: 1,
@@ -500,7 +500,7 @@ impl Generator {
     /// The baked maps this generator reads (a bit per `MAPS` index).
     pub fn needs_maps(&self) -> u32 {
         // Generator input -> the map it comes from.
-        const FROM: [(usize, usize); 10] = [
+        const FROM: [(usize, usize); 11] = [
             (gin::EDGE, 5),
             (gin::CONVEX, 1),
             (gin::CONCAVE, 1),
@@ -511,6 +511,7 @@ impl Generator {
             (gin::CREASE, 6),
             (gin::PART_GRADIENT, 8),
             (gin::PART_RANDOM, 7),
+            (gin::ID, 12),
         ];
         FROM.iter().filter(|(i, _)| self.weights[*i].abs() > 1e-4).fold(0, |acc, (_, m)| acc | (1 << m))
     }

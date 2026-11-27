@@ -4,6 +4,7 @@
 //! History is shared: undoing a step of another set switches to it first.
 
 use super::{PainterApp, icons, theme};
+use crate::bake::IdSource;
 use crate::bvh::Bvh;
 use crate::engine::{Content, Engine, MaskSource, Projection};
 use crate::undo::{StrokeTarget, UndoStack};
@@ -28,6 +29,8 @@ pub(super) struct Parked {
 pub(super) struct TextureSets {
     /// The set in `PainterApp::engine`, by position in `Mesh::sets`.
     pub active: usize,
+    /// ID source actually used by each set's stored ID map.
+    pub baked_id_sources: Vec<IdSource>,
     /// One slot per mesh set; `None` for the active one.
     pub parked: Vec<Option<Parked>>,
     /// The set the running bake is for.
@@ -162,6 +165,7 @@ impl PainterApp {
             return;
         }
         let Some(mut p) = self.sets.parked.get_mut(k).and_then(Option::take) else { return };
+        self.id_color_pick_target = None;
         let previous_active = self.sets.active;
         let keep_previous_active_surface_maps = super::graph_ui::engine_uses_surface_graph(
             &self.engine, &self.graphs.docs, &self.graphs.lib,
@@ -276,6 +280,7 @@ impl PainterApp {
             }
         }
         let old_active = self.sets.active;
+        let old_baked_id_sources = std::mem::take(&mut self.sets.baked_id_sources);
         let mut old = std::mem::take(&mut self.sets.parked);
         old.resize_with(old_names.len().max(old_active + 1), || None);
         let active = assign.iter().position(|a| *a == Some(old_active)).unwrap_or(0);
@@ -317,6 +322,9 @@ impl PainterApp {
         }
         self.sets.parked = parked;
         self.sets.active = active;
+        self.sets.baked_id_sources = assign.iter().map(|old_set| {
+            (*old_set).and_then(|index| old_baked_id_sources.get(index).copied()).unwrap_or(self.baked_id_source)
+        }).collect();
         self.sets.bake_queue.clear();
         self.sets.hidden = vec![false; new.len()];
         self.sets.pinned = vec![false; new.len()];

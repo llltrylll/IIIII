@@ -336,13 +336,22 @@ struct LineAnchor {
 
 enum BakeJob {
     /// Worker thread is looking the bake up in the cache, or else loading the
-    /// source and building the BVH.
+    /// source and building the BVH. Settings are frozen for this entire batch.
     Preparing {
         rx: mpsc::Receiver<Result<Prepared, String>>,
         cancel: Arc<std::sync::atomic::AtomicBool>,
+        settings: crate::bake::BakeSettings,
+        id_only: bool,
+        set: usize,
     },
-    /// GPU passes in progress; the result is cached under the key.
-    Running(BakeRun, bake_cache::Key),
+    /// GPU passes in progress; keep the exact settings used for preparation.
+    Running {
+        run: BakeRun,
+        key: bake_cache::Key,
+        settings: crate::bake::BakeSettings,
+        id_only: bool,
+        set: usize,
+    },
 }
 
 enum Prepared {
@@ -915,8 +924,12 @@ pub struct PainterApp {
     screen_candidate_indices: Vec<u32>,
     /// Changes whenever the active Engine instance is replaced or swapped.
     engine_epoch: u64,
-    /// The running bake only makes the ID map (from vertex colors).
+    /// The running batch only makes ID maps (from vertex colors).
     bake_id_only: bool,
+    /// Immutable settings shared by every Texture Set in the active bake batch.
+    bake_batch_settings: Option<crate::bake::BakeSettings>,
+    /// An ID-only rebake requested during another bake; run it after that batch.
+    deferred_id_rebake: bool,
     cam: OrbitCam,
     selected_point_light: usize,
     show_point_light_markers: bool,
@@ -2505,6 +2518,8 @@ impl PainterApp {
             screen_candidate_indices: Vec::new(),
             engine_epoch: 0,
             bake_id_only: false,
+            bake_batch_settings: None,
+            deferred_id_rebake: false,
             cam: OrbitCam::default(),
             selected_point_light: 0,
             show_point_light_markers: true,
@@ -2644,10 +2659,14 @@ impl PainterApp {
             return;
         }
         self.engine_epoch = self.engine_epoch.wrapping_add(1);
-        // A bake of the old mesh can't land on the new one. Clear its
-        // one-shot ID workflow too, so no stale import/rebake can target the
-        // replacement mesh and the next manual Bake is a full bake.
+        // A bake of the old mesh can't land on the new one. Stop CPU preparation
+        // and discard its GPU run before replacing the mesh and texture sets.
+        if let Some(BakeJob::Preparing { cancel, .. }) = &self.bake_job {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.bake_job = None;
+        self.bake_batch_settings = None;
+        self.deferred_id_rebake = false;
         self.bake_id_only = false;
         self.id_color_pick_target = None;
         self.vertex_id.palette = None;
@@ -2678,6 +2697,9 @@ impl PainterApp {
         self.hidden_objects = vec![false; self.mesh.objects.len()];
         self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
         self.rebuild_sets(&old_names, sizes);
+        if start_auto_bake {
+            self.sets.baked_id_sources = vec![crate::bake::IdSource::MeshParts; self.mesh.sets.len()];
+        }
         // Mesh-dependent helpers rebuild for the new mesh on demand.
         self.poly.topo = None;
         self.poly.shown = None;
@@ -2701,6 +2723,9 @@ impl PainterApp {
             if self.stroke.is_some() {
                 continue;
             }
+            // Any pending layer/document action can invalidate the eyedropper's
+            // index-based target. Re-arm it explicitly after the action.
+            self.id_color_pick_target = None;
             let (at, parent) = self.insert_place();
             match action {
                 a @ (Action::NewProject(_) | Action::OpenProject(_) | Action::OpenSpp(_) | Action::Exit) if self.is_modified() => {

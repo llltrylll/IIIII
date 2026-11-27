@@ -1239,8 +1239,15 @@ pub fn prepare_cancellable(
             } else {
                 None
             };
-            let tri_material = if settings.id_source == IdSource::Materials && hp.material_count > 1 {
-                hp.tri_material
+            let tri_material = if settings.id_source == IdSource::Materials {
+                let triangle_count = hp.indices.len() / 3;
+                if hp.tri_material.len() == triangle_count {
+                    hp.tri_material
+                } else if hp.material_count <= 1 {
+                    vec![0; triangle_count]
+                } else {
+                    Vec::new()
+                }
             } else {
                 Vec::new()
             };
@@ -1267,7 +1274,7 @@ pub fn prepare_cancellable(
             // Material IDs are only needed when explicitly selected. Vertex
             // color payloads are copied only for Vertex Color ID mode.
             let count = low.sets.len().max(1) as u32;
-            let mut tri_material = if settings.id_source == IdSource::Materials && count > 1 {
+            let mut tri_material = if settings.id_source == IdSource::Materials {
                 vec![0; low_tris]
             } else {
                 Vec::new()
@@ -1398,7 +1405,8 @@ pub fn prepare_cancellable(
     let parts: Vec<[f32; 4]> = (0..part_count as usize)
         .map(|p| [hash01(p as u32 + 1), part_lo[p], (part_hi[p] - part_lo[p]).max(1e-5), 0.0])
         .collect();
-    let use_materials = settings.id_source == IdSource::Materials && material_count > 1;
+    let material_count = material_count.max(1);
+    let use_materials = settings.id_source == IdSource::Materials && tri_material.len() == triangle_count;
     let (tri_id, ids, id_regions): (Cow<'_, [u32]>, Vec<[f32; 4]>, Vec<IdRegion>) =
         if settings.id_source == IdSource::VertexColors {
             let colors = tri_vertex_color.as_ref().expect("vertex-color source was validated above");
