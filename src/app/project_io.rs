@@ -659,6 +659,15 @@ fn s<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(Value::as_str)
 }
 
+fn id_source(v: &Value, key: &str, fallback: IdSource) -> IdSource {
+    match s(v, key) {
+        Some("Materials") => IdSource::Materials,
+        Some("VertexColors") => IdSource::VertexColors,
+        Some("MeshParts") => IdSource::MeshParts,
+        _ => fallback,
+    }
+}
+
 fn custom_map_json(c: &crate::bake::CustomMap) -> Value {
     json!({
         "id": c.id,
@@ -1249,20 +1258,11 @@ impl PainterApp {
             .enumerate()
             .filter_map(|(k, cv)| custom_map_from(cv, k as u32 + 1))
             .collect();
-        bs.id_source = match s(bv, "id_source") {
-            Some("Materials") => IdSource::Materials,
-            Some("VertexColors") => IdSource::VertexColors,
-            _ => IdSource::MeshParts,
-        };
+        bs.id_source = id_source(bv, "id_source", IdSource::MeshParts);
         // Keep the source selected for the next bake separate from the source
         // actually used by the stored ID map. Older projects have no separate
         // field, so their saved ID source remains the best available fallback.
-        self.baked_id_source = match s(bv, "baked_id_source") {
-            Some("Materials") => IdSource::Materials,
-            Some("VertexColors") => IdSource::VertexColors,
-            Some("MeshParts") => IdSource::MeshParts,
-            _ => bs.id_source,
-        };
+        self.baked_id_source = id_source(bv, "baked_id_source", bs.id_source);
 
         // Texture sets: projects before version 3 have one, at the top level.
         let set_values: Vec<&Value> = match manifest["texture_sets"].as_array() {
@@ -1302,19 +1302,9 @@ impl PainterApp {
         self.sets.id_source_preferences.resize(set_count, legacy_baked_id_source);
         for (k, sv) in set_values.iter().enumerate().take(set_count) {
             self.switch_set(k);
-            let baked_id_source = match s(sv, "baked_id_source") {
-                Some("Materials") => IdSource::Materials,
-                Some("VertexColors") => IdSource::VertexColors,
-                Some("MeshParts") => IdSource::MeshParts,
-                _ => legacy_baked_id_source,
-            };
+            let baked_id_source = id_source(sv, "baked_id_source", legacy_baked_id_source);
             self.sets.baked_id_sources[k] = baked_id_source;
-            self.sets.id_source_preferences[k] = match s(sv, "id_source_preference") {
-                Some("Materials") => IdSource::Materials,
-                Some("VertexColors") => IdSource::VertexColors,
-                Some("MeshParts") => IdSource::MeshParts,
-                _ => baked_id_source,
-            };
+            self.sets.id_source_preferences[k] = id_source(sv, "id_source_preference", baked_id_source);
             // Replacing a document must drop old layer textures, not retain them in Undo.
             self.engine.restore_layers(Vec::new());
             let res = sv["resolution"].as_u64().unwrap_or(2048) as u32;
@@ -1525,6 +1515,42 @@ impl PainterApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+        fn id_source_metadata_migrates_legacy_and_preserves_per_set_preference() {
+            let legacy = json!({"baked_id_source": "VertexColors"});
+            let actual = id_source(&legacy, "baked_id_source", IdSource::MeshParts);
+            let preferred = id_source(&legacy, "id_source_preference", actual);
+            assert_eq!(actual, IdSource::VertexColors);
+            assert_eq!(preferred, IdSource::VertexColors);
+    
+            let current = json!({
+                "baked_id_source": "Materials",
+                "id_source_preference": "VertexColors"
+            });
+            assert_eq!(
+                id_source(&current, "baked_id_source", IdSource::MeshParts),
+                IdSource::Materials
+            );
+            assert_eq!(
+                id_source(&current, "id_source_preference", IdSource::MeshParts),
+                IdSource::VertexColors
+            );
+        }
+    
+        #[test]
+        fn id_source_metadata_uses_fallback_for_missing_or_unknown_values() {
+            let value = json!({
+                "old": "not-a-source",
+                "unknown": "HighPoly",
+                "valid": "MeshParts"
+            });
+            assert_eq!(id_source(&value, "missing", IdSource::Materials), IdSource::Materials);
+            assert_eq!(id_source(&value, "old", IdSource::VertexColors), IdSource::VertexColors);
+            assert_eq!(id_source(&value, "unknown", IdSource::MeshParts), IdSource::MeshParts);
+            assert_eq!(id_source(&value, "valid", IdSource::Materials), IdSource::MeshParts);
+        }
+    
+    
 
     /// Projects from the four fixed custom slots load as maps with ids 1-4
     /// (empty slots skipped), and their masks' extra weights as inputs on
