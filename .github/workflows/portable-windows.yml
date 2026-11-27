@@ -11,6 +11,15 @@ on:
       - "Cargo.lock"
       - "build.rs"
       - "scripts/package.ps1"
+  pull_request:
+    paths:
+      - ".github/workflows/portable-windows.yml"
+      - "src/**"
+      - "assets/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
+      - "scripts/package.ps1"
   workflow_dispatch:
 
 permissions:
@@ -21,8 +30,10 @@ jobs:
     name: Build portable Windows RAR
     runs-on: windows-latest
     steps:
-      - name: Check out master
+      - name: Check out the triggering commit
         uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
 
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
