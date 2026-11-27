@@ -380,6 +380,7 @@ impl PainterApp {
         }
         let Some((layer_idx, mask_layer)) = self.id_color_pick_target.take() else { return; };
         let Some(mask) = self.engine.layers.get_mut(layer_idx).and_then(|layer| layer.mask.as_mut()) else {
+            self.id_color_pick_target = None;
             self.status = "The target ID mask no longer exists.".into();
             return;
         };
