@@ -303,10 +303,9 @@ impl PainterApp {
     /// reading the colors from the mesh file for projects saved without them.
     pub(super) fn service_vertex_id_requests(&mut self, ctx: &egui::Context) {
         if std::mem::take(&mut self.vertex_id.want_rebake) {
-            if self.bake_settings.id_source != IdSource::VertexColors {
-                self.bake_settings.id_source = IdSource::VertexColors;
-                self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
-            }
+            // start_bake_id_only applies Vertex Colors only to the per-set ID
+            // job. The global source remains valid for any configured high-poly
+            // projection and the next full bake.
             self.start_bake_id_only(ctx);
             self.status = "Baking the ID map from the vertex colors (the other maps stay as they are).".into();
         }
