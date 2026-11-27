@@ -359,9 +359,20 @@ impl PainterApp {
                     self.vertex_id.auto_baked = false;
                     self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
                     self.vertex_id.shown = None;
-                    // The ID map has to be baked again from the new colors.
-                    self.vertex_id.want_rebake = true;
-                    self.status = format!("Read {found} vertex colors from the file. Baking the maps from them.");
+                    // Vertex colors are a mesh-wide attribute. Refresh every
+                    // Texture Set whose current or preferred ID source uses it,
+                    // plus the active set that initiated this import.
+                    let targets = crate::app::bake_jobs::vertex_color_rebake_targets(
+                        self.sets.active,
+                        self.mesh.sets.len(),
+                        &self.sets.baked_id_sources,
+                        &self.sets.id_source_preferences,
+                    );
+                    self.start_bake_id_only_for_sets(&targets, ctx);
+                    self.status = format!(
+                        "Read {found} vertex colors from the file. Refreshing ID maps on {} Texture Set(s).",
+                        targets.len(),
+                    );
                 }
                 Err(e) => self.status = e,
             }
