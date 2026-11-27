@@ -355,11 +355,10 @@ impl PainterApp {
         // source and the global mirror stays synchronized.
         let (baked_id_sources, active_baked_id_source) =
             remap_id_sources(&assign, &old_baked_id_sources, active, self.baked_id_source);
-        let (id_source_preferences, active_id_source_preference) =
+        let (id_source_preferences, _) =
             remap_id_sources(&assign, &old_id_source_preferences, active, self.bake_settings.id_source);
-        // Keep the active preference mirror global; a newly created set
-        // inherits the intended next source, not a temporary high-poly fallback.
-        self.bake_settings.id_source = active_id_source_preference;
+        // New sets inherit the next-bake preference of the active set when it
+        // survives the reorder; the global selector remains independent.
         self.baked_id_source = active_baked_id_source;
         self.sets.parked = parked;
         self.sets.active = active;
