@@ -33,6 +33,7 @@ impl PainterApp {
         self.bake_id_only = false;
         self.sets.bake_queue.clear();
         self.bake_batch_settings = Some(self.job_bake_settings());
+        self.bake_batch_id_sources = None;
         self.start_bake_set(self.sets.active, ctx);
     }
 
@@ -49,6 +50,7 @@ impl PainterApp {
         let active = self.sets.active;
         self.sets.bake_queue = (0..self.mesh.sets.len()).filter(|&k| k != active).collect();
         self.bake_batch_settings = Some(self.job_bake_settings());
+        self.bake_batch_id_sources = None;
         self.start_bake_set(active, ctx);
     }
 
@@ -62,6 +64,23 @@ impl PainterApp {
         let active = self.sets.active;
         self.sets.bake_queue = (0..self.mesh.sets.len()).filter(|&k| k != active).collect();
         self.bake_batch_settings = Some(self.job_bake_settings());
+        self.bake_batch_id_sources = None;
+        self.start_bake_set(active, ctx);
+    }
+
+    /// Restores each Texture Set's saved ID source when opening a project.
+    /// The baked maps are rebuilt from the cache or rebaked, since .mpp stores
+    /// mesh geometry and layer data rather than duplicating the map textures.
+    pub(super) fn start_bake_all_preserving_sources(&mut self, ctx: &egui::Context) {
+        if self.bake_job.is_some() {
+            self.status = "A bake is already running; the saved-source bake was not started.".into();
+            return;
+        }
+        self.bake_id_only = false;
+        let active = self.sets.active;
+        self.sets.bake_queue = (0..self.mesh.sets.len()).filter(|&k| k != active).collect();
+        self.bake_batch_settings = Some(self.job_bake_settings());
+        self.bake_batch_id_sources = Some(self.sets.baked_id_sources.clone());
         self.start_bake_set(active, ctx);
     }
 
@@ -75,6 +94,7 @@ impl PainterApp {
         let active = self.sets.active;
         self.sets.bake_queue = (0..self.mesh.sets.len()).filter(|&k| k != active).collect();
         self.bake_batch_settings = Some(self.job_bake_settings());
+        self.bake_batch_id_sources = None;
         self.start_bake_set(active, ctx);
     }
 
@@ -84,6 +104,7 @@ impl PainterApp {
         self.bake_job = None;
         self.sets.bake_queue.clear();
         self.bake_batch_settings = None;
+        self.bake_batch_id_sources = None;
         self.bake_id_only = false;
         self.start_deferred_id_rebake(ctx);
     }
@@ -102,7 +123,12 @@ impl PainterApp {
         // This snapshot is retained by the BakeJob and reused for every later
         // Texture Set in the batch. Cache key, CPU preparation and GPU uniforms
         // therefore always describe the same settings.
-        let settings = self.bake_batch_settings.clone().unwrap_or_else(|| self.job_bake_settings());
+        let mut settings = self.bake_batch_settings.clone().unwrap_or_else(|| self.job_bake_settings());
+        if let Some(sources) = &self.bake_batch_id_sources {
+            if let Some(source) = sources.get(set) {
+                settings.id_source = *source;
+            }
+        }
         let worker_settings = settings.clone();
         let id_only = self.bake_id_only;
         let mesh = Arc::clone(&self.mesh);
@@ -172,6 +198,7 @@ impl PainterApp {
             self.start_bake_set(set, ctx);
         } else {
             self.bake_batch_settings = None;
+            self.bake_batch_id_sources = None;
             self.bake_id_only = false;
             self.start_deferred_id_rebake(ctx);
         }
