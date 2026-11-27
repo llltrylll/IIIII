@@ -536,7 +536,7 @@ impl PainterApp {
 
 #[cfg(test)]
 mod project_bake_source_plan_tests {
-    use super::{project_bake_source_plan, queue_deferred_id_rebake};
+    use super::{next_full_bake_id_source, project_bake_source_plan, queue_deferred_id_rebake};
     use crate::bake::IdSource;
     use std::collections::VecDeque;
 
