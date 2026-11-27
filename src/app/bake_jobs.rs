@@ -72,7 +72,7 @@ fn set_id_source_preferences(
 
 /// Adds a deferred per-set ID pass once. Requests for the set already running
 /// or already queued in the current ID-only batch do not need another pass.
-fn vertex_color_rebake_targets(
+pub(super) fn vertex_color_rebake_targets(
     active: usize,
     set_count: usize,
     baked_sources: &[IdSource],
