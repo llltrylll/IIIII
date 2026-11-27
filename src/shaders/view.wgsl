@@ -171,7 +171,12 @@ fn sample_surface(uv: vec2<f32>) -> Surface {
     if (need_map_b) { s.b = textureSampleLevel(map_b, samp, uv, 0.0); }
     if (need_map_c) { s.c = textureSampleLevel(map_c, samp, uv, 0.0); }
     if (need_map_d) { s.d = textureSampleLevel(map_d, samp, uv, 0.0); }
-    if (need_map_e) {
+    if (custom_preview) {
+        // User-defined maps are continuous data and retain the normal filtered view.
+        s.e = textureSampleLevel(map_e, samp, uv, 0.0);
+    } else if (mode == 18) {
+        // The built-in ID map is categorical: interpolation invents labels that
+        // do not exist on the mesh, so inspect one exact texel.
         let dimensions = vec2<i32>(textureDimensions(map_e));
         let coord = clamp(vec2<i32>(uv * vec2<f32>(dimensions)), vec2<i32>(0), dimensions - vec2<i32>(1));
         s.e = textureLoad(map_e, coord, 0);
