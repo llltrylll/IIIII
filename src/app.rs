@@ -2707,6 +2707,7 @@ impl PainterApp {
         self.rebuild_sets(&old_names, sizes);
         if start_auto_bake {
             self.sets.baked_id_sources = vec![crate::bake::IdSource::MeshParts; self.mesh.sets.len()];
+            self.sets.id_source_preferences = vec![crate::bake::IdSource::MeshParts; self.mesh.sets.len()];
         }
         // Mesh-dependent helpers rebuild for the new mesh on demand.
         self.poly.topo = None;
