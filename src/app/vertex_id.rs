@@ -257,8 +257,7 @@ impl VertexIdState {
 
 /// What the panel needs to know about the mesh and its bake.
 #[derive(Clone, Copy)]
-pub struct Info<'a> {
-    pub palette: &'a Palette,
+pub struct Info {
     pub has_colors: bool,
     pub has_bake: bool,
     /// Source currently represented by the active Texture Set's ID map.
@@ -290,6 +289,7 @@ pub fn panel(
     ui: &mut egui::Ui,
     g: &mut Generator,
     vs: &mut VertexIdState,
+    mesh: &std::sync::Arc<Mesh>,
     info: Info,
     pick_target: &mut Option<(usize, Option<usize>)>,
     target: (usize, Option<usize>),
@@ -318,20 +318,22 @@ pub fn panel(
         return false;
     }
 
+    // Build the palette only when the actual ID controls are visible.
+    let palette = vs.palette_for(mesh).clone();
     let mut ids = g.id_colors();
     let before = ids.clone();
 
-    let shown_count = info.palette.entries.len();
-    let summary = if info.palette.distinct > shown_count {
-        format!("{} colors in the mesh (showing the {} most used). Click to add or remove.", info.palette.distinct, shown_count)
+    let shown_count = palette.entries.len();
+    let summary = if palette.distinct > shown_count {
+        format!("{} colors in the mesh (showing the {} most used). Click to add or remove.", palette.distinct, shown_count)
     } else {
-        format!("{} colors in the mesh. Click to add or remove.", info.palette.distinct)
+        format!("{} colors in the mesh. Click to add or remove.", palette.distinct)
     };
     ui.label(egui::RichText::new(summary).small().color(theme::TEXT_DIM));
 
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-        for e in &info.palette.entries {
+        for e in &palette.entries {
             let pos = selected_index(&ids, e.rgb);
             let tip = format!("{} · {} corners{}", hex(e.rgb), e.corners, if pos.is_some() { " · selected" } else { "" });
             if swatch(ui, e.rgb, pos.is_some(), &tip).clicked() {
