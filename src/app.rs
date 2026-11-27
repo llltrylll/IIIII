@@ -2715,8 +2715,12 @@ impl PainterApp {
         self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
         self.rebuild_sets(&old_names, sizes);
         if start_auto_bake {
+            // A newly imported mesh has no baked ID map yet, but its preferred
+            // source must match the user's global next-bake choice. This matters
+            // when the project is saved before the first bake and later opened
+            // with Bake on Load enabled.
             self.sets.baked_id_sources = vec![crate::bake::IdSource::MeshParts; self.mesh.sets.len()];
-            self.sets.id_source_preferences = vec![crate::bake::IdSource::MeshParts; self.mesh.sets.len()];
+            self.sets.id_source_preferences = vec![self.bake_settings.id_source; self.mesh.sets.len()];
         }
         // Mesh-dependent helpers rebuild for the new mesh on demand.
         self.poly.topo = None;
@@ -2730,7 +2734,7 @@ impl PainterApp {
         }
         self.cam = OrbitCam { fov_y: self.cam.fov_y, ..OrbitCam::default() };
         if start_auto_bake && self.prefs.bake_on_load {
-            self.start_bake_all(ctx);
+            self.start_bake_all_preserving_sources(ctx);
         }
     }
 
