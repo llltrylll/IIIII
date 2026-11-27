@@ -336,7 +336,10 @@ impl PainterApp {
             }
         }
         resp.context_menu(|ui| {
-            self.selected = idx;
+            if self.selected != idx {
+                self.id_color_pick_target = None;
+                self.selected = idx;
+            }
             self.layer_menu_items(ui);
         });
     }
