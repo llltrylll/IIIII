@@ -526,8 +526,12 @@ pub struct PreparedScene {
     nodes: Vec<[f32; 4]>,
     tri_pos: Vec<[f32; 4]>,
     tri_nrm: Vec<[f32; 4]>,
-    parts: Vec<[f32; 4]>,
+    /// Three sRGB vertex colors per triangle, only for the Low Poly Vertex
+    /// Color ID source. Other ID sources use the compact per-region palette.
+    tri_vcolor: Vec<[f32; 4]>,
+    /// Compact generated or imported ID colors, indexed by tri_pos' ID field.
     ids: Vec<[f32; 4]>,
+    parts: Vec<[f32; 4]>,
     /// Hard-edge segments (two entries each) and their BVH: convex edges, then concave creases.
     seg_nodes: Vec<[f32; 4]>,
     segs: Vec<[f32; 4]>,
@@ -618,7 +622,7 @@ fn hash01(x: u32) -> f32 {
 }
 
 /// Evenly spread, saturated ID colors (golden-ratio hue walk).
-fn id_color(i: u32) -> [f32; 4] {
+pub(crate) fn id_color(i: u32) -> [f32; 4] {
     let h = (i as f32 * 0.618_034).fract() * 6.0;
     let s = 0.75;
     let v = 0.95 - 0.25 * ((i / 7) % 2) as f32;
@@ -1017,15 +1021,18 @@ fn denoise_passes(ao_rays: u32) -> u32 {
 pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<PreparedScene, String> {
     let start = Instant::now();
     let low_tris = low.indices.len() / 3;
+    if settings.id_source == IdSource::VertexColors && settings.high_poly.is_some() {
+        return Err("Vertex Color ID masks use the active Low Poly mesh. Disable the separate High Poly source before baking this ID map.".into());
+    }
     let raster = low.sets.get(set).map_or(0..low_tris as u32, |s| s.tris.clone());
-    let (positions, normals, indices, tri_material, material_count, source, src_objects, tri_color) = match &settings.high_poly {
+    let (positions, normals, indices, tri_material, material_count, source, src_objects, tri_color, tri_vertex_color) = match &settings.high_poly {
         Some(path) => {
             let hp = HighPoly::load(path, low.center, low.scale)?;
             let objects = (hp.tri_object, hp.objects);
             // Imported normals need not be unit length; `vertex_curvature`
             // measures how fast they turn, which only means curvature for unit ones.
             let normals: Vec<Vec3> = hp.normals.iter().map(|n| n.normalize_or_zero()).collect();
-            (hp.positions, normals, hp.indices, hp.tri_material, hp.material_count, format!("{} (high poly)", hp.name), Some(objects), hp.tri_color)
+            (hp.positions, normals, hp.indices, hp.tri_material, hp.material_count, format!("{} (high poly)", hp.name), Some(objects), None, None)
         }
         None => {
             let positions: Vec<Vec3> = low.vertices.iter().map(|v| Vec3::from_array(v.pos)).collect();
@@ -1036,9 +1043,19 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
                 tri_material[s.tris.start as usize..s.tris.end as usize].fill(k as u32);
             }
             let count = low.sets.len().max(1) as u32;
-            (positions, normals, low.indices.clone(), tri_material, count, format!("{} (low poly)", low.name), None, low.tri_color.clone())
+            (positions, normals, low.indices.clone(), tri_material, count, format!("{} (low poly)", low.name), None, low.tri_color.clone(), low.tri_vertex_color.clone())
         }
     };
+
+    if settings.id_source == IdSource::VertexColors
+        && (tri_vertex_color.as_ref().is_none_or(|colors| colors.len() != indices.len() / 3)
+            || tri_color.as_ref().is_none_or(|colors| colors.len() != indices.len() / 3))
+    {
+        return Err(
+            "Vertex Colors is selected for the ID map, but the Low Poly mesh has no valid imported per-corner color data. Add a color attribute in Blender, reimport the Low Poly mesh, or choose Mesh parts / Materials."
+                .into(),
+        );
+    }
 
     // Name groups: 1-based per distinct low-poly base name; 0 = unmatched
     // (an unmatched low part sees everything, an unmatched high part is seen
@@ -1134,7 +1151,9 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
     let parts: Vec<[f32; 4]> = (0..part_count as usize)
         .map(|p| [hash01(p as u32 + 1), part_lo[p], (part_hi[p] - part_lo[p]).max(1e-5), 0.0])
         .collect();
-    let use_materials = settings.id_source == IdSource::Materials && material_count > 1;
+    // A single-material mesh still has one valid material ID region. Keeping
+    // the source active avoids silently substituting connected mesh parts.
+    let use_materials = settings.id_source == IdSource::Materials;
     // Vertex colors: one ID per distinct color, shown as that color.
     let color_ids: Option<(Vec<u32>, Vec<[f32; 4]>)> = match (&tri_color, settings.id_source) {
         (Some(colors), IdSource::VertexColors) if colors.len() == indices.len() / 3 => {
@@ -1187,6 +1206,11 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
     let curvature = vertex_curvature(&positions, &normals, &indices, 1.0 / settings.curvature_scale_for(low).max(1e-6));
     let mut tri_pos = Vec::with_capacity(bvh.order.len() * 3);
     let mut tri_nrm = Vec::with_capacity(bvh.order.len() * 3);
+    let mut tri_vcolor = Vec::with_capacity(if settings.id_source == IdSource::VertexColors {
+        bvh.order.len() * 3
+    } else {
+        0
+    });
     for &t in &bvh.order {
         let t = t as usize;
         // Per-triangle attributes ride in the w components: part index, ID
@@ -1197,6 +1221,10 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
             let n = normals[v as usize];
             tri_pos.push([p.x, p.y, p.z, w[k]]);
             tri_nrm.push([n.x, n.y, n.z, curvature.get(v as usize).copied().unwrap_or(0.0)]);
+            if settings.id_source == IdSource::VertexColors {
+                let rgb = tri_vertex_color.as_ref().expect("validated Low Poly vertex colors")[t][k];
+                tri_vcolor.push([rgb[0] as f32 / 255.0, rgb[1] as f32 / 255.0, rgb[2] as f32 / 255.0, 1.0]);
+            }
         }
     }
     // A low poly's interpolated normals give unreliable texel curvature, so
@@ -1246,8 +1274,9 @@ pub fn prepare(low: &Mesh, settings: &BakeSettings, set: usize) -> Result<Prepar
         nodes,
         tri_pos,
         tri_nrm,
-        parts,
+        tri_vcolor,
         ids,
+        parts,
         seg_nodes,
         segs,
         edge_roots,
@@ -1577,6 +1606,7 @@ impl GpuBaker {
                 (6, Storage(false)),
                 (7, Storage(false)),
                 (8, Storage(false)),
+                (39, Storage(false)),
                 (9, StorageTex(F::Rgba32Float)),
                 (10, StorageTex(F::Rgba16Float)),
                 (11, StorageTex(F::Rgba16Float)),
@@ -1877,7 +1907,8 @@ impl GpuBaker {
             ],
             c: [s.thickness_distance, if s.bakes(4) { s.sky_rays as f32 } else { 0.0 }, s.sky_cone_deg.to_radians().cos(), s.curvature_radius],
             d: [s.edge_threshold, scene.edge_max_distance, scene.curvature_scale, if s.high_poly.is_none() { 1.0 } else { 0.0 }],
-            e: [0.0, 0.0, 0.0, 1.0],
+            // e.w selects interpolated per-corner colors vs the compact flat-ID palette.
+            e: [0.0, 0.0, 0.0, if s.id_source == IdSource::VertexColors { 1.0 } else { 0.0 }],
             f: [scene.edge_roots[0], scene.edge_roots[1], if cage.is_some() { 1.0 } else { 0.0 }, scene.edge_seed_curvature],
             // Random ray sets are picked per world cell of about two texels
             // (see `world_seed` in bake.wgsl).
@@ -1893,8 +1924,13 @@ impl GpuBaker {
         let nodes = Self::storage(device, "bvh nodes", &scene.nodes);
         let tri_pos = Self::storage(device, "tri positions", &scene.tri_pos);
         let tri_nrm = Self::storage(device, "tri normals", &scene.tri_nrm);
+        // Only Vertex Color ID needs three colors per triangle. For parts or
+        // materials, bind a one-element dummy buffer and keep the compact palette.
+        let empty_tri_vcolor = [[0.0f32; 4]; 1];
+        let tri_vcolor_data = if scene.tri_vcolor.is_empty() { &empty_tri_vcolor[..] } else { &scene.tri_vcolor[..] };
+        let tri_vcolor = Self::storage(device, "tri vertex colors", tri_vcolor_data);
+        let ids = Self::storage(device, "ID palette", &scene.ids);
         let parts = Self::storage(device, "parts", &scene.parts);
-        let ids = Self::storage(device, "ids", &scene.ids);
         let seg_nodes = Self::storage(device, "edge bvh nodes", &scene.seg_nodes);
         let segs = Self::storage(device, "edge segments", &scene.segs);
         let counters = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1929,6 +1965,7 @@ impl GpuBaker {
                 (6, tri_nrm.as_entire_binding()),
                 (7, parts.as_entire_binding()),
                 (8, ids.as_entire_binding()),
+                (39, tri_vcolor.as_entire_binding()),
                 (9, v(&surf_pos)),
                 (10, v(&surf_nrm)),
                 (11, v(&maps[3])),
@@ -2042,7 +2079,9 @@ impl GpuBaker {
             let [x, y, pass] = run.tiles[run.next_tile];
             run.next_tile += 1;
             let mut u = run.uniform;
-            u.e = [x as f32, y as f32, 0.0, run.next_tile as f32];
+            // Preserve e.w: the surface pass uses it to select vertex
+            // color interpolation vs the compact flat-ID palette.
+            u.e = [x as f32, y as f32, 0.0, run.uniform.e[3]];
             let ubuf = Self::uniform_buffer(device, &u);
             let mut encoder = device.create_command_encoder(&Default::default());
             if pass == 0 {
@@ -2470,18 +2509,25 @@ pub(crate) mod tests {
         }
     }
 
-    /// Windowless GPU with the same limits the app requests.
-    pub(crate) fn gpu_with_adapter() -> (wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue) {
+    /// Windowless GPU with the same limits the app requests, when a usable
+    /// adapter is available on this machine.
+    pub(crate) fn try_gpu_with_adapter() -> Option<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = ready(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             ..Default::default()
-        }))
-        .expect("a GPU adapter");
-        let (device, queue) =
-            ready(adapter.request_device(&wgpu::DeviceDescriptor { required_limits: adapter.limits(), ..Default::default() }))
-                .expect("a GPU device");
-        (instance, adapter, device, queue)
+        })).ok()?;
+        let (device, queue) = ready(
+            adapter.request_device(&wgpu::DeviceDescriptor {
+                required_limits: adapter.limits(),
+                ..Default::default()
+            })
+        ).ok()?;
+        Some((instance, adapter, device, queue))
+    }
+
+    pub(crate) fn gpu_with_adapter() -> (wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue) {
+        try_gpu_with_adapter().expect("a GPU adapter and device")
     }
 
     pub(crate) fn gpu() -> (wgpu::Device, wgpu::Queue) {
@@ -2942,5 +2988,195 @@ pub(crate) mod tests {
         let mean = agree.iter().sum::<f32>() / agree.len().max(1) as f32;
         println!("  bulge normals, filled vs fitted cage: {mean:.3}");
         assert!(mean > 0.9, "the nearest surface is the bulge itself ({mean})");
+    }
+
+    /// End-to-end GPU regression: the ID texture must carry each Low Poly
+    /// triangle corner's color through barycentric interpolation.
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn low_poly_vertex_id_gpu_interpolates_corner_colors() {
+        let Some((_instance, _adapter, device, queue)) = try_gpu_with_adapter() else {
+            eprintln!("Skipping GPU regression: no usable adapter is available.");
+            return;
+        };
+        let positions = vec![
+            Vec3::new(-1.0, -1.0, 0.0),
+            Vec3::new(1.0, -1.0, 0.0),
+            Vec3::new(-1.0, 1.0, 0.0),
+        ];
+        let normals = Some(vec![Vec3::Z; 3]);
+        let uvs = vec![Vec2::ZERO, Vec2::X, Vec2::Y];
+        let mut mesh = Mesh::from_parts(
+            "Vertex ID color test".into(),
+            positions,
+            normals,
+            uvs,
+            vec![0, 1, 2],
+        );
+        mesh.tri_color = Some(vec![[85, 85, 85]]);
+        mesh.tri_vertex_color = Some(vec![[
+            [255, 0, 0],
+            [0, 255, 0],
+            [0, 0, 255],
+        ]]);
+
+        let gpu_mesh = GpuMesh::new(&device, &mesh);
+        let mut settings = BakeSettings { id_source: IdSource::VertexColors, ..BakeSettings::default() };
+        settings.apply_quality(Quality::Draft);
+        settings.aa = 1;
+        let (maps, _, low_pos) = run_bake(&device, &queue, &mesh, &gpu_mesh, &settings, 96);
+
+        let id_map = &maps.maps[MAPS[crate::engine::ID_MAP_INDEX].tex];
+        let id_bytes = read_texture(&device, &queue, id_map);
+        let low_bytes = read_texture(&device, &queue, &low_pos);
+        assert_eq!(id_bytes.len(), 96 * 96 * 4);
+        assert_eq!(low_bytes.len(), 96 * 96 * 16);
+
+        let mut ranges = [[u8::MAX, 0u8]; 3];
+        let mut interior = 0usize;
+        for (texel, low) in low_bytes.chunks_exact(16).enumerate() {
+            let alpha = f32::from_le_bytes([low[12], low[13], low[14], low[15]]);
+            if alpha <= 0.75 {
+                continue;
+            }
+            interior += 1;
+            for channel in 0..3 {
+                let value = id_bytes[texel * 4 + channel];
+                ranges[channel][0] = ranges[channel][0].min(value);
+                ranges[channel][1] = ranges[channel][1].max(value);
+            }
+        }
+
+        assert!(interior > 100, "the test triangle must cover enough texels ({interior})");
+        for (channel, [min, max]) in ranges.into_iter().enumerate() {
+            assert!(
+                max.saturating_sub(min) > 120,
+                "ID map channel {channel} should vary across the triangle, got {min}..{max}"
+            );
+        }
+    }
+
+    /// End-to-end GPU regression: flat Mesh Parts IDs still use the compact palette.
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn low_poly_vertex_id_gpu_keeps_flat_palette_mode() {
+        let Some((_instance, _adapter, device, queue)) = try_gpu_with_adapter() else {
+            eprintln!("Skipping GPU regression: no usable adapter is available.");
+            return;
+        };
+        let positions = vec![
+            Vec3::new(-1.0, -1.0, 0.0),
+            Vec3::new(1.0, -1.0, 0.0),
+            Vec3::new(-1.0, 1.0, 0.0),
+        ];
+        let normals = Some(vec![Vec3::Z; 3]);
+        let uvs = vec![Vec2::ZERO, Vec2::X, Vec2::Y];
+        let mut mesh = Mesh::from_parts(
+            "Flat ID palette test".into(),
+            positions,
+            normals,
+            uvs,
+            vec![0, 1, 2],
+        );
+        mesh.tri_color = Some(vec![[85, 85, 85]]);
+        mesh.tri_vertex_color = Some(vec![[
+            [255, 0, 0],
+            [0, 255, 0],
+            [0, 0, 255],
+        ]]);
+
+        let gpu_mesh = GpuMesh::new(&device, &mesh);
+        let mut settings = BakeSettings { id_source: IdSource::MeshParts, ..BakeSettings::default() };
+        settings.apply_quality(Quality::Draft);
+        settings.aa = 1;
+        let (maps, _, low_pos) = run_bake(&device, &queue, &mesh, &gpu_mesh, &settings, 96);
+
+        let id_map = &maps.maps[MAPS[crate::engine::ID_MAP_INDEX].tex];
+        let id_bytes = read_texture(&device, &queue, id_map);
+        let low_bytes = read_texture(&device, &queue, &low_pos);
+        let expected = id_color(0).map(|v| (v * 255.0).round() as u8);
+        let mut interior = 0usize;
+        for (texel, low) in low_bytes.chunks_exact(16).enumerate() {
+            let alpha = f32::from_le_bytes([low[12], low[13], low[14], low[15]]);
+            if alpha <= 0.75 {
+                continue;
+            }
+            interior += 1;
+            for channel in 0..3 {
+                let actual = id_bytes[texel * 4 + channel];
+                assert!(
+                    actual.abs_diff(expected[channel]) <= 1,
+                    "flat ID palette channel {channel}: expected {}, got {actual}",
+                    expected[channel]
+                );
+            }
+        }
+        assert!(interior > 100, "the flat-ID triangle must cover enough texels ({interior})");
+    }
+}
+
+#[cfg(test)]
+mod low_poly_vertex_id_tests {
+    use super::*;
+    use glam::Vec2;
+    use crate::mesh::Mesh;
+
+    fn colored_triangle() -> Mesh {
+        let positions = vec![Vec3::ZERO, Vec3::X, Vec3::Y];
+        let normals = Some(vec![Vec3::Z; 3]);
+        let uvs = vec![Vec2::ZERO, Vec2::X, Vec2::Y];
+        let mut mesh = Mesh::from_parts("vertex ID test".into(), positions, normals, uvs, vec![0, 1, 2]);
+        mesh.tri_color = Some(vec![[85, 85, 85]]);
+        mesh.tri_vertex_color = Some(vec![[
+            [255, 0, 0],
+            [0, 255, 0],
+            [0, 0, 255],
+        ]]);
+        mesh
+    }
+
+    #[test]
+    fn low_poly_bake_keeps_each_imported_vertex_color() {
+        let mesh = colored_triangle();
+        let settings = BakeSettings { id_source: IdSource::VertexColors, ..BakeSettings::default() };
+        let scene = prepare(&mesh, &settings, 0).expect("Low Poly vertex ID bake prepares");
+        assert_eq!(scene.tri_vcolor, vec![
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0],
+        ]);
+    }
+
+    #[test]
+    fn flat_id_sources_keep_the_compact_palette_without_per_corner_storage() {
+        let mesh = colored_triangle();
+        for id_source in [IdSource::MeshParts, IdSource::Materials] {
+            let settings = BakeSettings { id_source, ..BakeSettings::default() };
+            let scene = prepare(&mesh, &settings, 0).expect("flat ID source prepares");
+            assert!(scene.tri_vcolor.is_empty(), "flat ID source must not store per-corner colors");
+            assert_eq!(scene.tri_vcolor.capacity(), 0, "flat ID source must not reserve per-corner color memory");
+            assert!(!scene.ids.is_empty(), "flat ID source keeps its compact palette");
+        }
+    }
+
+    #[test]
+    fn low_poly_vertex_id_bake_rejects_missing_corner_colors() {
+        let mut mesh = colored_triangle();
+        mesh.tri_vertex_color = None;
+        let settings = BakeSettings { id_source: IdSource::VertexColors, ..BakeSettings::default() };
+        let error = prepare(&mesh, &settings, 0).err().expect("missing colors must fail clearly");
+        assert!(error.contains("per-corner color data"));
+    }
+
+    #[test]
+    fn vertex_color_id_bake_rejects_a_separate_high_poly_source() {
+        let mesh = colored_triangle();
+        let settings = BakeSettings {
+            id_source: IdSource::VertexColors,
+            high_poly: Some(PathBuf::from("intentionally-not-loaded.obj")),
+            ..BakeSettings::default()
+        };
+        let error = prepare(&mesh, &settings, 0).err().expect("High Poly ID sampling is outside this path");
+        assert!(error.contains("Low Poly mesh"));
     }
 }

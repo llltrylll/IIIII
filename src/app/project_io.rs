@@ -122,6 +122,18 @@ impl Reader {
     }
 }
 
+/// Decodes the compact RGB bytes stored for three corners per triangle.
+fn decode_triangle_vertex_colors(bytes: &[u8], triangles: usize) -> Option<Vec<[[u8; 3]; 3]>> {
+    if bytes.len() != triangles.checked_mul(9)? {
+        return None;
+    }
+    Some(bytes.chunks_exact(9).map(|c| [
+        [c[0], c[1], c[2]],
+        [c[3], c[4], c[5]],
+        [c[6], c[7], c[8]],
+    ]).collect())
+}
+
 fn f(v: &Value, key: &str, default: f32) -> f32 {
     v.get(key).and_then(Value::as_f64).map_or(default, |x| x as f32)
 }
@@ -316,7 +328,13 @@ const LEGACY_INPUTS: usize = 19;
 
 pub(super) fn generator_from(v: &Value) -> Result<Generator, String> {
     let name = s(v, "kind").ok_or("generator without a kind")?;
-    let kind = GenKind::ALL.into_iter().find(|k| k.name() == name).ok_or(format!("unknown generator '{name}'"))?;
+    let kind = GenKind::ALL
+        .into_iter()
+        .find(|k| k.name() == name)
+        // Projects made before the explicit Vertex Color ID naming used
+        // "ID Mask"; keep that serialized name readable.
+        .or_else(|| (name == "ID Mask").then_some(GenKind::IdMask))
+        .ok_or(format!("unknown generator '{name}'"))?;
     let d = kind.default_generator();
     let mut weights = [0.0; crate::engine::GEN_INPUT_COUNT];
     let mut custom = [crate::engine::CustomInput::default(); crate::engine::MAX_CUSTOM_INPUTS];
@@ -471,6 +489,7 @@ impl PainterApp {
             "objects": mesh.objects,
             "tri_object": w.blob(bytemuck::cast_slice(&mesh.tri_object)),
             "tri_color": mesh.tri_color.as_ref().map(|c| w.blob(bytemuck::cast_slice(c))),
+            "tri_vertex_color": mesh.tri_vertex_color.as_ref().map(|c| w.blob(bytemuck::cast_slice(c))),
         });
         // Every texture set: its layers, size and mesh-map corrections.
         let engines = super::texture_sets::engines(&self.engine, &self.sets, self.mesh.sets.len());
@@ -621,6 +640,17 @@ impl PainterApp {
             let colors: Vec<[u8; 3]> = r.blob(&m["tri_color"])?.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
             if colors.len() == tris {
                 mesh.tri_color = Some(colors);
+            }
+        }
+        if !m["tri_vertex_color"].is_null() {
+            let bytes = r.blob(&m["tri_vertex_color"])?;
+            mesh.tri_vertex_color = Some(decode_triangle_vertex_colors(&bytes, tris).ok_or_else(bad)?);
+        }
+        // Legacy .mpp projects contain only the average color per triangle.
+        // Preserve their old flat-ID behavior rather than silently dropping it.
+        if mesh.tri_vertex_color.is_none() {
+            if let Some(colors) = mesh.tri_color.as_ref().filter(|c| c.len() == tris) {
+                mesh.tri_vertex_color = Some(colors.iter().map(|&color| [color; 3]).collect());
             }
         }
         let bv = &manifest["bake"];
@@ -887,6 +917,18 @@ impl PainterApp {
 mod tests {
     use super::*;
 
+    #[test]
+    fn vertex_color_blob_round_trips_each_corner_and_rejects_bad_lengths() {
+        let colors = vec![
+            [[1, 2, 3], [4, 5, 6], [7, 8, 9]],
+            [[10, 11, 12], [13, 14, 15], [16, 17, 18]],
+        ];
+        let bytes = bytemuck::cast_slice(&colors);
+        assert_eq!(decode_triangle_vertex_colors(bytes, 2), Some(colors.clone()));
+        assert!(decode_triangle_vertex_colors(bytes, 1).is_none());
+        assert!(decode_triangle_vertex_colors(&bytes[..bytes.len() - 1], 2).is_none());
+    }
+
     /// Projects from the four fixed custom slots load as maps with ids 1-4
     /// (empty slots skipped), and their masks' extra weights as inputs on
     /// those ids.
@@ -907,5 +949,20 @@ mod tests {
         // And the new format round-trips.
         let back = generator_from(&generator_json(&g)).unwrap();
         assert_eq!(back, g);
+    }
+
+    #[test]
+    fn legacy_id_mask_generator_name_still_loads() {
+        let weights = vec![0.0; crate::engine::GEN_INPUT_COUNT];
+        let old_project_generator = json!({
+            "kind": "ID Mask",
+            "weights": weights,
+            "id_color": [0.2, 0.4, 0.6],
+            "id_tolerance": 0.12
+        });
+        let loaded = generator_from(&old_project_generator).expect("legacy ID Mask name is supported");
+        assert_eq!(loaded.kind, GenKind::IdMask);
+        assert_eq!(loaded.id_color, [0.2, 0.4, 0.6]);
+        assert_eq!(loaded.id_tolerance, 0.12);
     }
 }

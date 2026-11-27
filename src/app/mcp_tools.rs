@@ -47,6 +47,13 @@ fn eq(a: &str, b: &str) -> bool {
     a.trim().eq_ignore_ascii_case(b.trim())
 }
 
+fn generator_kind(name: &str) -> Option<GenKind> {
+    GenKind::ALL
+        .into_iter()
+        .find(|kind| eq(kind.name(), name))
+        .or_else(|| eq("ID Mask", name).then_some(GenKind::IdMask))
+}
+
 fn f32_arg(args: &Value, key: &str) -> Option<f32> {
     args.get(key).and_then(Value::as_f64).map(|v| v as f32)
 }
@@ -417,12 +424,25 @@ impl PainterApp {
             "set_mask" => {
                 let i = self.layer_index(args)?;
                 if args.get("remove").and_then(Value::as_bool) == Some(true) {
+                    if self.id_color_pick_target.is_some_and(|(layer, _)| layer == i) {
+                        self.id_color_pick_target = None;
+                    }
                     self.engine.remove_mask(i, &mut self.undo);
                     self.after_history_step();
                     return Ok(text("Mask removed."));
                 }
                 if let Some(g) = str_arg(args, "generator") {
-                    let kind = GenKind::ALL.into_iter().find(|k| eq(k.name(), g)).ok_or(format!("unknown generator '{g}'"))?;
+                    let kind = generator_kind(g).ok_or(format!("unknown generator '{g}'"))?;
+                    if self.id_color_pick_target == Some((i, None)) {
+                        self.id_color_pick_target = None;
+                    }
+                    if kind == GenKind::IdMask {
+                        self.bake_settings.id_source = if self.mesh.has_vertex_colors() && self.bake_settings.high_poly.is_none() {
+                            crate::bake::IdSource::VertexColors
+                        } else {
+                            crate::bake::IdSource::MeshParts
+                        };
+                    }
                     let mut generator = kind.default_generator();
                     self.tune_generator(&mut generator, args)?;
                     match &mut self.engine.layers[i].mask {
@@ -1094,5 +1114,17 @@ impl PainterApp {
             "undo": self.undo.undo.iter().rev().take(10).map(|e| e.label.as_str()).collect::<Vec<_>>(),
             "redo": self.undo.redo.iter().rev().take(10).map(|e| e.label.as_str()).collect::<Vec<_>>(),
         })
+    }
+}
+
+#[cfg(test)]
+mod generator_name_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_id_mask_name_resolves_to_vertex_color_id_mask() {
+        assert_eq!(generator_kind("ID Mask"), Some(GenKind::IdMask));
+        assert_eq!(generator_kind("Vertex Color ID Mask"), Some(GenKind::IdMask));
+        assert_eq!(generator_kind("not a generator"), None);
     }
 }

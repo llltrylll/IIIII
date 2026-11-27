@@ -74,6 +74,9 @@ impl PainterApp {
         if k == self.sets.active || self.stroke.is_some() {
             return;
         }
+        // Mask indices belong to a texture set; don't let an armed eyedropper
+        // write its sampled ID into a different set after switching.
+        self.id_color_pick_target = None;
         let Some(mut p) = self.sets.parked.get_mut(k).and_then(Option::take) else { return };
         // A bake preview shows on the set being edited; the full bake comes back first.
         self.end_preview(true);

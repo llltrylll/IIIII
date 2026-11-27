@@ -25,19 +25,32 @@ pub struct RawMesh {
     /// Object (mesh node) index per triangle, into `objects`.
     pub tri_object: Vec<u32>,
     pub objects: Vec<String>,
-    /// Average vertex color per triangle (sRGB), when every object has them.
+    /// Average vertex color per triangle (legacy ID report).
     pub tri_color: Option<Vec<[u8; 3]>>,
+    /// Original sRGB vertex colors for each triangle corner, in import order.
+    pub tri_vertex_color: Option<Vec<[[u8; 3]; 3]>>,
     /// Objects without UVs, for error messages.
     pub missing_uvs: Vec<String>,
 }
 
 pub const EXTENSIONS: [&str; 2] = ["obj", "fbx"];
 
+/// Loads a paintable Low Poly mesh, preserving its imported vertex colors.
 pub fn load(path: &Path) -> Result<RawMesh, String> {
+    load_with_vertex_colors(path, true)
+}
+
+/// Loads a bake-only mesh without allocating the per-corner vertex-color
+/// buffers that only the paintable Low Poly path consumes.
+pub fn load_high_poly(path: &Path) -> Result<RawMesh, String> {
+    load_with_vertex_colors(path, false)
+}
+
+fn load_with_vertex_colors(path: &Path, collect_vertex_colors: bool) -> Result<RawMesh, String> {
     let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     let mut mesh = match ext.as_str() {
-        "obj" => load_obj(path)?,
-        "fbx" => load_fbx(path)?,
+        "obj" => load_obj(path, collect_vertex_colors)?,
+        "fbx" => load_fbx(path, collect_vertex_colors)?,
         _ => return Err(format!("Unsupported mesh format '.{ext}'. Use OBJ or FBX.")),
     };
     if mesh.indices.is_empty() {
@@ -47,10 +60,10 @@ pub fn load(path: &Path) -> Result<RawMesh, String> {
     Ok(mesh)
 }
 
-fn load_obj(path: &Path) -> Result<RawMesh, String> {
+fn load_obj(path: &Path, collect_vertex_colors: bool) -> Result<RawMesh, String> {
     let (models, materials) = tobj::load_obj(path, &tobj::LoadOptions { single_index: true, triangulate: true, ..Default::default() })
         .map_err(|e| format!("Failed to read OBJ: {e}"))?;
-    let mut out = Builder::default();
+    let mut out = Builder::new(collect_vertex_colors);
     // A missing .mtl leaves the indices (and default names).
     out.material_names = materials.map(|m| m.into_iter().map(|m| m.name).collect()).unwrap_or_default();
     for m in &models {
@@ -62,7 +75,7 @@ fn load_obj(path: &Path) -> Result<RawMesh, String> {
             out.missing_uvs.push(m.name.clone());
         }
         let material = mesh.material_id.unwrap_or(0) as u32;
-        let has_c = mesh.vertex_color.len() >= count * 3;
+        let has_c = collect_vertex_colors && mesh.vertex_color.len() >= count * 3;
         out.begin_object(&m.name);
         for &i in &mesh.indices {
             let i = i as usize;
@@ -78,7 +91,7 @@ fn load_obj(path: &Path) -> Result<RawMesh, String> {
     Ok(out.finish())
 }
 
-fn load_fbx(path: &Path) -> Result<RawMesh, String> {
+fn load_fbx(path: &Path, collect_vertex_colors: bool) -> Result<RawMesh, String> {
     let opts = ufbx::LoadOpts {
         ignore_animation: true,
         ignore_embedded: true,
@@ -96,7 +109,7 @@ fn load_fbx(path: &Path) -> Result<RawMesh, String> {
     let path_str = path.to_str().ok_or("The FBX path is not valid UTF-8.")?;
     let scene = ufbx::load_file(path_str, opts).map_err(|e| format!("Failed to read FBX: {e:?}"))?;
 
-    let mut out = Builder::default();
+    let mut out = Builder::new(collect_vertex_colors);
     let material_count = scene.materials.len().max(1) as u32;
     out.material_names = scene.materials.iter().map(|m| m.element.name.to_string()).collect();
     let mut tri = Vec::new();
@@ -109,7 +122,7 @@ fn load_fbx(path: &Path) -> Result<RawMesh, String> {
         if !has_uv {
             out.missing_uvs.push(node.element.name.to_string());
         }
-        let has_c = mesh.vertex_color.exists;
+        let has_c = collect_vertex_colors && mesh.vertex_color.exists;
         out.begin_object(&node.element.name);
         tri.resize(mesh.max_face_triangles * 3, 0u32);
         for (face_index, &face) in mesh.faces.iter().enumerate() {
@@ -169,13 +182,21 @@ struct Builder {
     material_names: Vec<String>,
     objects: Vec<String>,
     tri_object: Vec<u32>,
-    all_colors: bool,
+    /// Collect colors for the paintable Low Poly source only.
+    collect_vertex_colors: bool,
+    any_colors: bool,
     tri_color: Vec<[u8; 3]>,
+    tri_vertex_color: Vec<[[u8; 3]; 3]>,
+    color_corners: [[u8; 3]; 3],
     /// Color sum of the triangle being built.
     color_acc: Vec3,
 }
 
 impl Builder {
+    fn new(collect_vertex_colors: bool) -> Self {
+        Self { collect_vertex_colors, ..Default::default() }
+    }
+
     /// Starts a new object; its triangles are tagged with its index.
     fn begin_object(&mut self, name: &str) {
         self.objects.push(name.to_string());
@@ -185,19 +206,27 @@ impl Builder {
         if self.corners == 0 {
             self.all_normals = true;
             self.all_uvs = true;
-            self.all_colors = true;
         }
         self.corners += 1;
         self.all_normals &= c.normal.is_some();
         self.all_uvs &= c.uv.is_some();
-        self.all_colors &= c.color.is_some();
-        self.color_acc += c.color.unwrap_or(Vec3::ZERO);
-        if self.corners % 3 == 0 {
-            // Exporters write vertex colors sRGB-encoded by default; ID
-            // masks compare sRGB too, so they're kept as they are.
-            let avg = self.color_acc / 3.0;
-            self.tri_color.push(avg.to_array().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
-            self.color_acc = Vec3::ZERO;
+        if self.collect_vertex_colors {
+            // Keep colors even when only some objects carry a color layer.
+            // Unpainted objects receive white so they remain a selectable ID region.
+            self.any_colors |= c.color.is_some();
+            let corner = (self.corners - 1) % 3;
+            let color = c.color.unwrap_or(Vec3::ONE);
+            self.color_acc += color;
+            self.color_corners[corner] = color.to_array().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+            if self.corners % 3 == 0 {
+                // Keep the average for older ID-region summaries, but preserve
+                // each corner so the GPU can interpolate the real vertex color.
+                let avg = self.color_acc / 3.0;
+                self.tri_color.push(avg.to_array().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
+                self.tri_vertex_color.push(self.color_corners);
+                self.color_corners = [[0; 3]; 3];
+                self.color_acc = Vec3::ZERO;
+            }
         }
         let n = c.normal.unwrap_or(Vec3::ZERO);
         let uv = c.uv.unwrap_or(Vec2::ZERO);
@@ -235,14 +264,75 @@ impl Builder {
             missing_uvs: self.missing_uvs,
             tri_object: self.tri_object,
             objects: self.objects,
-            tri_color: (self.all_colors && self.corners > 0).then_some(self.tri_color),
+            tri_color: (self.collect_vertex_colors && self.any_colors && self.corners > 0).then_some(self.tri_color),
+            tri_vertex_color: (self.collect_vertex_colors && self.any_colors && self.corners > 0).then_some(self.tri_vertex_color),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     /// Opt-in smoke test: `MP_IMPORT_TEST="a.fbx;b.obj" cargo test -- --ignored`.
+    #[test]
+    fn vertex_colors_preserve_each_corner_and_unpainted_objects_are_white() {
+        let mut builder = Builder::new(true);
+        let p = [
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ];
+        builder.begin_object("painted");
+        for (pos, color) in p.into_iter().zip([
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        ]) {
+            builder.push_corner(Corner {
+                pos, normal: Some(Vec3::Z), uv: Some(Vec2::ZERO), color: Some(color),
+            });
+        }
+        builder.push_materials(1, 0);
+
+        builder.begin_object("unpainted");
+        for pos in p {
+            builder.push_corner(Corner {
+                pos: pos + Vec3::splat(2.0), normal: Some(Vec3::Z),
+                uv: Some(Vec2::ZERO), color: None,
+            });
+        }
+        builder.push_materials(1, 0);
+
+        let raw = builder.finish();
+        let colors = raw.tri_vertex_color.expect("mixed objects retain vertex colors");
+        assert_eq!(colors[0], [[255, 0, 0], [0, 255, 0], [0, 0, 255]]);
+        assert_eq!(colors[1], [[255, 255, 255]; 3]);
+        assert_eq!(raw.tri_color.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn high_poly_import_skips_vertex_color_storage() {
+        let mut builder = Builder::new(false);
+        builder.begin_object("high");
+        for (pos, color) in [
+            (Vec3::ZERO, Vec3::X),
+            (Vec3::X, Vec3::Y),
+            (Vec3::Y, Vec3::Z),
+        ] {
+            builder.push_corner(Corner {
+                pos,
+                normal: Some(Vec3::Z),
+                uv: Some(Vec2::ZERO),
+                color: Some(color),
+            });
+        }
+        builder.push_materials(1, 0);
+        let raw = builder.finish();
+        assert!(raw.tri_color.is_none());
+        assert!(raw.tri_vertex_color.is_none());
+    }
+
     #[test]
     #[ignore]
     fn import_files_from_env() {

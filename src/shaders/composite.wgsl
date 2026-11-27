@@ -179,7 +179,15 @@ fn generator(p: vec3<f32>, n: vec3<f32>, uv: vec2<f32>, texel_world: f32) -> f32
     s.a = textureSampleLevel(map_a, samp, uv, 0.0);
     s.b = textureSampleLevel(map_b, samp, uv, 0.0);
     s.c = textureSampleLevel(map_c, samp, uv, 0.0);
-    s.e = textureSampleLevel(map_e, samp, uv, 0.0);
+    // ID values are categorical, not continuous: nearest texel avoids
+    // blending unrelated regions along polygon and UV-island boundaries.
+    let id_dims = vec2<i32>(textureDimensions(map_e));
+    let id_coord = clamp(
+        vec2<i32>(floor(uv * vec2<f32>(id_dims))),
+        vec2<i32>(0),
+        id_dims - vec2<i32>(1),
+    );
+    s.e = textureLoad(map_e, id_coord, 0);
     s.p = p;
     s.n = n;
     s.texel_world = texel_world;

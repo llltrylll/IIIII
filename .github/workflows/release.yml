@@ -1,7 +1,5 @@
-# Pushing a version tag (v0.1.0, ...) builds the release on Windows (zip and
-# installer), Linux (tarball) and macOS (universal .dmg), and attaches them to a draft GitHub release
-# to review and publish by hand. Run it by hand (Actions → Release) to build some
-# platforms again for an existing tag, e.g. after a runner failed.
+# Personal-use fork: build and attach only the Windows release (ZIP and installer).
+# Push a version tag or run this workflow manually for an existing tag.
 name: Release
 
 on:
@@ -12,16 +10,12 @@ on:
       tag:
         description: "Existing version tag to attach to (v0.1.6)"
         required: true
-      platforms:
-        description: "Platforms to build"
-        default: "windows,linux,macos"
 
 permissions:
   contents: write
 
 jobs:
   windows:
-    if: github.event_name == 'push' || contains(inputs.platforms, 'windows')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -51,49 +45,3 @@ jobs:
             dist/MaterialPainter-*-windows-x64.zip
             dist/MaterialPainter-*-setup.exe
 
-  linux:
-    if: github.event_name == 'push' || contains(inputs.platforms, 'linux')
-    # The oldest supported runner, so the build runs on older distributions too (glibc 2.35).
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ inputs.tag || github.ref }}
-      - name: Build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libgtk-3-dev
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Unit tests
-        run: cargo test --locked
-      - name: Build and package
-        run: ./scripts/package.sh
-      - name: Draft release
-        uses: softprops/action-gh-release@v2
-        with:
-          draft: true
-          tag_name: ${{ inputs.tag || github.ref_name }}
-          files: dist/MaterialPainter-*-linux-x64.tar.gz
-
-  macos:
-    if: github.event_name == 'push' || contains(inputs.platforms, 'macos')
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ inputs.tag || github.ref }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin, x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
-      - name: Unit tests
-        run: cargo test --locked
-      - name: Build and package
-        run: ./scripts/package-macos.sh
-      - name: Draft release
-        uses: softprops/action-gh-release@v2
-        with:
-          draft: true
-          tag_name: ${{ inputs.tag || github.ref_name }}
-          files: dist/MaterialPainter-*-macos-universal.dmg
