@@ -30,6 +30,9 @@ impl PainterApp {
                         let palette = (k == GenKind::IdMask).then(|| vertex_id.palette_for(mesh).clone());
                         *g = new_generator(k, custom, source, palette.as_ref());
                         *pick_target = None;
+                        if k != GenKind::IdMask {
+                            vertex_id.panel = None;
+                        }
                         dirty = true;
                     }
                 }
@@ -54,8 +57,11 @@ impl PainterApp {
         dirty |= generator_inputs_ui(ui, g, custom);
         // The picker target is positional. Removing the ID input disarms it
         // immediately instead of leaving the 3D viewport in sampling mode.
-        if g.weights[gin::ID].abs() <= 1e-4 && *pick_target == Some(target) {
-            *pick_target = None;
+        if g.weights[gin::ID].abs() <= 1e-4 {
+            if *pick_target == Some(target) {
+                *pick_target = None;
+            }
+            vertex_id.panel = None;
         }
         dirty
     }
