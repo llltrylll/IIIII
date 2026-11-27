@@ -9,6 +9,7 @@ impl PainterApp {
         g: &mut crate::engine::Generator,
         salt: usize,
         custom: &[bake::CustomMap],
+        mesh: &std::sync::Arc<crate::mesh::Mesh>,
         target: (usize, Option<usize>),
         pick_target: &mut Option<(usize, Option<usize>)>,
         vertex_id: &mut vertex_id::VertexIdState,
@@ -21,7 +22,8 @@ impl PainterApp {
                 for k in GenKind::ALL {
                     if ui.selectable_label(g.kind == k, k.name()).clicked() && g.kind != k {
                         let source = if info.has_bake { info.baked_source } else { info.next_source };
-                        *g = new_generator(k, custom, source, Some(info.palette));
+                        let palette = (k == GenKind::IdMask).then(|| vertex_id.palette_for(mesh).clone());
+                        *g = new_generator(k, custom, source, palette.as_ref());
                         *pick_target = None;
                         dirty = true;
                     }
@@ -42,7 +44,7 @@ impl PainterApp {
             dirty |= slider(ui, "Edge width", &mut g.edge_width, 0.002..=0.5);
         }
         if g.weights[gin::ID] != 0.0 {
-            dirty |= vertex_id::panel(ui, g, vertex_id, info, pick_target, target);
+            dirty |= vertex_id::panel(ui, g, vertex_id, mesh, info, pick_target, target);
         }
         dirty | generator_inputs_ui(ui, g, custom)
     }
@@ -50,9 +52,7 @@ impl PainterApp {
     pub(super) fn mask_properties(&mut self, ui: &mut egui::Ui, idx: usize) -> bool {
         let mut dirty = false;
         let custom = self.bake_settings.custom.clone();
-        let palette = self.vertex_id.palette_for(&self.mesh).clone();
         let id_info = vertex_id::Info {
-            palette: &palette,
             has_colors: vertex_id::has_colors(&self.mesh),
             has_bake: self.engine.has_bake,
             baked_source: self.sets.baked_id_sources.get(self.sets.active).copied().unwrap_or(self.baked_id_source),
@@ -79,7 +79,7 @@ impl PainterApp {
         }
         let has_paint = mask.paint.is_some();
         if let Some(g) = &mut mask.generator {
-            dirty |= Self::generator_ui(ui, g, 0, &custom, (idx, None), &mut self.id_color_pick_target, &mut self.vertex_id, id_info);
+            dirty |= Self::generator_ui(ui, g, 0, &custom, &self.mesh, (idx, None), &mut self.id_color_pick_target, &mut self.vertex_id, id_info);
         }
         ui.horizontal(|ui| {
             if !has_paint && ui.button("Add paint to mask").clicked() {
@@ -105,9 +105,7 @@ impl PainterApp {
         section(ui, "Mask layers");
         let mut dirty = false;
         let custom = self.bake_settings.custom.clone();
-        let palette = self.vertex_id.palette_for(&self.mesh).clone();
         let id_info = vertex_id::Info {
-            palette: &palette,
             has_colors: vertex_id::has_colors(&self.mesh),
             has_bake: self.engine.has_bake,
             baked_source: self.sets.baked_id_sources.get(self.sets.active).copied().unwrap_or(self.baked_id_source),
@@ -149,7 +147,7 @@ impl PainterApp {
                     });
                     dirty |= slider(ui, "Opacity", &mut ml.opacity, 0.0..=1.0);
                     match &mut ml.source {
-                        MaskSource::Generator(g) => dirty |= Self::generator_ui(ui, g, 100 + i, &custom, (idx, Some(i)), &mut self.id_color_pick_target, &mut self.vertex_id, id_info),
+                        MaskSource::Generator(g) => dirty |= Self::generator_ui(ui, g, 100 + i, &custom, &self.mesh, (idx, Some(i)), &mut self.id_color_pick_target, &mut self.vertex_id, id_info),
                         MaskSource::Fill(v) => dirty |= slider(ui, "Value", v, 0.0..=1.0),
                     }
                 });
@@ -172,7 +170,8 @@ impl PainterApp {
                     // On a black mask nothing shows through Multiply: reveal with Add instead.
                     let blend = if mask.black_base && mask.layers.is_empty() { MaskBlend::Add } else { MaskBlend::Multiply };
                     let source = if id_info.has_bake { id_info.baked_source } else { id_info.next_source };
-                    let generator = new_generator(k, &custom, source, Some(id_info.palette));
+                    let palette = (k == GenKind::IdMask).then(|| self.vertex_id.palette_for(&self.mesh).clone());
+                    let generator = new_generator(k, &custom, source, palette.as_ref());
                     mask.layers.push(MaskLayer { source: MaskSource::Generator(generator), blend, opacity: 1.0, enabled: true });
                     dirty = true;
                     structure_changed = true;
