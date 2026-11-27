@@ -1,4 +1,4 @@
-# Windows-only build and unit-test validation for this personal fork.
+# Windows-only build, test, and portable package for this personal fork.
 name: CI
 
 on:
@@ -25,3 +25,13 @@ jobs:
         run: cargo test --locked --bin material_painter bake::tests::low_poly_vertex_id_gpu_ -- --ignored --nocapture --test-threads 1
         env:
           WGPU_BACKEND: dx12
+      - name: Package portable Windows build
+        shell: pwsh
+        run: ./scripts/package.ps1
+      - name: Upload portable Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: MaterialPainter-Windows-x64-Portable
+          path: dist/MaterialPainter-*-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 14
