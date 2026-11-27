@@ -102,7 +102,11 @@ impl PainterApp {
                     *running_set == set && *id_only && settings.id_source == IdSource::VertexColors
                 }
             };
-            if !already_running && !self.deferred_id_rebake_sets.contains(&set) {
+            let already_queued_in_id_batch = self.bake_id_only && self.sets.bake_queue.contains(&set);
+            if !already_running
+                && !already_queued_in_id_batch
+                && !self.deferred_id_rebake_sets.contains(&set)
+            {
                 self.deferred_id_rebake_sets.push_back(set);
             }
             self.status = if already_running {
@@ -175,7 +179,10 @@ impl PainterApp {
             return;
         }
         let Some(set) = self.deferred_id_rebake_sets.pop_front() else { return };
-        self.bake_settings.id_source = IdSource::VertexColors;
+        if self.bake_settings.id_source != IdSource::VertexColors {
+            self.bake_settings.id_source = IdSource::VertexColors;
+            self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
+        }
         self.bake_id_only = true;
         self.sets.bake_queue = std::mem::take(&mut self.deferred_id_rebake_sets);
         self.bake_batch_settings = Some(self.job_bake_settings());
