@@ -51,7 +51,13 @@ impl PainterApp {
         if g.weights[gin::ID] != 0.0 {
             dirty |= vertex_id::panel(ui, g, vertex_id, mesh, info, pick_target, target);
         }
-        dirty | generator_inputs_ui(ui, g, custom)
+        dirty |= generator_inputs_ui(ui, g, custom);
+        // The picker target is positional. Removing the ID input disarms it
+        // immediately instead of leaving the 3D viewport in sampling mode.
+        if g.weights[gin::ID].abs() <= 1e-4 && *pick_target == Some(target) {
+            *pick_target = None;
+        }
+        dirty
     }
 
     pub(super) fn mask_properties(&mut self, ui: &mut egui::Ui, idx: usize) -> bool {
