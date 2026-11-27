@@ -2782,21 +2782,25 @@ impl PainterApp {
                     self.after_history_step();
                 }
                 Action::AddPaint => {
+                    self.id_color_pick_target = None;
                     self.selected = self.engine.add_paint_layer(at, parent, None, &mut self.undo);
                     self.target = StrokeTarget::Content;
                 }
                 Action::AddFill(fill, name) => {
+                    self.id_color_pick_target = None;
                     let disabled = project_settings_ui::disabled_fill_channels(&fill, &self.active_channels);
                     self.selected = self.engine.add_fill_layer(at, parent, name, fill, &mut self.undo);
                     self.engine.layers[self.selected].disabled_channels = disabled;
                     self.target = StrokeTarget::Content;
                 }
                 Action::AddFolder => {
+                    self.id_color_pick_target = None;
                     let n = self.engine.layers.iter().filter(|l| l.is_folder()).count() + 1;
                     self.selected = self.engine.add_folder(at, parent, format!("Folder {n}"), &mut self.undo);
                     self.target = StrokeTarget::Content;
                 }
                 Action::GroupIntoFolder => {
+                    self.id_color_pick_target = None;
                     if let Some(layer) = self.engine.layers.get(self.selected) {
                         let (parent, label) = (layer.parent, format!("Group {}", layer.name));
                         self.undo.begin_group(label);
@@ -2817,6 +2821,7 @@ impl PainterApp {
                     }
                 }
                 Action::AddMaskLayer(kind) => {
+                    self.id_color_pick_target = None;
                     if self.selected < self.engine.layers.len() {
                         if self.engine.layers[self.selected].mask.is_none() {
                             self.engine.add_mask(self.selected, false, None, &mut self.undo);
@@ -2868,6 +2873,7 @@ impl PainterApp {
                 }
                 Action::SaveSmart => self.save_smart_material(ctx),
                 Action::Duplicate => {
+                    self.id_color_pick_target = None;
                     if let Some(i) = self.engine.duplicate_layer(self.selected, &mut self.undo) {
                         self.selected = i;
                     }
@@ -2883,6 +2889,7 @@ impl PainterApp {
                     }
                 }
                 Action::PasteLayer => {
+                    self.id_color_pick_target = None;
                     if let Some(mut layers) = self.layer_clipboard.take() {
                         project_settings_ui::mark_inactive_layer_channels(&mut layers, &self.active_channels);
                         if layers.is_empty() {
@@ -2915,7 +2922,9 @@ impl PainterApp {
                 Action::AddOnTop(item) => {
                     self.pending.push(Action::ShelfDrop { item, at: self.engine.layers.len(), parent: None });
                 }
-                Action::ShelfDrop { item, at, parent } => match item {
+                Action::ShelfDrop { item, at, parent } => {
+                    self.id_color_pick_target = None;
+                    match item {
                     ShelfItem::Smart(i) => {
                         let smart = &presets::SMART_MATERIALS[i];
                         self.selected = add_smart_material_with_channels(&mut self.engine, &mut self.undo, smart, at, parent, &self.active_channels);
@@ -2949,14 +2958,22 @@ impl PainterApp {
                             self.apply_smart_material(&path, at, parent);
                         }
                     }
+                    }
                 },
-                Action::AddGraphLayer => self.add_graph_layer(None, at, parent),
+                Action::AddGraphLayer => {
+                    self.id_color_pick_target = None;
+                    self.add_graph_layer(None, at, parent);
+                }
                 Action::AddGraphPreset(i) => {
+                    self.id_color_pick_target = None;
                     if let Some(p) = crate::graph::presets::PRESETS.get(i) {
                         self.add_graph_layer(Some((p.build)()), at, parent);
                     }
                 }
-                Action::AddGraphMask => self.add_graph_mask(),
+                Action::AddGraphMask => {
+                    self.id_color_pick_target = None;
+                    self.add_graph_mask();
+                }
                 Action::EditGraph => self.edit_selected_graph(),
                 Action::GraphUndo => self.graph_undo(false),
                 Action::GraphRedo => self.graph_undo(true),
@@ -3009,6 +3026,7 @@ impl PainterApp {
                     }
                 },
                 Action::MoveTo { from, drop } => {
+                    self.id_color_pick_target = None;
                     if let Some(i) = self.engine.move_to(from, drop, &mut self.undo) {
                         self.selected = i;
                     }
