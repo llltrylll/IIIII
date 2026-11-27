@@ -331,13 +331,25 @@ impl PainterApp {
         if !identity {
             self.undo.clear();
         }
+        // The active set may now refer to a different old index after a
+        // rebuild/reorder. Resolve its source first so newly created sets inherit
+        // the source of the set that is actually active, not the stale old mirror.
+        let active_baked_id_source = assign.get(active)
+            .and_then(|old_set| *old_set)
+            .and_then(|index| old_baked_id_sources.get(index).copied())
+            .unwrap_or(self.baked_id_source);
+        let active_id_source_preference = assign.get(active)
+            .and_then(|old_set| *old_set)
+            .and_then(|index| old_id_source_preferences.get(index).copied())
+            .unwrap_or(active_baked_id_source);
+        self.baked_id_source = active_baked_id_source;
         self.sets.parked = parked;
         self.sets.active = active;
         self.sets.baked_id_sources = assign.iter().map(|old_set| {
-            (*old_set).and_then(|index| old_baked_id_sources.get(index).copied()).unwrap_or(self.baked_id_source)
+            (*old_set).and_then(|index| old_baked_id_sources.get(index).copied()).unwrap_or(active_baked_id_source)
         }).collect();
         self.sets.id_source_preferences = assign.iter().map(|old_set| {
-            (*old_set).and_then(|index| old_id_source_preferences.get(index).copied()).unwrap_or(self.baked_id_source)
+            (*old_set).and_then(|index| old_id_source_preferences.get(index).copied()).unwrap_or(active_id_source_preference)
         }).collect();
         self.sets.bake_queue.clear();
         self.sets.hidden = vec![false; new.len()];
