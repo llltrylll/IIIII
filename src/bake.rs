@@ -1958,6 +1958,9 @@ impl SceneUploads {
 }
 
 pub struct GpuBaker {
+    /// OpenGL shares one serialized adapter context with presentation. Keep
+    /// fewer bake dispatches in flight so viewport frames retain GPU time.
+    is_gl: bool,
     /// Format of the rasterized low-poly position and tangent maps.
     uv_pos_format: F,
     uv_tan_format: F,
@@ -2024,7 +2027,7 @@ impl GpuBaker {
     /// Test helper for paths that use the original floating-point UV targets.
     #[cfg(test)]
     pub fn new(device: &wgpu::Device) -> GpuBaker {
-        Self::new_with_formats(device, F::Rgba32Float, F::Rgba32Float, false, F::Rg32Float)
+        Self::new_with_formats(device, F::Rgba32Float, F::Rgba32Float, false, F::Rg32Float, false)
     }
 
     /// Selects render-target and storage formats from the adapter's actual capabilities.
@@ -2064,7 +2067,14 @@ impl GpuBaker {
             );
         };
 
-        Self::new_with_formats(device, uv_pos_format, uv_tan_format, integer_uv_textures, surface_curv_format)
+        Self::new_with_formats(
+            device,
+            uv_pos_format,
+            uv_tan_format,
+            integer_uv_textures,
+            surface_curv_format,
+            adapter.get_info().backend == wgpu::Backend::Gl,
+        )
     }
 
     fn new_with_formats(
@@ -2073,6 +2083,7 @@ impl GpuBaker {
         uv_tan_format: F,
         integer_uv_textures: bool,
         surface_curv_format: F,
+        is_gl: bool,
     ) -> GpuBaker {
         let mut uv_source = include_str!("shaders/bake_uv.wgsl").to_owned();
         let mut bake_source = include_str!("shaders/bake.wgsl").to_owned();
@@ -2342,6 +2353,7 @@ impl GpuBaker {
         );
         let cust_smooth = compute("cs_cust_smooth", &smooth_inputs(&[(37, Tex), (36, StorageTex(F::Rgba16Float))]));
         GpuBaker {
+            is_gl,
             uv_pos_format,
             uv_tan_format,
             surface_curv_format,
@@ -2735,7 +2747,10 @@ impl GpuBaker {
         // scheduling frames while a bake is active so queue completion callbacks
         // progress there; never call device.poll from a background thread.
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
-        while run.next_tile < run.tiles.len() && run.in_flight.load(Ordering::Acquire) < MAX_IN_FLIGHT {
+        // Three 256² tiles at once can monopolize an integrated OpenGL GPU.
+        // Keep one dispatch outstanding on GL; Vulkan retains the wider queue.
+        let max_in_flight = if self.is_gl { 1 } else { MAX_IN_FLIGHT };
+        while run.next_tile < run.tiles.len() && run.in_flight.load(Ordering::Acquire) < max_in_flight {
             let [x, y, pass] = run.tiles[run.next_tile];
             run.next_tile += 1;
             let mut u = run.uniform;

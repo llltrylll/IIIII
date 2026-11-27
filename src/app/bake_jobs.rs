@@ -611,9 +611,14 @@ impl PainterApp {
                             if report.used_cage { ", cage" } else { "" },
                             report.resolution
                         );
-                        // Cache the exact maps under the exact settings snapshot
-                        // before moving their textures into the destination Engine.
-                        bake_cache::store(key, &maps, report.clone(), &self.rs.device, &self.rs.queue);
+                        // The cache encoder performs blocking GPU texture readback
+                        // on a worker thread. WGPU's OpenGL adapter context is shared
+                        // with surface presentation, so that readback can deadlock
+                        // against wglSwapLayerBuffers. Keep OpenGL GPU access on the
+                        // UI thread; existing cache entries can still be loaded.
+                        if self.rs.adapter.get_info().backend != wgpu::Backend::Gl {
+                            bake_cache::store(key, &maps, report.clone(), &self.rs.device, &self.rs.queue);
+                        }
                         if self.install_baked_maps(set, id_only, settings.id_source, maps, report) {
                             self.status = if id_only {
                                 "Baked the ID map from the vertex colors.".into()
