@@ -21,7 +21,7 @@ impl PainterApp {
                 for k in GenKind::ALL {
                     if ui.selectable_label(g.kind == k, k.name()).clicked() && g.kind != k {
                         let source = if info.has_bake { info.baked_source } else { info.next_source };
-                        *g = new_generator(k, custom, source, info.palette);
+                        *g = new_generator(k, custom, source, Some(info.palette));
                         *pick_target = None;
                         dirty = true;
                     }
@@ -172,7 +172,7 @@ impl PainterApp {
                     // On a black mask nothing shows through Multiply: reveal with Add instead.
                     let blend = if mask.black_base && mask.layers.is_empty() { MaskBlend::Add } else { MaskBlend::Multiply };
                     let source = if id_info.has_bake { id_info.baked_source } else { id_info.next_source };
-                    let generator = new_generator(k, &custom, source, id_info.palette);
+                    let generator = new_generator(k, &custom, source, Some(id_info.palette));
                     mask.layers.push(MaskLayer { source: MaskSource::Generator(generator), blend, opacity: 1.0, enabled: true });
                     dirty = true;
                     structure_changed = true;
