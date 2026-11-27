@@ -41,7 +41,10 @@ impl PainterApp {
     /// Starts an ID-only batch. If another bake is active, defer this request
     /// until its entire queue finishes; never drop an in-flight GPU run.
     pub(super) fn start_bake_id_only(&mut self, ctx: &egui::Context) {
-        self.bake_settings.id_source = IdSource::VertexColors;
+        if self.bake_settings.id_source != IdSource::VertexColors {
+            self.bake_settings.id_source = IdSource::VertexColors;
+            self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
+        }
         if self.bake_job.is_some() {
             self.deferred_id_rebake = true;
             self.status = "Vertex ID rebake queued; the current bake will finish first.".into();
@@ -207,12 +210,16 @@ impl PainterApp {
             }
         }
         self.sets.baked_id_sources.resize(self.mesh.sets.len(), self.baked_id_source);
+        let source_changed = self.sets.baked_id_sources[set] != id_source;
         self.sets.baked_id_sources[set] = id_source;
         if set == self.sets.active {
             self.baked_id_source = id_source;
         }
-        // Mesh maps and their source metadata are serialized project state.
-        self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
+        // Only the per-set source is serialized; the transient GPU map itself
+        // is regenerated from the project cache when the document is reopened.
+        if source_changed {
+            self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
+        }
         true
     }
 
