@@ -508,7 +508,7 @@ mod project_bake_source_plan_tests {
     use std::collections::VecDeque;
 
     #[test]
-    fn ID_only_vertex_color_pass_keeps_the_next_full_bake_source_valid() {
+    fn id_only_vertex_color_pass_keeps_the_next_full_bake_source_valid() {
         assert_eq!(
             next_full_bake_id_source(IdSource::MeshParts, false),
             IdSource::VertexColors,
