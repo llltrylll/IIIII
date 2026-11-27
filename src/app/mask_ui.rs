@@ -50,7 +50,12 @@ impl PainterApp {
         let mut dirty = false;
         let custom = self.bake_settings.custom.clone();
         let palette = self.vertex_id.palette_for(&self.mesh).clone();
-        let id_info = vertex_id::Info { palette: &palette, has_colors: vertex_id::has_colors(&self.mesh), baked_source: self.sets.baked_id_sources.get(self.sets.active).copied().unwrap_or(self.baked_id_source) };
+        let id_info = vertex_id::Info {
+            palette: &palette,
+            has_colors: vertex_id::has_colors(&self.mesh),
+            has_bake: self.engine.has_bake,
+            baked_source: self.sets.baked_id_sources.get(self.sets.active).copied().unwrap_or(self.baked_id_source),
+        };
         section(ui, "Mask");
         self.missing_maps_note(ui, idx);
         let Some(mask) = self.engine.layers[idx].mask.as_mut() else {
@@ -99,7 +104,12 @@ impl PainterApp {
         let mut dirty = false;
         let custom = self.bake_settings.custom.clone();
         let palette = self.vertex_id.palette_for(&self.mesh).clone();
-        let id_info = vertex_id::Info { palette: &palette, has_colors: vertex_id::has_colors(&self.mesh), baked_source: self.sets.baked_id_sources.get(self.sets.active).copied().unwrap_or(self.baked_id_source) };
+        let id_info = vertex_id::Info {
+            palette: &palette,
+            has_colors: vertex_id::has_colors(&self.mesh),
+            has_bake: self.engine.has_bake,
+            baked_source: self.sets.baked_id_sources.get(self.sets.active).copied().unwrap_or(self.baked_id_source),
+        };
         let (mut remove, mut swap) = (None, None);
         let mut structure_changed = false;
         let count = mask.layers.len();
@@ -289,7 +299,10 @@ impl PainterApp {
     /// reading the colors from the mesh file for projects saved without them.
     pub(super) fn service_vertex_id_requests(&mut self, ctx: &egui::Context) {
         if std::mem::take(&mut self.vertex_id.want_rebake) {
-            self.bake_settings.id_source = IdSource::VertexColors;
+            if self.bake_settings.id_source != IdSource::VertexColors {
+                self.bake_settings.id_source = IdSource::VertexColors;
+                self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
+            }
             self.start_bake_id_only(ctx);
             self.status = "Baking the ID map from the vertex colors (the other maps stay as they are).".into();
         }
