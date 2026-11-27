@@ -187,13 +187,15 @@ impl PainterApp {
     /// Rebuilds the active Texture Set's ID map from the loaded low-poly colors.
     pub(super) fn start_bake_id_only(&mut self, ctx: &egui::Context) {
         let active = self.sets.active;
-        self.start_bake_id_only_for_sets(&[active], ctx);
+        self.start_bake_id_only_for_sets(&[active], false, ctx);
     }
 
     /// Rebuilds only the ID maps for the requested sets. A global vertex-color
     /// reimport uses this to refresh every set whose current or preferred source
     /// is Vertex Colors, while a normal panel action passes only the active set.
-    pub(super) fn start_bake_id_only_for_sets(&mut self, requested: &[usize], ctx: &egui::Context) {
+    /// `force_running` is used after replacing mesh colors: a running ID-only job
+    /// may already own a preparation snapshot made from the previous Mesh Arc.
+    pub(super) fn start_bake_id_only_for_sets(&mut self, requested: &[usize], force_running: bool, ctx: &egui::Context) {
         if !vertex_id::has_colors(&self.mesh) {
             self.status = "Vertex ID rebake requires per-corner vertex colors. Import them from the original FBX/OBJ first.".into();
             return;
@@ -238,7 +240,7 @@ impl PainterApp {
                         *source = IdSource::VertexColors;
                     }
                 }
-                let already_scheduled = already_running
+                let already_scheduled = (!force_running && already_running)
                     || already_queued_in_id_batch
                     || already_planned_as_high_poly_followup;
                 if queue_deferred_id_rebake(
