@@ -2538,8 +2538,10 @@ mod vertex_id_overlay_shader_tests {
     }
 
     #[test]
-    fn categorical_id_view_uses_exact_texels() {
+    fn categorical_id_view_uses_exact_texels_without_changing_custom_map_filtering() {
         assert!(SHADER.contains("s.e = textureLoad(map_e, coord, 0)"));
-        assert!(!SHADER.contains("s.e = textureSampleLevel(map_e, samp, uv, 0.0)"));
+        assert!(SHADER.contains("if (custom_preview) {"));
+        assert!(SHADER.contains("s.e = textureSampleLevel(map_e, samp, uv, 0.0)"));
+        assert!(SHADER.contains("} else if (mode == 18) {"));
     }
 }
