@@ -18,6 +18,25 @@ const FLASH_SECONDS: f64 = 1.6;
 /// Highlight of a pinned texture set.
 const PINNED: f32 = 0.7;
 
+/// Remaps per-set ID sources alongside a Texture Set reorder. New sets inherit
+/// the source of whichever set becomes active, and the returned mirror always
+/// reflects that new active set rather than the previous positional index.
+fn remap_id_sources(
+    assign: &[Option<usize>],
+    previous: &[IdSource],
+    active: usize,
+    fallback: IdSource,
+) -> (Vec<IdSource>, IdSource) {
+    let active_source = assign.get(active)
+        .and_then(|old_set| *old_set)
+        .and_then(|index| previous.get(index).copied())
+        .unwrap_or(fallback);
+    let sources = assign.iter().map(|old_set| {
+        (*old_set).and_then(|index| previous.get(index).copied()).unwrap_or(active_source)
+    }).collect();
+    (sources, active_source)
+}
+
 /// A texture set that isn't being edited, with the panel state it had.
 pub(super) struct Parked {
     pub engine: Engine,
@@ -332,25 +351,17 @@ impl PainterApp {
             self.undo.clear();
         }
         // The active set may now refer to a different old index after a
-        // rebuild/reorder. Resolve its source first so newly created sets inherit
-        // the source of the set that is actually active, not the stale old mirror.
-        let active_baked_id_source = assign.get(active)
-            .and_then(|old_set| *old_set)
-            .and_then(|index| old_baked_id_sources.get(index).copied())
-            .unwrap_or(self.baked_id_source);
-        let active_id_source_preference = assign.get(active)
-            .and_then(|old_set| *old_set)
-            .and_then(|index| old_id_source_preferences.get(index).copied())
-            .unwrap_or(active_baked_id_source);
+        // rebuild/reorder. Resolve it first so new sets inherit the correct
+        // source and the global mirror stays synchronized.
+        let (baked_id_sources, active_baked_id_source) =
+            remap_id_sources(&assign, &old_baked_id_sources, active, self.baked_id_source);
+        let (id_source_preferences, _) =
+            remap_id_sources(&assign, &old_id_source_preferences, active, active_baked_id_source);
         self.baked_id_source = active_baked_id_source;
         self.sets.parked = parked;
         self.sets.active = active;
-        self.sets.baked_id_sources = assign.iter().map(|old_set| {
-            (*old_set).and_then(|index| old_baked_id_sources.get(index).copied()).unwrap_or(active_baked_id_source)
-        }).collect();
-        self.sets.id_source_preferences = assign.iter().map(|old_set| {
-            (*old_set).and_then(|index| old_id_source_preferences.get(index).copied()).unwrap_or(active_id_source_preference)
-        }).collect();
+        self.sets.baked_id_sources = baked_id_sources;
+        self.sets.id_source_preferences = id_source_preferences;
         self.sets.bake_queue.clear();
         self.sets.hidden = vec![false; new.len()];
         self.sets.pinned = vec![false; new.len()];
@@ -536,6 +547,48 @@ impl PainterApp {
         if let Some(k) = pick {
             self.pick_set(k, ui.ctx());
         }
+    }
+}
+
+#[cfg(test)]
+mod id_source_remap_tests {
+    use super::remap_id_sources;
+    use crate::bake::IdSource;
+
+    #[test]
+    fn new_sets_inherit_the_source_of_the_new_active_set_after_reorder() {
+        let previous = [IdSource::MeshParts, IdSource::VertexColors];
+        let assign = [Some(1), Some(0), None];
+
+        let (sources, active) = remap_id_sources(&assign, &previous, 0, IdSource::Materials);
+
+        assert_eq!(active, IdSource::VertexColors);
+        assert_eq!(
+            sources,
+            vec![
+                IdSource::VertexColors,
+                IdSource::MeshParts,
+                IdSource::VertexColors,
+            ],
+        );
+    }
+
+    #[test]
+    fn missing_active_mapping_uses_the_supplied_fallback_consistently() {
+        let previous = [IdSource::Materials];
+        let assign = [None, Some(0), None];
+
+        let (sources, active) = remap_id_sources(&assign, &previous, 0, IdSource::MeshParts);
+
+        assert_eq!(active, IdSource::MeshParts);
+        assert_eq!(
+            sources,
+            vec![
+                IdSource::MeshParts,
+                IdSource::Materials,
+                IdSource::MeshParts,
+            ],
+        );
     }
 }
 
