@@ -117,7 +117,7 @@ impl PainterApp {
     /// Records the requested Vertex Color source for a set list. A currently
     /// running full bake can finish after a request and write its older source
     /// back, so deferred targets are reasserted immediately before their batch.
-    fn prefer_vertex_colors_for_id_sets(&mut self, sets: &[usize]) {
+    fn prefer_vertex_colors_for_id_sets(&mut self, sets: &[usize]) -> bool {
         self.sets.id_source_preferences.resize(self.mesh.sets.len(), self.baked_id_source);
         let mut changed = false;
         for &set in sets {
@@ -128,9 +128,7 @@ impl PainterApp {
                 }
             }
         }
-        if changed {
-            self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
-        }
+        changed
     }
 
     /// Rebuilds only the active Texture Set's ID map from the loaded low-poly
@@ -152,9 +150,7 @@ impl PainterApp {
             self.bake_settings.id_source = next_source;
             project_settings_changed = true;
         }
-        let previous_preference = self.sets.id_source_preferences.get(set).copied();
-        self.prefer_vertex_colors_for_id_sets(&[set]);
-        project_settings_changed |= previous_preference != Some(IdSource::VertexColors);
+        project_settings_changed |= self.prefer_vertex_colors_for_id_sets(&[set]);
         if project_settings_changed {
             self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
         }
@@ -247,7 +243,7 @@ impl PainterApp {
         let mut requested_sets = Vec::with_capacity(self.deferred_id_rebake_sets.len() + 1);
         requested_sets.push(set);
         requested_sets.extend(self.deferred_id_rebake_sets.iter().copied());
-        self.prefer_vertex_colors_for_id_sets(&requested_sets);
+        let mut project_settings_changed = self.prefer_vertex_colors_for_id_sets(&requested_sets);
         let next_source = next_full_bake_id_source(
             self.bake_settings.id_source,
             self.bake_settings.high_poly.is_some(),
@@ -255,6 +251,9 @@ impl PainterApp {
         );
         if self.bake_settings.id_source != next_source {
             self.bake_settings.id_source = next_source;
+            project_settings_changed = true;
+        }
+        if project_settings_changed {
             self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
         }
         self.bake_id_only = true;
