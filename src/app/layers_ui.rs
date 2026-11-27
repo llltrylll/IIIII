@@ -274,6 +274,7 @@ impl PainterApp {
             // The picker stores positional layer/mask-layer indices. A new
             // selection must not leave it armed against a different panel.
             self.id_color_pick_target = None;
+            self.vertex_id.panel = None;
         }
 
         // Drag to reorder: the top or bottom part of a row drops above or below
@@ -338,6 +339,7 @@ impl PainterApp {
         resp.context_menu(|ui| {
             if self.selected != idx {
                 self.id_color_pick_target = None;
+                self.vertex_id.panel = None;
                 self.selected = idx;
             }
             self.layer_menu_items(ui);
