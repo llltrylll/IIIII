@@ -11,7 +11,8 @@ use crate::theme;
 use crate::viewport::OverlayVertex;
 use eframe::egui;
 use egui::{Color32, Sense, Stroke, vec2};
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 
 /// Colors listed in the palette (the most used ones).
 pub const PALETTE_MAX: usize = crate::bake::MAX_VERTEX_COLOR_ID_REGIONS;
@@ -31,21 +32,52 @@ pub struct Palette {
 }
 
 /// The distinct vertex colors of a mesh, most used first.
+///
+/// Sort compact 24-bit RGB keys instead of retaining a HashMap entry (and its
+/// allocation overhead) for every color. Only the most-used palette entries
+/// survive the scan, so high-cardinality color attributes have bounded working
+/// memory after the packed key array.
 pub fn palette(colors: &[[[u8; 3]; 3]]) -> Palette {
-    let mut counts: HashMap<[u8; 3], u32> = HashMap::new();
-    for tri in colors {
-        for c in tri {
-            *counts.entry(*c).or_default() += 1;
+    let mut packed = Vec::with_capacity(colors.len().saturating_mul(3));
+    packed.extend(colors.iter().flat_map(|tri| tri.iter()).map(|rgb| {
+        ((rgb[0] as u32) << 16) | ((rgb[1] as u32) << 8) | rgb[2] as u32
+    }));
+    packed.sort_unstable();
+
+    // Heap key is (frequency, inverted RGB). Higher frequency wins; for ties,
+    // the smaller original RGB value wins deterministically. Reverse keeps the
+    // worst retained entry at the root for O(log PALETTE_MAX) replacement.
+    let mut top: BinaryHeap<Reverse<(u32, [u8; 3])>> = BinaryHeap::with_capacity(PALETTE_MAX + 1);
+    let mut distinct = 0usize;
+    let mut start = 0usize;
+    while start < packed.len() {
+        let key = packed[start];
+        let mut end = start + 1;
+        while end < packed.len() && packed[end] == key {
+            end += 1;
         }
+        distinct += 1;
+        let rgb = [(key >> 16) as u8, (key >> 8) as u8, key as u8];
+        let corners = u32::try_from(end - start).unwrap_or(u32::MAX);
+        let inverse_rgb = rgb.map(|channel| 255 - channel);
+        let candidate = (corners, inverse_rgb);
+        if top.len() < PALETTE_MAX {
+            top.push(Reverse(candidate));
+        } else if top.peek().is_some_and(|Reverse(worst)| candidate > *worst) {
+            top.pop();
+            top.push(Reverse(candidate));
+        }
+        start = end;
     }
-    let distinct = counts.len();
-    let mut entries: Vec<PaletteEntry> = counts.into_iter().map(|(rgb, corners)| PaletteEntry { rgb, corners }).collect();
-    let order = |a: &PaletteEntry, b: &PaletteEntry| b.corners.cmp(&a.corners).then(a.rgb.cmp(&b.rgb));
-    if entries.len() > PALETTE_MAX {
-        entries.select_nth_unstable_by(PALETTE_MAX, order);
-        entries.truncate(PALETTE_MAX);
-    }
-    entries.sort_unstable_by(order);
+
+    let mut entries: Vec<PaletteEntry> = top
+        .into_iter()
+        .map(|Reverse((corners, inverse_rgb))| PaletteEntry {
+            rgb: inverse_rgb.map(|channel| 255 - channel),
+            corners,
+        })
+        .collect();
+    entries.sort_unstable_by(|a, b| b.corners.cmp(&a.corners).then(a.rgb.cmp(&b.rgb)));
     Palette { entries, distinct }
 }
 
@@ -436,6 +468,26 @@ mod tests {
             (0..PALETTE_MAX).map(|index| index as u8).collect::<Vec<_>>(),
             "equal-frequency palette ties must choose the lowest RGB values deterministically",
         );
+    }
+
+    #[test]
+    fn high_cardinality_palette_keeps_exact_top_colors_with_bounded_entries() {
+        let colors: Vec<[[u8; 3]; 3]> = (0..50_000u32)
+            .map(|i| {
+                let rgb = [(i >> 16) as u8, (i >> 8) as u8, i as u8];
+                [rgb; 3]
+            })
+            .collect();
+
+        let p = palette(&colors);
+
+        assert_eq!(p.distinct, 50_000);
+        assert_eq!(p.entries.len(), PALETTE_MAX);
+        assert!(p.entries.iter().all(|entry| entry.corners == 3));
+        let selected: Vec<u32> = p.entries.iter()
+            .map(|entry| ((entry.rgb[0] as u32) << 16) | ((entry.rgb[1] as u32) << 8) | entry.rgb[2] as u32)
+            .collect();
+        assert_eq!(selected, (0..PALETTE_MAX as u32).collect::<Vec<_>>());
     }
 
     #[test]
