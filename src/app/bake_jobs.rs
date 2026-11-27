@@ -163,6 +163,11 @@ impl PainterApp {
                 }
             };
             let already_queued_in_id_batch = self.bake_id_only && self.sets.bake_queue.contains(&set);
+            if already_queued_in_id_batch {
+                if let Some(source) = self.bake_batch_id_sources.as_mut().and_then(|sources| sources.get_mut(set)) {
+                    *source = IdSource::VertexColors;
+                }
+            }
             let queued = queue_deferred_id_rebake(
                 &mut self.deferred_id_rebake_sets,
                 set,
