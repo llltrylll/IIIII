@@ -972,6 +972,8 @@ pub struct PainterApp {
     bake_job: Option<BakeJob>,
     /// Compiled on demand when a mesh bake is actually requested.
     baker: Option<GpuBaker>,
+    /// GPU readbacks in progress; worker threads receive CPU bytes only.
+    bake_cache_writes: Vec<bake_cache::PendingStore>,
     show_bake: bool,
     shelf: Shelf,
     /// CPU-only material and generator previews arrive from a worker.
@@ -2563,6 +2565,7 @@ impl PainterApp {
             bake_settings: BakeSettings::default(),
             bake_job: None,
             baker: None,
+            bake_cache_writes: Vec::new(),
             show_bake: false,
             shelf: Shelf { cat: ShelfCat::SmartMaterials, search: String::new(), kind: None, icon_size: 72.0, smart, materials, generators, brushes, textures },
             cpu_preview_rx: Some(cpu_preview_rx),
@@ -6129,6 +6132,7 @@ impl eframe::App for PainterApp {
         {
             let _s = crate::startup_trace::span("frame: async job polling");
             self.undo.update();
+            self.bake_cache_writes.retain_mut(|pending| !pending.poll(&ctx));
             self.poll_user_smarts(&ctx);
             self.poll_bake(&ctx);
             self.poll_spp_open(&ctx);

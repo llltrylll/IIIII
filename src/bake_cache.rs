@@ -14,6 +14,8 @@ use eframe::wgpu;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, OnceLock};
 
 const MAGIC: &[u8; 4] = b"MPBC";
@@ -260,29 +262,184 @@ impl Entry {
     }
 }
 
-/// Saves a finished bake in the background: the maps are read back from the
-/// GPU once the bake's work completes, then compressed and written. Failures
-/// only cost the cache entry, so they are ignored.
-pub fn store(key: Key, baked: &BakedMaps, report: Arc<BakeReport>, device: &wgpu::Device, queue: &wgpu::Queue) {
-    let Some(path) = path(&key) else { return };
-    let textures: Vec<wgpu::Texture> = baked.maps.iter().map(|m| m.texture.clone()).collect();
-    let custom: Vec<wgpu::Texture> = baked.custom.iter().map(|m| m.texture.clone()).collect();
-    let (device, queue) = (device.clone(), queue.clone());
-    let spawned = std::thread::Builder::new().name("bake cache".into()).spawn(move || {
-        let bytes = encode(&textures, &custom, &report, &device, &queue);
-        if write_atomic(&path, &bytes).is_ok() {
-            evict(MAX_BYTES);
+/// A GPU-to-CPU copy staged on the UI thread. Mapping is asynchronous;
+/// PainterApp polls the device on that same thread while the viewport renders.
+struct StagedTexture {
+    buffer: wgpu::Buffer,
+    resolution: u32,
+    bytes_per_pixel: u32,
+    padded_bytes_per_row: u32,
+}
+
+pub struct PendingStore {
+    staging: Vec<StagedTexture>,
+    mapped_remaining: Arc<AtomicUsize>,
+    map_failed: Arc<AtomicBool>,
+    next: usize,
+    pending_bytes: Option<(u32, Vec<u8>)>,
+    sender: Option<SyncSender<(u32, Vec<u8>)>>,
+}
+
+impl PendingStore {
+    fn try_send_pending(&mut self) {
+        let Some(bytes) = self.pending_bytes.take() else { return };
+        let Some(sender) = self.sender.as_ref() else { return };
+        match sender.try_send(bytes) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(bytes)) => self.pending_bytes = Some(bytes),
+            Err(mpsc::TrySendError::Disconnected(_)) => self.map_failed.store(true, Ordering::Release),
         }
-    });
-    if let Err(e) = spawned {
-        eprintln!("bake cache: {e}");
+    }
+
+    /// Advances readback without blocking. Only one mapped texture is copied
+    /// out per frame; a bounded channel lets the CPU compressor work separately.
+    pub fn poll(&mut self, ctx: &eframe::egui::Context) -> bool {
+        if self.map_failed.load(Ordering::Acquire) {
+            self.sender.take();
+            return true;
+        }
+        if self.mapped_remaining.load(Ordering::Acquire) != 0 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+            return false;
+        }
+
+        self.try_send_pending();
+        if self.pending_bytes.is_none() && self.next < self.staging.len() {
+            let staged = &mut self.staging[self.next];
+            let row_bytes = staged.resolution * staged.bytes_per_pixel;
+            let mapped = staged.buffer.slice(..).get_mapped_range().expect("bake cache readback is mapped");
+            let mut bytes = Vec::with_capacity((row_bytes * staged.resolution) as usize);
+            for y in 0..staged.resolution as usize {
+                let start = y * staged.padded_bytes_per_row as usize;
+                bytes.extend_from_slice(&mapped[start..start + row_bytes as usize]);
+            }
+            drop(mapped);
+            staged.buffer.unmap();
+            self.pending_bytes = Some((staged.resolution, bytes));
+            self.next += 1;
+            self.try_send_pending();
+        }
+
+        if self.next == self.staging.len() && self.pending_bytes.is_none() {
+            self.sender.take();
+            return true;
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        false
     }
 }
 
-/// Reads the maps back (blocking until the bake's GPU work is done) and
-/// serializes them with the report.
+/// Starts readback on the caller's thread. The worker receives CPU byte vectors
+/// only; it never sees a wgpu Device, Queue, Texture or Buffer.
+pub fn store(
+    key: Key,
+    baked: &BakedMaps,
+    report: Arc<BakeReport>,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> Option<PendingStore> {
+    let path = path(&key)?;
+    let custom_count = baked.custom.len();
+    let (sender, receiver) = mpsc::sync_channel::<(u32, Vec<u8>)>(1);
+    let spawned = std::thread::Builder::new().name("bake cache compressor".into()).spawn(move || {
+        let mut maps = Vec::with_capacity(MAP_TEXTURES);
+        for _ in 0..MAP_TEXTURES {
+            maps.push(receiver.recv().ok()?);
+        }
+        let mut custom = Vec::with_capacity(custom_count);
+        for _ in 0..custom_count {
+            custom.push(receiver.recv().ok()?);
+        }
+        let bytes = encode_raw(&maps, &custom, &report);
+        if write_atomic(&path, &bytes).is_ok() {
+            evict(MAX_BYTES);
+        }
+        Some(())
+    });
+    if let Err(error) = spawned {
+        eprintln!("bake cache compressor: {error}");
+        return None;
+    }
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("bake cache readback") });
+    let mut staging = Vec::with_capacity(MAP_TEXTURES + custom_count);
+    for tex in baked.maps.iter().chain(&baked.custom) {
+        let resolution = tex.width;
+        let bytes_per_pixel = gpu::bytes_per_texel(tex.format);
+        let row_bytes = resolution * bytes_per_pixel;
+        let padded_bytes_per_row = row_bytes.div_ceil(256) * 256;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bake cache staging"),
+            size: u64::from(padded_bytes_per_row) * u64::from(tex.height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            tex.copy_info(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(tex.height),
+                },
+            },
+            tex.extent(),
+        );
+        staging.push(StagedTexture { buffer, resolution, bytes_per_pixel, padded_bytes_per_row });
+    }
+    queue.submit([encoder.finish()]);
+
+    let mapped_remaining = Arc::new(AtomicUsize::new(staging.len()));
+    let map_failed = Arc::new(AtomicBool::new(false));
+    for staged in &staging {
+        let remaining = Arc::clone(&mapped_remaining);
+        let failed = Arc::clone(&map_failed);
+        staged.buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+            if result.is_err() {
+                failed.store(true, Ordering::Release);
+            }
+            remaining.fetch_sub(1, Ordering::AcqRel);
+        });
+    }
+    Some(PendingStore {
+        staging,
+        mapped_remaining,
+        map_failed,
+        next: 0,
+        pending_bytes: None,
+        sender: Some(sender),
+    })
+}
+
+fn encode_raw(maps: &[(u32, Vec<u8>)], custom: &[(u32, Vec<u8>)], report: &BakeReport) -> Vec<u8> {
+    let mut body = Vec::new();
+    let put = |body: &mut Vec<u8>, (resolution, raw): &(u32, Vec<u8>)| {
+        let packed = lz4_flex::compress_prepend_size(raw);
+        body.extend_from_slice(&resolution.to_le_bytes());
+        body.extend_from_slice(&(packed.len() as u32).to_le_bytes());
+        body.extend_from_slice(&packed);
+    };
+    for map in maps {
+        put(&mut body, map);
+    }
+    body.extend_from_slice(&(custom.len() as u32).to_le_bytes());
+    for map in custom {
+        put(&mut body, map);
+    }
+    let json = serde_json::to_vec(&report.cache_json()).expect("report serializes");
+    let mut out = Vec::with_capacity(12 + json.len() + body.len());
+    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+    out.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    out.extend_from_slice(&json);
+    out.extend_from_slice(&body);
+    out
+}
+
+/// Synchronous encoder retained as a reference for the offscreen GPU test.
+#[cfg(test)]
 fn encode(textures: &[wgpu::Texture], custom: &[wgpu::Texture], report: &BakeReport, device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<u8> {
-    // Map by map, so only one uncompressed map is in memory at a time.
     let mut body = Vec::new();
     let put = |body: &mut Vec<u8>, tex: &wgpu::Texture| {
         let raw = gpu::read_wgpu_texture(device, queue, tex);
@@ -294,12 +451,10 @@ fn encode(textures: &[wgpu::Texture], custom: &[wgpu::Texture], report: &BakeRep
     for tex in textures {
         put(&mut body, tex);
     }
-    // The custom map textures, after their count.
     body.extend_from_slice(&(custom.len() as u32).to_le_bytes());
     for tex in custom {
         put(&mut body, tex);
     }
-    // The readback waited for the bake to finish, so the report is final.
     let json = serde_json::to_vec(&report.cache_json()).expect("report serializes");
     let mut out = Vec::with_capacity(12 + json.len() + body.len());
     out.extend_from_slice(MAGIC);
