@@ -1226,6 +1226,9 @@ fn vertex_color_palette_sorted(
         let key = packed[start];
         let mut end = start + 1;
         while end < packed.len() && packed[end] == key {
+            if end.is_multiple_of(8192) {
+                check_cancelled()?;
+            }
             end += 1;
         }
         distinct += 1;
