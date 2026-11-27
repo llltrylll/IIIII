@@ -79,8 +79,19 @@ impl PainterApp {
     /// Starts an ID-only batch. If another bake is active, defer this request
     /// until its entire queue finishes; never drop an in-flight GPU run.
     pub(super) fn start_bake_id_only(&mut self, ctx: &egui::Context) {
+        let mut project_settings_changed = false;
         if self.bake_settings.id_source != IdSource::VertexColors {
             self.bake_settings.id_source = IdSource::VertexColors;
+            project_settings_changed = true;
+        }
+        self.sets.id_source_preferences.resize(self.mesh.sets.len(), self.baked_id_source);
+        for source in &mut self.sets.id_source_preferences {
+            if *source != IdSource::VertexColors {
+                *source = IdSource::VertexColors;
+                project_settings_changed = true;
+            }
+        }
+        if project_settings_changed {
             self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
         }
         if self.bake_job.is_some() {
