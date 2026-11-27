@@ -3495,6 +3495,83 @@ pub(crate) mod tests {
         }
     }
 
+    /// End-to-end GPU smoke test for binding 39 (per-corner Vertex Colors).
+    /// It is ignored in normal CI because runners are not guaranteed to expose
+    /// a native adapter; run manually with:
+    /// cargo test vertex_color_id_shader_roundtrip -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn vertex_color_id_shader_roundtrip_preserves_spatial_labels() {
+        let (device, queue) = gpu();
+        let mut mesh = Primitive::Plane.build();
+        let colors: Vec<[[u8; 3]; 3]> = mesh.indices.chunks_exact(3).map(|tri| {
+            let center_x = tri.iter()
+                .map(|&index| mesh.vertices[index as usize].pos[0])
+                .sum::<f32>() / 3.0;
+            let color = if center_x < 0.0 {
+                [35, 190, 70]
+            } else {
+                [220, 40, 170]
+            };
+            [color; 3]
+        }).collect();
+        mesh.tri_color = Some(colors.iter().map(|corners| corners[0]).collect());
+        mesh.tri_vertex_color = Some(colors);
+
+        let gpu_mesh = GpuMesh::new(&device, &mesh);
+        let settings = BakeSettings {
+            id_source: IdSource::VertexColors,
+            maps: 0,
+            aa: 1,
+            ..Default::default()
+        };
+        let (baked, report, low_position) =
+            run_bake(&device, &queue, &mesh, &gpu_mesh, &settings, 64);
+
+        let id_index = MAPS.iter().position(|map| map.name == "ID").expect("ID map");
+        let id_texture = &baked.maps[MAPS[id_index].tex];
+        assert_eq!(id_texture.format, F::Rgba8Unorm);
+        assert_eq!(report.id_regions.len(), 2, "both spatial vertex-color labels must reach the bake report");
+
+        let id_bytes = read_texture(&device, &queue, id_texture);
+        let low_bytes = read_texture(&device, &queue, &low_position);
+        assert_eq!(id_bytes.len() / 4, low_bytes.len() / 16);
+
+        let expected_left = [35u8, 190, 70];
+        let expected_right = [220u8, 40, 170];
+        let mut left_samples = 0usize;
+        let mut right_samples = 0usize;
+        for (id_pixel, position_pixel) in id_bytes.chunks_exact(4).zip(low_bytes.chunks_exact(16)) {
+            let position = f32::from_le_bytes(position_pixel[0..4].try_into().expect("x channel"));
+            let inside = f32::from_le_bytes(position_pixel[12..16].try_into().expect("coverage channel")) > 0.75;
+            if !inside {
+                continue;
+            }
+            let expected = if position < -0.2 {
+                left_samples += 1;
+                Some(expected_left)
+            } else if position > 0.2 {
+                right_samples += 1;
+                Some(expected_right)
+            } else {
+                None
+            };
+            if let Some(expected) = expected {
+                for channel in 0..3 {
+                    assert!(
+                        id_pixel[channel].abs_diff(expected[channel]) <= 1,
+                        "wrong Vertex Color ID at x={position:.3}, channel {channel}: got {}, expected {}",
+                        id_pixel[channel],
+                        expected[channel],
+                    );
+                }
+            }
+        }
+
+        assert!(left_samples > 16, "not enough left-side GPU samples: {left_samples}");
+        assert!(right_samples > 16, "not enough right-side GPU samples: {right_samples}");
+    }
+
     /// The usual Mesh Parts mode must use the compact ID palette, not
     /// allocate one RGBA value for every triangle corner.
     #[test]
