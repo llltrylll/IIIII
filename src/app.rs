@@ -3173,6 +3173,10 @@ impl PainterApp {
 
     /// Keeps the selection valid after undo/redo changed the layer stack.
     fn after_history_step(&mut self) {
+        // The eyedropper addresses generators by layer/mask-layer indices.
+        // Undo/redo can replace or reorder those structures, so never keep a
+        // positional picker target armed across a history step.
+        self.id_color_pick_target = None;
         if self.selected != NO_LAYER {
             self.selected = self.selected.min(self.engine.layers.len().saturating_sub(1));
         }
