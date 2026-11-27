@@ -1864,7 +1864,7 @@ fn new_generator(
     kind: GenKind,
     custom: &[bake::CustomMap],
     id_source: IdSource,
-    palette: &vertex_id::Palette,
+    palette: Option<&vertex_id::Palette>,
 ) -> crate::engine::Generator {
     let mut g = kind.default_generator();
     if kind == GenKind::IdMask {
@@ -2820,13 +2820,13 @@ impl PainterApp {
                             self.engine.add_mask(self.selected, false, None, &mut self.undo);
                         }
                         use crate::engine::{MaskBlend, MaskLayer, MaskSource};
-                        let palette = self.vertex_id.palette_for(&self.mesh).clone();
+                        let palette = (kind == GenKind::IdMask).then(|| self.vertex_id.palette_for(&self.mesh).clone());
                         let id_source = if self.engine.has_bake {
                             self.sets.baked_id_sources.get(self.sets.active).copied().unwrap_or(self.baked_id_source)
                         } else {
                             self.bake_settings.id_source
                         };
-                        let g = new_generator(kind, &self.bake_settings.custom, id_source, &palette);
+                        let g = new_generator(kind, &self.bake_settings.custom, id_source, palette.as_ref());
                         if let Some(mask) = self.engine.layers[self.selected].mask.as_mut() {
                             let blend = if mask.black_base && mask.layers.is_empty() { MaskBlend::Add } else { MaskBlend::Multiply };
                             mask.layers.push(MaskLayer { source: MaskSource::Generator(g), blend, opacity: 1.0, enabled: true });
@@ -2836,13 +2836,13 @@ impl PainterApp {
                     }
                 }
                 Action::AddGenerator(kind) => {
-                    let palette = self.vertex_id.palette_for(&self.mesh).clone();
+                    let palette = (kind == GenKind::IdMask).then(|| self.vertex_id.palette_for(&self.mesh).clone());
                     let id_source = if self.engine.has_bake {
                         self.sets.baked_id_sources.get(self.sets.active).copied().unwrap_or(self.baked_id_source)
                     } else {
                         self.bake_settings.id_source
                     };
-                    let g = new_generator(kind, &self.bake_settings.custom, id_source, &palette);
+                    let g = new_generator(kind, &self.bake_settings.custom, id_source, palette.as_ref());
                     if let Some(layer) = self.engine.layers.get_mut(self.selected) {
                         match &mut layer.mask {
                             Some(m) => {
