@@ -324,7 +324,8 @@ impl PainterApp {
             };
             match vertex_id::colors_from_file(&self.mesh, &path) {
                 Ok(colors) => {
-                    let found = vertex_id::palette(&colors).distinct;
+                    let palette = vertex_id::palette(&colors);
+                    let found = palette.distinct;
                     // Keep the legacy per-triangle ID summary in sync with the
                     // authoritative per-corner attribute. Baking and preview
                     // use the corner values; bake reports and palette metadata
@@ -339,6 +340,10 @@ impl PainterApp {
                     mesh.tri_color = Some(tri_colors);
                     mesh.tri_vertex_color = Some(colors);
                     self.mesh = Arc::new(mesh);
+                    // Reuse the just-built palette on the next panel frame
+                    // instead of scanning and sorting every corner twice.
+                    self.vertex_id.palette = Some((Arc::downgrade(&self.mesh), palette));
+                    self.vertex_id.auto_baked = false;
                     self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
                     self.vertex_id.shown = None;
                     // The ID map has to be baked again from the new colors.
