@@ -2791,7 +2791,7 @@ impl GpuBaker {
                 done.fetch_add(1, Ordering::AcqRel);
                 ctx.request_repaint();
             });
-            }
+        }
         if run.next_tile < run.tiles.len() || run.maps.is_none() {
             return None;
         }
