@@ -29,8 +29,11 @@ pub(super) struct Parked {
 pub(super) struct TextureSets {
     /// The set in `PainterApp::engine`, by position in `Mesh::sets`.
     pub active: usize,
-    /// ID source actually used by each set's stored ID map.
+    /// ID source actually used by each set's currently available ID map.
     pub baked_id_sources: Vec<IdSource>,
+    /// Source the project intends to use when rebuilding each set's ID map.
+    /// This can differ temporarily during a high-poly bake's low-poly ID pass.
+    pub id_source_preferences: Vec<IdSource>,
     /// One slot per mesh set; `None` for the active one.
     pub parked: Vec<Option<Parked>>,
     /// The set the running bake is for.
@@ -288,6 +291,7 @@ impl PainterApp {
         }
         let old_active = self.sets.active;
         let old_baked_id_sources = std::mem::take(&mut self.sets.baked_id_sources);
+        let old_id_source_preferences = std::mem::take(&mut self.sets.id_source_preferences);
         let mut old = std::mem::take(&mut self.sets.parked);
         old.resize_with(old_names.len().max(old_active + 1), || None);
         let active = assign.iter().position(|a| *a == Some(old_active)).unwrap_or(0);
@@ -331,6 +335,9 @@ impl PainterApp {
         self.sets.active = active;
         self.sets.baked_id_sources = assign.iter().map(|old_set| {
             (*old_set).and_then(|index| old_baked_id_sources.get(index).copied()).unwrap_or(self.baked_id_source)
+        }).collect();
+        self.sets.id_source_preferences = assign.iter().map(|old_set| {
+            (*old_set).and_then(|index| old_id_source_preferences.get(index).copied()).unwrap_or(self.baked_id_source)
         }).collect();
         self.sets.bake_queue.clear();
         self.sets.hidden = vec![false; new.len()];
