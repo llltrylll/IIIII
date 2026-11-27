@@ -2810,6 +2810,7 @@ impl PainterApp {
                     }
                 }
                 Action::AddMask { white } => {
+                    self.id_color_pick_target = None;
                     if self.selected < self.engine.layers.len() {
                         self.engine.add_mask(self.selected, white, None, &mut self.undo);
                         self.target = StrokeTarget::Mask;
@@ -2838,6 +2839,7 @@ impl PainterApp {
                     }
                 }
                 Action::AddGenerator(kind) => {
+                    self.id_color_pick_target = None;
                     let palette = (kind == GenKind::IdMask).then(|| self.vertex_id.palette_for(&self.mesh).clone());
                     let id_source = vertex_id::default_generator_source(
                         palette.as_ref().is_some_and(|p| !p.entries.is_empty()),
@@ -2860,6 +2862,7 @@ impl PainterApp {
                     }
                 }
                 Action::RemoveMask => {
+                    self.id_color_pick_target = None;
                     self.engine.remove_mask(self.selected, &mut self.undo);
                     self.target = StrokeTarget::Content;
                 }
@@ -2901,6 +2904,7 @@ impl PainterApp {
                     }
                 }
                 Action::Delete => {
+                    self.id_color_pick_target = None;
                     self.engine.delete_layer(self.selected, &mut self.undo);
                     self.selected = self.selected.min(self.engine.layers.len().saturating_sub(1));
                     self.target = StrokeTarget::Content;
