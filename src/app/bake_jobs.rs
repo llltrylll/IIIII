@@ -43,8 +43,8 @@ use super::*;
 /// Vertex Colors is applied only as the ID-only job's per-set override when a
 /// high-poly source is selected; after that job, the next full bake still uses
 /// Mesh Parts or Materials.
-fn next_full_bake_id_source(current: IdSource, high_poly: bool) -> IdSource {
-    if high_poly {
+fn next_full_bake_id_source(current: IdSource, high_poly: bool, has_vertex_colors: bool) -> IdSource {
+    if high_poly || !has_vertex_colors {
         if current == IdSource::VertexColors { IdSource::MeshParts } else { current }
     } else {
         IdSource::VertexColors
@@ -69,7 +69,9 @@ impl PainterApp {
     /// Keep the full-bake source valid for the selected projection.
     /// Vertex Colors is applied later as a per-set ID-only override.
     fn ensure_valid_full_bake_id_source(&mut self) {
-        if self.bake_settings.high_poly.is_some() && self.bake_settings.id_source == IdSource::VertexColors {
+        if (self.bake_settings.high_poly.is_some() || !vertex_id::has_colors(&self.mesh))
+            && self.bake_settings.id_source == IdSource::VertexColors
+        {
             self.bake_settings.id_source = IdSource::MeshParts;
             self.project_settings_serial = self.project_settings_serial.wrapping_add(1);
         }
@@ -117,10 +119,15 @@ impl PainterApp {
     /// If another bake is active, remember this set's index and run it afterward.
     pub(super) fn start_bake_id_only(&mut self, ctx: &egui::Context) {
         let set = self.sets.active;
+        if !vertex_id::has_colors(&self.mesh) {
+            self.status = "Vertex ID rebake requires per-corner vertex colors. Import them from the original FBX/OBJ first.".into();
+            return;
+        }
         let mut project_settings_changed = false;
         let next_source = next_full_bake_id_source(
             self.bake_settings.id_source,
             self.bake_settings.high_poly.is_some(),
+            vertex_id::has_colors(&self.mesh),
         );
         if self.bake_settings.id_source != next_source {
             self.bake_settings.id_source = next_source;
@@ -223,6 +230,7 @@ impl PainterApp {
         let next_source = next_full_bake_id_source(
             self.bake_settings.id_source,
             self.bake_settings.high_poly.is_some(),
+            vertex_id::has_colors(&self.mesh),
         );
         if self.bake_settings.id_source != next_source {
             self.bake_settings.id_source = next_source;
@@ -510,23 +518,27 @@ mod project_bake_source_plan_tests {
     #[test]
     fn id_only_vertex_color_pass_keeps_the_next_full_bake_source_valid() {
         assert_eq!(
-            next_full_bake_id_source(IdSource::MeshParts, false),
+            next_full_bake_id_source(IdSource::MeshParts, false, true),
             IdSource::VertexColors,
         );
         assert_eq!(
-            next_full_bake_id_source(IdSource::Materials, false),
+            next_full_bake_id_source(IdSource::Materials, false, true),
             IdSource::VertexColors,
         );
         assert_eq!(
-            next_full_bake_id_source(IdSource::MeshParts, true),
+            next_full_bake_id_source(IdSource::MeshParts, true, true),
             IdSource::MeshParts,
         );
         assert_eq!(
-            next_full_bake_id_source(IdSource::Materials, true),
+            next_full_bake_id_source(IdSource::Materials, true, true),
             IdSource::Materials,
         );
         assert_eq!(
-            next_full_bake_id_source(IdSource::VertexColors, true),
+            next_full_bake_id_source(IdSource::VertexColors, true, true),
+            IdSource::MeshParts,
+        );
+        assert_eq!(
+            next_full_bake_id_source(IdSource::VertexColors, false, false),
             IdSource::MeshParts,
         );
     }
