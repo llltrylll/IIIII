@@ -132,7 +132,7 @@ impl PainterApp {
         let has_vertex_colors = vertex_id::has_colors(&self.mesh);
         self.bake_batch_settings = Some(self.job_bake_settings());
         let (sources, followups) = project_bake_source_plan(
-            &self.sets.baked_id_sources,
+            &self.sets.id_source_preferences,
             self.mesh.sets.len(),
             active,
             high_poly,
@@ -246,6 +246,14 @@ impl PainterApp {
         self.sets.baked_id_sources.resize(self.mesh.sets.len(), self.baked_id_source);
         let source_changed = self.sets.baked_id_sources[set] != id_source;
         self.sets.baked_id_sources[set] = id_source;
+        // A project-restore batch can temporarily use Mesh Parts/Materials
+        // for the full high-poly pass, then replace only the ID map from the
+        // low-poly Vertex Colors. Do not overwrite the saved preferred source
+        // until an ordinary user-requested bake commits a new choice.
+        if self.bake_batch_id_sources.is_none() {
+            self.sets.id_source_preferences.resize(self.mesh.sets.len(), self.baked_id_source);
+            self.sets.id_source_preferences[set] = id_source;
+        }
         if set == self.sets.active {
             self.baked_id_source = id_source;
         }
