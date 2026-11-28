@@ -1984,6 +1984,8 @@ pub struct GpuBaker {
 }
 
 const TILE: u32 = 256;
+/// Smaller OpenGL dispatches let the integrated GPU service viewport frames between bake batches.
+const GL_TILE: u32 = 64;
 /// Custom-map tiles are smaller: a flow walk traces hundreds of rays a texel.
 const CUSTOM_TILE: u32 = 128;
 const MAX_IN_FLIGHT: usize = 3;
@@ -2690,8 +2692,9 @@ impl GpuBaker {
         }
 
         let mut tiles = Vec::new();
-        for y in (0..res).step_by(TILE as usize) {
-            for x in (0..res).step_by(TILE as usize) {
+        let tile_size = if self.is_gl { GL_TILE } else { TILE };
+        for y in (0..res).step_by(tile_size as usize) {
+            for x in (0..res).step_by(tile_size as usize) {
                 tiles.push([x, y, 0]);
             }
         }
@@ -2747,9 +2750,11 @@ impl GpuBaker {
         // scheduling frames while a bake is active so queue completion callbacks
         // progress there; never call device.poll from a background thread.
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
-        // Three 256² tiles at once can monopolize an integrated OpenGL GPU.
-        // Keep one dispatch outstanding on GL; Vulkan retains the wider queue.
+        // OpenGL shares the integrated GPU with viewport presentation. Keep one
+        // small 64² dispatch outstanding so a single bake batch cannot monopolize it.
+        // Vulkan retains 256² tiles and the wider queue for throughput.
         let max_in_flight = if self.is_gl { 1 } else { MAX_IN_FLIGHT };
+        let tile_size = if self.is_gl { GL_TILE } else { TILE };
         while run.next_tile < run.tiles.len() && run.in_flight.load(Ordering::Acquire) < max_in_flight {
             let [x, y, pass] = run.tiles[run.next_tile];
             run.next_tile += 1;
@@ -2775,7 +2780,7 @@ impl GpuBaker {
                         (35, v(&run.surf_curv)),
                     ],
                 );
-                Self::dispatch(&mut encoder, &self.occlusion.0, &group, TILE.min(run.res - x), TILE.min(run.res - y));
+                Self::dispatch(&mut encoder, &self.occlusion.0, &group, tile_size.min(run.res - x), tile_size.min(run.res - y));
             } else {
                 let (target, settings) = &run.custom[pass as usize - 1];
                 u.cust = *settings;
