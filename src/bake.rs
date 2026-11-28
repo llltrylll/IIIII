@@ -1984,8 +1984,9 @@ pub struct GpuBaker {
 }
 
 const TILE: u32 = 256;
-/// Smaller OpenGL dispatches let the integrated GPU service viewport frames between bake batches.
-const GL_TILE: u32 = 64;
+/// Mid-sized OpenGL dispatches balance viewport responsiveness with per-dispatch overhead.
+const GL_TILE: u32 = 128;
+const GL_MAX_IN_FLIGHT: usize = 2;
 /// Custom-map tiles are smaller: a flow walk traces hundreds of rays a texel.
 const CUSTOM_TILE: u32 = 128;
 const MAX_IN_FLIGHT: usize = 3;
@@ -2750,10 +2751,10 @@ impl GpuBaker {
         // scheduling frames while a bake is active so queue completion callbacks
         // progress there; never call device.poll from a background thread.
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
-        // OpenGL shares the integrated GPU with viewport presentation. Keep one
-        // small 64² dispatch outstanding so a single bake batch cannot monopolize it.
-        // Vulkan retains 256² tiles and the wider queue for throughput.
-        let max_in_flight = if self.is_gl { 1 } else { MAX_IN_FLIGHT };
+        // OpenGL shares the integrated GPU with viewport presentation. Two 128²
+        // tiles recover throughput without returning to three 256² dispatches.
+        // Vulkan retains 256² tiles and its wider queue for throughput.
+        let max_in_flight = if self.is_gl { GL_MAX_IN_FLIGHT } else { MAX_IN_FLIGHT };
         let tile_size = if self.is_gl { GL_TILE } else { TILE };
         while run.next_tile < run.tiles.len() && run.in_flight.load(Ordering::Acquire) < max_in_flight {
             let [x, y, pass] = run.tiles[run.next_tile];
